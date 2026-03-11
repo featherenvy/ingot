@@ -48,6 +48,12 @@ Reasons:
 * independent teams should be able to reason about a fixed state machine
 * operator-visible behavior must be reconstructable from durable state alone
 
+That implies a strict split:
+
+* the evaluator is pure read-side projection logic over durable rows
+* command handlers, job-completion handlers, and startup reconciliation own durable mutations
+* HTTP reads and WebSocket projection delivery never trigger workflow side effects
+
 Config and templates remain useful, but they stay below the semantic boundary.
 
 ### Revisions Freeze Meaning
@@ -82,6 +88,9 @@ That separation is the backbone of the product:
 * authoring success does not imply integration success
 * approval applies to a prepared integrated result, not just a candidate commit
 * target-ref drift is detected explicitly instead of being hand-waved
+* convergence replay preserves authoring commit boundaries so auditability and post-hoc learnings are not lost at integration time
+* finalization happens through explicit approval or a daemon-only system action when approval is not required
+* stale prepared results are invalidated by the daemon before approval or finalization can continue
 
 ### Conservative Recovery Wins Over Optimism
 
@@ -157,6 +166,8 @@ SQLite:
 * Git operation journal
 * activity history
 
+The journal may describe one logical convergence-prepare replay that creates multiple prepared commits. In that case, SQLite stores the ordered source-to-prepared commit mapping needed for audit and recovery, while Git stores the actual rewritten commit chain.
+
 This split keeps Git and large artifacts where they belong while preserving a queryable source of truth for orchestration.
 
 ## Recommended Rust Workspace
@@ -192,11 +203,11 @@ ingot/
 | Crate                  | Responsibility                                                                                           | Must not depend on                               |
 | ---------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
 | `ingot-domain`         | Pure entities, enums, invariants, value objects, repository ports, event types                           | `sqlx`, `axum`, `tokio::process`                 |
-| `ingot-workflow`       | Built-in workflow definitions, step contracts, evaluator, transition tables                              | `sqlx`, `axum`, adapter code                     |
-| `ingot-usecases`    | Command handlers, transaction boundaries, use-case orchestration, port composition                       | `axum`, `sqlx` concrete types, CLI-specific code |
+| `ingot-workflow`       | Built-in workflow definitions, step contracts, pure evaluator, transition tables                         | `sqlx`, `axum`, adapter code                     |
+| `ingot-usecases`       | Command handlers, transaction boundaries, use-case orchestration, port composition, daemon-only system actions | `axum`, `sqlx` concrete types, CLI-specific code |
 | `ingot-config`         | YAML loading, merge logic, config schema validation, template override loading                           | `axum`, `sqlx`                                   |
-| `ingot-store-sqlite`   | sqlx models, migrations, repository implementations, transaction adapters                                | `axum`, adapter crates                           |
-| `ingot-git`            | Safe Git wrappers, diff generation, ref validation, commit trailers, convergence helpers, target-ref CAS | `axum`, workflow logic                           |
+| `ingot-store-sqlite`   | sqlx models, migrations, repository implementations, transaction adapters, replay-journal persistence    | `axum`, adapter crates                           |
+| `ingot-git`            | Safe Git wrappers, diff generation, ref validation, commit trailers, convergence helpers, ordered commit replay, target-ref CAS | `axum`, workflow logic                           |
 | `ingot-workspace`      | Worktree provisioning, reset, reuse, and cleanup using `ingot-git`                                       | `axum`, `sqlx`                                   |
 | `ingot-agent-protocol` | Adapter traits, request and response types, result schemas, progress events                              | `sqlx`, `axum`                                   |
 | `ingot-agent-adapters` | Built-in Claude and Codex adapter implementations                                                        | `sqlx`, `axum`, workflow crates                  |
@@ -218,14 +229,16 @@ config store  workspace agent-runtime
                   ↑
             agent-adapters
 
-http-api ───────→ application
+http-api ───────→ ingot-usecases
 apps/ingot-daemon wires everything together
 ```
 
 Rules:
 
 * `ingot-domain` and `ingot-workflow` stay pure and testable
+* `ingot-workflow` projects state and legal next actions only; it does not execute Git or mutate durable state
 * `ingot-usecases` depends on ports, not infrastructure implementations
+* `ingot-usecases` owns transaction boundaries and daemon-only system actions such as automatic finalization and stale prepared-convergence invalidation
 * storage, workspace, Git, and agent runtime are infrastructure
 * the daemon app owns DI, config bootstrap, background task startup, and signal handling only
 
@@ -299,6 +312,7 @@ Transport expectations:
 * live updates arrive over WebSocket
 * WebSocket messages carry monotonic sequence numbers so clients can detect gaps and resync
 * API auth uses a bearer token generated by the daemon and stored locally with restrictive permissions
+* REST and WebSocket reads surface projections only; they MUST NOT synchronously trigger daemon-only system actions
 
 The wire-level contracts themselves are specified in [SPEC.md](./SPEC.md).
 
@@ -342,7 +356,13 @@ There is no `workflows/` directory in v1. Workflow definitions are built into th
 | Agents        | tokio::process     | spawn and supervise local CLI agents         |
 | Git           | tokio::process     | worktree and ref operations                  |
 | Frontend      | React + TypeScript | operator UI                                  |
+| Routing       | React Router       | project-scoped SPA routes                     |
+| State         | Zustand            | client-only state (active project, WS conn)   |
+| Server Cache  | TanStack Query     | REST fetch/cache, WS-driven invalidation      |
+| Testing       | Vitest + RTL       | unit and component tests, shared Vite config  |
+| Lint/Format   | Biome              | single-tool lint and format, replaces ESLint  |
 | Bundler       | Vite               | local development                            |
+| JS Runtime    | Bun                | package management and script execution       |
 
 ## What Stays Out Of v1
 

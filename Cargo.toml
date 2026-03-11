@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/ingot-daemon",
+    "crates/ingot-domain",
+    "crates/ingot-workflow",
+    "crates/ingot-usecases",
+    "crates/ingot-config",
+    "crates/ingot-store-sqlite",
+    "crates/ingot-git",
+    "crates/ingot-workspace",
+    "crates/ingot-agent-protocol",
+    "crates/ingot-agent-adapters",
+    "crates/ingot-agent-runtime",
+    "crates/ingot-http-api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+# Internal crates
+ingot-domain = { path = "crates/ingot-domain" }
+ingot-workflow = { path = "crates/ingot-workflow" }
+ingot-usecases = { path = "crates/ingot-usecases" }
+ingot-config = { path = "crates/ingot-config" }
+ingot-store-sqlite = { path = "crates/ingot-store-sqlite" }
+ingot-git = { path = "crates/ingot-git" }
+ingot-workspace = { path = "crates/ingot-workspace" }
+ingot-agent-protocol = { path = "crates/ingot-agent-protocol" }
+ingot-agent-adapters = { path = "crates/ingot-agent-adapters" }
+ingot-agent-runtime = { path = "crates/ingot-agent-runtime" }
+ingot-http-api = { path = "crates/ingot-http-api" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP / WebSocket
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yml = "0.0.12"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+thiserror = "2"
+anyhow = "1"

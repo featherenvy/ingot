@@ -261,7 +261,7 @@ Required fields:
 * `lifecycle_state` with values `open|done`
 * `parking_state` with values `active|deferred`
 * `done_reason` with values `completed|dismissed|invalidated`
-* `resolution_source` with values `evaluator|approval_command|manual_command`
+* `resolution_source` with values `system_command|approval_command|manual_command`
 * `approval_state` with values `not_required|not_requested|pending|approved`
 * `escalation_state` with values `none|operator_required`
 * `escalation_reason` with values `candidate_rework_budget_exhausted|integration_rework_budget_exhausted|convergence_conflict|step_failed|protocol_violation|manual_decision_required|other`
@@ -420,7 +420,10 @@ Required fields:
 Semantics:
 
 * convergence is item-revision-scoped
-* `prepared` means integrated result exists and target ref has not moved
+* `strategy=rebase_then_fast_forward` means prepare replays the full current-revision authoring commit chain onto `input_target_commit_oid` while preserving commit boundaries
+* `source_head_commit_oid` is the original authoring tip before replay
+* `prepared_commit_oid` is the tip of the rewritten prepared chain, not a squash or synthetic merge commit
+* `prepared` means the full authoring chain was replayed cleanly and target ref has not moved
 * `finalized` means target ref was compare-and-swapped from `input_target_commit_oid` to the prepared commit
 * if target ref moves after preparation but before finalization, convergence fails and approval is cleared
 
@@ -454,11 +457,16 @@ Required fields:
 Semantics:
 
 * a `GitOperation` row MUST be written before a daemon-owned Git side effect
+* `prepare_convergence_commit` is one logical replay operation and MAY create multiple daemon-owned commits
 * daemon-created commits MUST include trailers:
   * `Ingot-Operation: <git_operation_id>`
   * `Ingot-Item: <item_id>`
   * `Ingot-Revision: <revision_no>`
   * `Ingot-Job: <job_id>` or `Ingot-Convergence: <convergence_id>`
+* replayed prepared commits created by `prepare_convergence_commit` MUST additionally include:
+  * `Ingot-Source-Commit: <source_commit_oid>`
+* for `prepare_convergence_commit`, `metadata` MUST record `source_commit_oids` ordered oldest-first before replay begins; it SHOULD record any successfully replayed `prepared_commit_oids` prefix when known; after a clean prepare it MUST record `prepared_commit_oids` ordered oldest-first with the same cardinality and positional correspondence
+* for `prepare_convergence_commit`, `commit_oid` and `new_oid` denote the last successfully replayed prepared commit when one exists; on a clean prepare this is the rewritten prepared tip
 * startup reconciliation uses the journal plus actual Git state to adopt or fail incomplete work safely
 
 Field nullability and conditional requirements:
@@ -571,7 +579,7 @@ prepare_convergence(conflicted)
 validate_integrated(clean, approval_policy=required)
   -> pending approval
 validate_integrated(clean, approval_policy=not_required)
-  -> auto finalize
+  -> daemon-only: finalize_prepared_convergence
 validate_integrated(findings)
   -> repair_after_integration
 
@@ -589,7 +597,9 @@ review_after_integration_repair(findings)
   -> repair_after_integration
 ```
 
-Successful `validate_integrated` does not create another job step. It either enters the approval gate or finalizes automatically according to the revision's `approval_policy`.
+Successful `validate_integrated` does not create another job step. It either enters the approval gate or projects the daemon-only `finalize_prepared_convergence` action according to the revision's `approval_policy`.
+
+If a prepared convergence later becomes stale because `target_ref` moved, the daemon MUST execute the daemon-only `invalidate_prepared_convergence` action before approval or finalization can proceed.
 
 ### 5.4 Default Budgets
 
@@ -648,12 +658,15 @@ The evaluator computes but does not canonically store:
 * `attention_badges`
 * `terminal_readiness`
 
+The evaluator is pure read-side logic. It MUST NOT mutate durable state, create `GitOperation` rows, move refs, or update item, job, workspace, or convergence rows.
+
 Operational terms used elsewhere:
 
 * `idle item` means `lifecycle_state=open` and zero active jobs plus zero active convergence for the current revision. It does not by itself imply that approval is not pending; individual commands may impose that extra requirement.
 * `next_recommended_action` may point to a job dispatch, a daemon-only operation, or a human command.
+* daemon-only `next_recommended_action` values used in v1 are `prepare_convergence`, `finalize_prepared_convergence`, and `invalidate_prepared_convergence`.
 * `dispatchable_step_id` is the legal job `step_id` to dispatch next, or null when the next recommended action is a human or daemon-only action such as approval or convergence prepare.
-* `board_status` MUST be one of `INBOX|WORKING|APPROVAL|DONE`. `DONE` applies iff `lifecycle_state=done`. `APPROVAL` applies iff `lifecycle_state=open` and `approval_state=pending`. `INBOX` applies to remaining open items only when there is no active job, no active convergence, and the current revision has no non-superseded terminal jobs yet. `WORKING` applies to all other remaining open items.
+* `board_status` MUST be one of `INBOX|WORKING|APPROVAL|DONE`. `DONE` applies iff `lifecycle_state=done`. `APPROVAL` applies iff `lifecycle_state=open`, `approval_state=pending`, and `next_recommended_action!=invalidate_prepared_convergence`. `INBOX` applies to remaining open items only when there is no active job, no active convergence, and the current revision has no non-superseded terminal jobs yet. `WORKING` applies to all other remaining open items.
 * `attention_badges` MUST be an ordered list containing zero or more of `escalated` and `deferred`. Include `escalated` when `escalation_state=operator_required`. Include `deferred` when `parking_state=deferred`. If both apply, the recommended order is `["escalated", "deferred"]`. `Blocked` is not a canonical value in v1.
 
 ### 6.3 Normalized Outcomes
@@ -685,12 +698,12 @@ For one item:
 1. If `lifecycle_state=done`, the item is terminal.
 2. If `parking_state=deferred`, no auto-dispatch occurs.
 3. If there is an active job or active convergence for the current revision, project the current step as running.
-4. Otherwise inspect the latest non-superseded terminal job for the current step and apply the frozen transition rules from the current revision.
-5. If candidate or integration rework budget is exhausted, set `escalation_state=operator_required`.
-6. If the current convergence is `conflicted`, set `escalation_state=operator_required` with reason `convergence_conflict`.
-7. If the workflow reaches the approval gate and `approval_policy=required`, set `approval_state=pending`.
-8. If the workflow reaches the approval gate and `approval_policy=not_required`, attempt finalization automatically: set `lifecycle_state=done`, `done_reason=completed`, `resolution_source=evaluator`, and `closed_at` to the transaction timestamp.
-9. If the target ref moved after a convergence was prepared but before finalization, fail that convergence, clear pending approval, and project `prepare_convergence` again.
+4. Otherwise determine workflow position from canonical rows for the current revision: latest non-superseded terminal jobs, current convergence state, and canonical approval state.
+5. If candidate or integration rework budget is exhausted, project operator-required attention and a human next action. The command or system action that exhausts the budget MUST materialize the corresponding escalation state canonically.
+6. If the current convergence is `conflicted`, project operator-required attention and a human next action. The convergence handler MUST materialize `escalation_state=operator_required` with reason `convergence_conflict` canonically.
+7. If the workflow is at the approval gate and `approval_policy=required`, project approval actions from canonical `approval_state`. Clean completion of `validate_integrated` MUST materialize `approval_state=pending` as part of job-completion handling.
+8. If the workflow is at the approval gate and `approval_policy=not_required`, project `next_recommended_action=finalize_prepared_convergence` and `dispatchable_step_id=null`. The daemon MUST finalize through the daemon-only action, not inside the evaluator.
+9. If a prepared convergence exists but the current `target_ref` head no longer matches `input_target_commit_oid`, project `next_recommended_action=invalidate_prepared_convergence`, remove approval and finalization commands from `allowed_actions`, and require the daemon-only invalidation action before projecting `prepare_convergence` again.
 
 ### 6.6 Terminal Readiness
 
@@ -704,7 +717,37 @@ An item is terminally ready only when all of the following are true for the curr
 * integrated validation completed cleanly
 * if approval is required, approval has been granted and finalization succeeded
 
-### 6.7 Approval Commands
+### 6.7 Daemon-Only System Actions
+
+The following daemon-only actions have no public HTTP endpoint in v1:
+
+* `finalize_prepared_convergence`
+* `invalidate_prepared_convergence`
+
+`finalize_prepared_convergence` MUST:
+
+1. verify the current revision has `approval_policy=not_required`
+2. verify there are no active jobs or active convergence operations
+3. verify the prepared convergence still matches current `target_ref` head
+4. create a `GitOperation` for target-ref finalization
+5. compare-and-swap `target_ref` from `input_target_commit_oid` to `prepared_commit_oid`
+6. mark the convergence `finalized`
+7. set `lifecycle_state=done`
+8. set `done_reason=completed`
+9. set `resolution_source=system_command`
+10. set `closed_at`
+
+`invalidate_prepared_convergence` MUST:
+
+1. verify a prepared convergence exists for the current revision
+2. verify the current `target_ref` head no longer matches `input_target_commit_oid`
+3. mark the convergence `failed` with error `target_ref_moved`
+4. set `approval_state` to `not_requested` or `not_required` according to the revision's `approval_policy`
+5. keep `lifecycle_state=open` and `parking_state=active`
+
+HTTP queries and WebSocket delivery MUST NOT execute daemon-only system actions synchronously as a side effect of read evaluation.
+
+### 6.8 Approval Commands
 
 `POST /items/:id/approval/approve` MUST:
 
@@ -729,9 +772,9 @@ An item is terminally ready only when all of the following are true for the curr
 5. set `approval_state` for the new revision to `not_requested` or `not_required` per the revision's approval policy
 6. keep `lifecycle_state=open` and `parking_state=active`
 
-Approval is not durable if finalization fails. If target ref moved before approval finalization, the approval command MUST fail safely, clear pending approval, and require a new prepare attempt.
+Approval is not durable if finalization fails. If target ref moved before approval finalization, the approval command MUST fail safely by applying the same state transition as `invalidate_prepared_convergence`, then require a new prepare attempt.
 
-### 6.8 Illegal Combinations
+### 6.9 Illegal Combinations
 
 The following combinations are invalid and MUST be prevented:
 
@@ -739,7 +782,7 @@ The following combinations are invalid and MUST be prevented:
 * `approval_state=pending` with `parking_state=deferred`
 * `approval_state=approved` while `lifecycle_state=open`
 * `escalation_state=operator_required` while `lifecycle_state=done`
-* `approval_state=pending` when no valid prepared convergence exists
+* `approval_state=pending` when no prepared convergence exists for the current revision
 * `lifecycle_state=done` with active jobs or active convergence
 * reopen of a `completed` item
 
@@ -810,18 +853,21 @@ Prepare:
 
 1. create an integration workspace from the latest `target_ref` head
 2. record `input_target_commit_oid`
-3. apply the current authoring head using `rebase_then_fast_forward`
-4. if conflicts occur, mark convergence `conflicted`, retain the integration workspace, and escalate the item
-5. if integration is clean, create a prepared commit in the integration workspace, journal it, and mark convergence `prepared`
+3. compute the current revision source range as the commits in `seed_commit_oid..source_head_commit_oid`, ordered oldest-first
+4. create a `GitOperation` for `prepare_convergence_commit` with the ordered `source_commit_oids` before replay begins
+5. replay the source range onto `input_target_commit_oid` oldest-first, preserving commit boundaries and creating one daemon-owned prepared commit per source commit
+6. if conflicts occur, mark the `GitOperation` failed, mark convergence `conflicted`, retain the integration workspace, and escalate the item
+7. if replay is clean, persist the ordered `prepared_commit_oids` in the `GitOperation` metadata, set `prepared_commit_oid` to the rewritten tip, and mark convergence `prepared`
 
 Validate and finalize:
 
 1. run `validate_integrated` against the prepared result
 2. if validation finds issues, return to the post-integration repair loop
-3. if approval is required, wait for explicit approval
-4. before finalization, verify `target_ref` is still at `input_target_commit_oid`
-5. if still valid, create a `GitOperation` for `finalize_target_ref` and move the ref
-6. if target moved, fail the convergence, clear pending approval, and require a new prepare attempt
+3. if approval is required, the clean completion handler for `validate_integrated` MUST set `approval_state=pending` and wait for explicit approval
+4. if approval is not required, the daemon MUST project and execute `finalize_prepared_convergence`
+5. before any approval-command or daemon-only finalization, verify `target_ref` is still at `input_target_commit_oid`
+6. if still valid, finalization MUST create a `GitOperation` for `finalize_target_ref` and move the ref
+7. if target moved, the daemon MUST execute `invalidate_prepared_convergence`, which fails the prepared convergence, clears pending approval when present, and requires a new prepare attempt
 
 ### 7.8 Conflict Handling
 
@@ -847,6 +893,8 @@ Git and SQLite are not atomic together. The journal makes recovery honest.
 Recovery rules:
 
 * if a planned commit operation exists and a commit with matching trailers is present, reconcile it and adopt the commit
+* if a planned or applied `prepare_convergence_commit` exists and the full rewritten commit chain with matching `Ingot-Operation` and `Ingot-Source-Commit` trailers is present in the integration workspace, reconcile it and adopt the prepared state using the rewritten tip
+* if only a prefix of a planned `prepare_convergence_commit` replay exists and the integration workspace is not conflicted, mark the operation failed, mark the workspace `stale`, and require a new prepare attempt
 * if a planned finalization operation exists and the target ref is already at the expected new OID, reconcile it and adopt the move
 * if a planned `reset_workspace` operation exists and the workspace ref and head already match the expected clean state, reconcile it and adopt the reset
 * if a planned `remove_workspace_ref` operation exists and the scratch ref is already absent, reconcile it and adopt the removal
@@ -949,6 +997,8 @@ Internal worker lifecycle endpoints MAY exist:
 * `POST /api/jobs/:job_id/complete`
 * `POST /api/jobs/:job_id/fail`
 * `POST /api/jobs/:job_id/expire`
+
+Daemon-only system actions such as `finalize_prepared_convergence` and `invalidate_prepared_convergence` are internal runtime behavior, not public HTTP endpoints in v1.
 
 Job command semantics:
 
@@ -1126,7 +1176,7 @@ Recovery errors:
 * `terminal_failure` escalates the item with reason `step_failed`.
 * `protocol_violation` escalates immediately and MUST NOT be silently retried.
 * `convergence_conflict` retains the integration workspace if configured and escalates the item.
-* `target_ref_moved` fails the prepared convergence, clears pending approval, and requires a new prepare attempt.
+* `target_ref_moved` MUST be applied through `invalidate_prepared_convergence`, which fails the prepared convergence, clears pending approval when present, and requires a new prepare attempt.
 * command precondition failures MUST NOT partially mutate state.
 * recovery ambiguity MUST leave the system in a safe, non-completed state.
 
@@ -1140,7 +1190,7 @@ Recovery errors:
 4. At most one active convergence may exist per item revision.
 5. `lifecycle_state=done` implies zero active jobs and zero active convergence.
 6. `parking_state=deferred` implies the item is open, idle, and `approval_state!=pending`.
-7. `approval_state=pending` implies the item is open, there are no active jobs or active convergence operations, and a valid prepared convergence exists for the current revision.
+7. `approval_state=pending` implies the item is open, there are no active jobs or active convergence operations, and a prepared convergence exists for the current revision. Approval commands are legal only while that prepared convergence still matches the current `target_ref` head.
 8. `approval_state=approved` implies `lifecycle_state=done`, `done_reason=completed`, `resolution_source=approval_command`, and a finalized convergence exists for the current revision.
 9. `escalation_state=operator_required` implies the item is open and escalation metadata is consistent.
 10. Job side effects may be adopted only if `job.item_revision_id == item.current_revision_id` at state-application time.
@@ -1162,7 +1212,7 @@ An implementation SHOULD enforce at least:
 * stable `step_id + semantic_attempt_no + retry_no` uniqueness per item revision
 * same-project relationships across item, revision, job, workspace, convergence, and GitOperation
 
-Cross-row conditions such as approval pending requiring a valid prepared convergence MUST be enforced transactionally.
+Cross-row conditions such as approval pending requiring a prepared convergence for the current revision, and approval or finalization requiring that convergence to still match the current `target_ref` head, MUST be enforced transactionally.
 
 ### 11.3 Idempotency and Stale Events
 
@@ -1192,9 +1242,10 @@ At startup the daemon MUST:
 4. fail or expire uncertain jobs conservatively
 5. inspect active convergences and integration workspaces
 6. if an integration workspace contains unresolved conflicts, mark convergence `conflicted`
-7. if a prepared convergence commit exists and the journaled side effect is present, reconcile it and adopt the prepared state
-8. if finalization already happened, reconcile and mark convergence `finalized`
-9. rebuild derived projections from canonical rows
+7. if a full prepared replay chain exists and the journaled side effect is present, reconcile it and adopt the prepared state using the rewritten tip
+8. if only a replay prefix exists without unresolved conflicts, mark the prepare operation failed and the integration workspace `stale`
+9. if finalization already happened, reconcile and mark convergence `finalized`
+10. rebuild derived projections from canonical rows
 
 ## 12. Reference Algorithms
 
@@ -1268,18 +1319,55 @@ prepare_convergence(item_id):
   assert evaluate(item).next_recommended_action == prepare_convergence
   create convergence row
   provision integration workspace from target_ref head
-  attempt rebase_then_fast_forward(source_head, target_ref_head)
+  source_commits = list_commits(item.current_revision.seed_commit_oid..source_head, oldest_first)
+  write GitOperation(
+    planned=prepare_convergence_commit,
+    metadata={source_commit_oids=source_commits}
+  )
+  replay_commits_oldest_first(
+    source_commits,
+    onto=target_ref_head,
+    preserve_commit_boundaries=true,
+    extra_trailer=Ingot-Source-Commit
+  )
   if conflicts:
+    mark prepare GitOperation failed
     mark convergence conflicted
     escalate item
     retain integration workspace
     return
-  write GitOperation(planned=prepare_convergence_commit)
-  create prepared commit
+  persist prepared_commit_oids mapping and rewritten tip
   mark convergence prepared
 ```
 
-### 12.5 Approve Pending Item
+### 12.5 Finalize Prepared Convergence
+
+```text
+finalize_prepared_convergence(item_id):
+  item = load_item_with_current_revision(item_id)
+  assert item.current_revision.approval_policy == not_required
+  assert evaluate(item).next_recommended_action == finalize_prepared_convergence
+  conv = load_prepared_convergence(item.current_revision_id)
+  assert target_ref_head == conv.input_target_commit_oid
+  write GitOperation(planned=finalize_target_ref)
+  compare_and_swap(target_ref, old=conv.input_target_commit_oid, new=conv.prepared_commit_oid)
+  mark convergence finalized
+  close item as completed with resolution_source=system_command
+```
+
+### 12.6 Invalidate Prepared Convergence
+
+```text
+invalidate_prepared_convergence(item_id):
+  item = load_item_with_current_revision(item_id)
+  conv = load_prepared_convergence(item.current_revision_id)
+  assert target_ref_head != conv.input_target_commit_oid
+  mark convergence failed with error target_ref_moved
+  reset approval_state according to current revision approval_policy
+  leave item open and eligible to project prepare_convergence again
+```
+
+### 12.7 Approve Pending Item
 
 ```text
 approve(item_id):
@@ -1294,13 +1382,19 @@ approve(item_id):
   close item as completed
 ```
 
-### 12.6 Startup Reconcile Git Operations
+### 12.8 Startup Reconcile Git Operations
 
 ```text
 reconcile_startup_state():
   for each planned_or_applied GitOperation:
     inspect Git and filesystem state appropriate to operation_kind
-    if side effect definitely happened:
+    if operation_kind == prepare_convergence_commit and full replay chain matching metadata is present:
+      mark operation reconciled
+      adopt prepared state using rewritten tip
+    else if operation_kind == prepare_convergence_commit and only a replay prefix is present:
+      mark operation failed
+      mark integration workspace stale unless unresolved conflicts already prove convergence conflicted
+    else if side effect definitely happened:
       mark operation reconciled
       adopt resulting state
     else if side effect definitely did not happen:
@@ -1419,11 +1513,11 @@ Recommended `GET .../items/:item_id` shape:
 
 ### 14.2 State Evaluation
 
-* evaluator derives the current step from canonical rows only
+* evaluator derives the current step from canonical rows only and never mutates durable state or Git
 * deferred items do not auto-dispatch
 * exhausted rework budgets escalate correctly
-* pending approval requires a valid prepared convergence
-* target-ref drift clears pending approval and requires new prepare
+* pending approval requires a prepared convergence, and approval actions require that it is still valid for the current target head
+* target-ref drift projects daemon-only invalidation and requires new prepare
 * completed items cannot reopen
 
 ### 14.3 Workspace and Job Protocols
@@ -1440,15 +1534,19 @@ Recommended `GET .../items/:item_id` shape:
 
 * prepare creates a convergence record and integration workspace
 * conflicts mark convergence `conflicted` and escalate the item
-* clean prepare creates a prepared commit without moving `target_ref`
+* clean prepare replays the full current-revision authoring chain without squashing, records the source-to-prepared chain mapping, and sets `prepared_commit_oid` to the rewritten tip without moving `target_ref`
 * integrated validation gates finalization
+* `approval_policy=not_required` finalizes through daemon-only `finalize_prepared_convergence`
 * approval approve compare-and-swaps the target ref
+* stale prepared convergence is cleared through daemon-only `invalidate_prepared_convergence`
 * approval reject supersedes the revision and resets approval state
 
 ### 14.5 Recovery and Journaling
 
 * every daemon-owned Git side effect has a corresponding `GitOperation`
+* `prepare_convergence_commit` journals the ordered source and prepared commit chains for replayed prepare work
 * startup reconciliation adopts already-applied side effects when evidence is clear
+* partial prepare replay never counts as implicit success
 * uncertain process death never becomes implicit success
 * stale callbacks no-op when revision, job, or lease owner no longer match
 
@@ -1469,6 +1567,8 @@ Required for conformance:
 * immutable revision snapshots
 * daemon-owned canonical commits and ref movement
 * explicit convergence prepare and finalize lifecycle
+* prepare preserves the full current-revision authoring chain during convergence replay
+* daemon-only finalization and prepared-convergence invalidation actions
 * approval gate with approve and reject commands
 * Git operation journal with startup reconciliation
 * deterministic prompt assembly and on-disk prompt snapshots

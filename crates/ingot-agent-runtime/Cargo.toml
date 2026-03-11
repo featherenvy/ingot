@@ -1,0 +1,12 @@
+[package]
+name = "ingot-agent-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ingot-domain = { workspace = true }
+ingot-agent-protocol = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

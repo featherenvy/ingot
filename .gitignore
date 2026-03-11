@@ -1,0 +1,9 @@
+/target
+Cargo.lock
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+node_modules/
+ui/dist/
+~/.ingot/

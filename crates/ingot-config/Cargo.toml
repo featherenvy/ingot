@@ -1,0 +1,11 @@
+[package]
+name = "ingot-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ingot-domain = { workspace = true }
+serde = { workspace = true }
+serde_yml = { workspace = true }
+thiserror = { workspace = true }

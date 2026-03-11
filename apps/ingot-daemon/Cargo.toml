@@ -1,0 +1,27 @@
+[package]
+name = "ingot-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ingotd"
+path = "src/main.rs"
+
+[dependencies]
+ingot-domain = { workspace = true }
+ingot-workflow = { workspace = true }
+ingot-usecases = { workspace = true }
+ingot-config = { workspace = true }
+ingot-store-sqlite = { workspace = true }
+ingot-git = { workspace = true }
+ingot-workspace = { workspace = true }
+ingot-agent-protocol = { workspace = true }
+ingot-agent-adapters = { workspace = true }
+ingot-agent-runtime = { workspace = true }
+ingot-http-api = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

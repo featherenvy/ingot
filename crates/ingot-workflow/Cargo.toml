@@ -1,0 +1,10 @@
+[package]
+name = "ingot-workflow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ingot-domain = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
