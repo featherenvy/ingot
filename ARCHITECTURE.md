@@ -172,7 +172,7 @@ ingot/
 ├── crates/
 │   ├── ingot-domain/
 │   ├── ingot-workflow/
-│   ├── ingot-application/
+│   ├── ingot-usecases/
 │   ├── ingot-config/
 │   ├── ingot-store-sqlite/
 │   ├── ingot-git/
@@ -193,7 +193,7 @@ ingot/
 | ---------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
 | `ingot-domain`         | Pure entities, enums, invariants, value objects, repository ports, event types                           | `sqlx`, `axum`, `tokio::process`                 |
 | `ingot-workflow`       | Built-in workflow definitions, step contracts, evaluator, transition tables                              | `sqlx`, `axum`, adapter code                     |
-| `ingot-application`    | Command handlers, transaction boundaries, use-case orchestration, port composition                       | `axum`, `sqlx` concrete types, CLI-specific code |
+| `ingot-usecases`    | Command handlers, transaction boundaries, use-case orchestration, port composition                       | `axum`, `sqlx` concrete types, CLI-specific code |
 | `ingot-config`         | YAML loading, merge logic, config schema validation, template override loading                           | `axum`, `sqlx`                                   |
 | `ingot-store-sqlite`   | sqlx models, migrations, repository implementations, transaction adapters                                | `axum`, adapter crates                           |
 | `ingot-git`            | Safe Git wrappers, diff generation, ref validation, commit trailers, convergence helpers, target-ref CAS | `axum`, workflow logic                           |
@@ -210,7 +210,7 @@ ingot-domain
     ↑
 ingot-workflow
     ↑
-ingot-application
+ingot-usecases
    ↑    ↑      ↑        ↑
 config store  workspace agent-runtime
          ↑       ↑          ↑
@@ -225,7 +225,7 @@ apps/ingot-daemon wires everything together
 Rules:
 
 * `ingot-domain` and `ingot-workflow` stay pure and testable
-* `ingot-application` depends on ports, not infrastructure implementations
+* `ingot-usecases` depends on ports, not infrastructure implementations
 * storage, workspace, Git, and agent runtime are infrastructure
 * the daemon app owns DI, config bootstrap, background task startup, and signal handling only
 
