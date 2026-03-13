@@ -2,10 +2,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { Link, useNavigate } from 'react-router'
-import { ApiError, createItem } from '../api/client'
+import { toast } from 'sonner'
+import { createItem } from '../api/client'
 import { itemsQuery, queryKeys } from '../api/queries'
+import { ActivityPulse } from '../components/ActivityPulse'
+import { EmptyState } from '../components/EmptyState'
+import { PageHeader } from '../components/PageHeader'
+import { PageQueryError } from '../components/PageQueryError'
 import { BoardSkeleton } from '../components/PageSkeletons'
-import { Alert, AlertDescription, AlertTitle } from '../components/ui/alert'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
@@ -16,6 +20,7 @@ import { Textarea } from '../components/ui/textarea'
 import { useRequiredProjectId } from '../hooks/useRequiredRouteParam'
 import { boardStatuses, groupItemSummariesByBoardStatus } from '../itemSummaries'
 import { isActivePhaseStatus } from '../lib/status'
+import { showErrorToast } from '../lib/toast'
 
 type CreateItemForm = {
   title: string
@@ -33,7 +38,7 @@ export default function BoardPage() {
   const projectId = useRequiredProjectId()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const { data: itemSummaries, isLoading } = useQuery(itemsQuery(projectId))
+  const { data: itemSummaries, error, isError, isFetching, isLoading, refetch } = useQuery(itemsQuery(projectId))
   const [formOpen, setFormOpen] = useState(false)
   const form = useForm<CreateItemForm>({
     defaultValues: initialCreateItemForm,
@@ -50,7 +55,11 @@ export default function BoardPage() {
       queryClient.invalidateQueries({ queryKey: queryKeys.items(projectId) })
       queryClient.setQueryData(queryKeys.item(projectId, detail.item.id), detail)
       handleSheetOpenChange(false)
+      toast.success('Item created.')
       navigate(`/projects/${projectId}/items/${detail.item.id}`)
+    },
+    onError: (error) => {
+      showErrorToast('Item creation failed.', error)
     },
   })
 
@@ -67,90 +76,88 @@ export default function BoardPage() {
   }, [itemSummaries])
 
   if (isLoading) return <BoardSkeleton />
+  if (isError) {
+    return <PageQueryError title="Board failed to load" error={error} onRetry={refetch} isRetrying={isFetching} />
+  }
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1">
-          <h2 className="text-2xl font-semibold tracking-tight">Board</h2>
-          <p className="text-sm text-muted-foreground">
-            Create new work and scan the current board state across all workflow lanes.
-          </p>
-        </div>
-        <Sheet open={formOpen} onOpenChange={handleSheetOpenChange}>
-          <SheetTrigger asChild>
-            <Button type="button">New item</Button>
-          </SheetTrigger>
-          <SheetContent side="right" className="overflow-y-auto sm:max-w-2xl">
-            <SheetHeader>
-              <SheetTitle>Create Item</SheetTitle>
-              <SheetDescription>
-                Define the title, context, and acceptance criteria the workflow should drive toward.
-              </SheetDescription>
-            </SheetHeader>
-            <Form {...form}>
-              <form onSubmit={form.handleSubmit((values) => createItemMutation.mutate(values))} className="grid gap-4">
-                <FormField
-                  control={form.control}
-                  name="title"
-                  rules={{ required: 'Title is required.' }}
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Title</FormLabel>
-                      <FormControl>
-                        <Input placeholder="Title" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="description"
-                  rules={{ required: 'Description is required.' }}
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Description</FormLabel>
-                      <FormControl>
-                        <Textarea placeholder="Description" rows={5} {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="acceptanceCriteria"
-                  rules={{ required: 'Acceptance criteria are required.' }}
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Acceptance criteria</FormLabel>
-                      <FormControl>
-                        <Textarea placeholder="Acceptance criteria" rows={5} {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                {createItemMutation.error instanceof ApiError && (
-                  <Alert variant="destructive">
-                    <AlertTitle>Item creation failed</AlertTitle>
-                    <AlertDescription>{createItemMutation.error.message}</AlertDescription>
-                  </Alert>
-                )}
-                <div className="flex items-center gap-3">
-                  <Button type="submit" disabled={createItemMutation.isPending}>
-                    {createItemMutation.isPending ? 'Creating…' : 'Create item'}
-                  </Button>
-                  <Button type="button" variant="outline" onClick={() => handleSheetOpenChange(false)}>
-                    Cancel
-                  </Button>
-                </div>
-              </form>
-            </Form>
-          </SheetContent>
-        </Sheet>
-      </div>
+      <PageHeader
+        title="Board"
+        description="Create new work and scan the current board state across all workflow lanes."
+        action={
+          <Sheet open={formOpen} onOpenChange={handleSheetOpenChange}>
+            <SheetTrigger asChild>
+              <Button type="button">New item</Button>
+            </SheetTrigger>
+            <SheetContent side="right" className="overflow-y-auto sm:max-w-2xl">
+              <SheetHeader>
+                <SheetTitle>Create Item</SheetTitle>
+                <SheetDescription>
+                  Define the title, context, and acceptance criteria the workflow should drive toward.
+                </SheetDescription>
+              </SheetHeader>
+              <Form {...form}>
+                <form
+                  onSubmit={form.handleSubmit((values) => createItemMutation.mutate(values))}
+                  className="grid gap-4"
+                >
+                  <FormField
+                    control={form.control}
+                    name="title"
+                    rules={{ required: 'Title is required.' }}
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Title</FormLabel>
+                        <FormControl>
+                          <Input placeholder="Title" {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="description"
+                    rules={{ required: 'Description is required.' }}
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Description</FormLabel>
+                        <FormControl>
+                          <Textarea placeholder="Description" rows={5} {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="acceptanceCriteria"
+                    rules={{ required: 'Acceptance criteria are required.' }}
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Acceptance criteria</FormLabel>
+                        <FormControl>
+                          <Textarea placeholder="Acceptance criteria" rows={5} {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <div className="flex items-center gap-3">
+                    <Button type="submit" disabled={createItemMutation.isPending}>
+                      {createItemMutation.isPending ? 'Creating…' : 'Create item'}
+                    </Button>
+                    <Button type="button" variant="outline" onClick={() => handleSheetOpenChange(false)}>
+                      Cancel
+                    </Button>
+                  </div>
+                </form>
+              </Form>
+            </SheetContent>
+          </Sheet>
+        }
+      />
 
       <div className="grid gap-4 xl:grid-cols-4">
         {boardStatuses.map((col) => (
@@ -173,12 +180,7 @@ export default function BoardPage() {
                         </Badge>
                       </div>
                       <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-                        {isActivePhaseStatus(evaluation.phase_status) && (
-                          <span className="relative flex size-2">
-                            <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-75" />
-                            <span className="relative inline-flex size-2 rounded-full bg-primary" />
-                          </span>
-                        )}
+                        {isActivePhaseStatus(evaluation.phase_status) ? <ActivityPulse /> : null}
                         <span>
                           {item.classification} · {evaluation.phase_status ?? 'unknown'}
                         </span>
@@ -187,7 +189,7 @@ export default function BoardPage() {
                   </Card>
                 ))
               ) : (
-                <p className="text-sm text-muted-foreground">No items in this lane.</p>
+                <EmptyState variant="inline" description="No items in this lane." className="px-0 py-2" />
               )}
             </CardContent>
           </Card>

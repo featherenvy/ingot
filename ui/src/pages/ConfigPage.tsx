@@ -2,10 +2,16 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
-import { ApiError, createAgent, reprobeAgent } from '../api/client'
+import { createAgent, reprobeAgent } from '../api/client'
 import { agentsQuery, projectConfigQuery, queryKeys } from '../api/queries'
-import { Alert, AlertDescription, AlertTitle } from '../components/ui/alert'
-import { Badge } from '../components/ui/badge'
+import { CodeBlock } from '../components/CodeBlock'
+import type { ComboboxOption } from '../components/Combobox'
+import { Combobox } from '../components/Combobox'
+import { DataTable } from '../components/DataTable'
+import { EmptyState } from '../components/EmptyState'
+import { PageHeader } from '../components/PageHeader'
+import { PageQueryError } from '../components/PageQueryError'
+import { StatusBadge } from '../components/StatusBadge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import {
@@ -18,12 +24,10 @@ import {
 } from '../components/ui/dialog'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '../components/ui/form'
 import { Input } from '../components/ui/input'
-import { ScrollArea } from '../components/ui/scroll-area'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Skeleton } from '../components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { useRequiredProjectId } from '../hooks/useRequiredRouteParam'
-import { statusVariant } from '../lib/status'
+import { showErrorToast } from '../lib/toast'
 import type { Agent } from '../types/domain'
 
 type AgentForm = {
@@ -40,15 +44,77 @@ const initialAgentForm: AgentForm = {
   cliPath: 'codex',
 }
 
-export default function ConfigPage() {
+const providerDefaults = ['openai', 'anthropic']
+const providerModelDefaults: Record<string, string[]> = {
+  openai: ['gpt-5-codex', 'gpt-5'],
+  anthropic: [],
+}
+
+function toComboboxOptions(values: Iterable<string>): ComboboxOption[] {
+  return Array.from(values, (value) => ({
+    value,
+    label: value,
+  }))
+}
+
+function buildProviderOptions(agents: Agent[] | undefined): ComboboxOption[] {
+  const knownProviders = new Set(providerDefaults)
+
+  for (const agent of agents ?? []) {
+    knownProviders.add(agent.provider)
+  }
+
+  return toComboboxOptions(knownProviders)
+}
+
+function buildModelOptions(
+  selectedProvider: string,
+  selectedModel: string,
+  agents: Agent[] | undefined,
+): ComboboxOption[] {
+  const knownModels = new Set(providerModelDefaults[selectedProvider] ?? [])
+
+  for (const agent of agents ?? []) {
+    if (agent.provider === selectedProvider) {
+      knownModels.add(agent.model)
+    }
+  }
+
+  if (selectedModel) {
+    knownModels.add(selectedModel)
+  }
+
+  return toComboboxOptions(knownModels)
+}
+
+export default function ConfigPage(): React.JSX.Element {
   const projectId = useRequiredProjectId()
   const queryClient = useQueryClient()
-  const { data: config, isLoading: isConfigLoading } = useQuery(projectConfigQuery(projectId))
-  const { data: agents, isLoading: isAgentsLoading } = useQuery(agentsQuery())
+  const {
+    data: config,
+    error: configError,
+    isError: isConfigError,
+    isFetching: isConfigFetching,
+    isLoading: isConfigLoading,
+    refetch: refetchConfig,
+  } = useQuery(projectConfigQuery(projectId))
+  const {
+    data: agents,
+    error: agentsError,
+    isError: isAgentsError,
+    isFetching: isAgentsFetching,
+    isLoading: isAgentsLoading,
+    refetch: refetchAgents,
+  } = useQuery(agentsQuery())
   const [dialogOpen, setDialogOpen] = useState(false)
   const form = useForm<AgentForm>({
     defaultValues: initialAgentForm,
   })
+  const selectedProvider = form.watch('provider')
+  const selectedModel = form.watch('model')
+
+  const providerOptions = buildProviderOptions(agents)
+  const modelOptions = buildModelOptions(selectedProvider, selectedModel, agents)
 
   const createAgentMutation = useMutation({
     mutationFn: (values: AgentForm) =>
@@ -64,6 +130,9 @@ export default function ConfigPage() {
       handleDialogOpenChange(false)
       toast.success('Agent registered.')
     },
+    onError: (error) => {
+      showErrorToast('Agent registration failed.', error)
+    },
   })
 
   function handleDialogOpenChange(open: boolean) {
@@ -74,115 +143,144 @@ export default function ConfigPage() {
     }
   }
 
-  const refreshAgents = () => {
+  function refreshAgents(): void {
     queryClient.invalidateQueries({ queryKey: queryKeys.agents() })
+  }
+
+  if (isConfigError || isAgentsError) {
+    return (
+      <PageQueryError
+        title="Config failed to load"
+        error={configError ?? agentsError}
+        onRetry={() => Promise.all([refetchConfig(), refetchAgents()])}
+        isRetrying={isConfigFetching || isAgentsFetching}
+      />
+    )
   }
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1">
-          <h2 className="text-2xl font-semibold tracking-tight">Config</h2>
-          <p className="text-sm text-muted-foreground">
-            Set project defaults and register the agents that can execute queued work.
-          </p>
-        </div>
-        <Dialog open={dialogOpen} onOpenChange={handleDialogOpenChange}>
-          <DialogTrigger asChild>
-            <Button type="button">Register Codex agent</Button>
-          </DialogTrigger>
-          <DialogContent className="sm:max-w-xl">
-            <DialogHeader>
-              <DialogTitle>Register Agent</DialogTitle>
-              <DialogDescription>
-                Define the adapter, provider, model, and CLI path available for project execution.
-              </DialogDescription>
-            </DialogHeader>
-            <Form {...form}>
-              <form onSubmit={form.handleSubmit((values) => createAgentMutation.mutate(values))} className="grid gap-4">
-                <FormField
-                  control={form.control}
-                  name="name"
-                  rules={{ required: 'Agent name is required.' }}
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Agent name</FormLabel>
-                      <FormControl>
-                        <Input placeholder="Agent name" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="provider"
-                  rules={{ required: 'Provider is required.' }}
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Provider</FormLabel>
-                      <Select value={field.value} onValueChange={field.onChange}>
+      <PageHeader
+        title="Config"
+        description="Set project defaults and register the agents that can execute queued work."
+        action={
+          <Dialog open={dialogOpen} onOpenChange={handleDialogOpenChange}>
+            <DialogTrigger asChild>
+              <Button type="button">Register Codex agent</Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-xl">
+              <DialogHeader>
+                <DialogTitle>Register Agent</DialogTitle>
+                <DialogDescription>
+                  Define the adapter, provider, model, and CLI path available for project execution.
+                </DialogDescription>
+              </DialogHeader>
+              <Form {...form}>
+                <form
+                  onSubmit={form.handleSubmit((values) => createAgentMutation.mutate(values))}
+                  className="grid gap-4"
+                >
+                  <FormField
+                    control={form.control}
+                    name="name"
+                    rules={{ required: 'Agent name is required.' }}
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Agent name</FormLabel>
                         <FormControl>
-                          <SelectTrigger aria-label="Provider">
-                            <SelectValue placeholder="Provider" />
-                          </SelectTrigger>
+                          <Input placeholder="Agent name" {...field} />
                         </FormControl>
-                        <SelectContent>
-                          <SelectItem value="openai">openai</SelectItem>
-                          <SelectItem value="anthropic">anthropic</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="model"
-                  rules={{ required: 'Model is required.' }}
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Model</FormLabel>
-                      <FormControl>
-                        <Input placeholder="Model" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="cliPath"
-                  rules={{ required: 'CLI path is required.' }}
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>CLI path</FormLabel>
-                      <FormControl>
-                        <Input placeholder="CLI path" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                {createAgentMutation.error instanceof ApiError && (
-                  <Alert variant="destructive">
-                    <AlertTitle>Agent registration failed</AlertTitle>
-                    <AlertDescription>{createAgentMutation.error.message}</AlertDescription>
-                  </Alert>
-                )}
-                <div className="flex items-center gap-3">
-                  <Button type="submit" disabled={createAgentMutation.isPending}>
-                    {createAgentMutation.isPending ? 'Registering…' : 'Register Codex agent'}
-                  </Button>
-                  <Button type="button" variant="outline" onClick={() => handleDialogOpenChange(false)}>
-                    Cancel
-                  </Button>
-                </div>
-              </form>
-            </Form>
-          </DialogContent>
-        </Dialog>
-      </div>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="provider"
+                    rules={{ required: 'Provider is required.' }}
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Provider</FormLabel>
+                        <FormControl>
+                          <Combobox
+                            ariaLabel="Provider"
+                            value={field.value}
+                            onChange={(provider) => {
+                              const previousProvider = form.getValues('provider')
+                              const currentModel = form.getValues('model')
+                              field.onChange(provider)
+
+                              const previousDefaults = providerModelDefaults[previousProvider] ?? []
+                              const nextDefaults = providerModelDefaults[provider] ?? []
+                              if (!currentModel || previousDefaults.includes(currentModel)) {
+                                form.setValue('model', nextDefaults[0] ?? '', {
+                                  shouldDirty: true,
+                                  shouldValidate: true,
+                                })
+                              }
+                            }}
+                            options={providerOptions}
+                            placeholder="Select provider"
+                            searchPlaceholder="Filter providers..."
+                            emptyText="No providers found."
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="model"
+                    rules={{ required: 'Model is required.' }}
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Model</FormLabel>
+                        <FormControl>
+                          <Combobox
+                            ariaLabel="Model"
+                            value={field.value}
+                            onChange={field.onChange}
+                            options={modelOptions}
+                            placeholder="Select or type a model"
+                            searchPlaceholder="Filter models..."
+                            emptyText="No saved models for this provider."
+                            allowCustom
+                            customLabel={(query) => `Use "${query}"`}
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="cliPath"
+                    rules={{ required: 'CLI path is required.' }}
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>CLI path</FormLabel>
+                        <FormControl>
+                          <Input placeholder="CLI path" {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <div className="flex items-center gap-3">
+                    <Button type="submit" disabled={createAgentMutation.isPending}>
+                      {createAgentMutation.isPending ? 'Registering…' : 'Register Codex agent'}
+                    </Button>
+                    <Button type="button" variant="outline" onClick={() => handleDialogOpenChange(false)}>
+                      Cancel
+                    </Button>
+                  </div>
+                </form>
+              </Form>
+            </DialogContent>
+          </Dialog>
+        }
+      />
 
       <Card>
         <CardHeader>
@@ -196,69 +294,74 @@ export default function ConfigPage() {
               <Skeleton className="h-40 w-full" />
             </div>
           ) : (
-            <ScrollArea className="max-h-72 rounded-lg border border-border bg-muted/30">
-              <pre className="w-max min-w-full p-4 text-xs leading-6">{JSON.stringify(config ?? {}, null, 2)}</pre>
-            </ScrollArea>
+            <CodeBlock
+              value={JSON.stringify(config ?? {}, null, 2)}
+              copyLabel="Copy project defaults"
+              maxHeightClassName="max-h-72"
+            />
           )}
         </CardContent>
       </Card>
 
-      <Card className="gap-0">
-        <CardHeader className="border-b">
-          <CardTitle>Agents</CardTitle>
-          <CardDescription>
-            Reprobe health and confirm which execution endpoints are currently available.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="px-0">
-          {isAgentsLoading ? (
-            <div className="space-y-4 px-4 py-4">
-              <div className="grid grid-cols-6 gap-3">
-                {['name', 'adapter', 'model', 'status', 'health', 'actions'].map((key) => (
-                  <Skeleton key={key} className="h-4 w-16" />
-                ))}
-              </div>
-              {['row-1', 'row-2', 'row-3', 'row-4'].map((rowKey) => (
-                <div key={rowKey} className="grid grid-cols-6 gap-3">
-                  {['name', 'adapter', 'model', 'status', 'health', 'actions'].map((columnKey) => (
-                    <Skeleton key={`${rowKey}-${columnKey}`} className="h-5 w-full" />
-                  ))}
-                </div>
+      <DataTable
+        title="Agents"
+        description="Reprobe health and confirm which execution endpoints are currently available."
+      >
+        {isAgentsLoading ? (
+          <div className="space-y-4 px-4 py-4">
+            <div className="grid grid-cols-6 gap-3">
+              {['name', 'adapter', 'model', 'status', 'health', 'actions'].map((key) => (
+                <Skeleton key={key} className="h-4 w-16" />
               ))}
             </div>
-          ) : agents && agents.length > 0 ? (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Adapter</TableHead>
-                  <TableHead>Model</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Health</TableHead>
-                  <TableHead>Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {agents.map((agent) => (
-                  <AgentRow key={agent.id} agent={agent} onSuccess={refreshAgents} />
+            {['row-1', 'row-2', 'row-3', 'row-4'].map((rowKey) => (
+              <div key={rowKey} className="grid grid-cols-6 gap-3">
+                {['name', 'adapter', 'model', 'status', 'health', 'actions'].map((columnKey) => (
+                  <Skeleton key={`${rowKey}-${columnKey}`} className="h-5 w-full" />
                 ))}
-              </TableBody>
-            </Table>
-          ) : (
-            <p className="px-4 py-4 text-sm text-muted-foreground">No agents configured.</p>
-          )}
-        </CardContent>
-      </Card>
+              </div>
+            ))}
+          </div>
+        ) : agents && agents.length > 0 ? (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Adapter</TableHead>
+                <TableHead>Model</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Health</TableHead>
+                <TableHead>Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {agents.map((agent) => (
+                <AgentRow key={agent.id} agent={agent} onSuccess={refreshAgents} />
+              ))}
+            </TableBody>
+          </Table>
+        ) : (
+          <EmptyState variant="inline" description="No agents configured." />
+        )}
+      </DataTable>
     </div>
   )
 }
 
-function AgentRow({ agent, onSuccess }: { agent: Agent; onSuccess: () => void }) {
+type AgentRowProps = {
+  agent: Agent
+  onSuccess: () => void
+}
+
+function AgentRow({ agent, onSuccess }: AgentRowProps): React.JSX.Element {
   const reprobeMutation = useMutation({
     mutationFn: () => reprobeAgent(agent.id),
     onSuccess: () => {
       onSuccess()
       toast.success(`Reprobe complete for ${agent.name}.`)
+    },
+    onError: (error) => {
+      showErrorToast('Reprobe failed.', error)
     },
   })
 
@@ -268,7 +371,7 @@ function AgentRow({ agent, onSuccess }: { agent: Agent; onSuccess: () => void })
       <TableCell>{agent.adapter_kind}</TableCell>
       <TableCell>{agent.model}</TableCell>
       <TableCell>
-        <Badge variant={statusVariant(agent.status)}>{agent.status}</Badge>
+        <StatusBadge status={agent.status} />
       </TableCell>
       <TableCell className="whitespace-normal">{agent.health_check ?? '—'}</TableCell>
       <TableCell className="whitespace-normal">
@@ -281,12 +384,6 @@ function AgentRow({ agent, onSuccess }: { agent: Agent; onSuccess: () => void })
         >
           {reprobeMutation.isPending ? 'Reprobing…' : 'Reprobe'}
         </Button>
-        {reprobeMutation.error instanceof ApiError && (
-          <Alert variant="destructive" className="mt-2">
-            <AlertTitle>Reprobe failed</AlertTitle>
-            <AlertDescription>{reprobeMutation.error.message}</AlertDescription>
-          </Alert>
-        )}
       </TableCell>
     </TableRow>
   )

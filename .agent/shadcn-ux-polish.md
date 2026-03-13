@@ -16,6 +16,10 @@ After this change, the React UI will use the missing shadcn primitives that mate
 - [x] (2026-03-13 13:59Z) Updated existing UI tests and added new route tests for the board sheet, project tabs, and workspace dropdown confirm flow.
 - [x] (2026-03-13 14:02Z) Ran `make ui-test`, `make ui-build`, and `bun run lint` in `ui/`; frontend validation passed.
 - [x] (2026-03-13 14:03Z) Ran `make lint` and confirmed the remaining failure is unrelated Rust clippy debt in `crates/ingot-http-api/src/router.rs`.
+- [x] (2026-03-13 15:20Z) Audited the follow-up gap and confirmed the remaining work was shared page abstractions plus the last inline mutation-error alerts.
+- [x] (2026-03-13 15:24Z) Added shared `PageHeader`, `DataTable`, and `EmptyState` components, then migrated the route pages and item-detail tables onto those abstractions.
+- [x] (2026-03-13 15:29Z) Moved mutation failure feedback for projects, board items, agents, workspaces, item-detail operator actions, and job actions onto `toast.error`, leaving persistent page-load and queue-blocker alerts in place.
+- [x] (2026-03-13 15:31Z) Re-ran `make ui-test`, `make ui-build`, and `bun run lint` in `ui/`; all frontend validation targets passed after the cleanup pass.
 
 ## Surprises & Discoveries
 
@@ -31,14 +35,17 @@ After this change, the React UI will use the missing shadcn primitives that mate
 - Observation: The generated Sonner template pulled in `next-themes`, but the app does not provide a theme context.
   Evidence: the generated `ui/src/components/ui/sonner.tsx` imported `useTheme` from `next-themes`; the final implementation removed that dependency and uses Sonner’s `theme="system"` directly.
 
+- Observation: The first primitive-adoption pass still left hand-built route-shell layout in place.
+  Evidence: follow-up inspection showed repeated page-header blocks and repeated `CardHeader + CardContent + Table` wrappers in `ui/src/pages/ConfigPage.tsx`, `ui/src/pages/JobsPage.tsx`, `ui/src/pages/WorkspacesPage.tsx`, and `ui/src/pages/ActivityPage.tsx`.
+
 ## Decision Log
 
 - Decision: Use the shadcn CLI for primitive scaffolding, then patch the generated files manually for this app’s route-driven and testable behaviors.
   Rationale: The repo already uses shadcn-generated source files, so the CLI keeps the primitives consistent while still allowing project-specific integration logic.
   Date/Author: 2026-03-13 / Codex
 
-- Decision: Keep toast usage limited to transient success and informational feedback, while retaining inline alerts for actionable failures and queue blockers.
-  Rationale: This aligns with the product direction chosen during planning and avoids hiding errors that need persistent context.
+- Decision: Use toast notifications for all mutation-driven transient failures, while retaining inline alerts only for page-load failures and persistent queue blockers.
+  Rationale: The follow-up gap review showed that inline mutation alerts were the last inconsistent feedback path. Error toasts now match the existing success-toast pattern without removing warnings that need to stay visible in context.
   Date/Author: 2026-03-13 / Codex
 
 - Decision: Use a small `TooltipValue` helper and shared skeleton helpers instead of repeating tooltip wiring and loading markup across pages.
@@ -49,15 +56,21 @@ After this change, the React UI will use the missing shadcn primitives that mate
   Rationale: This preserves the existing confirm-before-act behavior while still collapsing the three visible action buttons into one menu trigger.
   Date/Author: 2026-03-13 / Codex
 
+- Decision: Extract `PageHeader`, `DataTable`, and `EmptyState` as app-level wrappers instead of extending the low-level shadcn primitives further.
+  Rationale: The remaining duplication lived at the route-shell level. Small wrappers remove repeated markup without making `ui/src/components/ui/` more complex or hiding how the primitives behave.
+  Date/Author: 2026-03-13 / Codex
+
 ## Outcomes & Retrospective
 
-The UI now has the missing shadcn primitives wired into the highest-friction routes. Project navigation renders as actual tabs, the board item form opens in a sheet, the projects and config create flows open in dialogs, the config provider is constrained through a select, long logs and JSON payloads scroll through shared containers, and transient success states are delivered through Sonner toasts instead of scattered inline green text.
+The UI now has the missing shadcn primitives wired into the highest-friction routes, and the follow-up cleanup gap is closed. Project navigation renders as actual tabs, the board item form opens in a sheet, the projects and config create flows open in dialogs, the config provider is constrained through a select, long logs and JSON payloads scroll through shared containers, and transient success and mutation-failure states are delivered through Sonner toasts instead of scattered inline status blocks.
 
-The frontend validation target was met. `make ui-test`, `make ui-build`, and `bun run lint` in `ui/` all pass. The repo-wide `make lint` target still fails, but the failure is outside this UI work: clippy reports an existing `collapsible_if` warning promoted to error in `crates/ingot-http-api/src/router.rs`.
+The cleanup pass also extracted shared `PageHeader`, `DataTable`, and `EmptyState` wrappers and migrated the route pages plus item-detail table sections onto them. That closes the earlier “partially done” recommendation around shared abstractions.
+
+The frontend validation target was met again after the cleanup pass. `make ui-test`, `make ui-build`, and `bun run lint` in `ui/` all pass. The repo-wide `make lint` target still fails, but the failure is outside this UI work: clippy reports an existing `collapsible_if` warning promoted to error in `crates/ingot-http-api/src/router.rs`.
 
 ## Context and Orientation
 
-The Vite React app lives under `ui/`. Shared shadcn components live in `ui/src/components/ui/`. The top-level app provider tree is in `ui/src/main.tsx`. Route shells live in `ui/src/layouts/`, with `ProjectLayout.tsx` currently simulating tabs by styling `NavLink` buttons. The pages that need the largest behavior changes are `ui/src/pages/BoardPage.tsx`, `ui/src/pages/ProjectsPage.tsx`, `ui/src/pages/ConfigPage.tsx`, `ui/src/pages/WorkspacesPage.tsx`, `ui/src/pages/JobsPage.tsx`, and `ui/src/pages/ActivityPage.tsx`. Shared display components that need primitive adoption include `ui/src/components/Timestamp.tsx`, `ui/src/components/LogBlock.tsx`, `ui/src/components/item-detail/JobsTable.tsx`, `ui/src/components/item-detail/ConvergencesTable.tsx`, `ui/src/components/item-detail/JobActions.tsx`, and `ui/src/components/item-detail/OperatorActions.tsx`.
+The Vite React app lives under `ui/`. Shared shadcn components live in `ui/src/components/ui/`. The top-level app provider tree is in `ui/src/main.tsx`. Route shells live in `ui/src/layouts/`. The cleanup pass in this plan also introduces app-level wrappers in `ui/src/components/PageHeader.tsx`, `ui/src/components/DataTable.tsx`, and `ui/src/components/EmptyState.tsx` so route pages can share heading, table-card, and empty-state structure without modifying the low-level shadcn primitives. The pages that need the largest behavior changes are `ui/src/pages/BoardPage.tsx`, `ui/src/pages/ProjectsPage.tsx`, `ui/src/pages/ConfigPage.tsx`, `ui/src/pages/WorkspacesPage.tsx`, `ui/src/pages/JobsPage.tsx`, `ui/src/pages/ActivityPage.tsx`, and `ui/src/pages/ItemDetailPage.tsx`. Shared display components that need primitive adoption include `ui/src/components/Timestamp.tsx`, `ui/src/components/LogBlock.tsx`, `ui/src/components/item-detail/JobsTable.tsx`, `ui/src/components/item-detail/ConvergencesTable.tsx`, `ui/src/components/item-detail/FindingsTable.tsx`, `ui/src/components/item-detail/JobActions.tsx`, and `ui/src/components/item-detail/OperatorActions.tsx`.
 
 In this repository, “shadcn primitive” means a local component source file checked into `ui/src/components/ui/`, not a remote package import. “Toast” refers to Sonner’s transient notification UI mounted globally through a single top-level `<Toaster />`.
 
@@ -69,7 +82,7 @@ Next, refactor navigation and creation flows. `ProjectLayout.tsx` will become ro
 
 Then, migrate the supporting display and action patterns. The current `title` attributes will be replaced with tooltips for truncated or full-value disclosure. `LogBlock.tsx` and long JSON blocks will use `ScrollArea`. `ActivityPage.tsx` will replace its hand-rolled payload disclosure with shadcn `Collapsible`. `WorkspacesPage.tsx` will collapse row actions into a `DropdownMenu` while preserving the current confirm-before-act interaction.
 
-Finally, replace spinner-only loading states with page-shaped and section-shaped skeletons, move transient success feedback to toast, update the UI tests, and run build and test validation.
+Finally, replace spinner-only loading states with page-shaped and section-shaped skeletons, move transient success and mutation-failure feedback to toast, extract the remaining shared route-shell abstractions, update the UI tests, and run build and test validation.
 
 ## Concrete Steps
 
@@ -95,6 +108,10 @@ Actual commands run during implementation:
     cd /Users/aa/Documents/ingot && make ui-build
     cd /Users/aa/Documents/ingot/ui && bun run lint
     cd /Users/aa/Documents/ingot && make lint
+    cd /Users/aa/Documents/ingot/ui && bunx @biomejs/biome check --write src
+    cd /Users/aa/Documents/ingot && make ui-test
+    cd /Users/aa/Documents/ingot && make ui-build
+    cd /Users/aa/Documents/ingot/ui && bun run lint
 
 ## Validation and Acceptance
 
@@ -107,8 +124,9 @@ Acceptance is behavioral. After implementation:
 - Long log and JSON panels scroll inside shared containers.
 - Activity payloads expand and collapse through proper disclosure semantics.
 - Workspace actions are reachable from a row menu and still require confirmation before mutating.
-- Transient success states show toasts instead of scattered inline green text.
+- Transient success and mutation-failure states show toasts instead of scattered inline status blocks.
 - Full page loads render skeleton placeholders instead of bare spinners.
+- Route pages and item-detail table sections use shared `PageHeader`, `DataTable`, and `EmptyState` wrappers instead of repeating the same shell markup by hand.
 
 Observed result: all UI behaviors above are implemented and covered by the updated Vitest suite. The frontend build succeeds. The only remaining validation blocker is the unrelated clippy warning in `crates/ingot-http-api/src/router.rs:2473`.
 
@@ -128,8 +146,10 @@ Key discovery commands used before implementation:
 
 ## Interfaces and Dependencies
 
-The resulting UI contains local primitives for `dialog`, `sheet`, `select`, `tabs`, `tooltip`, `skeleton`, `dropdown-menu`, `scroll-area`, `collapsible`, and `sonner` under `ui/src/components/ui/`. `ui/src/main.tsx` renders a global toaster and wraps the app in `TooltipProvider`. No backend or domain API contract changes are part of this work.
+The resulting UI contains local primitives for `dialog`, `sheet`, `select`, `tabs`, `tooltip`, `skeleton`, `dropdown-menu`, `scroll-area`, `collapsible`, and `sonner` under `ui/src/components/ui/`. `ui/src/main.tsx` renders a global toaster and wraps the app in `TooltipProvider`. The cleanup pass also adds `ui/src/components/PageHeader.tsx`, `ui/src/components/DataTable.tsx`, and `ui/src/components/EmptyState.tsx` as app-level wrappers for repeated route-shell structure. No backend or domain API contract changes are part of this work.
 
 Revision note: created before implementation to capture the execution path, current repo constraints, and the required validation targets for this cross-cutting UI pass.
 
 Revision note: updated after implementation to record the completed frontend work, the added UI test coverage, the successful frontend validation commands, and the unrelated Rust clippy failure surfaced by `make lint`.
+
+Revision note: updated after the follow-up cleanup pass to record the extracted shared page abstractions, the conversion of mutation failures to Sonner error toasts, and the second successful run of frontend validation commands.

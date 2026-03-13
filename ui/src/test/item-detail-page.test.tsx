@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { TooltipProvider } from '../components/ui/tooltip'
 import ItemDetailPage from '../pages/ItemDetailPage'
@@ -117,6 +117,10 @@ describe('ItemDetailPage', () => {
 
     expect(document.querySelector('[data-slot="skeleton"]')).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'Ship the feature' })).toBeInTheDocument()
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    expect(breadcrumb).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Board' })).toHaveAttribute('href', '/projects/prj_1/board')
+    expect(within(breadcrumb).getByText('Ship the feature')).toHaveAttribute('aria-current', 'page')
     expect(screen.getByRole('button', { name: 'Dispatch author_initial' })).toBeInTheDocument()
   })
 
@@ -136,6 +140,7 @@ describe('ItemDetailPage', () => {
 
     expect(await screen.findByText('Item detail failed to load')).toBeInTheDocument()
     expect(screen.getByText('Error: network down')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
   })
 
   it('explains when a queued job is blocked by missing agents', async () => {
@@ -174,6 +179,148 @@ describe('ItemDetailPage', () => {
     expect(screen.getByRole('link', { name: 'Open Config' })).toHaveAttribute('href', '/projects/prj_1/config')
   })
 
+  it('shows agent availability loading while queued-job blocker context is still resolving', async () => {
+    const detail = makeItemDetail()
+    detail.jobs = [
+      {
+        id: 'job_1',
+        project_id: 'prj_1',
+        item_id: 'itm_1',
+        item_revision_id: 'rev_1',
+        step_id: 'author_initial',
+        status: 'queued',
+        outcome_class: null,
+        phase_kind: 'author',
+        workspace_id: 'wrk_1',
+        created_at: '2026-03-11T00:00:00Z',
+        started_at: null,
+        ended_at: null,
+      },
+    ]
+
+    let resolveAgents: (value: Response) => void = () => {
+      throw new Error('Expected agents request to stay pending')
+    }
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/agents')) {
+        return new Promise<Response>((resolve) => {
+          resolveAgents = resolve
+        })
+      }
+      if (url.endsWith('/api/projects/prj_1/items/itm_1')) {
+        return Promise.resolve(jsonResponse(detail))
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByRole('heading', { name: 'Ship the feature' })).toBeInTheDocument()
+    expect(screen.getByText('Checking agent availability…')).toBeInTheDocument()
+
+    resolveAgents(jsonResponse([]))
+
+    await waitFor(() => {
+      expect(screen.queryByText('Checking agent availability…')).not.toBeInTheDocument()
+    })
+  })
+
+  it('opens a confirmation dialog before rejecting approval', async () => {
+    const detail = makeItemDetail()
+    detail.evaluation.allowed_actions = ['approval_reject']
+    detail.evaluation.dispatchable_step_id = null
+    detail.evaluation.next_recommended_action = 'awaiting_operator'
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+
+      if (method === 'GET' && url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (method === 'GET' && url.endsWith('/api/projects/prj_1/items/itm_1')) {
+        return Promise.resolve(jsonResponse(detail))
+      }
+      if (method === 'POST' && url.endsWith('/api/projects/prj_1/items/itm_1/approval/reject')) {
+        return Promise.resolve(jsonResponse(detail))
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`)
+    })
+
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Reject approval' }))
+
+    const dialog = await screen.findByRole('alertdialog', { name: 'Reject approval?' })
+    expect(dialog).toHaveTextContent('sends the item back for rework')
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Reject approval' }))
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/projects/prj_1/items/itm_1/approval/reject',
+        expect.objectContaining({ method: 'POST' }),
+      )
+    })
+  })
+
+  it('opens a confirmation dialog before cancelling an active job', async () => {
+    const detail = makeItemDetail()
+    detail.jobs = [
+      {
+        id: 'job_1',
+        project_id: 'prj_1',
+        item_id: 'itm_1',
+        item_revision_id: 'rev_1',
+        step_id: 'author_initial',
+        status: 'running',
+        outcome_class: null,
+        phase_kind: 'author',
+        workspace_id: 'wrk_1',
+        created_at: '2026-03-11T00:00:00Z',
+        started_at: '2026-03-11T00:01:00Z',
+        ended_at: null,
+      },
+    ]
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+
+      if (method === 'GET' && url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (method === 'GET' && url.endsWith('/api/projects/prj_1/items/itm_1')) {
+        return Promise.resolve(jsonResponse(detail))
+      }
+      if (method === 'POST' && url.endsWith('/api/projects/prj_1/items/itm_1/jobs/job_1/cancel')) {
+        return Promise.resolve(jsonResponse({}))
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`)
+    })
+
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
+
+    const dialog = await screen.findByRole('alertdialog', { name: 'Cancel job?' })
+    expect(dialog).toHaveTextContent('job_1')
+    expect(dialog).toHaveTextContent('itm_1')
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel job' }))
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/projects/prj_1/items/itm_1/jobs/job_1/cancel',
+        expect.objectContaining({ method: 'POST' }),
+      )
+    })
+  })
+
   it('renders the extracted item detail sections when data is present', async () => {
     const detail = makeItemDetail()
     detail.findings = [
@@ -195,8 +342,8 @@ describe('ItemDetailPage', () => {
         paths: ['src/lib.rs'],
         evidence: null,
         triage_state: 'untriaged',
-        promoted_item_id: null,
-        dismissal_reason: null,
+        linked_item_id: null,
+        triage_note: null,
         created_at: '2026-03-11T00:00:00Z',
         triaged_at: null,
       },
@@ -279,6 +426,53 @@ describe('ItemDetailPage', () => {
     expect(screen.getByText('Missing regression coverage')).toBeInTheDocument()
     expect(screen.getByText('validate_initial:clean')).toBeInTheDocument()
     expect(screen.getByText('detail diagnostic')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Copy acceptance criteria' })).toBeInTheDocument()
+  })
+
+  it('keeps triage controls visible for already-triaged findings so operators can revise them', async () => {
+    const detail = makeItemDetail()
+    detail.findings = [
+      {
+        id: 'fnd_1',
+        project_id: 'prj_1',
+        source_item_id: 'itm_1',
+        source_item_revision_id: 'rev_1',
+        source_job_id: 'job_1',
+        source_step_id: 'review_candidate_initial',
+        source_report_schema_version: 'review_report:v1',
+        source_finding_key: 'finding-1',
+        source_subject_kind: 'candidate',
+        source_subject_base_commit_oid: 'base',
+        source_subject_head_commit_oid: 'head',
+        code: 'BUG001',
+        severity: 'high',
+        summary: 'Need a decision',
+        paths: ['src/lib.rs'],
+        evidence: null,
+        triage_state: 'wont_fix',
+        linked_item_id: null,
+        triage_note: 'accepted',
+        created_at: '2026-03-11T00:00:00Z',
+        triaged_at: '2026-03-11T00:01:00Z',
+      },
+    ]
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/projects/prj_1/items/itm_1')) {
+        return Promise.resolve(jsonResponse(detail))
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByDisplayValue('wont_fix')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('accepted')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeInTheDocument()
   })
 
   it('throws before fetching when a required route param is missing', () => {

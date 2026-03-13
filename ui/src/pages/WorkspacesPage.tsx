@@ -2,9 +2,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { MoreHorizontalIcon } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
-import { ApiError, abandonWorkspace, removeWorkspace, resetWorkspace } from '../api/client'
+import { abandonWorkspace, removeWorkspace, resetWorkspace } from '../api/client'
 import { projectWorkspacesQuery, queryKeys } from '../api/queries'
+import { DataTable } from '../components/DataTable'
+import { EmptyState } from '../components/EmptyState'
+import { PageHeader } from '../components/PageHeader'
+import { PageQueryError } from '../components/PageQueryError'
 import { PageHeaderSkeleton, TableCardSkeleton } from '../components/PageSkeletons'
+import { StatusBadge } from '../components/StatusBadge'
 import { TooltipValue } from '../components/TooltipValue'
 import {
   AlertDialog,
@@ -15,10 +20,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '../components/ui/alert-dialog'
-import { Alert, AlertDescription, AlertTitle } from '../components/ui/alert'
-import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,7 +30,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { useRequiredProjectId } from '../hooks/useRequiredRouteParam'
 import { shortOid } from '../lib/git'
-import { statusVariant } from '../lib/status'
+import { showErrorToast } from '../lib/toast'
 import type { Workspace } from '../types/domain'
 
 type WorkspaceActionKind = 'reset' | 'abandon' | 'remove'
@@ -69,7 +71,14 @@ const workspaceActionCopy: Record<
 export default function WorkspacesPage() {
   const projectId = useRequiredProjectId()
   const queryClient = useQueryClient()
-  const { data: workspaces, isLoading } = useQuery(projectWorkspacesQuery(projectId))
+  const {
+    data: workspaces,
+    error,
+    isError,
+    isFetching,
+    isLoading,
+    refetch,
+  } = useQuery(projectWorkspacesQuery(projectId))
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: queryKeys.workspaces(projectId) })
@@ -84,47 +93,43 @@ export default function WorkspacesPage() {
       </div>
     )
   }
+  if (isError) {
+    return <PageQueryError title="Workspaces failed to load" error={error} onRetry={refetch} isRetrying={isFetching} />
+  }
 
   return (
     <div className="space-y-6">
-      <div className="space-y-1">
-        <h2 className="text-2xl font-semibold tracking-tight">Workspaces</h2>
-        <p className="text-sm text-muted-foreground">
-          Inspect retained authoring environments and recover or remove them as needed.
-        </p>
-      </div>
+      <PageHeader
+        title="Workspaces"
+        description="Inspect retained authoring environments and recover or remove them as needed."
+      />
 
       {workspaces && workspaces.length > 0 ? (
-        <Card className="gap-0">
-          <CardHeader className="border-b">
-            <CardTitle>Workspace inventory</CardTitle>
-            <CardDescription>Track workspace refs, head commits, and operator recovery actions.</CardDescription>
-          </CardHeader>
-          <CardContent className="px-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>ID</TableHead>
-                  <TableHead>Kind</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Target ref</TableHead>
-                  <TableHead>Base</TableHead>
-                  <TableHead>Head</TableHead>
-                  <TableHead>Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {workspaces.map((workspace) => (
-                  <WorkspaceRow key={workspace.id} projectId={projectId} workspace={workspace} onSuccess={refresh} />
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
+        <DataTable
+          title="Workspace inventory"
+          description="Track workspace refs, head commits, and operator recovery actions."
+        >
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>ID</TableHead>
+                <TableHead>Kind</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Target ref</TableHead>
+                <TableHead>Base</TableHead>
+                <TableHead>Head</TableHead>
+                <TableHead>Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {workspaces.map((workspace) => (
+                <WorkspaceRow key={workspace.id} projectId={projectId} workspace={workspace} onSuccess={refresh} />
+              ))}
+            </TableBody>
+          </Table>
+        </DataTable>
       ) : (
-        <Card>
-          <CardContent className="py-6 text-sm text-muted-foreground">No workspaces yet.</CardContent>
-        </Card>
+        <EmptyState description="No workspaces yet." />
       )}
     </div>
   )
@@ -141,20 +146,25 @@ function WorkspaceRow({
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [confirmAction, setConfirmAction] = useState<WorkspaceActionKind | null>(null)
+  const handleMutationError = (error: unknown) => {
+    showErrorToast('Workspace action failed.', error)
+  }
   const resetMutation = useMutation({
     mutationFn: () => resetWorkspace(projectId, workspace.id),
     onSuccess: () => handleMutationSuccess(workspaceActionCopy.reset.successMessage),
+    onError: handleMutationError,
   })
   const abandonMutation = useMutation({
     mutationFn: () => abandonWorkspace(projectId, workspace.id),
     onSuccess: () => handleMutationSuccess(workspaceActionCopy.abandon.successMessage),
+    onError: handleMutationError,
   })
   const removeMutation = useMutation({
     mutationFn: () => removeWorkspace(projectId, workspace.id),
     onSuccess: () => handleMutationSuccess(workspaceActionCopy.remove.successMessage),
+    onError: handleMutationError,
   })
 
-  const error = resetMutation.error ?? abandonMutation.error ?? removeMutation.error
   const isPending = resetMutation.isPending || abandonMutation.isPending || removeMutation.isPending
   const currentActionCopy = confirmAction ? workspaceActionCopy[confirmAction] : null
 
@@ -214,7 +224,7 @@ function WorkspaceRow({
         </TableCell>
         <TableCell className="align-top">{workspace.kind}</TableCell>
         <TableCell className="align-top">
-          <Badge variant={statusVariant(workspace.status)}>{workspace.status}</Badge>
+          <StatusBadge status={workspace.status} />
         </TableCell>
         <TableCell className="align-top">{workspace.target_ref ?? '—'}</TableCell>
         <TableCell className="align-top">
@@ -270,12 +280,6 @@ function WorkspaceRow({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          {error instanceof ApiError && (
-            <Alert variant="destructive" className="mt-2">
-              <AlertTitle>Workspace action failed</AlertTitle>
-              <AlertDescription>{error.message}</AlertDescription>
-            </Alert>
-          )}
         </TableCell>
       </TableRow>
 
@@ -288,12 +292,6 @@ function WorkspaceRow({
               <code>{workspace.target_ref ?? 'no ref'}</code>.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          {error instanceof ApiError && (
-            <Alert variant="destructive">
-              <AlertTitle>Workspace action failed</AlertTitle>
-              <AlertDescription>{error.message}</AlertDescription>
-            </Alert>
-          )}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={isPending}>Cancel</AlertDialogCancel>
             <Button type="button" variant="destructive" onClick={runConfirmedAction} disabled={isPending}>

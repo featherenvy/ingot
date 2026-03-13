@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ingot-agent-adapters = { workspace = true }
 ingot-config = { workspace = true }
 ingot-domain = { workspace = true }
 ingot-git = { workspace = true }

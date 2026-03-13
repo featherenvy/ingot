@@ -1,6 +1,8 @@
 import { useMutation } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { cancelItemJob, retryItemJob } from '../../api/client'
+import { showErrorToast } from '../../lib/toast'
+import { ConfirmActionButton } from '../ConfirmActionButton'
 import { Button } from '../ui/button'
 
 export function JobActions({
@@ -24,12 +26,18 @@ export function JobActions({
       onSuccess()
       toast.success('Job retry queued.')
     },
+    onError: (error) => {
+      showErrorToast('Job retry failed.', error)
+    },
   })
   const cancelMutation = useMutation({
     mutationFn: () => cancelItemJob(projectId, itemId, jobId),
     onSuccess: () => {
       onSuccess()
       toast.success('Job cancelled.')
+    },
+    onError: (error) => {
+      showErrorToast('Job cancellation failed.', error)
     },
   })
 
@@ -49,15 +57,20 @@ export function JobActions({
         </Button>
       )}
       {canCancel && (
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          onClick={() => cancelMutation.mutate()}
-          disabled={cancelMutation.isPending}
-        >
-          {cancelMutation.isPending ? 'Cancelling…' : 'Cancel'}
-        </Button>
+        <ConfirmActionButton
+          title="Cancel job?"
+          description={
+            <>
+              This stops job <code>{jobId}</code> for item <code>{itemId}</code>.
+            </>
+          }
+          triggerLabel="Cancel"
+          confirmLabel="Cancel job"
+          pendingLabel="Cancelling…"
+          onConfirm={() => cancelMutation.mutate()}
+          pending={cancelMutation.isPending}
+          triggerVariant="secondary"
+        />
       )}
     </div>
   )

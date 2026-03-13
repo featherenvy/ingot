@@ -1,3 +1,5 @@
+mod bootstrap;
+
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -34,6 +36,7 @@ use ingot_git::commands::{
 use ingot_git::commit::{JobCommitTrailers, create_daemon_job_commit, working_tree_has_changes};
 use ingot_git::diff::changed_paths_between;
 use ingot_store_sqlite::{Database, FinishJobNonSuccessParams, StartJobExecutionParams};
+use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
 use ingot_usecases::{
     CompleteJobCommand, CompleteJobService, ProjectLocks, rebuild_revision_context,
 };
@@ -173,6 +176,7 @@ impl JobDispatcher {
     }
 
     pub async fn reconcile_startup(&self) -> Result<(), RuntimeError> {
+        bootstrap::ensure_default_agent(&self.db).await?;
         self.reconcile_git_operations().await?;
         self.reconcile_active_jobs().await?;
         self.reconcile_active_convergences().await?;
@@ -247,13 +251,15 @@ impl JobDispatcher {
             for item in items {
                 let revision = self.db.get_revision(item.current_revision_id).await?;
                 let jobs = self.db.list_jobs_by_item(item.id).await?;
+                let findings = self.db.list_findings_by_item(item.id).await?;
                 let convergences = self
                     .hydrate_convergences(
                         &project,
                         self.db.list_convergences_by_item(item.id).await?,
                     )
                     .await?;
-                let evaluation = Evaluator::new().evaluate(&item, &revision, &jobs, &convergences);
+                let evaluation =
+                    Evaluator::new().evaluate(&item, &revision, &jobs, &findings, &convergences);
 
                 match evaluation.next_recommended_action.as_str() {
                     "finalize_prepared_convergence" => {
@@ -441,6 +447,8 @@ impl JobDispatcher {
             Some(job.id),
         )
         .await?;
+        self.auto_dispatch_incremental_review(job.project_id, job.item_id)
+            .await?;
 
         Ok(())
     }
@@ -721,7 +729,7 @@ impl JobDispatcher {
         let head_commit_oid = workspace.head_commit_oid.as_deref().unwrap_or_default();
         let blocked = findings.iter().any(|finding| {
             finding.source_item_revision_id == revision.id
-                && finding.triage_state == FindingTriageState::Untriaged
+                && finding.triage_state.is_unresolved()
                 && finding.source_subject_head_commit_oid == head_commit_oid
                 && match workspace.kind {
                     WorkspaceKind::Authoring => {
@@ -1151,6 +1159,69 @@ impl JobDispatcher {
             template, context_block
         ));
 
+        if matches!(
+            job.step_id.as_str(),
+            "repair_candidate" | "repair_after_integration"
+        ) {
+            let jobs = self.db.list_jobs_by_item(item.id).await?;
+            let findings = self.db.list_findings_by_item(item.id).await?;
+            let latest_closure_findings_job = jobs
+                .iter()
+                .filter(|candidate| candidate.item_revision_id == revision.id)
+                .filter(|candidate| candidate.status.is_terminal())
+                .filter(|candidate| candidate.outcome_class == Some(OutcomeClass::Findings))
+                .filter(|candidate| is_closure_relevant_job(candidate))
+                .max_by_key(|candidate| (candidate.ended_at, candidate.created_at));
+
+            if let Some(latest_job) = latest_closure_findings_job {
+                let scoped_findings = findings
+                    .iter()
+                    .filter(|finding| finding.source_item_revision_id == revision.id)
+                    .filter(|finding| finding.source_job_id == latest_job.id)
+                    .collect::<Vec<_>>();
+                let fix_now_findings = scoped_findings
+                    .iter()
+                    .filter(|finding| finding.triage_state == FindingTriageState::FixNow)
+                    .collect::<Vec<_>>();
+                let accepted_findings = scoped_findings
+                    .iter()
+                    .filter(|finding| {
+                        !matches!(
+                            finding.triage_state,
+                            FindingTriageState::Untriaged
+                                | FindingTriageState::FixNow
+                                | FindingTriageState::NeedsInvestigation
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                if !fix_now_findings.is_empty() || !accepted_findings.is_empty() {
+                    prompt.push_str("Finding triage for this repair:\n");
+                }
+                if !fix_now_findings.is_empty() {
+                    prompt.push_str("- Fix now findings:\n");
+                    for finding in &fix_now_findings {
+                        prompt.push_str(&format!(
+                            "  - [{}] {} ({:?})\n",
+                            finding.code, finding.summary, finding.severity
+                        ));
+                    }
+                }
+                if !accepted_findings.is_empty() {
+                    prompt.push_str("- Already triaged as non-blocking for this attempt:\n");
+                    for finding in &accepted_findings {
+                        prompt.push_str(&format!(
+                            "  - [{}] {} => {:?}\n",
+                            finding.code, finding.summary, finding.triage_state
+                        ));
+                    }
+                }
+                if !fix_now_findings.is_empty() || !accepted_findings.is_empty() {
+                    prompt.push('\n');
+                }
+            }
+        }
+
         match job.output_artifact_kind {
             OutputArtifactKind::Commit => {
                 prompt.push_str(
@@ -1375,10 +1446,12 @@ impl JobDispatcher {
         let mut item = self.db.get_item(item_id).await?;
         let revision = self.db.get_revision(item.current_revision_id).await?;
         let jobs = self.db.list_jobs_by_item(item.id).await?;
+        let findings = self.db.list_findings_by_item(item.id).await?;
         let convergences = self
             .hydrate_convergences(&project, self.db.list_convergences_by_item(item.id).await?)
             .await?;
-        let evaluation = Evaluator::new().evaluate(&item, &revision, &jobs, &convergences);
+        let evaluation =
+            Evaluator::new().evaluate(&item, &revision, &jobs, &findings, &convergences);
         if evaluation.next_recommended_action != "finalize_prepared_convergence" {
             return Ok(());
         }
@@ -1479,10 +1552,12 @@ impl JobDispatcher {
         let mut item = self.db.get_item(item_id).await?;
         let revision = self.db.get_revision(item.current_revision_id).await?;
         let jobs = self.db.list_jobs_by_item(item.id).await?;
+        let findings = self.db.list_findings_by_item(item.id).await?;
         let convergences = self
             .hydrate_convergences(&project, self.db.list_convergences_by_item(item.id).await?)
             .await?;
-        let evaluation = Evaluator::new().evaluate(&item, &revision, &jobs, &convergences);
+        let evaluation =
+            Evaluator::new().evaluate(&item, &revision, &jobs, &findings, &convergences);
         if evaluation.next_recommended_action != "invalidate_prepared_convergence" {
             return Ok(());
         }
@@ -1678,10 +1753,69 @@ impl JobDispatcher {
         self.refresh_revision_context(prepared).await?;
         self.append_escalation_cleared_activity_if_needed(prepared)
             .await?;
+        self.auto_dispatch_incremental_review(prepared.project.id, prepared.item.id)
+            .await?;
 
         info!(job_id = %prepared.job.id, commit_oid, "completed authoring job");
 
         Ok(())
+    }
+
+    async fn auto_dispatch_incremental_review(
+        &self,
+        project_id: ingot_domain::ids::ProjectId,
+        item_id: ingot_domain::ids::ItemId,
+    ) -> Result<bool, RuntimeError> {
+        let _guard = self
+            .project_locks
+            .acquire_project_mutation(project_id)
+            .await;
+
+        let project = self.db.get_project(project_id).await?;
+        let item = self.db.get_item(item_id).await?;
+        let revision = self.db.get_revision(item.current_revision_id).await?;
+        let jobs = self.db.list_jobs_by_item(item.id).await?;
+        let findings = self.db.list_findings_by_item(item.id).await?;
+        let convergences = self
+            .hydrate_convergences(&project, self.db.list_convergences_by_item(item.id).await?)
+            .await?;
+        let evaluation =
+            Evaluator::new().evaluate(&item, &revision, &jobs, &findings, &convergences);
+        let Some(step_id) = evaluation.dispatchable_step_id.as_deref() else {
+            return Ok(false);
+        };
+
+        if !is_auto_dispatched_incremental_review_step(step_id) {
+            return Ok(false);
+        }
+
+        let job = dispatch_job(
+            &item,
+            &revision,
+            &jobs,
+            &findings,
+            &convergences,
+            DispatchJobCommand {
+                step_id: Some(step_id.to_string()),
+            },
+        )
+        .map_err(|error| {
+            RuntimeError::InvalidState(format!(
+                "failed to auto-dispatch incremental review {step_id}: {error}"
+            ))
+        })?;
+        self.db.create_job(&job).await?;
+        self.append_activity(
+            project_id,
+            ActivityEventType::JobDispatched,
+            "job",
+            job.id.to_string(),
+            serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
+        )
+        .await?;
+        info!(job_id = %job.id, step_id = %job.step_id, item_id = %item.id, "auto-dispatched incremental review");
+
+        Ok(true)
     }
 
     async fn fail_run(
@@ -2204,6 +2338,20 @@ fn finding_schema() -> serde_json::Value {
     })
 }
 
+fn nullable_closed_extensions_schema() -> serde_json::Value {
+    serde_json::json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "additionalProperties": false
+            },
+            {
+                "type": "null"
+            }
+        ]
+    })
+}
+
 fn validation_report_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -2227,7 +2375,7 @@ fn validation_report_schema() -> serde_json::Value {
                 "type": "array",
                 "items": finding_schema()
             },
-            "extensions": { "type": ["object", "null"] }
+            "extensions": nullable_closed_extensions_schema()
         },
         "required": ["outcome", "summary", "checks", "findings", "extensions"],
         "additionalProperties": false
@@ -2254,7 +2402,7 @@ fn review_report_schema() -> serde_json::Value {
                 "type": "array",
                 "items": finding_schema()
             },
-            "extensions": { "type": ["object", "null"] }
+            "extensions": nullable_closed_extensions_schema()
         },
         "required": ["outcome", "summary", "review_subject", "overall_risk", "findings", "extensions"],
         "additionalProperties": false
@@ -2271,7 +2419,7 @@ fn finding_report_schema() -> serde_json::Value {
                 "type": "array",
                 "items": finding_schema()
             },
-            "extensions": { "type": ["object", "null"] }
+            "extensions": nullable_closed_extensions_schema()
         },
         "required": ["outcome", "summary", "findings", "extensions"],
         "additionalProperties": false
@@ -2364,6 +2512,15 @@ fn is_closure_relevant_job(job: &Job) -> bool {
     )
 }
 
+fn is_auto_dispatched_incremental_review_step(step_id: &str) -> bool {
+    matches!(
+        step_id,
+        step::REVIEW_INCREMENTAL_INITIAL
+            | step::REVIEW_INCREMENTAL_REPAIR
+            | step::REVIEW_INCREMENTAL_AFTER_INTEGRATION_REPAIR
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2421,8 +2578,8 @@ mod tests {
 
         let validation_schema = validation_report_schema();
         assert_eq!(
-            schema_property_type(&validation_schema, "extensions"),
-            Some(serde_json::json!(["object", "null"]))
+            schema_property(&validation_schema, "extensions"),
+            Some(nullable_closed_extensions_schema())
         );
     }
 
@@ -2448,10 +2605,13 @@ mod tests {
         schema: &serde_json::Value,
         property: &str,
     ) -> Option<serde_json::Value> {
+        schema_property(schema, property).and_then(|value| value.get("type").cloned())
+    }
+
+    fn schema_property(schema: &serde_json::Value, property: &str) -> Option<serde_json::Value> {
         schema
             .get("properties")
             .and_then(|value| value.get(property))
-            .and_then(|value| value.get("type"))
             .cloned()
     }
 
@@ -3721,11 +3881,13 @@ mod tests {
         assert_eq!(updated_item.escalation_reason, None);
 
         let jobs = db.list_jobs_by_item(item_id).await.expect("jobs");
-        let evaluation = Evaluator::new().evaluate(&updated_item, &revision, &jobs, &[]);
-        assert_eq!(
-            evaluation.dispatchable_step_id.as_deref(),
-            Some(step::REVIEW_INCREMENTAL_INITIAL)
-        );
+        let evaluation = Evaluator::new().evaluate(&updated_item, &revision, &jobs, &[], &[]);
+        assert_eq!(evaluation.dispatchable_step_id, None);
+        let review_job = jobs
+            .iter()
+            .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
+            .expect("auto-dispatched review job");
+        assert_eq!(review_job.status, JobStatus::Queued);
 
         let activity = db
             .list_activity_by_project(project.id, 20, 0)
@@ -4557,7 +4719,7 @@ mod tests {
             entity_id: job.id.to_string(),
             workspace_id: Some(workspace.id),
             ref_name: workspace.workspace_ref.clone(),
-            expected_old_oid: Some(base_commit),
+            expected_old_oid: Some(base_commit.clone()),
             new_oid: Some(authored_commit.clone()),
             commit_oid: Some(authored_commit.clone()),
             status: GitOperationStatus::Applied,
@@ -4586,6 +4748,21 @@ mod tests {
         assert_eq!(updated_workspace.status, WorkspaceStatus::Ready);
         assert_eq!(
             updated_workspace.head_commit_oid.as_deref(),
+            Some(authored_commit.as_str())
+        );
+
+        let jobs = db.list_jobs_by_item(item.id).await.expect("jobs");
+        let review_job = jobs
+            .iter()
+            .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
+            .expect("auto-dispatched review job after startup adoption");
+        assert_eq!(review_job.status, JobStatus::Queued);
+        assert_eq!(
+            review_job.input_base_commit_oid.as_deref(),
+            Some(base_commit.as_str())
+        );
+        assert_eq!(
+            review_job.input_head_commit_oid.as_deref(),
             Some(authored_commit.as_str())
         );
     }
@@ -5185,8 +5362,8 @@ mod tests {
             paths: vec!["tracked.txt".into()],
             evidence: serde_json::json!(["evidence"]),
             triage_state: FindingTriageState::Untriaged,
-            promoted_item_id: None,
-            dismissal_reason: None,
+            linked_item_id: None,
+            triage_note: None,
             created_at,
             triaged_at: None,
         };
@@ -5375,8 +5552,8 @@ mod tests {
             paths: vec!["tracked.txt".into()],
             evidence: serde_json::json!(["evidence"]),
             triage_state: FindingTriageState::Untriaged,
-            promoted_item_id: None,
-            dismissal_reason: None,
+            linked_item_id: None,
+            triage_note: None,
             created_at,
             triaged_at: None,
         };
@@ -5808,6 +5985,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authoring_success_auto_dispatches_incremental_review() {
+        let repo = temp_git_repo();
+        let db_path =
+            std::env::temp_dir().join(format!("ingot-runtime-auto-review-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        let dispatcher = JobDispatcher::with_runner(
+            db.clone(),
+            ProjectLocks::default(),
+            DispatcherConfig::new(std::env::temp_dir().join(format!(
+                "ingot-runtime-auto-review-state-{}",
+                Uuid::now_v7()
+            ))),
+            Arc::new(FakeRunner),
+        );
+
+        let created_at = Utc::now();
+        let project = Project {
+            id: ingot_domain::ids::ProjectId::new(),
+            name: "repo".into(),
+            path: repo.display().to_string(),
+            default_branch: "main".into(),
+            color: "#000".into(),
+            created_at,
+            updated_at: created_at,
+        };
+        db.create_project(&project).await.expect("create project");
+
+        let agent = Agent {
+            id: ingot_domain::ids::AgentId::new(),
+            slug: "codex".into(),
+            name: "Codex".into(),
+            adapter_kind: AdapterKind::Codex,
+            provider: "openai".into(),
+            model: "gpt-5-codex".into(),
+            cli_path: "codex".into(),
+            capabilities: vec![
+                AgentCapability::MutatingJobs,
+                AgentCapability::ReadOnlyJobs,
+                AgentCapability::StructuredOutput,
+            ],
+            health_check: Some("ok".into()),
+            status: AgentStatus::Available,
+        };
+        db.create_agent(&agent).await.expect("create agent");
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let item = ingot_domain::item::Item {
+            id: item_id,
+            project_id: project.id,
+            classification: Classification::Change,
+            workflow_version: "delivery:v1".into(),
+            lifecycle_state: LifecycleState::Open,
+            parking_state: ParkingState::Active,
+            done_reason: None,
+            resolution_source: None,
+            approval_state: ApprovalState::NotRequested,
+            escalation_state: EscalationState::None,
+            escalation_reason: None,
+            current_revision_id: revision_id,
+            origin_kind: OriginKind::Manual,
+            origin_finding_id: None,
+            priority: Priority::Major,
+            labels: vec![],
+            operator_notes: None,
+            created_at,
+            updated_at: created_at,
+            closed_at: None,
+        };
+        let seed_commit = head_oid(&repo).await.expect("seed head");
+        let revision = ItemRevision {
+            id: revision_id,
+            item_id,
+            revision_no: 1,
+            title: "Auto review".into(),
+            description: "queue incremental review".into(),
+            acceptance_criteria: "author then review".into(),
+            target_ref: "refs/heads/main".into(),
+            approval_policy: ApprovalPolicy::Required,
+            policy_snapshot: serde_json::json!({}),
+            template_map_snapshot: serde_json::json!({}),
+            seed_commit_oid: seed_commit.clone(),
+            seed_target_commit_oid: Some(seed_commit.clone()),
+            supersedes_revision_id: None,
+            created_at,
+        };
+        db.create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let author_job = dispatch_job(
+            &item,
+            &revision,
+            &[],
+            &[],
+            &[],
+            DispatchJobCommand { step_id: None },
+        )
+        .expect("dispatch author initial");
+        db.create_job(&author_job).await.expect("create author job");
+
+        dispatcher.tick().await.expect("author tick");
+
+        let jobs = db.list_jobs_by_item(item.id).await.expect("jobs");
+        assert_eq!(jobs.len(), 2, "author success should auto-queue review");
+
+        let completed_author = jobs
+            .iter()
+            .find(|job| job.step_id == step::AUTHOR_INITIAL)
+            .expect("completed author job");
+        assert_eq!(completed_author.status, JobStatus::Completed);
+        assert_eq!(completed_author.outcome_class, Some(OutcomeClass::Clean));
+
+        let review_job = jobs
+            .iter()
+            .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
+            .expect("auto-dispatched incremental review job");
+        assert_eq!(review_job.status, JobStatus::Queued);
+        assert_eq!(
+            review_job.input_base_commit_oid.as_deref(),
+            Some(seed_commit.as_str())
+        );
+        assert_eq!(
+            review_job.input_head_commit_oid.as_deref(),
+            completed_author.output_commit_oid.as_deref()
+        );
+    }
+
+    #[tokio::test]
     async fn candidate_repair_loop_advances_to_prepare_convergence() {
         let repo = temp_git_repo();
         let db_path = std::env::temp_dir().join(format!(
@@ -5906,6 +6213,7 @@ mod tests {
             &revision,
             &[],
             &[],
+            &[],
             DispatchJobCommand { step_id: None },
         )
         .expect("dispatch author initial");
@@ -5913,17 +6221,12 @@ mod tests {
         dispatcher.tick().await.expect("author tick");
 
         let mut jobs = db.list_jobs_by_item(item.id).await.expect("jobs");
-        let review_initial = dispatch_job(
-            &item,
-            &revision,
-            &jobs,
-            &[],
-            DispatchJobCommand { step_id: None },
-        )
-        .expect("dispatch review incremental initial");
-        db.create_job(&review_initial)
-            .await
-            .expect("create review initial");
+        let review_initial = jobs
+            .iter()
+            .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
+            .cloned()
+            .expect("auto-dispatched review initial");
+        assert_eq!(review_initial.status, JobStatus::Queued);
         dispatcher.tick().await.expect("review initial tick");
 
         jobs = db.list_jobs_by_item(item.id).await.expect("jobs");
@@ -5932,6 +6235,7 @@ mod tests {
             &revision,
             &jobs,
             &[],
+            &[],
             DispatchJobCommand { step_id: None },
         )
         .expect("dispatch repair candidate");
@@ -5939,17 +6243,12 @@ mod tests {
         dispatcher.tick().await.expect("repair tick");
 
         jobs = db.list_jobs_by_item(item.id).await.expect("jobs");
-        let review_incremental_repair = dispatch_job(
-            &item,
-            &revision,
-            &jobs,
-            &[],
-            DispatchJobCommand { step_id: None },
-        )
-        .expect("dispatch review incremental repair");
-        db.create_job(&review_incremental_repair)
-            .await
-            .expect("create review incremental repair");
+        let review_incremental_repair = jobs
+            .iter()
+            .find(|job| job.step_id == step::REVIEW_INCREMENTAL_REPAIR)
+            .cloned()
+            .expect("auto-dispatched review incremental repair");
+        assert_eq!(review_incremental_repair.status, JobStatus::Queued);
         dispatcher
             .tick()
             .await
@@ -5960,6 +6259,7 @@ mod tests {
             &item,
             &revision,
             &jobs,
+            &[],
             &[],
             DispatchJobCommand { step_id: None },
         )
@@ -5978,6 +6278,7 @@ mod tests {
             &revision,
             &jobs,
             &[],
+            &[],
             DispatchJobCommand { step_id: None },
         )
         .expect("dispatch validate candidate repair");
@@ -5990,7 +6291,7 @@ mod tests {
             .expect("validate candidate repair tick");
 
         let jobs = db.list_jobs_by_item(item.id).await.expect("jobs");
-        let evaluation = Evaluator::new().evaluate(&item, &revision, &jobs, &[]);
+        let evaluation = Evaluator::new().evaluate(&item, &revision, &jobs, &[], &[]);
         assert_eq!(evaluation.next_recommended_action, "prepare_convergence");
     }
 

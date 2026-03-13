@@ -122,6 +122,7 @@ export function BoardSkeleton() {
 export function ItemDetailSkeleton() {
   return (
     <div className="space-y-6">
+      <Skeleton className="h-4 w-56" />
       <div className="space-y-2">
         <Skeleton className="h-8 w-80" />
         <Skeleton className="h-4 w-full max-w-3xl" />

@@ -87,4 +87,23 @@ describe('WorkspacesPage', () => {
 
     expect(await screen.findByText('Workspace reset.')).toBeInTheDocument()
   })
+
+  it('renders a destructive alert when the workspaces query fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+
+      if (method === 'GET' && url.endsWith('/api/projects/prj_1/workspaces')) {
+        return Promise.reject(new Error('network down'))
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Workspaces failed to load')).toBeInTheDocument()
+    expect(screen.getByText('Error: network down')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
 })

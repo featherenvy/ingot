@@ -1169,7 +1169,7 @@ impl Database {
                 id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
                 source_report_schema_version, source_finding_key, source_subject_kind,
                 source_subject_base_commit_oid, source_subject_head_commit_oid, code, severity, summary,
-                paths, evidence, triage_state, promoted_item_id, dismissal_reason, created_at, triaged_at
+                paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(finding.id.to_string())
@@ -1189,8 +1189,8 @@ impl Database {
         .bind(serde_json::to_string(&finding.paths).map_err(json_err)?)
         .bind(serde_json::to_string(&finding.evidence).map_err(json_err)?)
         .bind(encode_enum(&finding.triage_state)?)
-        .bind(finding.promoted_item_id.map(|id| id.to_string()))
-        .bind(finding.dismissal_reason.as_deref())
+        .bind(finding.linked_item_id.map(|id| id.to_string()))
+        .bind(finding.triage_note.as_deref())
         .bind(finding.created_at)
         .bind(finding.triaged_at)
         .execute(&self.pool)
@@ -1479,15 +1479,16 @@ impl Database {
         Ok(())
     }
 
-    pub async fn dismiss_finding(&self, finding: &Finding) -> Result<(), RepositoryError> {
+    pub async fn triage_finding(&self, finding: &Finding) -> Result<(), RepositoryError> {
         sqlx::query(
             "UPDATE findings
-             SET triage_state = ?, dismissal_reason = ?, triaged_at = ?, promoted_item_id = NULL
+             SET triage_state = ?, triage_note = ?, triaged_at = ?, linked_item_id = ?
              WHERE id = ?",
         )
         .bind(encode_enum(&finding.triage_state)?)
-        .bind(finding.dismissal_reason.as_deref())
+        .bind(finding.triage_note.as_deref())
         .bind(finding.triaged_at)
+        .bind(finding.linked_item_id.map(|id| id.to_string()))
         .bind(finding.id.to_string())
         .execute(&self.pool)
         .await
@@ -1496,11 +1497,53 @@ impl Database {
         Ok(())
     }
 
-    pub async fn promote_finding(
+    pub async fn triage_finding_with_origin_detached(
         &self,
         finding: &Finding,
-        promoted_item: &Item,
-        promoted_revision: &ItemRevision,
+        detached_item_id: Option<ItemId>,
+    ) -> Result<(), RepositoryError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+
+        sqlx::query(
+            "UPDATE findings
+             SET triage_state = ?, triage_note = ?, triaged_at = ?, linked_item_id = ?
+             WHERE id = ?",
+        )
+        .bind(encode_enum(&finding.triage_state)?)
+        .bind(finding.triage_note.as_deref())
+        .bind(finding.triaged_at)
+        .bind(finding.linked_item_id.map(|id| id.to_string()))
+        .bind(finding.id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        if let Some(detached_item_id) = detached_item_id {
+            sqlx::query(
+                "UPDATE items
+                 SET origin_kind = 'manual', origin_finding_id = NULL, updated_at = ?
+                 WHERE id = ?
+                   AND origin_kind = 'promoted_finding'
+                   AND origin_finding_id = ?",
+            )
+            .bind(Utc::now())
+            .bind(detached_item_id.to_string())
+            .bind(finding.id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    pub async fn link_backlog_finding(
+        &self,
+        finding: &Finding,
+        linked_item: &Item,
+        linked_revision: &ItemRevision,
+        detached_item_id: Option<ItemId>,
     ) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
 
@@ -1512,26 +1555,26 @@ impl Database {
                 created_at, updated_at, closed_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(promoted_item.id.to_string())
-        .bind(promoted_item.project_id.to_string())
-        .bind(encode_enum(&promoted_item.classification)?)
-        .bind(&promoted_item.workflow_version)
-        .bind(encode_enum(&promoted_item.lifecycle_state)?)
-        .bind(encode_enum(&promoted_item.parking_state)?)
-        .bind(promoted_item.done_reason.as_ref().map(encode_enum).transpose()?)
-        .bind(promoted_item.resolution_source.as_ref().map(encode_enum).transpose()?)
-        .bind(encode_enum(&promoted_item.approval_state)?)
-        .bind(encode_enum(&promoted_item.escalation_state)?)
-        .bind(promoted_item.escalation_reason.as_ref().map(encode_enum).transpose()?)
-        .bind(promoted_item.current_revision_id.to_string())
-        .bind(encode_enum(&promoted_item.origin_kind)?)
-        .bind(promoted_item.origin_finding_id.map(|id| id.to_string()))
-        .bind(encode_enum(&promoted_item.priority)?)
-        .bind(serde_json::to_string(&promoted_item.labels).map_err(json_err)?)
-        .bind(promoted_item.operator_notes.as_deref())
-        .bind(promoted_item.created_at)
-        .bind(promoted_item.updated_at)
-        .bind(promoted_item.closed_at)
+        .bind(linked_item.id.to_string())
+        .bind(linked_item.project_id.to_string())
+        .bind(encode_enum(&linked_item.classification)?)
+        .bind(&linked_item.workflow_version)
+        .bind(encode_enum(&linked_item.lifecycle_state)?)
+        .bind(encode_enum(&linked_item.parking_state)?)
+        .bind(linked_item.done_reason.as_ref().map(encode_enum).transpose()?)
+        .bind(linked_item.resolution_source.as_ref().map(encode_enum).transpose()?)
+        .bind(encode_enum(&linked_item.approval_state)?)
+        .bind(encode_enum(&linked_item.escalation_state)?)
+        .bind(linked_item.escalation_reason.as_ref().map(encode_enum).transpose()?)
+        .bind(linked_item.current_revision_id.to_string())
+        .bind(encode_enum(&linked_item.origin_kind)?)
+        .bind(linked_item.origin_finding_id.map(|id| id.to_string()))
+        .bind(encode_enum(&linked_item.priority)?)
+        .bind(serde_json::to_string(&linked_item.labels).map_err(json_err)?)
+        .bind(linked_item.operator_notes.as_deref())
+        .bind(linked_item.created_at)
+        .bind(linked_item.updated_at)
+        .bind(linked_item.closed_at)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -1543,39 +1586,57 @@ impl Database {
                 seed_target_commit_oid, supersedes_revision_id, created_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(promoted_revision.id.to_string())
-        .bind(promoted_revision.item_id.to_string())
-        .bind(promoted_revision.revision_no as i64)
-        .bind(&promoted_revision.title)
-        .bind(&promoted_revision.description)
-        .bind(&promoted_revision.acceptance_criteria)
-        .bind(&promoted_revision.target_ref)
-        .bind(encode_enum(&promoted_revision.approval_policy)?)
-        .bind(serde_json::to_string(&promoted_revision.policy_snapshot).map_err(json_err)?)
-        .bind(serde_json::to_string(&promoted_revision.template_map_snapshot).map_err(json_err)?)
-        .bind(&promoted_revision.seed_commit_oid)
-        .bind(promoted_revision.seed_target_commit_oid.as_deref())
+        .bind(linked_revision.id.to_string())
+        .bind(linked_revision.item_id.to_string())
+        .bind(linked_revision.revision_no as i64)
+        .bind(&linked_revision.title)
+        .bind(&linked_revision.description)
+        .bind(&linked_revision.acceptance_criteria)
+        .bind(&linked_revision.target_ref)
+        .bind(encode_enum(&linked_revision.approval_policy)?)
+        .bind(serde_json::to_string(&linked_revision.policy_snapshot).map_err(json_err)?)
+        .bind(serde_json::to_string(&linked_revision.template_map_snapshot).map_err(json_err)?)
+        .bind(&linked_revision.seed_commit_oid)
+        .bind(linked_revision.seed_target_commit_oid.as_deref())
         .bind(
-            promoted_revision
+            linked_revision
                 .supersedes_revision_id
                 .map(|id| id.to_string()),
         )
-        .bind(promoted_revision.created_at)
+        .bind(linked_revision.created_at)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
 
         sqlx::query(
             "UPDATE findings
-             SET triage_state = 'promoted', promoted_item_id = ?, dismissal_reason = NULL, triaged_at = ?
+             SET triage_state = ?, linked_item_id = ?, triage_note = ?, triaged_at = ?
              WHERE id = ?",
         )
-        .bind(promoted_item.id.to_string())
+        .bind(encode_enum(&finding.triage_state)?)
+        .bind(linked_item.id.to_string())
+        .bind(finding.triage_note.as_deref())
         .bind(finding.triaged_at)
         .bind(finding.id.to_string())
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
+
+        if let Some(detached_item_id) = detached_item_id {
+            sqlx::query(
+                "UPDATE items
+                 SET origin_kind = 'manual', origin_finding_id = NULL, updated_at = ?
+                 WHERE id = ?
+                   AND origin_kind = 'promoted_finding'
+                   AND origin_finding_id = ?",
+            )
+            .bind(Utc::now())
+            .bind(detached_item_id.to_string())
+            .bind(finding.id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
 
         tx.commit().await.map_err(db_err)?;
         Ok(())
@@ -1614,7 +1675,7 @@ async fn upsert_finding(
             id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
             source_report_schema_version, source_finding_key, source_subject_kind,
             source_subject_base_commit_oid, source_subject_head_commit_oid, code, severity, summary,
-            paths, evidence, triage_state, promoted_item_id, dismissal_reason, created_at, triaged_at
+            paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(source_job_id, source_finding_key) DO UPDATE SET
             source_step_id = excluded.source_step_id,
@@ -1645,8 +1706,8 @@ async fn upsert_finding(
     .bind(serde_json::to_string(&finding.paths).map_err(json_err)?)
     .bind(serde_json::to_string(&finding.evidence).map_err(json_err)?)
     .bind(encode_enum(&finding.triage_state)?)
-    .bind(finding.promoted_item_id.map(|id| id.to_string()))
-    .bind(finding.dismissal_reason.as_deref())
+    .bind(finding.linked_item_id.map(|id| id.to_string()))
+    .bind(finding.triage_note.as_deref())
     .bind(finding.created_at)
     .bind(finding.triaged_at)
     .execute(&mut **tx)
@@ -2038,12 +2099,12 @@ fn map_finding(row: &SqliteRow) -> Result<Finding, RepositoryError> {
         paths: parse_json(row.try_get("paths").map_err(db_err)?)?,
         evidence: parse_json(row.try_get("evidence").map_err(db_err)?)?,
         triage_state: parse_enum(row.try_get("triage_state").map_err(db_err)?)?,
-        promoted_item_id: row
-            .try_get::<Option<String>, _>("promoted_item_id")
+        linked_item_id: row
+            .try_get::<Option<String>, _>("linked_item_id")
             .map_err(db_err)?
             .map(parse_id)
             .transpose()?,
-        dismissal_reason: row.try_get("dismissal_reason").map_err(db_err)?,
+        triage_note: row.try_get("triage_note").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
         triaged_at: row.try_get("triaged_at").map_err(db_err)?,
     })

@@ -136,11 +136,30 @@ describe('ActivityPage', () => {
 
     renderPage()
 
+    expect(await screen.findByRole('button', { name: 'Copy payload' })).toBeInTheDocument()
     const toggle = await screen.findByRole('button', { name: 'Show more' })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
 
     fireEvent.click(toggle)
 
     expect(await screen.findByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('renders a destructive alert when the activity query fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = new URL(String(input), 'http://localhost')
+
+      if (url.pathname === '/api/projects/prj_1/activity') {
+        return Promise.reject(new Error('network down'))
+      }
+
+      throw new Error(`Unexpected fetch: ${url.pathname}${url.search}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Activity failed to load')).toBeInTheDocument()
+    expect(screen.getByText('Error: network down')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
   })
 })

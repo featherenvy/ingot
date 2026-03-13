@@ -39,6 +39,7 @@ export type PhaseKind = 'author' | 'validate' | 'review' | 'investigate' | 'syst
 export type PhaseStatus =
   | 'done'
   | 'running'
+  | 'triaging'
   | 'escalated'
   | 'idle'
   | 'deferred'
@@ -62,7 +63,14 @@ export type WorkspaceStatus =
 export type ConvergenceStatus = 'queued' | 'running' | 'conflicted' | 'prepared' | 'finalized' | 'failed' | 'cancelled'
 export type FindingSubjectKind = 'candidate' | 'integrated'
 export type FindingSeverity = 'low' | 'medium' | 'high' | 'critical'
-export type FindingTriageState = 'untriaged' | 'promoted' | 'dismissed'
+export type FindingTriageState =
+  | 'untriaged'
+  | 'fix_now'
+  | 'wont_fix'
+  | 'backlog'
+  | 'duplicate'
+  | 'dismissed_invalid'
+  | 'needs_investigation'
 export type ActivityEventType =
   | 'item_created'
   | 'item_revision_created'
@@ -80,6 +88,7 @@ export type ActivityEventType =
   | 'job_cancelled'
   | 'finding_promoted'
   | 'finding_dismissed'
+  | 'finding_triaged'
   | 'approval_requested'
   | 'approval_approved'
   | 'approval_rejected'
@@ -254,8 +263,8 @@ export interface Finding {
   paths: string[]
   evidence: JsonValue
   triage_state: FindingTriageState
-  promoted_item_id: string | null
-  dismissal_reason: string | null
+  linked_item_id: string | null
+  triage_note: string | null
   created_at: string
   triaged_at: string | null
 }

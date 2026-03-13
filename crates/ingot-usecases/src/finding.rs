@@ -14,9 +14,16 @@ use serde::Deserialize;
 use crate::UseCaseError;
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
-pub struct FindingPromotionOverrides {
+pub struct BacklogFindingOverrides {
     pub target_ref: Option<String>,
     pub approval_policy: Option<ApprovalPolicy>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TriageFindingInput {
+    pub triage_state: FindingTriageState,
+    pub triage_note: Option<String>,
+    pub linked_item_id: Option<ItemId>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,8 +202,8 @@ pub fn extract_findings(
                 paths: finding.paths,
                 evidence: serde_json::json!(finding.evidence),
                 triage_state: FindingTriageState::Untriaged,
-                promoted_item_id: None,
-                dismissal_reason: None,
+                linked_item_id: None,
+                triage_note: None,
                 created_at,
                 triaged_at: None,
             })
@@ -224,33 +231,79 @@ fn ensure_unique_finding_keys(findings: &[FindingV1]) -> Result<(), UseCaseError
     Ok(())
 }
 
-pub fn dismiss_finding(
+pub fn triage_finding(
     finding: &Finding,
-    dismissal_reason: String,
+    input: TriageFindingInput,
 ) -> Result<Finding, UseCaseError> {
-    if finding.triage_state != FindingTriageState::Untriaged {
-        return Err(UseCaseError::FindingNotUntriaged);
-    }
-    if dismissal_reason.trim().is_empty() {
-        return Err(UseCaseError::InvalidDismissalReason);
+    if input.triage_state == FindingTriageState::Untriaged {
+        return Err(UseCaseError::InvalidFindingTriage(
+            "triage_state must resolve the finding".into(),
+        ));
     }
 
-    let mut dismissed = finding.clone();
-    dismissed.triage_state = FindingTriageState::Dismissed;
-    dismissed.promoted_item_id = None;
-    dismissed.dismissal_reason = Some(dismissal_reason);
-    dismissed.triaged_at = Some(Utc::now());
-    Ok(dismissed)
+    let triage_note = normalize_note(input.triage_note);
+    let mut triaged = finding.clone();
+    triaged.triage_state = input.triage_state;
+    triaged.triaged_at = Some(Utc::now());
+
+    match input.triage_state {
+        FindingTriageState::FixNow => {
+            ensure_note_absent(&triage_note, "fix_now")?;
+            ensure_link_absent(input.linked_item_id, "fix_now")?;
+            triaged.linked_item_id = None;
+            triaged.triage_note = None;
+        }
+        FindingTriageState::WontFix => {
+            ensure_note_present(&triage_note, "wont_fix")?;
+            ensure_link_absent(input.linked_item_id, "wont_fix")?;
+            triaged.linked_item_id = None;
+            triaged.triage_note = triage_note;
+        }
+        FindingTriageState::Backlog => {
+            let linked_item_id = input.linked_item_id.ok_or_else(|| {
+                UseCaseError::InvalidFindingTriage(
+                    "backlog triage requires a linked_item_id".into(),
+                )
+            })?;
+            triaged.linked_item_id = Some(linked_item_id);
+            triaged.triage_note = triage_note;
+        }
+        FindingTriageState::Duplicate => {
+            let linked_item_id = input.linked_item_id.ok_or_else(|| {
+                UseCaseError::InvalidFindingTriage(
+                    "duplicate triage requires a linked_item_id".into(),
+                )
+            })?;
+            triaged.linked_item_id = Some(linked_item_id);
+            triaged.triage_note = triage_note;
+        }
+        FindingTriageState::DismissedInvalid => {
+            ensure_note_present(&triage_note, "dismissed_invalid")?;
+            ensure_link_absent(input.linked_item_id, "dismissed_invalid")?;
+            triaged.linked_item_id = None;
+            triaged.triage_note = triage_note;
+        }
+        FindingTriageState::NeedsInvestigation => {
+            ensure_note_present(&triage_note, "needs_investigation")?;
+            ensure_link_absent(input.linked_item_id, "needs_investigation")?;
+            triaged.linked_item_id = None;
+            triaged.triage_note = triage_note;
+        }
+        FindingTriageState::Untriaged => unreachable!("handled above"),
+    }
+
+    Ok(triaged)
 }
 
-pub fn promote_finding(
+pub fn backlog_finding(
     finding: &Finding,
     source_item: &Item,
     source_revision: &ItemRevision,
-    overrides: FindingPromotionOverrides,
+    overrides: BacklogFindingOverrides,
+    triage_note: Option<String>,
 ) -> Result<(Item, ItemRevision, Finding), UseCaseError> {
-    if finding.triage_state != FindingTriageState::Untriaged {
-        return Err(UseCaseError::FindingNotUntriaged);
+    if !finding.triage_state.is_unresolved() {
+        return Err(UseCaseError::FindingNotTriageable);
     }
 
     if finding.source_subject_head_commit_oid.trim().is_empty()
@@ -269,6 +322,7 @@ pub fn promote_finding(
         .approval_policy
         .unwrap_or(source_revision.approval_policy);
     let created_at = Utc::now();
+    let triage_note = normalize_note(triage_note);
     let evidence_lines = finding
         .evidence
         .as_array()
@@ -281,7 +335,7 @@ pub fn promote_finding(
         })
         .unwrap_or_default();
 
-    let promoted_item = Item {
+    let linked_item = Item {
         id: item_id,
         project_id: source_item.project_id,
         classification: Classification::Bug,
@@ -307,7 +361,7 @@ pub fn promote_finding(
         closed_at: None,
     };
 
-    let promoted_revision = ItemRevision {
+    let linked_revision = ItemRevision {
         id: revision_id,
         item_id,
         revision_no: 1,
@@ -340,13 +394,16 @@ pub fn promote_finding(
         created_at,
     };
 
-    let mut promoted_finding = finding.clone();
-    promoted_finding.triage_state = FindingTriageState::Promoted;
-    promoted_finding.promoted_item_id = Some(item_id);
-    promoted_finding.dismissal_reason = None;
-    promoted_finding.triaged_at = Some(created_at);
+    let triaged_finding = triage_finding(
+        finding,
+        TriageFindingInput {
+            triage_state: FindingTriageState::Backlog,
+            triage_note,
+            linked_item_id: Some(item_id),
+        },
+    )?;
 
-    Ok((promoted_item, promoted_revision, promoted_finding))
+    Ok((linked_item, linked_revision, triaged_finding))
 }
 
 pub fn parse_revision_context_summary(
@@ -387,23 +444,62 @@ fn validate_validation_report(
         }
     }
 
-    let has_failed_check = checks
-        .iter()
-        .any(|check| check.status == ValidationCheckStatus::Fail);
-
     match outcome {
-        "clean" if findings.is_empty() && !has_failed_check => Ok(OutcomeClass::Clean),
+        "clean" if findings.is_empty() => Ok(OutcomeClass::Clean),
         "clean" => Err(UseCaseError::ProtocolViolation(
             "clean validation reports must not contain findings or failed checks".into(),
         )),
-        "findings" if has_failed_check || !findings.is_empty() => Ok(OutcomeClass::Findings),
+        "findings" if !findings.is_empty() => Ok(OutcomeClass::Findings),
         "findings" => Err(UseCaseError::ProtocolViolation(
-            "validation reports with outcome=findings must contain a failed check or a finding"
-                .into(),
+            "validation reports with outcome=findings must contain at least one finding".into(),
         )),
         other => Err(UseCaseError::ProtocolViolation(format!(
             "unsupported report outcome {other}"
         ))),
+    }
+}
+
+fn normalize_note(note: Option<String>) -> Option<String> {
+    note.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn ensure_note_present(note: &Option<String>, triage_state: &str) -> Result<(), UseCaseError> {
+    if note.is_some() {
+        Ok(())
+    } else {
+        Err(UseCaseError::InvalidFindingTriage(format!(
+            "{triage_state} triage requires a triage_note"
+        )))
+    }
+}
+
+fn ensure_note_absent(note: &Option<String>, triage_state: &str) -> Result<(), UseCaseError> {
+    if note.is_none() {
+        Ok(())
+    } else {
+        Err(UseCaseError::InvalidFindingTriage(format!(
+            "{triage_state} triage does not accept a triage_note"
+        )))
+    }
+}
+
+fn ensure_link_absent(
+    linked_item_id: Option<ItemId>,
+    triage_state: &str,
+) -> Result<(), UseCaseError> {
+    if linked_item_id.is_none() {
+        Ok(())
+    } else {
+        Err(UseCaseError::InvalidFindingTriage(format!(
+            "{triage_state} triage does not accept a linked_item_id"
+        )))
     }
 }
 
@@ -501,7 +597,7 @@ fn classify_subject(job: &Job, convergences: &[Convergence]) -> FindingSubjectKi
 mod tests {
     use chrono::Utc;
     use ingot_domain::convergence::{Convergence, ConvergenceStatus, ConvergenceStrategy};
-    use ingot_domain::finding::{FindingSeverity, FindingSubjectKind};
+    use ingot_domain::finding::{FindingSeverity, FindingSubjectKind, FindingTriageState};
     use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
     use ingot_domain::item::{
         ApprovalState, Classification, EscalationState, Item, LifecycleState, OriginKind,
@@ -518,8 +614,8 @@ mod tests {
     use crate::UseCaseError;
 
     use super::{
-        FindingPromotionOverrides, dismiss_finding, extract_findings,
-        parse_revision_context_summary, promote_finding,
+        BacklogFindingOverrides, TriageFindingInput, backlog_finding, extract_findings,
+        parse_revision_context_summary, triage_finding,
     };
 
     #[test]
@@ -558,29 +654,63 @@ mod tests {
     }
 
     #[test]
-    fn promotion_links_item_and_finding() {
+    fn backlog_links_item_and_finding() {
         let item = test_item();
         let revision = test_revision();
         let finding = test_finding();
 
-        let (promoted_item, promoted_revision, promoted_finding) = promote_finding(
+        let (linked_item, linked_revision, triaged_finding) = backlog_finding(
             &finding,
             &item,
             &revision,
-            FindingPromotionOverrides::default(),
+            BacklogFindingOverrides::default(),
+            None,
         )
         .unwrap();
 
-        assert_eq!(promoted_item.origin_kind, OriginKind::PromotedFinding);
-        assert_eq!(promoted_item.origin_finding_id, Some(finding.id));
-        assert_eq!(promoted_revision.item_id, promoted_item.id);
-        assert_eq!(promoted_finding.promoted_item_id, Some(promoted_item.id));
+        assert_eq!(linked_item.origin_kind, OriginKind::PromotedFinding);
+        assert_eq!(linked_item.origin_finding_id, Some(finding.id));
+        assert_eq!(linked_revision.item_id, linked_item.id);
+        assert_eq!(triaged_finding.linked_item_id, Some(linked_item.id));
+        assert_eq!(triaged_finding.triage_state, FindingTriageState::Backlog);
     }
 
     #[test]
-    fn dismissal_requires_reason() {
+    fn dismissed_invalid_requires_reason() {
         let finding = test_finding();
-        assert!(dismiss_finding(&finding, "".into()).is_err());
+        assert!(
+            triage_finding(
+                &finding,
+                TriageFindingInput {
+                    triage_state: FindingTriageState::DismissedInvalid,
+                    triage_note: Some("".into()),
+                    linked_item_id: None,
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn triage_allows_revising_a_previous_nonblocking_decision() {
+        let mut finding = test_finding();
+        finding.triage_state = FindingTriageState::WontFix;
+        finding.triage_note = Some("accepted".into());
+        finding.triaged_at = Some(Utc::now());
+
+        let retriaged = triage_finding(
+            &finding,
+            TriageFindingInput {
+                triage_state: FindingTriageState::FixNow,
+                triage_note: None,
+                linked_item_id: None,
+            },
+        )
+        .expect("retriage from wont_fix to fix_now");
+
+        assert_eq!(retriaged.triage_state, FindingTriageState::FixNow);
+        assert_eq!(retriaged.triage_note, None);
+        assert_eq!(retriaged.linked_item_id, None);
     }
 
     #[test]
@@ -881,8 +1011,8 @@ mod tests {
             paths: vec!["src/lib.rs".into()],
             evidence: serde_json::json!(["broken"]),
             triage_state: ingot_domain::finding::FindingTriageState::Untriaged,
-            promoted_item_id: None,
-            dismissal_reason: None,
+            linked_item_id: None,
+            triage_note: None,
             created_at: Utc::now(),
             triaged_at: None,
         }

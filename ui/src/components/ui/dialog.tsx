@@ -68,6 +68,39 @@ function DialogContent({
   )
 }
 
+function DialogFullscreenContent({
+  className,
+  children,
+  showCloseButton = true,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Content> & {
+  showCloseButton?: boolean
+}) {
+  return (
+    <DialogPortal>
+      <DialogOverlay className="bg-black/40" />
+      <DialogPrimitive.Content
+        data-slot="dialog-content"
+        className={cn(
+          'fixed inset-x-0 bottom-0 top-12 z-50 overflow-y-auto bg-background shadow-2xl outline-none duration-100 data-open:animate-in data-open:fade-in-0 data-open:slide-in-from-bottom-2 data-closed:animate-out data-closed:fade-out-0 data-closed:slide-out-to-bottom-2',
+          className,
+        )}
+        {...props}
+      >
+        {children}
+        {showCloseButton && (
+          <DialogPrimitive.Close data-slot="dialog-close" asChild>
+            <Button variant="ghost" className="absolute top-4 right-4" size="icon-sm">
+              <XIcon />
+              <span className="sr-only">Close</span>
+            </Button>
+          </DialogPrimitive.Close>
+        )}
+      </DialogPrimitive.Content>
+    </DialogPortal>
+  )
+}
+
 function DialogHeader({ className, ...props }: React.ComponentProps<'div'>) {
   return <div data-slot="dialog-header" className={cn('flex flex-col gap-2', className)} {...props} />
 }
@@ -128,6 +161,7 @@ export {
   DialogContent,
   DialogDescription,
   DialogFooter,
+  DialogFullscreenContent,
   DialogHeader,
   DialogOverlay,
   DialogPortal,

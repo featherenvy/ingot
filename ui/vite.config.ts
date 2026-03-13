@@ -6,6 +6,34 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('/node_modules/')) return
+
+          if (
+            id.includes('/@tanstack/react-query/') ||
+            id.includes('/react-router/') ||
+            id.includes('/zustand/')
+          ) {
+            return 'app-runtime'
+          }
+
+          if (
+            id.includes('/radix-ui/') ||
+            id.includes('/react-hook-form/') ||
+            id.includes('/sonner/') ||
+            id.includes('/lucide-react/')
+          ) {
+            return 'ui-kit'
+          }
+
+          return 'vendor'
+        },
+      },
+    },
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

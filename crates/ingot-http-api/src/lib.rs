@@ -1,3 +1,4 @@
+mod demo;
 pub mod error;
 pub mod router;
 

@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router'
 import { toast } from 'sonner'
-import { ApiError, approveItem, dispatchItemJob, prepareConvergence, rejectApproval } from '../api/client'
+import { approveItem, dispatchItemJob, prepareConvergence, rejectApproval, triageFinding } from '../api/client'
+import type { FindingTriageState } from '../types/domain'
 import { agentsQuery, itemDetailQuery, queryKeys } from '../api/queries'
 import {
   AcceptanceCriteriaSection,
@@ -12,19 +14,35 @@ import {
   OverviewPanels,
   RevisionContextPanel,
 } from '../components/item-detail'
+import { PageHeader } from '../components/PageHeader'
+import { PageQueryError } from '../components/PageQueryError'
 import { ItemDetailSkeleton } from '../components/PageSkeletons'
-import { Alert, AlertDescription, AlertTitle } from '../components/ui/alert'
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from '../components/ui/breadcrumb'
 import { useRequiredItemId, useRequiredProjectId } from '../hooks/useRequiredRouteParam'
 import { getQueuedJobBlocker } from '../jobBlockers'
+import { showErrorToast } from '../lib/toast'
 
-export default function ItemDetailPage() {
+type DetailSection = {
+  id: string
+  label: string
+  count: number
+}
+
+export default function ItemDetailPage(): React.JSX.Element {
   const projectId = useRequiredProjectId()
   const itemId = useRequiredItemId()
   const queryClient = useQueryClient()
-  const { data: detail, isLoading, error } = useQuery(itemDetailQuery(projectId, itemId))
-  const { data: agents } = useQuery(agentsQuery())
+  const { data: detail, error, isError, isFetching, isLoading, refetch } = useQuery(itemDetailQuery(projectId, itemId))
+  const { data: agents, isLoading: isAgentsLoading } = useQuery(agentsQuery())
 
-  const refresh = () => {
+  function refresh(): void {
     queryClient.invalidateQueries({ queryKey: queryKeys.items(projectId) })
     queryClient.invalidateQueries({ queryKey: queryKeys.item(projectId, itemId) })
   }
@@ -35,12 +53,18 @@ export default function ItemDetailPage() {
       refresh()
       toast.success('Job dispatched.')
     },
+    onError: (error) => {
+      showErrorToast('Job dispatch failed.', error)
+    },
   })
   const prepareMutation = useMutation({
     mutationFn: () => prepareConvergence(projectId, itemId),
     onSuccess: () => {
       refresh()
       toast.success('Convergence prepared.')
+    },
+    onError: (error) => {
+      showErrorToast('Convergence preparation failed.', error)
     },
   })
   const approveMutation = useMutation({
@@ -49,6 +73,9 @@ export default function ItemDetailPage() {
       refresh()
       toast.success('Approval recorded.')
     },
+    onError: (error) => {
+      showErrorToast('Approval failed.', error)
+    },
   })
   const rejectMutation = useMutation({
     mutationFn: () => rejectApproval(projectId, itemId),
@@ -56,24 +83,41 @@ export default function ItemDetailPage() {
       refresh()
       toast.success('Approval rejected.')
     },
+    onError: (error) => {
+      showErrorToast('Approval rejection failed.', error)
+    },
+  })
+  const triageMutation = useMutation({
+    mutationFn: (payload: {
+      findingId: string
+      triage_state: FindingTriageState
+      triage_note?: string
+      linked_item_id?: string
+    }) =>
+      triageFinding(payload.findingId, {
+        triage_state: payload.triage_state,
+        triage_note: payload.triage_note,
+        linked_item_id: payload.linked_item_id,
+      }),
+    onSuccess: () => {
+      refresh()
+      toast.success('Finding triage saved.')
+    },
+    onError: (error) => {
+      showErrorToast('Finding triage failed.', error)
+    },
   })
 
   const activeJob = detail?.jobs.find((job) => ['queued', 'assigned', 'running'].includes(job.status))
   const retryableJobs = detail?.jobs.filter((job) => ['failed', 'cancelled', 'expired'].includes(job.status)) ?? []
-  const queueBlocker = getQueuedJobBlocker(activeJob ? [activeJob] : [], agents)
+  const isAgentAvailabilityLoading = isAgentsLoading && !!activeJob
+  const queueBlocker = isAgentAvailabilityLoading ? null : getQueuedJobBlocker(activeJob ? [activeJob] : [], agents)
 
-  const currentError = dispatchMutation.error ?? prepareMutation.error ?? approveMutation.error ?? rejectMutation.error
-  const currentErrorMessage = currentError instanceof ApiError ? currentError.message : null
   const retryableJobIds = new Set(retryableJobs.map((job) => job.id))
 
   if (isLoading) return <ItemDetailSkeleton />
-  if (error) {
-    return (
-      <Alert variant="destructive">
-        <AlertTitle>Item detail failed to load</AlertTitle>
-        <AlertDescription>{String(error)}</AlertDescription>
-      </Alert>
-    )
+  if (isError) {
+    return <PageQueryError title="Item detail failed to load" error={error} onRetry={refetch} isRetrying={isFetching} />
   }
   if (!detail) return <p>Item not found.</p>
 
@@ -86,7 +130,7 @@ export default function ItemDetailPage() {
     diagnostics,
   } = detail
 
-  const sections: { id: string; label: string; count: number }[] = [
+  const sections: DetailSection[] = [
     { id: 'jobs', label: 'Jobs', count: detail.jobs.length },
     { id: 'findings', label: 'Findings', count: findings.length },
     { id: 'convergences', label: 'Convergences', count: detail.convergences.length },
@@ -96,10 +140,25 @@ export default function ItemDetailPage() {
 
   return (
     <div className="space-y-6">
-      <div className="space-y-2">
-        <h2 className="text-2xl font-semibold tracking-tight">{current_revision.title}</h2>
-        <p className="max-w-3xl text-sm text-muted-foreground">{current_revision.description}</p>
-      </div>
+      <Breadcrumb>
+        <BreadcrumbList>
+          <BreadcrumbItem>
+            <BreadcrumbLink asChild>
+              <Link to={`/projects/${projectId}/board`}>Board</Link>
+            </BreadcrumbLink>
+          </BreadcrumbItem>
+          <BreadcrumbSeparator />
+          <BreadcrumbItem>
+            <BreadcrumbPage>{current_revision.title}</BreadcrumbPage>
+          </BreadcrumbItem>
+        </BreadcrumbList>
+      </Breadcrumb>
+
+      <PageHeader
+        title={current_revision.title}
+        description={current_revision.description}
+        descriptionClassName="max-w-3xl"
+      />
 
       {sections.length > 0 && (
         <nav className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
@@ -132,8 +191,8 @@ export default function ItemDetailPage() {
             run: () => rejectMutation.mutate(),
           },
         }}
-        errorMessage={currentErrorMessage}
         queueBlocker={queueBlocker}
+        agentsLoading={isAgentAvailabilityLoading}
       />
       <OverviewPanels item={item} evaluation={evaluation} revision={current_revision} />
       <AcceptanceCriteriaSection acceptanceCriteria={current_revision.acceptance_criteria} />
@@ -151,7 +210,16 @@ export default function ItemDetailPage() {
       )}
       {findings.length > 0 && (
         <div id="findings">
-          <FindingsTable findings={findings} />
+          <FindingsTable
+            findings={findings}
+            pendingFindingId={triageMutation.isPending ? (triageMutation.variables?.findingId ?? null) : null}
+            onTriage={(findingId, payload) =>
+              triageMutation.mutate({
+                findingId,
+                ...payload,
+              })
+            }
+          />
         </div>
       )}
       {detail.convergences.length > 0 && (

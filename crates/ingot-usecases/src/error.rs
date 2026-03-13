@@ -14,12 +14,12 @@ pub enum UseCaseError {
     JobNotActive,
     #[error("finding not found")]
     FindingNotFound,
-    #[error("finding is not untriaged")]
-    FindingNotUntriaged,
+    #[error("finding is not triageable")]
+    FindingNotTriageable,
     #[error("finding subject is unreachable")]
     FindingSubjectUnreachable,
-    #[error("invalid dismissal reason")]
-    InvalidDismissalReason,
+    #[error("invalid finding triage: {0}")]
+    InvalidFindingTriage(String),
     #[error("illegal step dispatch: {0}")]
     IllegalStepDispatch(String),
     #[error("active job exists")]
@@ -32,6 +32,10 @@ pub enum UseCaseError {
     TargetRefUnresolved(String),
     #[error("revision seed unreachable: {0}")]
     RevisionSeedUnreachable(String),
+    #[error("linked item not found")]
+    LinkedItemNotFound,
+    #[error("linked item must belong to the same project")]
+    LinkedItemProjectMismatch,
     #[error("prepared convergence missing")]
     PreparedConvergenceMissing,
     #[error("prepared convergence stale")]

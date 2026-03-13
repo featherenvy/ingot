@@ -54,6 +54,12 @@ export const createProject = (payload: { name?: string; path: string; default_br
     body: JSON.stringify(payload),
   })
 
+export const createDemoProject = (payload?: { name?: string }) =>
+  request<{ project: Project; items_created: number }>('/demo-project', {
+    method: 'POST',
+    body: JSON.stringify(payload ?? {}),
+  })
+
 export const getProjectConfig = (projectId: string) => request<JsonObject>(`/projects/${projectId}/config`)
 
 // Agents
@@ -108,6 +114,21 @@ export const retryItemJob = (projectId: string, itemId: string, jobId: string) =
 export const cancelItemJob = (projectId: string, itemId: string, jobId: string) =>
   request(`/projects/${projectId}/items/${itemId}/jobs/${jobId}/cancel`, {
     method: 'POST',
+  })
+
+export const triageFinding = (
+  findingId: string,
+  payload: {
+    triage_state: string
+    triage_note?: string
+    linked_item_id?: string
+    target_ref?: string
+    approval_policy?: 'required' | 'not_required'
+  },
+) =>
+  request(`/findings/${findingId}/triage`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
   })
 
 export const prepareConvergence = (projectId: string, itemId: string) =>

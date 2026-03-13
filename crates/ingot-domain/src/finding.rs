@@ -23,8 +23,25 @@ pub enum FindingSeverity {
 #[serde(rename_all = "snake_case")]
 pub enum FindingTriageState {
     Untriaged,
-    Promoted,
-    Dismissed,
+    FixNow,
+    WontFix,
+    Backlog,
+    Duplicate,
+    DismissedInvalid,
+    NeedsInvestigation,
+}
+
+impl FindingTriageState {
+    pub fn is_unresolved(self) -> bool {
+        matches!(self, Self::Untriaged | Self::NeedsInvestigation)
+    }
+
+    pub fn blocks_closure(self) -> bool {
+        matches!(
+            self,
+            Self::Untriaged | Self::FixNow | Self::NeedsInvestigation
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,8 +63,8 @@ pub struct Finding {
     pub paths: Vec<String>,
     pub evidence: serde_json::Value,
     pub triage_state: FindingTriageState,
-    pub promoted_item_id: Option<ItemId>,
-    pub dismissal_reason: Option<String>,
+    pub linked_item_id: Option<ItemId>,
+    pub triage_note: Option<String>,
     pub created_at: DateTime<Utc>,
     pub triaged_at: Option<DateTime<Utc>>,
 }

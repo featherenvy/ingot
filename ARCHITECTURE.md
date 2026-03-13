@@ -100,7 +100,7 @@ The architecture is therefore built around:
 
 * a durable SQLite state model
 * a GitOperation journal
-* startup reconciliation
+* startup reconciliation, including bootstrap of required global runtime records
 * stale-event rejection
 
 ## System Shape
@@ -211,9 +211,9 @@ ingot/
 | `ingot-git`            | Safe Git wrappers, diff generation, ref validation, commit trailers, convergence helpers, ordered commit replay, target-ref CAS | `axum`, workflow logic                           |
 | `ingot-workspace`      | Worktree provisioning, reset, reuse, and cleanup using `ingot-git`                                       | `axum`, `sqlx`                                   |
 | `ingot-agent-protocol` | Adapter traits, request and response types, canonical core result schemas, extension-bag normalization, progress events | `sqlx`, `axum`                                   |
-| `ingot-agent-adapters` | Built-in Claude and Codex adapter implementations                                                        | `sqlx`, `axum`, workflow crates                  |
-| `ingot-agent-runtime`  | Subprocess spawning, cancellation, heartbeats, log writing, adapter supervision                          | `axum`, workflow crates                          |
-| `ingot-http-api`       | Axum routes, DTOs, auth middleware, WebSocket transport                                                  | `sqlx` direct queries, adapter code              |
+| `ingot-agent-adapters` | Built-in Claude and Codex adapter implementations, built-in agent defaults, and CLI probe helpers        | `sqlx`, `axum`, workflow crates                  |
+| `ingot-agent-runtime`  | Subprocess spawning, cancellation, heartbeats, log writing, adapter supervision, and startup agent bootstrap reconciliation | `axum`, workflow crates                          |
+| `ingot-http-api`       | Axum routes, DTOs, auth middleware, WebSocket transport, and operator-facing composition of shared agent probe helpers | `sqlx` direct queries, daemon runtime orchestration |
 
 ### Dependency Direction
 
@@ -231,6 +231,8 @@ config store  workspace agent-runtime
             agent-adapters
 
 http-api ───────→ ingot-usecases
+    │
+    └──────────→ agent-adapters
 apps/ingot-daemon wires everything together
 ```
 
@@ -241,6 +243,7 @@ Rules:
 * `ingot-usecases` depends on ports, not infrastructure implementations
 * `ingot-usecases` owns transaction boundaries and daemon-only system actions such as automatic finalization and stale prepared-convergence invalidation
 * storage, workspace, Git, and agent runtime are infrastructure
+* startup reconciliation in `ingot-agent-runtime` MAY create required global runtime records, including the built-in default agent when the registry is empty
 * the daemon app owns DI, config bootstrap, background task startup, and signal handling only
 
 ## Operator Surface
@@ -326,7 +329,8 @@ The wire-level contracts themselves are specified in [SPEC.md](./SPEC.md).
 ├── auth_token
 ├── daemon.lock
 ├── daemon.pid
-├── daemon.log
+├── log/
+│   └── daemon.log
 ├── backups/
 ├── defaults.yml
 ├── logs/

@@ -1,4 +1,5 @@
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
+use ingot_domain::finding::{Finding, FindingTriageState};
 use ingot_domain::item::{ApprovalState, EscalationState, Item, LifecycleState, ParkingState};
 use ingot_domain::job::{Job, JobStatus, OutcomeClass, PhaseKind};
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
@@ -11,6 +12,7 @@ const ACTION_APPROVAL_APPROVE: &str = "approval_approve";
 const ACTION_OPERATOR_INTERVENTION: &str = "operator_intervention";
 const ACTION_FINALIZE_PREPARED_CONVERGENCE: &str = "finalize_prepared_convergence";
 const ACTION_INVALIDATE_PREPARED_CONVERGENCE: &str = "invalidate_prepared_convergence";
+const ACTION_TRIAGE_FINDINGS: &str = "triage_findings";
 
 /// Board column for UI rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -73,6 +75,7 @@ impl Evaluator {
         item: &Item,
         revision: &ItemRevision,
         jobs: &[Job],
+        findings: &[Finding],
         convergences: &[Convergence],
     ) -> Evaluation {
         let mut diagnostics = Vec::new();
@@ -104,6 +107,10 @@ impl Evaluator {
         let current_revision_jobs: Vec<&Job> = jobs
             .iter()
             .filter(|job| job.item_revision_id == item.current_revision_id)
+            .collect();
+        let current_revision_findings: Vec<&Finding> = findings
+            .iter()
+            .filter(|finding| finding.source_item_revision_id == item.current_revision_id)
             .collect();
         let current_revision_convergences: Vec<&Convergence> = convergences
             .iter()
@@ -141,6 +148,7 @@ impl Evaluator {
                     item,
                     revision,
                     latest_closure_job,
+                    &current_revision_findings,
                     prepared_convergence,
                     &mut diagnostics,
                 );
@@ -210,6 +218,7 @@ impl Evaluator {
             item,
             revision,
             latest_closure_job,
+            &current_revision_findings,
             prepared_convergence,
             &mut diagnostics,
         );
@@ -243,6 +252,7 @@ impl Evaluator {
         item: &Item,
         revision: &ItemRevision,
         latest_closure_job: Option<&Job>,
+        findings: &[&Finding],
         prepared_convergence: Option<&Convergence>,
         diagnostics: &mut Vec<String>,
     ) -> IdleProjection {
@@ -350,6 +360,19 @@ impl Evaluator {
                         terminal_readiness: false,
                     };
                 }
+            }
+
+            if outcome == OutcomeClass::Findings && is_closure_relevant_step(&last_job.step_id) {
+                if let Some(triage_projection) =
+                    triage_projection(item, revision, last_job, findings, prepared_convergence)
+                {
+                    return triage_projection;
+                }
+
+                diagnostics.push(format!(
+                    "last closure job {} ended with findings but no durable findings were extracted",
+                    last_job.step_id
+                ));
             }
         }
 
@@ -524,6 +547,138 @@ fn current_closure_step_id(
     latest_closure_job.map(|job| job.step_id.clone())
 }
 
+fn triage_projection(
+    item: &Item,
+    revision: &ItemRevision,
+    latest_closure_job: &Job,
+    findings: &[&Finding],
+    prepared_convergence: Option<&Convergence>,
+) -> Option<IdleProjection> {
+    let job_findings = findings
+        .iter()
+        .copied()
+        .filter(|finding| finding.source_job_id == latest_closure_job.id)
+        .collect::<Vec<_>>();
+
+    if job_findings.is_empty() {
+        return None;
+    }
+
+    if job_findings.iter().any(|finding| {
+        matches!(
+            finding.triage_state,
+            FindingTriageState::Untriaged | FindingTriageState::NeedsInvestigation
+        )
+    }) {
+        return Some(IdleProjection {
+            current_step_id: Some(latest_closure_job.step_id.clone()),
+            phase_status: "triaging",
+            next_recommended_action: ACTION_TRIAGE_FINDINGS.into(),
+            dispatchable_step_id: None,
+            allowed_actions: vec![],
+            terminal_readiness: false,
+        });
+    }
+
+    if job_findings
+        .iter()
+        .any(|finding| finding.triage_state == FindingTriageState::FixNow)
+    {
+        return triaged_findings_repair_projection(latest_closure_job);
+    }
+
+    triaged_findings_clean_projection(item, revision, latest_closure_job, prepared_convergence)
+}
+
+fn triaged_findings_repair_projection(latest_closure_job: &Job) -> Option<IdleProjection> {
+    graph_target_projection(
+        Some(latest_closure_job.step_id.clone()),
+        "idle",
+        WorkflowGraph::delivery_v1()
+            .next_step(&latest_closure_job.step_id, &OutcomeClass::Findings),
+    )
+}
+
+fn triaged_findings_clean_projection(
+    item: &Item,
+    revision: &ItemRevision,
+    latest_closure_job: &Job,
+    prepared_convergence: Option<&Convergence>,
+) -> Option<IdleProjection> {
+    if latest_closure_job.step_id == step::VALIDATE_INTEGRATED {
+        if prepared_convergence.is_none() {
+            return Some(IdleProjection {
+                current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
+                phase_status: "unknown",
+                next_recommended_action: ACTION_OPERATOR_INTERVENTION.into(),
+                dispatchable_step_id: None,
+                allowed_actions: vec![],
+                terminal_readiness: false,
+            });
+        }
+
+        if revision.approval_policy == ApprovalPolicy::Required {
+            if item.approval_state == ApprovalState::Pending {
+                return Some(IdleProjection {
+                    current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
+                    phase_status: "pending_approval",
+                    next_recommended_action: ACTION_APPROVAL_APPROVE.into(),
+                    dispatchable_step_id: None,
+                    allowed_actions: vec!["approval_approve".into(), "approval_reject".into()],
+                    terminal_readiness: false,
+                });
+            }
+
+            return Some(IdleProjection {
+                current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
+                phase_status: "unknown",
+                next_recommended_action: ACTION_OPERATOR_INTERVENTION.into(),
+                dispatchable_step_id: None,
+                allowed_actions: vec![],
+                terminal_readiness: false,
+            });
+        }
+
+        return Some(IdleProjection {
+            current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
+            phase_status: "finalization_ready",
+            next_recommended_action: ACTION_FINALIZE_PREPARED_CONVERGENCE.into(),
+            dispatchable_step_id: None,
+            allowed_actions: vec![],
+            terminal_readiness: true,
+        });
+    }
+
+    graph_target_projection(
+        Some(latest_closure_job.step_id.clone()),
+        "idle",
+        WorkflowGraph::delivery_v1().next_step(&latest_closure_job.step_id, &OutcomeClass::Clean),
+    )
+}
+
+fn graph_target_projection(
+    current_step_id: Option<String>,
+    phase_status: &'static str,
+    target: Option<&TransitionTarget>,
+) -> Option<IdleProjection> {
+    match target? {
+        TransitionTarget::Step(next_step) => Some(dispatchable_projection(
+            current_step_id,
+            phase_status,
+            next_step,
+        )),
+        TransitionTarget::SystemAction(action) => Some(IdleProjection {
+            current_step_id,
+            phase_status: "awaiting_convergence",
+            next_recommended_action: (*action).into(),
+            dispatchable_step_id: None,
+            allowed_actions: vec![],
+            terminal_readiness: false,
+        }),
+        TransitionTarget::Escalation(_) => None,
+    }
+}
+
 fn dispatchable_projection(
     current_step_id: Option<String>,
     phase_status: &'static str,
@@ -628,7 +783,10 @@ fn job_status_name(job_status: JobStatus) -> &'static str {
 mod tests {
     use chrono::Utc;
     use ingot_domain::convergence::{Convergence, ConvergenceStatus, ConvergenceStrategy};
-    use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId, WorkspaceId};
+    use ingot_domain::finding::{Finding, FindingSeverity, FindingSubjectKind, FindingTriageState};
+    use ingot_domain::ids::{
+        ConvergenceId, FindingId, ItemId, ItemRevisionId, ProjectId, WorkspaceId,
+    };
     use ingot_domain::item::{
         ApprovalState, Classification, EscalationState, Item, LifecycleState, OriginKind,
         ParkingState, Priority,
@@ -664,7 +822,7 @@ mod tests {
             ),
         ];
 
-        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[]);
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
 
         assert_eq!(
             evaluation.current_step_id.as_deref(),
@@ -690,7 +848,7 @@ mod tests {
             Some(OutcomeClass::Clean),
         )];
 
-        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[]);
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
 
         assert_eq!(
             evaluation.dispatchable_step_id.as_deref(),
@@ -714,7 +872,7 @@ mod tests {
             Some(OutcomeClass::Clean),
         )];
 
-        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[]);
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
 
         assert_eq!(
             evaluation.dispatchable_step_id.as_deref(),
@@ -738,7 +896,7 @@ mod tests {
             Some(OutcomeClass::Clean),
         )];
 
-        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[]);
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
 
         assert_eq!(
             evaluation.dispatchable_step_id.as_deref(),
@@ -762,7 +920,7 @@ mod tests {
             Some(OutcomeClass::Clean),
         )];
 
-        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[]);
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
 
         assert_eq!(
             evaluation.next_recommended_action,
@@ -790,7 +948,7 @@ mod tests {
         )];
         let convergences = vec![test_prepared_convergence(false)];
 
-        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &convergences);
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &convergences);
 
         assert_eq!(
             evaluation.next_recommended_action,
@@ -805,15 +963,17 @@ mod tests {
         let evaluator = Evaluator::new();
         let item = test_item();
         let revision = test_revision(ApprovalPolicy::Required);
-        let jobs = vec![test_job(
+        let job = test_job(
             step::VALIDATE_INTEGRATED,
             PhaseKind::Validate,
             JobStatus::Completed,
             Some(OutcomeClass::Findings),
-        )];
+        );
+        let jobs = vec![job.clone()];
+        let findings = vec![test_finding(&job, FindingTriageState::FixNow)];
         let convergences = vec![test_prepared_convergence(true)];
 
-        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &convergences);
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &findings, &convergences);
 
         assert_eq!(
             evaluation.dispatchable_step_id.as_deref(),
@@ -822,6 +982,49 @@ mod tests {
         assert_eq!(
             evaluation.next_recommended_action,
             step::REPAIR_AFTER_INTEGRATION
+        );
+    }
+
+    #[test]
+    fn untriaged_findings_block_dispatch_in_triage_state() {
+        let evaluator = Evaluator::new();
+        let item = test_item();
+        let revision = test_revision(ApprovalPolicy::Required);
+        let job = test_job(
+            step::REVIEW_CANDIDATE_INITIAL,
+            PhaseKind::Review,
+            JobStatus::Completed,
+            Some(OutcomeClass::Findings),
+        );
+        let jobs = vec![job.clone()];
+        let findings = vec![test_finding(&job, FindingTriageState::Untriaged)];
+
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &findings, &[]);
+
+        assert_eq!(evaluation.phase_status.as_deref(), Some("triaging"));
+        assert_eq!(evaluation.next_recommended_action, "triage_findings");
+        assert_eq!(evaluation.dispatchable_step_id, None);
+    }
+
+    #[test]
+    fn non_blocking_triaged_findings_follow_clean_edge() {
+        let evaluator = Evaluator::new();
+        let item = test_item();
+        let revision = test_revision(ApprovalPolicy::Required);
+        let job = test_job(
+            step::REVIEW_CANDIDATE_INITIAL,
+            PhaseKind::Review,
+            JobStatus::Completed,
+            Some(OutcomeClass::Findings),
+        );
+        let jobs = vec![job.clone()];
+        let findings = vec![test_finding(&job, FindingTriageState::WontFix)];
+
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &findings, &[]);
+
+        assert_eq!(
+            evaluation.dispatchable_step_id.as_deref(),
+            Some(step::VALIDATE_CANDIDATE_INITIAL)
         );
     }
 
@@ -837,7 +1040,7 @@ mod tests {
             Some(OutcomeClass::Clean),
         )];
 
-        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[]);
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
 
         assert_eq!(
             evaluation.dispatchable_step_id.as_deref(),
@@ -861,7 +1064,7 @@ mod tests {
             None,
         )];
 
-        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[]);
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
 
         assert_eq!(evaluation.dispatchable_step_id, None);
         assert_eq!(evaluation.phase_status.as_deref(), Some("unknown"));
@@ -885,7 +1088,7 @@ mod tests {
             Some(OutcomeClass::Cancelled),
         )];
 
-        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[]);
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
 
         assert_eq!(evaluation.dispatchable_step_id, None);
         assert_eq!(evaluation.next_recommended_action, "none");
@@ -907,7 +1110,7 @@ mod tests {
             Some(OutcomeClass::TransientFailure),
         )];
 
-        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[]);
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
 
         assert_eq!(evaluation.dispatchable_step_id, None);
         assert_eq!(evaluation.next_recommended_action, "none");
@@ -1034,6 +1237,39 @@ mod tests {
             conflict_summary: None,
             created_at: Utc::now(),
             completed_at: None,
+        }
+    }
+
+    fn test_finding(job: &Job, triage_state: FindingTriageState) -> Finding {
+        Finding {
+            id: FindingId::from_uuid(Uuid::now_v7()),
+            project_id: ProjectId::from_uuid(Uuid::nil()),
+            source_item_id: ItemId::from_uuid(Uuid::nil()),
+            source_item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
+            source_job_id: job.id,
+            source_step_id: job.step_id.clone(),
+            source_report_schema_version: "review_report:v1".into(),
+            source_finding_key: "finding-1".into(),
+            source_subject_kind: FindingSubjectKind::Candidate,
+            source_subject_base_commit_oid: Some("base".into()),
+            source_subject_head_commit_oid: "head".into(),
+            code: "BUG001".into(),
+            severity: FindingSeverity::High,
+            summary: "summary".into(),
+            paths: vec!["src/lib.rs".into()],
+            evidence: serde_json::json!(["evidence"]),
+            triage_state,
+            linked_item_id: None,
+            triage_note: match triage_state {
+                FindingTriageState::WontFix => Some("accepted".into()),
+                _ => None,
+            },
+            created_at: Utc::now(),
+            triaged_at: if triage_state == FindingTriageState::Untriaged {
+                None
+            } else {
+                Some(Utc::now())
+            },
         }
     }
 }

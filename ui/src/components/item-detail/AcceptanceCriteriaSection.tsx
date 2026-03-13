@@ -1,3 +1,4 @@
+import { CodeBlock } from '../CodeBlock'
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
 
 export function AcceptanceCriteriaSection({ acceptanceCriteria }: { acceptanceCriteria: string }) {
@@ -7,9 +8,13 @@ export function AcceptanceCriteriaSection({ acceptanceCriteria }: { acceptanceCr
         <CardTitle>Acceptance Criteria</CardTitle>
       </CardHeader>
       <CardContent>
-        <pre className="rounded-lg border border-border bg-muted/30 p-4 text-sm leading-6 whitespace-pre-wrap">
-          {acceptanceCriteria}
-        </pre>
+        <CodeBlock
+          value={acceptanceCriteria}
+          wrap
+          copyLabel="Copy acceptance criteria"
+          maxHeightClassName="max-h-64"
+          preClassName="text-sm"
+        />
       </CardContent>
     </Card>
   )

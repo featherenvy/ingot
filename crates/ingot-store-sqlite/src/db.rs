@@ -221,8 +221,8 @@ mod tests {
 
         sqlx::query(
             "UPDATE findings
-             SET triage_state = 'promoted',
-                 promoted_item_id = 'itm_11111111111111111111111111111111',
+             SET triage_state = 'backlog',
+                 linked_item_id = 'itm_11111111111111111111111111111111',
                  triaged_at = '2026-03-12T00:00:00Z'
              WHERE id = 'fnd_00000000000000000000000000000000'",
         )

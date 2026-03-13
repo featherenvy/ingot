@@ -7,20 +7,20 @@ use axum::http::StatusCode;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::Utc;
+use ingot_agent_adapters::registry::{default_agent_capabilities, probe_and_apply};
 use ingot_config::IngotConfig;
 use ingot_config::loader::load_config;
 use ingot_domain::activity::{Activity, ActivityEventType};
 use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 
 use ingot_domain::convergence::Convergence;
-use ingot_domain::finding::Finding;
+use ingot_domain::finding::{Finding, FindingTriageState};
 use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
 use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::item::{
-    ApprovalState, Classification, DoneReason, EscalationReason, Item, LifecycleState, Priority,
-    ResolutionSource,
+    ApprovalState, Classification, DoneReason, EscalationReason, Item, LifecycleState, OriginKind,
+    Priority, ResolutionSource,
 };
 use ingot_domain::job::{Job, JobStatus, OutcomeClass};
 use ingot_domain::ports::{ProjectMutationLockPort, RepositoryError};
@@ -40,10 +40,12 @@ use ingot_git::commit::{
 use ingot_git::diff::changed_paths_between;
 use ingot_store_sqlite::{Database, FinishJobNonSuccessParams, StartJobExecutionParams};
 use ingot_usecases::finding::{
-    FindingPromotionOverrides, dismiss_finding, parse_revision_context_summary, promote_finding,
+    BacklogFindingOverrides, TriageFindingInput, backlog_finding, parse_revision_context_summary,
+    triage_finding,
 };
 use ingot_usecases::item::{
-    CreateItemInput, approval_state_for_policy, create_manual_item, normalize_target_ref,
+    CreateItemInput, approval_state_for_policy, create_manual_item, default_policy_snapshot,
+    default_template_map_snapshot, normalize_target_ref, rework_budgets_from_policy_snapshot,
 };
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job, retry_job};
 use ingot_usecases::{
@@ -59,10 +61,10 @@ use ingot_workspace::{
 use crate::error::ApiError;
 
 #[derive(Clone)]
-struct AppState {
-    db: Database,
+pub(crate) struct AppState {
+    pub(crate) db: Database,
     complete_job_service: CompleteJobService<Database, GitJobCompletionPort, ProjectLocks>,
-    project_locks: ProjectLocks,
+    pub(crate) project_locks: ProjectLocks,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,6 +196,15 @@ pub struct DismissFindingRequest {
     pub dismissal_reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TriageFindingRequest {
+    pub triage_state: FindingTriageState,
+    pub triage_note: Option<String>,
+    pub linked_item_id: Option<String>,
+    pub target_ref: Option<String>,
+    pub approval_policy: Option<ApprovalPolicy>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct DispatchJobRequest {
     pub step_id: Option<String>,
@@ -245,6 +256,20 @@ pub struct ReviseItemRequest {
     pub seed_target_commit_oid: Option<String>,
 }
 
+impl From<RejectApprovalRequest> for ReviseItemRequest {
+    fn from(request: RejectApprovalRequest) -> Self {
+        Self {
+            title: request.title,
+            description: request.description,
+            acceptance_criteria: request.acceptance_criteria,
+            target_ref: request.target_ref,
+            approval_policy: request.approval_policy,
+            seed_commit_oid: request.seed_commit_oid,
+            seed_target_commit_oid: request.seed_target_commit_oid,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CompleteJobRequest {
     pub outcome_class: OutcomeClass,
@@ -280,6 +305,7 @@ pub fn build_router_with_project_locks(db: Database, project_locks: ProjectLocks
         .route("/api/health", get(health))
         .route("/api/config", get(get_global_config))
         .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/demo-project", post(crate::demo::create_demo_project))
         .route(
             "/api/projects/{project_id}/activity",
             get(list_project_activity),
@@ -377,6 +403,10 @@ pub fn build_router_with_project_locks(db: Database, project_locks: ProjectLocks
         .route("/api/jobs/{job_id}/heartbeat", post(heartbeat_job))
         .route("/api/jobs/{job_id}/logs", get(get_job_logs))
         .route("/api/findings/{finding_id}", get(get_finding))
+        .route(
+            "/api/findings/{finding_id}/triage",
+            post(triage_item_finding),
+        )
         .route(
             "/api/findings/{finding_id}/promote",
             post(promote_item_from_finding),
@@ -822,8 +852,7 @@ async fn create_agent(
         health_check: None,
         status: AgentStatus::Probing,
     };
-    let probe_result = probe_agent_cli(&agent).await;
-    apply_probe_result(&mut agent, probe_result);
+    probe_and_apply(&mut agent).await;
 
     state
         .db
@@ -877,8 +906,7 @@ async fn update_agent(
         health_check: existing_health_check,
         status: AgentStatus::Probing,
     };
-    let probe_result = probe_agent_cli(&agent).await;
-    apply_probe_result(&mut agent, probe_result);
+    probe_and_apply(&mut agent).await;
 
     state
         .db
@@ -909,9 +937,7 @@ async fn reprobe_agent(
 ) -> Result<Json<Agent>, ApiError> {
     let agent_id = parse_id::<AgentId>(&agent_id, "agent")?;
     let mut agent = state.db.get_agent(agent_id).await.map_err(repo_to_agent)?;
-    agent.status = AgentStatus::Probing;
-    let probe_result = probe_agent_cli(&agent).await;
-    apply_probe_result(&mut agent, probe_result);
+    probe_and_apply(&mut agent).await;
 
     state
         .db
@@ -1038,13 +1064,19 @@ async fn list_items(
             .list_jobs_by_item(item.id)
             .await
             .map_err(repo_to_internal)?;
+        let findings = state
+            .db
+            .list_findings_by_item(item.id)
+            .await
+            .map_err(repo_to_internal)?;
         let convergences = state
             .db
             .list_convergences_by_item(item.id)
             .await
             .map_err(repo_to_internal)?;
         let convergences = hydrate_convergence_validity(&project, convergences).await?;
-        let evaluation = evaluator.evaluate(&item, &current_revision, &jobs, &convergences);
+        let evaluation =
+            evaluator.evaluate(&item, &current_revision, &jobs, &findings, &convergences);
 
         let title = current_revision.title.clone();
         summaries.push(ItemSummaryResponse {
@@ -1146,9 +1178,10 @@ async fn revise_item(
     Path((project_id, item_id)): Path<(String, String)>,
     maybe_request: Option<Json<ReviseItemRequest>>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
-    let request = maybe_request
+    let request: ReviseItemRequest = maybe_request
         .map(|Json(request)| request)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into();
     let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let project = state
@@ -1342,9 +1375,10 @@ async fn reopen_item(
     Path((project_id, item_id)): Path<(String, String)>,
     maybe_request: Option<Json<ReviseItemRequest>>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
-    let request = maybe_request
+    let request: ReviseItemRequest = maybe_request
         .map(|Json(request)| request)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into();
     let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let project = state
@@ -1485,6 +1519,11 @@ async fn dispatch_item_job(
         .list_jobs_by_item(item.id)
         .await
         .map_err(repo_to_internal)?;
+    let findings = state
+        .db
+        .list_findings_by_item(item.id)
+        .await
+        .map_err(repo_to_internal)?;
     let convergences = state
         .db
         .list_convergences_by_item(item.id)
@@ -1494,7 +1533,14 @@ async fn dispatch_item_job(
     let command = DispatchJobCommand {
         step_id: maybe_request.and_then(|Json(request)| request.step_id),
     };
-    let mut job = dispatch_job(&item, &current_revision, &jobs, &convergences, command)?;
+    let mut job = dispatch_job(
+        &item,
+        &current_revision,
+        &jobs,
+        &findings,
+        &convergences,
+        command,
+    )?;
 
     state.db.create_job(&job).await.map_err(repo_to_internal)?;
 
@@ -1548,6 +1594,11 @@ async fn retry_item_job(
         .list_jobs_by_item(item.id)
         .await
         .map_err(repo_to_internal)?;
+    let findings = state
+        .db
+        .list_findings_by_item(item.id)
+        .await
+        .map_err(repo_to_internal)?;
     let previous_job = jobs
         .iter()
         .find(|job| job.id == job_id)
@@ -1567,6 +1618,7 @@ async fn retry_item_job(
         &item,
         &current_revision,
         &jobs,
+        &findings,
         &convergences,
         &previous_job,
     )?;
@@ -1859,13 +1911,19 @@ async fn prepare_item_convergence(
         .list_jobs_by_item(item.id)
         .await
         .map_err(repo_to_internal)?;
+    let findings = state
+        .db
+        .list_findings_by_item(item.id)
+        .await
+        .map_err(repo_to_internal)?;
     let convergences = state
         .db
         .list_convergences_by_item(item.id)
         .await
         .map_err(repo_to_internal)?;
     let convergences = hydrate_convergence_validity(&project, convergences).await?;
-    let evaluation = Evaluator::new().evaluate(&item, &current_revision, &jobs, &convergences);
+    let evaluation =
+        Evaluator::new().evaluate(&item, &current_revision, &jobs, &findings, &convergences);
 
     if evaluation.next_recommended_action != "prepare_convergence" {
         return Err(ApiError::Conflict {
@@ -1903,6 +1961,7 @@ async fn prepare_item_convergence(
         &item,
         &current_revision,
         &jobs,
+        &findings,
         &all_convergences,
         DispatchJobCommand {
             step_id: Some("validate_integrated".into()),
@@ -2209,68 +2268,12 @@ async fn reject_item_approval(
             .map_err(repo_to_internal)?;
     }
 
-    let request = maybe_request
+    let request: ReviseItemRequest = maybe_request
         .map(|Json(request)| request)
-        .unwrap_or_default();
-    let target_ref = normalize_target_ref(
-        request
-            .target_ref
-            .as_deref()
-            .unwrap_or(current_revision.target_ref.as_str()),
-    );
-    let derived_target_head = resolve_ref_oid(FsPath::new(&project.path), &target_ref)
-        .await
-        .map_err(git_to_internal)?
-        .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.clone()))?;
-
-    let seed_commit_oid = if let Some(seed_commit_oid) = request.seed_commit_oid {
-        ensure_reachable_seed(
-            FsPath::new(&project.path),
-            "seed_commit_oid",
-            &seed_commit_oid,
-        )
-        .await?;
-        seed_commit_oid
-    } else {
-        current_authoring_head_for_revision(&jobs, &current_revision)
-    };
-    let seed_target_commit_oid =
-        if let Some(seed_target_commit_oid) = request.seed_target_commit_oid {
-            ensure_reachable_seed(
-                FsPath::new(&project.path),
-                "seed_target_commit_oid",
-                &seed_target_commit_oid,
-            )
-            .await?;
-            Some(seed_target_commit_oid)
-        } else {
-            Some(derived_target_head)
-        };
-
-    let approval_policy = request
-        .approval_policy
-        .unwrap_or(current_revision.approval_policy);
-    let created_at = Utc::now();
-    let next_revision = ItemRevision {
-        id: ingot_domain::ids::ItemRevisionId::new(),
-        item_id: item.id,
-        revision_no: current_revision.revision_no + 1,
-        title: request.title.unwrap_or(current_revision.title.clone()),
-        description: request
-            .description
-            .unwrap_or(current_revision.description.clone()),
-        acceptance_criteria: request
-            .acceptance_criteria
-            .unwrap_or(current_revision.acceptance_criteria.clone()),
-        target_ref,
-        approval_policy,
-        policy_snapshot: current_revision.policy_snapshot.clone(),
-        template_map_snapshot: current_revision.template_map_snapshot.clone(),
-        seed_commit_oid,
-        seed_target_commit_oid,
-        supersedes_revision_id: Some(current_revision.id),
-        created_at,
-    };
+        .unwrap_or_default()
+        .into();
+    let next_revision =
+        build_superseding_revision(&project, &item, &current_revision, &jobs, request).await?;
     state
         .db
         .create_revision(&next_revision)
@@ -2330,35 +2333,42 @@ async fn get_finding(
     Ok(Json(finding))
 }
 
+#[derive(Debug)]
+struct AppliedFindingTriage {
+    finding: Finding,
+    linked_item: Option<Item>,
+    linked_revision: Option<ItemRevision>,
+}
+
+async fn triage_item_finding(
+    State(state): State<AppState>,
+    Path(finding_id): Path<String>,
+    Json(request): Json<TriageFindingRequest>,
+) -> Result<Json<Finding>, ApiError> {
+    let finding_id = parse_id::<FindingId>(&finding_id, "finding")?;
+    let applied = apply_finding_triage(&state, finding_id, request).await?;
+    Ok(Json(applied.finding))
+}
+
 async fn dismiss_item_finding(
     State(state): State<AppState>,
     Path(finding_id): Path<String>,
     Json(request): Json<DismissFindingRequest>,
 ) -> Result<Json<Finding>, ApiError> {
     let finding_id = parse_id::<FindingId>(&finding_id, "finding")?;
-    let finding = state
-        .db
-        .get_finding(finding_id)
-        .await
-        .map_err(repo_to_finding)?;
-    let dismissed = dismiss_finding(&finding, request.dismissal_reason)?;
-
-    state
-        .db
-        .dismiss_finding(&dismissed)
-        .await
-        .map_err(repo_to_internal)?;
-    append_activity(
+    let applied = apply_finding_triage(
         &state,
-        dismissed.project_id,
-        ActivityEventType::FindingDismissed,
-        "finding",
-        dismissed.id,
-        serde_json::json!({ "item_id": dismissed.source_item_id }),
+        finding_id,
+        TriageFindingRequest {
+            triage_state: FindingTriageState::DismissedInvalid,
+            triage_note: Some(request.dismissal_reason),
+            linked_item_id: None,
+            target_ref: None,
+            approval_policy: None,
+        },
     )
     .await?;
-
-    Ok(Json(dismissed))
+    Ok(Json(applied.finding))
 }
 
 async fn promote_item_from_finding(
@@ -2367,6 +2377,43 @@ async fn promote_item_from_finding(
     maybe_request: Option<Json<PromoteFindingRequest>>,
 ) -> Result<Json<PromoteFindingResponse>, ApiError> {
     let finding_id = parse_id::<FindingId>(&finding_id, "finding")?;
+    let request = maybe_request
+        .map(|Json(request)| TriageFindingRequest {
+            triage_state: FindingTriageState::Backlog,
+            triage_note: None,
+            linked_item_id: None,
+            target_ref: request.target_ref,
+            approval_policy: request.approval_policy,
+        })
+        .unwrap_or(TriageFindingRequest {
+            triage_state: FindingTriageState::Backlog,
+            triage_note: None,
+            linked_item_id: None,
+            target_ref: None,
+            approval_policy: None,
+        });
+    let applied = apply_finding_triage(&state, finding_id, request).await?;
+    let item = applied.linked_item.ok_or_else(|| ApiError::Conflict {
+        code: "linked_item_missing",
+        message: "Backlog promotion did not create a linked item".into(),
+    })?;
+    let current_revision = applied.linked_revision.ok_or_else(|| ApiError::Conflict {
+        code: "linked_revision_missing",
+        message: "Backlog promotion did not create a linked revision".into(),
+    })?;
+
+    Ok(Json(PromoteFindingResponse {
+        item,
+        current_revision,
+        finding: applied.finding,
+    }))
+}
+
+async fn apply_finding_triage(
+    state: &AppState,
+    finding_id: FindingId,
+    request: TriageFindingRequest,
+) -> Result<AppliedFindingTriage, ApiError> {
     let finding = state
         .db
         .get_finding(finding_id)
@@ -2377,47 +2424,305 @@ async fn promote_item_from_finding(
         .get_item(finding.source_item_id)
         .await
         .map_err(repo_to_item)?;
-    let project = state
-        .db
-        .get_project(source_item.project_id)
-        .await
-        .map_err(repo_to_project)?;
     let source_revision = state
         .db
         .get_revision(finding.source_item_revision_id)
         .await
         .map_err(repo_to_internal)?;
-    ensure_finding_subject_reachable(&project, &finding).await?;
-    let overrides = maybe_request
-        .map(|Json(request)| FindingPromotionOverrides {
-            target_ref: request.target_ref,
-            approval_policy: request.approval_policy,
-        })
-        .unwrap_or_default();
-
-    let (promoted_item, promoted_revision, promoted_finding) =
-        promote_finding(&finding, &source_item, &source_revision, overrides)?;
-
-    state
+    let project = state
         .db
-        .promote_finding(&promoted_finding, &promoted_item, &promoted_revision)
+        .get_project(source_item.project_id)
         .await
-        .map_err(repo_to_internal)?;
-    append_activity(
-        &state,
-        promoted_item.project_id,
-        ActivityEventType::FindingPromoted,
-        "finding",
-        promoted_finding.id,
-        serde_json::json!({ "item_id": source_item.id, "promoted_item_id": promoted_item.id }),
+        .map_err(repo_to_project)?;
+    let _guard = state
+        .project_locks
+        .acquire_project_mutation(project.id)
+        .await;
+
+    let parsed_linked_item_id = request
+        .linked_item_id
+        .as_deref()
+        .map(|value| parse_id::<ItemId>(value, "linked_item"))
+        .transpose()?;
+    let detached_origin_item_id =
+        find_detached_origin_item_id(state, &finding, parsed_linked_item_id).await?;
+
+    let applied = match request.triage_state {
+        FindingTriageState::Backlog => {
+            ensure_finding_subject_reachable(&project, &finding).await?;
+            if let Some(linked_item_id) = parsed_linked_item_id {
+                let linked_item =
+                    load_linked_item_for_finding(state, &source_item, linked_item_id).await?;
+                if linked_item.id == source_item.id {
+                    return Err(ApiError::UseCase(UseCaseError::InvalidFindingTriage(
+                        "backlog triage must link to a different item".into(),
+                    )));
+                }
+                let triaged = triage_finding(
+                    &finding,
+                    TriageFindingInput {
+                        triage_state: FindingTriageState::Backlog,
+                        triage_note: request.triage_note,
+                        linked_item_id: Some(linked_item.id),
+                    },
+                )?;
+                state
+                    .db
+                    .triage_finding_with_origin_detached(&triaged, detached_origin_item_id)
+                    .await
+                    .map_err(repo_to_internal)?;
+                AppliedFindingTriage {
+                    finding: triaged,
+                    linked_item: Some(linked_item),
+                    linked_revision: None,
+                }
+            } else {
+                let overrides = BacklogFindingOverrides {
+                    target_ref: request.target_ref,
+                    approval_policy: request.approval_policy,
+                };
+                let (linked_item, linked_revision, triaged) = backlog_finding(
+                    &finding,
+                    &source_item,
+                    &source_revision,
+                    overrides,
+                    request.triage_note,
+                )?;
+                state
+                    .db
+                    .link_backlog_finding(
+                        &triaged,
+                        &linked_item,
+                        &linked_revision,
+                        detached_origin_item_id,
+                    )
+                    .await
+                    .map_err(repo_to_internal)?;
+                AppliedFindingTriage {
+                    finding: triaged,
+                    linked_item: Some(linked_item),
+                    linked_revision: Some(linked_revision),
+                }
+            }
+        }
+        FindingTriageState::Duplicate => {
+            let linked_item_id = parsed_linked_item_id.ok_or_else(|| {
+                ApiError::UseCase(UseCaseError::InvalidFindingTriage(
+                    "duplicate triage requires linked_item_id".into(),
+                ))
+            })?;
+            let linked_item =
+                load_linked_item_for_finding(state, &source_item, linked_item_id).await?;
+            if linked_item.id == source_item.id {
+                return Err(ApiError::UseCase(UseCaseError::InvalidFindingTriage(
+                    "duplicate triage must link to a different item".into(),
+                )));
+            }
+            let triaged = triage_finding(
+                &finding,
+                TriageFindingInput {
+                    triage_state: FindingTriageState::Duplicate,
+                    triage_note: request.triage_note,
+                    linked_item_id: Some(linked_item.id),
+                },
+            )?;
+            state
+                .db
+                .triage_finding_with_origin_detached(&triaged, detached_origin_item_id)
+                .await
+                .map_err(repo_to_internal)?;
+            AppliedFindingTriage {
+                finding: triaged,
+                linked_item: Some(linked_item),
+                linked_revision: None,
+            }
+        }
+        _ => {
+            let triaged = triage_finding(
+                &finding,
+                TriageFindingInput {
+                    triage_state: request.triage_state,
+                    triage_note: request.triage_note,
+                    linked_item_id: parsed_linked_item_id,
+                },
+            )?;
+            state
+                .db
+                .triage_finding_with_origin_detached(&triaged, detached_origin_item_id)
+                .await
+                .map_err(repo_to_internal)?;
+            AppliedFindingTriage {
+                finding: triaged,
+                linked_item: None,
+                linked_revision: None,
+            }
+        }
+    };
+
+    maybe_enter_approval_after_finding_triage(
+        state,
+        &source_item,
+        &source_revision,
+        &applied.finding,
     )
     .await?;
 
-    Ok(Json(PromoteFindingResponse {
-        item: promoted_item,
-        current_revision: promoted_revision,
-        finding: promoted_finding,
-    }))
+    append_activity(
+        state,
+        source_item.project_id,
+        ActivityEventType::FindingTriaged,
+        "finding",
+        applied.finding.id,
+        serde_json::json!({
+            "item_id": source_item.id,
+            "triage_state": applied.finding.triage_state,
+            "linked_item_id": applied.finding.linked_item_id,
+        }),
+    )
+    .await?;
+
+    Ok(applied)
+}
+
+async fn find_detached_origin_item_id(
+    state: &AppState,
+    finding: &Finding,
+    next_linked_item_id: Option<ItemId>,
+) -> Result<Option<ItemId>, ApiError> {
+    let Some(current_linked_item_id) = finding.linked_item_id else {
+        return Ok(None);
+    };
+    if finding.triage_state != FindingTriageState::Backlog {
+        return Ok(None);
+    }
+    if next_linked_item_id == Some(current_linked_item_id) {
+        return Ok(None);
+    }
+
+    let linked_item = state
+        .db
+        .get_item(current_linked_item_id)
+        .await
+        .map_err(repo_to_internal)?;
+
+    if linked_item.origin_kind == OriginKind::PromotedFinding
+        && linked_item.origin_finding_id == Some(finding.id)
+    {
+        Ok(Some(linked_item.id))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn load_linked_item_for_finding(
+    state: &AppState,
+    source_item: &Item,
+    linked_item_id: ItemId,
+) -> Result<Item, ApiError> {
+    let linked_item = state
+        .db
+        .get_item(linked_item_id)
+        .await
+        .map_err(|error| match error {
+            RepositoryError::NotFound => ApiError::UseCase(UseCaseError::LinkedItemNotFound),
+            other => repo_to_internal(other),
+        })?;
+
+    if linked_item.project_id != source_item.project_id {
+        return Err(UseCaseError::LinkedItemProjectMismatch.into());
+    }
+
+    Ok(linked_item)
+}
+
+async fn maybe_enter_approval_after_finding_triage(
+    state: &AppState,
+    source_item: &Item,
+    source_revision: &ItemRevision,
+    finding: &Finding,
+) -> Result<(), ApiError> {
+    if finding.source_step_id != "validate_integrated"
+        || source_item.current_revision_id != source_revision.id
+    {
+        return Ok(());
+    }
+
+    let jobs = state
+        .db
+        .list_jobs_by_item(source_item.id)
+        .await
+        .map_err(repo_to_internal)?;
+    let latest_closure_findings_job = jobs
+        .iter()
+        .filter(|job| job.item_revision_id == source_revision.id)
+        .filter(|job| job.status.is_terminal() && job.outcome_class == Some(OutcomeClass::Findings))
+        .filter(|job| {
+            matches!(
+                ingot_workflow::step::find_step(&job.step_id)
+                    .map(|contract| contract.closure_relevance),
+                Some(ingot_workflow::ClosureRelevance::ClosureRelevant)
+            )
+        })
+        .max_by_key(|job| (job.ended_at, job.created_at));
+
+    let Some(latest_job) = latest_closure_findings_job else {
+        return Ok(());
+    };
+    if latest_job.id != finding.source_job_id {
+        return Ok(());
+    }
+
+    let findings = state
+        .db
+        .list_findings_by_item(source_item.id)
+        .await
+        .map_err(repo_to_internal)?;
+    let latest_job_findings = findings
+        .iter()
+        .filter(|row| row.source_item_revision_id == source_revision.id)
+        .filter(|row| row.source_job_id == latest_job.id)
+        .collect::<Vec<_>>();
+
+    if latest_job_findings.is_empty()
+        || latest_job_findings.iter().any(|row| {
+            row.triage_state.is_unresolved() || row.triage_state == FindingTriageState::FixNow
+        })
+    {
+        return Ok(());
+    }
+
+    let mut item = state
+        .db
+        .get_item(source_item.id)
+        .await
+        .map_err(repo_to_item)?;
+    let next_approval_state = match source_revision.approval_policy {
+        ApprovalPolicy::Required => ApprovalState::Pending,
+        ApprovalPolicy::NotRequired => ApprovalState::NotRequired,
+    };
+    if item.approval_state != next_approval_state {
+        item.approval_state = next_approval_state;
+        item.updated_at = Utc::now();
+        state
+            .db
+            .update_item(&item)
+            .await
+            .map_err(repo_to_internal)?;
+
+        if next_approval_state == ApprovalState::Pending {
+            append_activity(
+                state,
+                item.project_id,
+                ActivityEventType::ApprovalRequested,
+                "item",
+                item.id,
+                serde_json::json!({ "source": "finding_triage" }),
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
 }
 
 async fn complete_job(
@@ -2646,7 +2951,8 @@ async fn load_item_detail(
         .await
         .map_err(repo_to_internal)?;
     let revision_context_summary = parse_revision_context_summary(revision_context.as_ref())?;
-    let evaluation = Evaluator::new().evaluate(&item, &current_revision, &jobs, &convergences);
+    let evaluation =
+        Evaluator::new().evaluate(&item, &current_revision, &jobs, &findings, &convergences);
     let diagnostics = evaluation.diagnostics.clone();
 
     Ok(ItemDetailResponse {
@@ -2714,7 +3020,7 @@ async fn refresh_revision_context_for_job_like(
     Ok(())
 }
 
-async fn append_activity(
+pub(crate) async fn append_activity(
     state: &AppState,
     project_id: ProjectId,
     event_type: ActivityEventType,
@@ -2941,6 +3247,7 @@ async fn build_superseding_revision(
     let approval_policy = request
         .approval_policy
         .unwrap_or(current_revision.approval_policy);
+    let policy_snapshot = build_superseding_policy_snapshot(current_revision, approval_policy);
 
     Ok(ItemRevision {
         id: ingot_domain::ids::ItemRevisionId::new(),
@@ -2955,13 +3262,37 @@ async fn build_superseding_revision(
             .unwrap_or(current_revision.acceptance_criteria.clone()),
         target_ref,
         approval_policy,
-        policy_snapshot: current_revision.policy_snapshot.clone(),
-        template_map_snapshot: current_revision.template_map_snapshot.clone(),
+        policy_snapshot,
+        template_map_snapshot: default_template_map_snapshot(),
         seed_commit_oid,
         seed_target_commit_oid,
         supersedes_revision_id: Some(current_revision.id),
         created_at: Utc::now(),
     })
+}
+
+fn build_superseding_policy_snapshot(
+    current_revision: &ItemRevision,
+    approval_policy: ApprovalPolicy,
+) -> serde_json::Value {
+    match rework_budgets_from_policy_snapshot(&current_revision.policy_snapshot) {
+        Some((candidate_rework_budget, integration_rework_budget)) => default_policy_snapshot(
+            approval_policy,
+            candidate_rework_budget,
+            integration_rework_budget,
+        ),
+        None => {
+            let mut policy_snapshot = current_revision.policy_snapshot.clone();
+            if let Some(object) = policy_snapshot.as_object_mut() {
+                object.insert(
+                    "approval_policy".into(),
+                    serde_json::to_value(approval_policy)
+                        .expect("approval policy should serialize into JSON"),
+                );
+            }
+            policy_snapshot
+        }
+    }
 }
 
 async fn ensure_authoring_workspace(
@@ -3260,7 +3591,7 @@ async fn prepare_convergence_workspace(
     Ok(convergence)
 }
 
-fn load_effective_config(project: Option<&Project>) -> Result<IngotConfig, ApiError> {
+pub(crate) fn load_effective_config(project: Option<&Project>) -> Result<IngotConfig, ApiError> {
     let project_path = project.map(project_config_path);
     load_config(global_config_path().as_path(), project_path.as_deref()).map_err(|error| {
         ApiError::BadRequest {
@@ -3284,7 +3615,9 @@ fn project_config_path(project: &Project) -> PathBuf {
     FsPath::new(&project.path).join(".ingot").join("config.yml")
 }
 
-fn parse_config_approval_policy(config: &IngotConfig) -> Result<ApprovalPolicy, ApiError> {
+pub(crate) fn parse_config_approval_policy(
+    config: &IngotConfig,
+) -> Result<ApprovalPolicy, ApiError> {
     match config.defaults.approval_policy.as_str() {
         "required" => Ok(ApprovalPolicy::Required),
         "not_required" => Ok(ApprovalPolicy::NotRequired),
@@ -3303,7 +3636,7 @@ fn canonicalize_repo_path(path: &str) -> Result<PathBuf, ApiError> {
     })
 }
 
-async fn resolve_default_branch(
+pub(crate) async fn resolve_default_branch(
     repo_path: &FsPath,
     requested_branch: Option<&str>,
 ) -> Result<String, ApiError> {
@@ -3418,91 +3751,6 @@ fn normalize_non_empty(field: &'static str, value: &str) -> Result<String, ApiEr
     Ok(trimmed.to_string())
 }
 
-fn default_agent_capabilities(adapter_kind: AdapterKind) -> Vec<AgentCapability> {
-    match adapter_kind {
-        AdapterKind::Codex => vec![
-            AgentCapability::ReadOnlyJobs,
-            AgentCapability::MutatingJobs,
-            AgentCapability::StructuredOutput,
-        ],
-        AdapterKind::ClaudeCode => vec![
-            AgentCapability::ReadOnlyJobs,
-            AgentCapability::StructuredOutput,
-        ],
-    }
-}
-
-async fn probe_agent_cli(agent: &Agent) -> Result<String, String> {
-    let args = match agent.adapter_kind {
-        AdapterKind::Codex => vec!["exec", "--help"],
-        AdapterKind::ClaudeCode => vec!["--version"],
-    };
-    let output = Command::new(&agent.cli_path)
-        .args(&args)
-        .output()
-        .await
-        .map_err(|error| error.to_string())?;
-
-    let combined = if output.stdout.is_empty() {
-        String::from_utf8_lossy(&output.stderr).trim().to_string()
-    } else {
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    };
-
-    if output.status.success() {
-        match agent.adapter_kind {
-            AdapterKind::Codex => validate_codex_exec_probe(&combined),
-            AdapterKind::ClaudeCode => Ok(combined),
-        }
-    } else if combined.is_empty() {
-        Err(format!(
-            "{} exited with status {}",
-            agent.cli_path, output.status
-        ))
-    } else {
-        Err(combined)
-    }
-}
-
-fn validate_codex_exec_probe(output: &str) -> Result<String, String> {
-    let required_flags = [
-        "--sandbox",
-        "--output-schema",
-        "--output-last-message",
-        "--json",
-    ];
-    let missing_flags = required_flags
-        .iter()
-        .filter(|flag| !output.contains(**flag))
-        .copied()
-        .collect::<Vec<_>>();
-    if !missing_flags.is_empty() {
-        return Err(format!(
-            "codex exec is missing required flags: {}",
-            missing_flags.join(", ")
-        ));
-    }
-
-    Ok("codex exec help ok".into())
-}
-
-fn apply_probe_result(agent: &mut Agent, probe_result: Result<String, String>) {
-    match probe_result {
-        Ok(message) => {
-            agent.status = AgentStatus::Available;
-            agent.health_check = if message.is_empty() {
-                Some("probe ok".into())
-            } else {
-                Some(message)
-            };
-        }
-        Err(message) => {
-            agent.status = AgentStatus::Unavailable;
-            agent.health_check = Some(message);
-        }
-    }
-}
-
 fn workspace_to_api_error(error: WorkspaceError) -> ApiError {
     match error {
         WorkspaceError::Busy => ApiError::Conflict {
@@ -3540,11 +3788,11 @@ where
         .map_err(|_| ApiError::invalid_id(entity, value))
 }
 
-fn repo_to_internal(error: RepositoryError) -> ApiError {
+pub(crate) fn repo_to_internal(error: RepositoryError) -> ApiError {
     ApiError::from(UseCaseError::Repository(error))
 }
 
-fn git_to_internal(error: ingot_git::commands::GitCommandError) -> ApiError {
+pub(crate) fn git_to_internal(error: ingot_git::commands::GitCommandError) -> ApiError {
     ApiError::from(UseCaseError::Internal(error.to_string()))
 }
 
@@ -3595,7 +3843,7 @@ fn repo_to_project(error: RepositoryError) -> ApiError {
     }
 }
 
-fn repo_to_project_mutation(error: RepositoryError) -> ApiError {
+pub(crate) fn repo_to_project_mutation(error: RepositoryError) -> ApiError {
     match error {
         RepositoryError::NotFound => UseCaseError::ProjectNotFound.into(),
         RepositoryError::Conflict(message) if message.contains("projects.path") => {
@@ -3792,6 +4040,425 @@ mod tests {
         ensure_finding_subject_reachable(&project, &finding)
             .await
             .expect("candidate finding should remain promotable");
+    }
+
+    #[tokio::test]
+    async fn triaging_final_integrated_finding_enters_pending_approval() {
+        let repo = temp_git_repo();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let db_path =
+            std::env::temp_dir().join(format!("ingot-http-api-triage-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+
+        let project_id = "prj_11111111111111111111111111111111";
+        let item_id = "itm_11111111111111111111111111111111";
+        let revision_id = "rev_11111111111111111111111111111111";
+        let job_id = "job_11111111111111111111111111111111";
+        let convergence_id = "cnv_11111111111111111111111111111111";
+        let workspace_id = "wrk_11111111111111111111111111111111";
+        let finding_id = "fnd_11111111111111111111111111111111";
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(item_id)
+        .bind(project_id)
+        .bind(revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(revision_id)
+        .bind(item_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+        sqlx::query(
+            "INSERT INTO jobs (
+                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
+                status, outcome_class, phase_kind, workspace_kind, execution_permission, context_policy,
+                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid,
+                created_at, ended_at
+             ) VALUES (?, ?, ?, ?, 'validate_integrated', 1, 0, 'completed', 'findings', 'validate', 'integration', 'must_not_mutate', 'resume_context', 'validate-integrated', 'validation_report', ?, ?, '2026-03-12T00:00:00Z', '2026-03-12T00:01:00Z')",
+        )
+        .bind(job_id)
+        .bind(project_id)
+        .bind(item_id)
+        .bind(revision_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert job");
+        sqlx::query(
+            "INSERT INTO workspaces (
+                id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
+                target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
+                status, current_job_id, created_at, updated_at
+             ) VALUES (?, ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', NULL, ?, ?, 'ephemeral', 'ready', NULL, '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(repo.join("workspace").display().to_string())
+        .bind(revision_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO convergences (
+                id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
+                source_head_commit_oid, target_ref, strategy, status, input_target_commit_oid,
+                prepared_commit_oid, final_target_commit_oid, conflict_summary, created_at, completed_at
+             ) VALUES (?, ?, ?, ?, ?, NULL, ?, 'refs/heads/main', 'rebase_then_fast_forward', 'prepared', ?, ?, NULL, NULL, '2026-03-12T00:00:00Z', NULL)",
+        )
+        .bind(convergence_id)
+        .bind(project_id)
+        .bind(item_id)
+        .bind(revision_id)
+        .bind(workspace_id)
+        .bind(&head)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert convergence");
+        sqlx::query(
+            "INSERT INTO findings (
+                id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
+                source_report_schema_version, source_finding_key, source_subject_kind,
+                source_subject_base_commit_oid, source_subject_head_commit_oid, code, severity, summary,
+                paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
+             ) VALUES (?, ?, ?, ?, ?, 'validate_integrated', 'validation_report:v1', 'finding-1', 'integrated', ?, ?, 'BUG001', 'high', 'summary', '[]', '[]', 'untriaged', NULL, NULL, '2026-03-12T00:00:00Z', NULL)",
+        )
+        .bind(finding_id)
+        .bind(project_id)
+        .bind(item_id)
+        .bind(revision_id)
+        .bind(job_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert finding");
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/findings/{finding_id}/triage"))
+                    .method("POST")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "triage_state": "wont_fix",
+                            "triage_note": "accepted risk"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("triage request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let approval_state: String =
+            sqlx::query_scalar("SELECT approval_state FROM items WHERE id = ?")
+                .bind(item_id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("load approval state");
+        assert_eq!(approval_state, "pending");
+    }
+
+    #[tokio::test]
+    async fn backlog_triage_rejects_self_linked_item() {
+        let repo = temp_git_repo();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let db_path =
+            std::env::temp_dir().join(format!("ingot-http-api-backlog-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+
+        let project_id = "prj_22222222222222222222222222222222";
+        let item_id = "itm_22222222222222222222222222222222";
+        let revision_id = "rev_22222222222222222222222222222222";
+        let finding_id = "fnd_22222222222222222222222222222222";
+        let job_id = "job_22222222222222222222222222222222";
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(item_id)
+        .bind(project_id)
+        .bind(revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(revision_id)
+        .bind(item_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+        sqlx::query(
+            "INSERT INTO jobs (
+                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
+                status, outcome_class, phase_kind, workspace_kind, execution_permission, context_policy,
+                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid,
+                created_at, ended_at
+             ) VALUES (?, ?, ?, ?, 'review_candidate_initial', 1, 0, 'completed', 'findings', 'review', 'review', 'must_not_mutate', 'fresh', 'review-candidate', 'review_report', ?, ?, '2026-03-12T00:00:00Z', '2026-03-12T00:01:00Z')",
+        )
+        .bind(job_id)
+        .bind(project_id)
+        .bind(item_id)
+        .bind(revision_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert job");
+        sqlx::query(
+            "INSERT INTO findings (
+                id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
+                source_report_schema_version, source_finding_key, source_subject_kind,
+                source_subject_base_commit_oid, source_subject_head_commit_oid, code, severity, summary,
+                paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
+             ) VALUES (?, ?, ?, ?, ?, 'review_candidate_initial', 'review_report:v1', 'finding-1', 'candidate', ?, ?, 'BUG001', 'high', 'summary', '[]', '[]', 'untriaged', NULL, NULL, '2026-03-12T00:00:00Z', NULL)",
+        )
+        .bind(finding_id)
+        .bind(project_id)
+        .bind(item_id)
+        .bind(revision_id)
+        .bind(job_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert finding");
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/findings/{finding_id}/triage"))
+                    .method("POST")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "triage_state": "backlog",
+                            "linked_item_id": item_id
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("triage request");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn retriaging_backlog_created_item_clears_origin_backlink() {
+        let repo = temp_git_repo();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let db_path =
+            std::env::temp_dir().join(format!("ingot-http-api-retriage-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+
+        let project_id = "prj_33333333333333333333333333333333";
+        let item_id = "itm_33333333333333333333333333333333";
+        let revision_id = "rev_33333333333333333333333333333333";
+        let finding_id = "fnd_33333333333333333333333333333333";
+        let job_id = "job_33333333333333333333333333333333";
+        let linked_item_id = "itm_44444444444444444444444444444444";
+        let linked_revision_id = "rev_44444444444444444444444444444444";
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(item_id)
+        .bind(project_id)
+        .bind(revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(revision_id)
+        .bind(item_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+        sqlx::query(
+            "INSERT INTO jobs (
+                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
+                status, outcome_class, phase_kind, workspace_kind, execution_permission, context_policy,
+                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid,
+                created_at, ended_at
+             ) VALUES (?, ?, ?, ?, 'review_candidate_initial', 1, 0, 'completed', 'findings', 'review', 'review', 'must_not_mutate', 'fresh', 'review-candidate', 'review_report', ?, ?, '2026-03-12T00:00:00Z', '2026-03-12T00:01:00Z')",
+        )
+        .bind(job_id)
+        .bind(project_id)
+        .bind(item_id)
+        .bind(revision_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert job");
+        sqlx::query(
+            "INSERT INTO findings (
+                id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
+                source_report_schema_version, source_finding_key, source_subject_kind,
+                source_subject_base_commit_oid, source_subject_head_commit_oid, code, severity, summary,
+                paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
+             ) VALUES (?, ?, ?, ?, ?, 'review_candidate_initial', 'review_report:v1', 'finding-1', 'candidate', ?, ?, 'BUG001', 'high', 'summary', '[]', '[]', 'untriaged', NULL, NULL, '2026-03-12T00:00:00Z', NULL)",
+        )
+        .bind(finding_id)
+        .bind(project_id)
+        .bind(item_id)
+        .bind(revision_id)
+        .bind(job_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert finding");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'bug', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'promoted_finding', ?, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(linked_item_id)
+        .bind(project_id)
+        .bind(linked_revision_id)
+        .bind(finding_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert linked item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Bug', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(linked_revision_id)
+        .bind(linked_item_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert linked revision");
+        sqlx::query(
+            "UPDATE findings
+             SET triage_state = 'backlog', linked_item_id = ?, triaged_at = '2026-03-12T00:01:00Z'
+             WHERE id = ?",
+        )
+        .bind(linked_item_id)
+        .bind(finding_id)
+        .execute(&db.pool)
+        .await
+        .expect("mark finding backlog");
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/findings/{finding_id}/triage"))
+                    .method("POST")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "triage_state": "fix_now"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("triage request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let origin_kind: String = sqlx::query_scalar("SELECT origin_kind FROM items WHERE id = ?")
+            .bind(linked_item_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("load origin kind");
+        let origin_finding_id: Option<String> =
+            sqlx::query_scalar("SELECT origin_finding_id FROM items WHERE id = ?")
+                .bind(linked_item_id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("load origin finding id");
+        assert_eq!(origin_kind, "manual");
+        assert_eq!(origin_finding_id, None);
     }
 
     #[tokio::test]
@@ -4585,7 +5252,7 @@ mod tests {
                 id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
                 approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
                 seed_target_commit_oid, supersedes_revision_id, created_at
-             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{\"workflow_version\":\"delivery:v1\",\"approval_policy\":\"required\",\"candidate_rework_budget\":7,\"integration_rework_budget\":8}', '{\"author_initial\":\"author-initial\"}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
         )
         .bind(&revision_id)
         .bind(&item_id)
@@ -4665,7 +5332,7 @@ mod tests {
                 id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
                 approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
                 seed_target_commit_oid, supersedes_revision_id, created_at
-             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{\"workflow_version\":\"delivery:v1\",\"approval_policy\":\"required\",\"candidate_rework_budget\":3,\"integration_rework_budget\":4}', '{\"author_initial\":\"author-initial\"}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
         )
         .bind(&revision_id)
         .bind(&item_id)
@@ -4684,7 +5351,8 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "title": "Revised Title"
+                            "title": "Revised Title",
+                            "approval_policy": "not_required"
                         })
                         .to_string(),
                     ))
@@ -4702,10 +5370,44 @@ mod tests {
             Some("Revised Title")
         );
         assert_eq!(
+            json["current_revision"]["approval_policy"].as_str(),
+            Some("not_required")
+        );
+        assert_eq!(
+            json["current_revision"]["policy_snapshot"]["approval_policy"].as_str(),
+            Some("not_required")
+        );
+        assert_eq!(
+            json["current_revision"]["policy_snapshot"]["candidate_rework_budget"].as_u64(),
+            Some(3)
+        );
+        assert_eq!(
             json["current_revision"]["supersedes_revision_id"].as_str(),
             Some(revision_id.as_str())
         );
         assert_eq!(json["item"]["escalation_state"].as_str(), Some("none"));
+        assert_eq!(
+            json["item"]["approval_state"].as_str(),
+            Some("not_required")
+        );
+
+        let revision_policy_snapshot: String = sqlx::query_scalar(
+            "SELECT policy_snapshot FROM item_revisions WHERE item_id = ? AND revision_no = 2",
+        )
+        .bind(&item_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("load revised policy snapshot");
+        let revision_policy_snapshot: serde_json::Value =
+            serde_json::from_str(&revision_policy_snapshot).expect("revised policy snapshot json");
+        assert_eq!(
+            revision_policy_snapshot["approval_policy"].as_str(),
+            Some("not_required")
+        );
+        assert_eq!(
+            revision_policy_snapshot["candidate_rework_budget"].as_u64(),
+            Some(3)
+        );
     }
 
     #[tokio::test]
@@ -4746,7 +5448,7 @@ mod tests {
                 id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
                 approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
                 seed_target_commit_oid, supersedes_revision_id, created_at
-             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{\"workflow_version\":\"delivery:v1\",\"approval_policy\":\"required\",\"candidate_rework_budget\":5,\"integration_rework_budget\":6}', '{\"author_initial\":\"author-initial\"}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
         )
         .bind(&revision_id)
         .bind(&item_id)
@@ -4778,7 +5480,12 @@ mod tests {
                     .uri(format!("/api/projects/{project_id}/items/{item_id}/reopen"))
                     .method("POST")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from("{}"))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "approval_policy": "not_required"
+                        })
+                        .to_string(),
+                    ))
                     .expect("build reopen request"),
             )
             .await
@@ -4791,8 +5498,42 @@ mod tests {
         assert_eq!(json["item"]["lifecycle_state"].as_str(), Some("open"));
         assert_eq!(json["item"]["done_reason"], serde_json::Value::Null);
         assert_eq!(
+            json["current_revision"]["approval_policy"].as_str(),
+            Some("not_required")
+        );
+        assert_eq!(
+            json["current_revision"]["policy_snapshot"]["approval_policy"].as_str(),
+            Some("not_required")
+        );
+        assert_eq!(
+            json["current_revision"]["policy_snapshot"]["candidate_rework_budget"].as_u64(),
+            Some(5)
+        );
+        assert_eq!(
             json["current_revision"]["supersedes_revision_id"].as_str(),
             Some(revision_id.as_str())
+        );
+        assert_eq!(
+            json["item"]["approval_state"].as_str(),
+            Some("not_required")
+        );
+
+        let revision_policy_snapshot: String = sqlx::query_scalar(
+            "SELECT policy_snapshot FROM item_revisions WHERE item_id = ? AND revision_no = 2",
+        )
+        .bind(&item_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("load reopened policy snapshot");
+        let revision_policy_snapshot: serde_json::Value =
+            serde_json::from_str(&revision_policy_snapshot).expect("reopened policy snapshot json");
+        assert_eq!(
+            revision_policy_snapshot["approval_policy"].as_str(),
+            Some("not_required")
+        );
+        assert_eq!(
+            revision_policy_snapshot["candidate_rework_budget"].as_u64(),
+            Some(5)
         );
     }
 
@@ -5087,7 +5828,7 @@ mod tests {
                 id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
                 approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
                 seed_target_commit_oid, supersedes_revision_id, created_at
-             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{\"workflow_version\":\"delivery:v1\",\"approval_policy\":\"required\",\"candidate_rework_budget\":7,\"integration_rework_budget\":8}', '{\"author_initial\":\"author-initial\"}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
         )
         .bind(&revision_id)
         .bind(&item_id)
@@ -5274,7 +6015,7 @@ mod tests {
                 id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
                 approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
                 seed_target_commit_oid, supersedes_revision_id, created_at
-             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{\"workflow_version\":\"delivery:v1\",\"approval_policy\":\"required\",\"candidate_rework_budget\":7,\"integration_rework_budget\":8}', '{\"author_initial\":\"author-initial\"}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
         )
         .bind(&revision_id)
         .bind(&item_id)
@@ -5422,7 +6163,7 @@ mod tests {
                 id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
                 approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
                 seed_target_commit_oid, supersedes_revision_id, created_at
-             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{\"workflow_version\":\"delivery:v1\",\"approval_policy\":\"required\",\"candidate_rework_budget\":7,\"integration_rework_budget\":8}', '{\"author_initial\":\"author-initial\"}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
         )
         .bind(&revision_id)
         .bind(&item_id)
@@ -5564,7 +6305,7 @@ mod tests {
                 id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
                 approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
                 seed_target_commit_oid, supersedes_revision_id, created_at
-             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{\"workflow_version\":\"delivery:v1\",\"approval_policy\":\"required\",\"candidate_rework_budget\":7,\"integration_rework_budget\":8}', '{\"author_initial\":\"author-initial\"}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
         )
         .bind(&revision_id)
         .bind(&item_id)
@@ -5636,7 +6377,12 @@ mod tests {
                     ))
                     .method("POST")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from("{}"))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "approval_policy": "not_required"
+                        })
+                        .to_string(),
+                    ))
                     .expect("build request"),
             )
             .await
@@ -5649,9 +6395,21 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(
             json["item"]["approval_state"].as_str(),
-            Some("not_requested")
+            Some("not_required")
         );
         assert_eq!(json["item"]["lifecycle_state"].as_str(), Some("open"));
+        assert_eq!(
+            json["current_revision"]["approval_policy"].as_str(),
+            Some("not_required")
+        );
+        assert_eq!(
+            json["current_revision"]["policy_snapshot"]["approval_policy"].as_str(),
+            Some("not_required")
+        );
+        assert_eq!(
+            json["current_revision"]["policy_snapshot"]["candidate_rework_budget"].as_u64(),
+            Some(7)
+        );
         assert_ne!(
             json["current_revision"]["id"].as_str(),
             Some(revision_id.as_str())
@@ -5663,6 +6421,24 @@ mod tests {
         assert_eq!(
             json["current_revision"]["seed_commit_oid"].as_str(),
             Some(candidate_commit_oid.as_str())
+        );
+
+        let revision_policy_snapshot: String = sqlx::query_scalar(
+            "SELECT policy_snapshot FROM item_revisions WHERE item_id = ? AND revision_no = 2",
+        )
+        .bind(&item_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("load rejected policy snapshot");
+        let revision_policy_snapshot: serde_json::Value =
+            serde_json::from_str(&revision_policy_snapshot).expect("rejected policy snapshot json");
+        assert_eq!(
+            revision_policy_snapshot["approval_policy"].as_str(),
+            Some("not_required")
+        );
+        assert_eq!(
+            revision_policy_snapshot["candidate_rework_budget"].as_u64(),
+            Some(7)
         );
 
         let convergence_status: String =
@@ -6685,8 +7461,8 @@ exit 1
             paths: vec!["src/lib.rs".into()],
             evidence: serde_json::json!(["evidence"]),
             triage_state: FindingTriageState::Untriaged,
-            promoted_item_id: None,
-            dismissal_reason: None,
+            linked_item_id: None,
+            triage_note: None,
             created_at: Utc::now(),
             triaged_at: None,
         }

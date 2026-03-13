@@ -33,3 +33,12 @@ Object.defineProperty(HTMLElement.prototype, 'releasePointerCapture', {
   writable: true,
   value: () => {},
 })
+
+Object.defineProperty(window, 'ResizeObserver', {
+  writable: true,
+  value: class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  },
+})

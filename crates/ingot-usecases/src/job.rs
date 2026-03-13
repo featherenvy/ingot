@@ -3,6 +3,7 @@ use std::path::Path;
 use crate::UseCaseError;
 use crate::finding::extract_findings;
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
+use ingot_domain::finding::Finding;
 use ingot_domain::ids::JobId;
 use ingot_domain::item::{ApprovalState, Item, ParkingState};
 use ingot_domain::job::{Job, JobStatus, OutcomeClass, OutputArtifactKind};
@@ -510,13 +511,14 @@ pub fn dispatch_job(
     item: &Item,
     revision: &ItemRevision,
     jobs: &[Job],
+    findings: &[Finding],
     convergences: &[Convergence],
     command: DispatchJobCommand,
 ) -> Result<Job, UseCaseError> {
     ensure_item_dispatchable(item)?;
     ensure_no_active_execution(item.current_revision_id, jobs, convergences)?;
 
-    let evaluation = Evaluator::new().evaluate(item, revision, jobs, convergences);
+    let evaluation = Evaluator::new().evaluate(item, revision, jobs, findings, convergences);
     let step_id = select_dispatch_step(&evaluation, command.step_id.as_deref())?;
     let contract = step::find_step(&step_id)
         .ok_or_else(|| UseCaseError::IllegalStepDispatch(format!("Unknown step: {step_id}")))?;
@@ -574,6 +576,7 @@ pub fn retry_job(
     item: &Item,
     revision: &ItemRevision,
     jobs: &[Job],
+    findings: &[Finding],
     convergences: &[Convergence],
     previous_job: &Job,
 ) -> Result<Job, UseCaseError> {
@@ -598,7 +601,7 @@ pub fn retry_job(
         ));
     }
 
-    let evaluation = Evaluator::new().evaluate(item, revision, jobs, convergences);
+    let evaluation = Evaluator::new().evaluate(item, revision, jobs, findings, convergences);
     let contract = step::find_step(&previous_job.step_id).ok_or_else(|| {
         UseCaseError::IllegalStepDispatch(format!("Unknown step: {}", previous_job.step_id))
     })?;
@@ -1060,6 +1063,7 @@ mod tests {
             &revision,
             &[author_initial, review_incremental, repair_candidate],
             &[],
+            &[],
             DispatchJobCommand { step_id: None },
         )
         .expect("dispatch after repair");
@@ -1110,6 +1114,7 @@ mod tests {
             &revision,
             &[repair_candidate.clone(), review_incremental_repair.clone()],
             &[],
+            &[],
             DispatchJobCommand { step_id: None },
         )
         .expect("dispatch candidate review");
@@ -1144,6 +1149,7 @@ mod tests {
                 review_incremental_repair,
                 review_candidate_repair,
             ],
+            &[],
             &[],
             DispatchJobCommand { step_id: None },
         )

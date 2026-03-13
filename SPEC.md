@@ -173,6 +173,18 @@ Typical capabilities include `read_only_jobs`, `mutating_jobs`, `structured_outp
 
 There is no generic shell adapter contract in v1. Only named adapters (`claude_code`, `codex`) are supported.
 
+Agents are global across projects. On startup, if the global agent registry is empty, the daemon MUST bootstrap exactly one built-in Codex agent with:
+
+* `slug=codex`
+* `name=Codex`
+* `adapter_kind=codex`
+* `provider=openai`
+* `model=gpt-5.4`
+* `cli_path=codex`
+* `capabilities=[read_only_jobs, mutating_jobs, structured_output]`
+
+Bootstrap is idempotent and MUST run only when the registry is empty. The daemon MUST probe the configured CLI before persisting the bootstrapped agent and MUST persist the resulting `status` and `health_check`, whether the probe succeeds or fails. Operators MAY update or delete the bootstrapped agent through the normal agent registry endpoints after startup.
+
 ### 4.3 PromptTemplate
 
 Required fields:
@@ -529,9 +541,9 @@ Required fields:
 * `summary`
 * `paths`
 * `evidence`
-* `triage_state` with values `untriaged|promoted|dismissed`
-* `promoted_item_id`
-* `dismissal_reason`
+* `triage_state` with values `untriaged|fix_now|wont_fix|backlog|duplicate|dismissed_invalid|needs_investigation`
+* `linked_item_id`
+* `triage_note`
 * `created_at`
 * `triaged_at`
 
@@ -540,8 +552,8 @@ Semantics:
 * a `Finding` is durable runtime state extracted from a canonical structured report
 * findings never touch Git and are stored only in SQLite
 * a finding captures the exact candidate or integrated subject that produced it
-* promotion creates a new item in the same project and links it bidirectionally through `promoted_item_id` and the promoted item's `origin_finding_id`
-* dismissal never deletes the finding; it only records triage state and reason
+* backlog triage MAY create a new item in the same project and link it bidirectionally through `linked_item_id` and the backlog item's `origin_finding_id`
+* triage never deletes the finding; it only records a disposition, optional note, and optional linked item
 * the daemon MUST preserve reachability of `source_subject_head_commit_oid` until the finding is triaged
 * when `source_subject_kind=integrated`, the daemon MUST also preserve reachability of `source_subject_base_commit_oid` until the finding is triaged
 
@@ -549,8 +561,8 @@ Field nullability and conditional requirements:
 
 * `source_subject_head_commit_oid` is required for every finding.
 * `source_subject_base_commit_oid` is required when `source_subject_kind=integrated` and optional otherwise.
-* `promoted_item_id` is required iff `triage_state=promoted`.
-* `dismissal_reason` is required iff `triage_state=dismissed`.
+* `linked_item_id` is required iff `triage_state=backlog|duplicate`.
+* `triage_note` is required iff `triage_state=wont_fix|dismissed_invalid|needs_investigation`.
 * `triaged_at` is null while `triage_state=untriaged` and required otherwise.
 
 ### 4.13 Activity
@@ -638,17 +650,17 @@ author_initial
 review_incremental_initial(clean)
   -> review_candidate_initial
 review_incremental_initial(findings)
-  -> repair_candidate
+  -> triage_findings
 
 review_candidate_initial(clean)
   -> validate_candidate_initial
 review_candidate_initial(findings)
-  -> repair_candidate
+  -> triage_findings
 
 validate_candidate_initial(clean)
   -> prepare_convergence
 validate_candidate_initial(findings)
-  -> repair_candidate
+  -> triage_findings
 
 repair_candidate
   -> review_incremental_repair
@@ -656,17 +668,17 @@ repair_candidate
 review_incremental_repair(clean)
   -> review_candidate_repair
 review_incremental_repair(findings)
-  -> repair_candidate
+  -> triage_findings
 
 review_candidate_repair(clean)
   -> validate_candidate_repair
 review_candidate_repair(findings)
-  -> repair_candidate
+  -> triage_findings
 
 validate_candidate_repair(clean)
   -> prepare_convergence
 validate_candidate_repair(findings)
-  -> repair_candidate
+  -> triage_findings
 
 prepare_convergence(prepared)
   -> validate_integrated
@@ -678,7 +690,7 @@ validate_integrated(clean, approval_policy=required)
 validate_integrated(clean, approval_policy=not_required)
   -> daemon-only: finalize_prepared_convergence
 validate_integrated(findings)
-  -> repair_after_integration
+  -> triage_findings
 
 repair_after_integration
   -> review_incremental_after_integration_repair
@@ -686,18 +698,25 @@ repair_after_integration
 review_incremental_after_integration_repair(clean)
   -> review_after_integration_repair
 review_incremental_after_integration_repair(findings)
-  -> repair_after_integration
+  -> triage_findings
 
 review_after_integration_repair(clean)
   -> validate_after_integration_repair
 review_after_integration_repair(findings)
-  -> repair_after_integration
+  -> triage_findings
 
 validate_after_integration_repair(clean)
   -> prepare_convergence
 validate_after_integration_repair(findings)
-  -> repair_after_integration
+  -> triage_findings
 ```
+
+`triage_findings` is an operator-driven closure hold, not a job step. It inspects the durable `Finding` rows extracted from the latest closure-relevant findings report for the current revision. The item remains in `phase_status=triaging` until every finding from that report is dispositioned away from `untriaged`, and any `needs_investigation` disposition also keeps the item in triage.
+
+When triage completes:
+
+* if at least one finding from the latest report is `fix_now`, the next dispatchable step is the same repair edge that the legacy `findings -> repair_*` transition would have taken
+* if every finding from the latest report is triaged into a non-blocking disposition (`wont_fix`, `backlog`, `duplicate`, or `dismissed_invalid`), the item continues on the same clean edge that the source step would have taken on `outcome=clean`
 
 Successful `validate_integrated` does not create another job step. It either enters the approval gate or projects the daemon-only `finalize_prepared_convergence` action according to the revision's `approval_policy`.
 
@@ -1175,6 +1194,7 @@ Workspace and convergence command semantics:
 
 * `GET .../items/:item_id/findings`
 * `GET .../findings/:finding_id`
+* `POST .../findings/:finding_id/triage`
 * `POST .../findings/:finding_id/promote`
 * `POST .../findings/:finding_id/dismiss`
 
@@ -1183,8 +1203,9 @@ Finding command semantics:
 * when a job completes successfully with `validation_report:v1`, `review_report:v1`, or `finding_report:v1`, the daemon MUST extract each canonical `finding:v1` object into a durable `Finding` row keyed by `source_job_id + source_finding_key`
 * finding extraction MUST determine `source_subject_kind` canonically: `validate_integrated` findings are always `integrated`; review or investigation findings are `integrated` iff their `input_base_commit_oid` and `input_head_commit_oid` match the prepared or finalized integrated subject for the same revision; all other findings are `candidate`
 * finding extraction MUST persist `source_subject_head_commit_oid=input_head_commit_oid`; it MUST also persist `source_subject_base_commit_oid=input_base_commit_oid` whenever present
-* `POST .../findings/:finding_id/promote` is allowed only when `triage_state=untriaged`. It MUST verify that `source_subject_head_commit_oid` remains reachable and, when `source_subject_kind=integrated`, that `source_subject_base_commit_oid` remains reachable; otherwise it MUST fail with `finding_subject_unreachable`. It creates a new item in the same project with `origin_kind=promoted_finding` and `origin_finding_id=<finding_id>`, defaults `classification=bug`, defaults title and description from the finding summary and evidence, defaults `acceptance_criteria` to resolving the promoted finding and validating that it no longer reproduces, defaults `target_ref` and `approval_policy` from the source item revision unless overridden, defaults `seed_commit_oid` to `source_subject_head_commit_oid` for both candidate and integrated findings, defaults `seed_target_commit_oid` to `source_subject_base_commit_oid` when `source_subject_kind=integrated`, and otherwise defaults `seed_target_commit_oid` to the source item revision's `seed_target_commit_oid`. It records the new item's initial revision and sets `triage_state=promoted` with `promoted_item_id`
-* `POST .../findings/:finding_id/dismiss` is allowed only when `triage_state=untriaged`. It records `triage_state=dismissed`, persists `dismissal_reason`, and keeps the finding attached to the source job and item for audit
+* `POST .../findings/:finding_id/triage` is allowed while the finding is still triageable. It records one of the supported dispositions and any required note or linked item. `backlog` MAY create a new linked item in the same project using the source finding summary and evidence as defaults.
+* `POST .../findings/:finding_id/promote` is retained as a compatibility wrapper for `triage_state=backlog` with a new linked item.
+* `POST .../findings/:finding_id/dismiss` is retained as a compatibility wrapper for `triage_state=dismissed_invalid`.
 
 ### 8.8 Activity and Stats Endpoints
 
@@ -1319,7 +1340,8 @@ Semantics:
 
 * validation reports represent objective checks over the job's current workspace subject
 * `outcome=clean` requires `findings=[]`
-* `outcome=findings` requires at least one failed check or one finding
+* `outcome=findings` requires at least one finding
+* failed checks remain valid supporting detail in `checks`, but any validation outcome that blocks closure MUST also emit at least one canonical `finding:v1`
 
 #### 9.5.3 `review_report:v1`
 
@@ -1468,8 +1490,8 @@ Recovery errors:
 12. Every daemon-owned Git side effect requires a corresponding `GitOperation`.
 13. Existing item semantics do not change when live config or templates change.
 14. A completed item cannot be reopened.
-15. `item.origin_kind=promoted_finding` implies `item.origin_finding_id` is present and the referenced finding has `triage_state=promoted` with `promoted_item_id=item.id`.
-16. `finding.triage_state=promoted` implies `finding.promoted_item_id` is present and the referenced item has `origin_kind=promoted_finding` with `origin_finding_id=finding.id`.
+15. `item.origin_kind=promoted_finding` implies `item.origin_finding_id` is present and the referenced finding has `triage_state=backlog` with `linked_item_id=item.id`.
+16. `finding.triage_state=backlog` implies `finding.linked_item_id` is present and the referenced item has `origin_kind=promoted_finding` with `origin_finding_id=finding.id`.
 17. Every finding belongs to exactly one project, one source item, one source item revision, and one source job, and those source relationships must be mutually consistent.
 
 ### 11.2 Database Enforcement
@@ -1486,7 +1508,7 @@ An implementation SHOULD enforce at least:
 * same-project relationships across item, revision, job, workspace, convergence, GitOperation, and Finding
 * unique `source_job_id + source_finding_key` per finding
 * at most one promoted item per finding
-* backlink consistency between `finding.promoted_item_id` and `item.origin_finding_id`
+* backlink consistency between `finding.linked_item_id` and `item.origin_finding_id` for backlog-created items
 
 Cross-row conditions such as approval pending requiring a prepared convergence for the current revision, approval or finalization requiring that convergence to still match the current `target_ref` head, finding source relationships remaining mutually consistent, and bidirectional finding-promotion links remaining consistent, MUST be enforced transactionally.
 
@@ -1512,17 +1534,18 @@ An `uncertain job` is a reconciliation condition, not a stored `Job.status`. It 
 
 At startup the daemon MUST:
 
-1. reconcile `GitOperation` rows in `planned` or `applied`
-2. inspect active jobs for stale leases or dead subprocesses
-3. if an active job's process or filesystem state is uncertain, mark the associated workspace `stale` and exclude it from scheduling until explicit `reset`, `abandon`, `remove`, or equivalent cleanup action
-4. fail or expire uncertain jobs conservatively
-5. inspect active convergences and integration workspaces
-6. if an integration workspace contains unresolved conflicts, mark convergence `conflicted`
-7. if a full prepared replay chain exists and the journaled side effect is present, reconcile it and adopt the prepared state using the rewritten tip
-8. if only a replay prefix exists without unresolved conflicts, mark the prepare operation failed and the integration workspace `stale`
-9. inspect untriaged findings and verify that each candidate subject head remains reachable from a retained daemon-owned authoring anchor or other durable local commit reference, and that each integrated subject remains reachable either from a finalized durable ref or from a retained daemon-owned integration anchor; if not, emit operator-visible diagnostics and require repair before promotion
-10. if finalization already happened, reconcile and mark convergence `finalized`
-11. rebuild derived projections from canonical rows
+1. if the global agent registry is empty, bootstrap the built-in default Codex agent and persist its probe status
+2. reconcile `GitOperation` rows in `planned` or `applied`
+3. inspect active jobs for stale leases or dead subprocesses
+4. if an active job's process or filesystem state is uncertain, mark the associated workspace `stale` and exclude it from scheduling until explicit `reset`, `abandon`, `remove`, or equivalent cleanup action
+5. fail or expire uncertain jobs conservatively
+6. inspect active convergences and integration workspaces
+7. if an integration workspace contains unresolved conflicts, mark convergence `conflicted`
+8. if a full prepared replay chain exists and the journaled side effect is present, reconcile it and adopt the prepared state using the rewritten tip
+9. if only a replay prefix exists without unresolved conflicts, mark the prepare operation failed and the integration workspace `stale`
+10. inspect untriaged findings and verify that each candidate subject head remains reachable from a retained daemon-owned authoring anchor or other durable local commit reference, and that each integrated subject remains reachable either from a finalized durable ref or from a retained daemon-owned integration anchor; if not, emit operator-visible diagnostics and require repair before promotion
+11. if finalization already happened, reconcile and mark convergence `finalized`
+12. rebuild derived projections from canonical rows
 
 ## 12. Reference Algorithms
 
@@ -1663,6 +1686,9 @@ approve(item_id):
 
 ```text
 reconcile_startup_state():
+  if agent_registry is empty:
+    create built_in_codex_agent()
+    probe its CLI and persist status + health_check
   for each planned_or_applied GitOperation:
     inspect Git and filesystem state appropriate to operation_kind
     if operation_kind == prepare_convergence_commit and full replay chain matching metadata is present:

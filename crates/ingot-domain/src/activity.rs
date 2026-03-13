@@ -22,6 +22,7 @@ pub enum ActivityEventType {
     JobCancelled,
     FindingPromoted,
     FindingDismissed,
+    FindingTriaged,
     ApprovalRequested,
     ApprovalApproved,
     ApprovalRejected,

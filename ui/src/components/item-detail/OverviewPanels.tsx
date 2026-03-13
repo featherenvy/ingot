@@ -1,4 +1,5 @@
 import type { Evaluation, Item, ItemRevision } from '../../types/domain'
+import { StatusBadge } from '../StatusBadge'
 import { Badge } from '../ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
 import { DetailList } from './DetailList'
@@ -21,10 +22,10 @@ export function OverviewPanels({
         <CardContent>
           <DetailList
             items={[
-              { label: 'Lifecycle', value: item.lifecycle_state },
-              { label: 'Parking', value: item.parking_state },
-              { label: 'Approval', value: item.approval_state },
-              { label: 'Escalation', value: item.escalation_state },
+              { label: 'Lifecycle', value: <StatusBadge status={item.lifecycle_state} /> },
+              { label: 'Parking', value: <StatusBadge status={item.parking_state} /> },
+              { label: 'Approval', value: <StatusBadge status={item.approval_state} /> },
+              { label: 'Escalation', value: <StatusBadge status={item.escalation_state} /> },
               { label: 'Origin', value: item.origin_kind },
               { label: 'Origin finding', value: item.origin_finding_id ?? 'none' },
               { label: 'Priority', value: <Badge variant="secondary">{item.priority}</Badge> },
@@ -40,10 +41,13 @@ export function OverviewPanels({
         <CardContent>
           <DetailList
             items={[
-              { label: 'Board', value: <Badge variant="outline">{evaluation.board_status}</Badge> },
+              { label: 'Board', value: <StatusBadge status={evaluation.board_status} /> },
               { label: 'Step', value: evaluation.current_step_id ?? 'none' },
               { label: 'Phase', value: evaluation.current_phase_kind ?? 'none' },
-              { label: 'Phase status', value: evaluation.phase_status ?? 'none' },
+              {
+                label: 'Phase status',
+                value: evaluation.phase_status ? <StatusBadge status={evaluation.phase_status} /> : 'none',
+              },
               { label: 'Next action', value: evaluation.next_recommended_action },
               { label: 'Dispatchable', value: evaluation.dispatchable_step_id ?? 'none' },
               {

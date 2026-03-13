@@ -113,7 +113,7 @@ pub fn approval_state_for_policy(approval_policy: ApprovalPolicy) -> ApprovalSta
     }
 }
 
-fn default_policy_snapshot(
+pub fn default_policy_snapshot(
     approval_policy: ApprovalPolicy,
     candidate_rework_budget: u32,
     integration_rework_budget: u32,
@@ -126,7 +126,7 @@ fn default_policy_snapshot(
     })
 }
 
-fn default_template_map_snapshot() -> Value {
+pub fn default_template_map_snapshot() -> Value {
     let map = DELIVERY_V1_STEPS
         .iter()
         .filter_map(|step| {
@@ -138,6 +138,16 @@ fn default_template_map_snapshot() -> Value {
     Value::Object(map)
 }
 
+pub fn rework_budgets_from_policy_snapshot(policy_snapshot: &Value) -> Option<(u32, u32)> {
+    let candidate_rework_budget = policy_snapshot["candidate_rework_budget"].as_u64()?;
+    let integration_rework_budget = policy_snapshot["integration_rework_budget"].as_u64()?;
+
+    Some((
+        u32::try_from(candidate_rework_budget).ok()?,
+        u32::try_from(integration_rework_budget).ok()?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -145,9 +155,13 @@ mod tests {
     use ingot_domain::item::{ApprovalState, Classification, Priority};
     use ingot_domain::project::Project;
     use ingot_domain::revision::ApprovalPolicy;
+    use serde_json::json;
     use uuid::Uuid;
 
-    use super::{CreateItemInput, create_manual_item, normalize_target_ref};
+    use super::{
+        CreateItemInput, create_manual_item, normalize_target_ref,
+        rework_budgets_from_policy_snapshot,
+    };
 
     #[test]
     fn create_manual_item_freezes_defaults_for_initial_revision() {
@@ -207,5 +221,15 @@ mod tests {
             normalize_target_ref("refs/heads/release"),
             "refs/heads/release"
         );
+    }
+
+    #[test]
+    fn rework_budgets_are_read_from_policy_snapshot() {
+        let budgets = rework_budgets_from_policy_snapshot(&json!({
+            "candidate_rework_budget": 5,
+            "integration_rework_budget": 6
+        }));
+
+        assert_eq!(budgets, Some((5, 6)));
     }
 }

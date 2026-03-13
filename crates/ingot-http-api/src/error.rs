@@ -60,20 +60,20 @@ impl IntoResponse for ApiError {
                     "finding_not_found",
                     "Finding not found".into(),
                 ),
-                UseCaseError::FindingNotUntriaged => (
+                UseCaseError::FindingNotTriageable => (
                     StatusCode::CONFLICT,
-                    "finding_not_untriaged",
-                    "Finding is not untriaged".into(),
+                    "finding_not_triageable",
+                    "Finding is not triageable".into(),
                 ),
                 UseCaseError::FindingSubjectUnreachable => (
                     StatusCode::CONFLICT,
                     "finding_subject_unreachable",
                     "Finding subject is unreachable".into(),
                 ),
-                UseCaseError::InvalidDismissalReason => (
+                UseCaseError::InvalidFindingTriage(message) => (
                     StatusCode::UNPROCESSABLE_ENTITY,
-                    "invalid_dismissal_reason",
-                    "Dismissal reason is required".into(),
+                    "invalid_finding_triage",
+                    message,
                 ),
                 UseCaseError::IllegalStepDispatch(message) => (
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -104,6 +104,16 @@ impl IntoResponse for ApiError {
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "revision_seed_unreachable",
                     format!("Revision seed is not reachable: {seed_name}"),
+                ),
+                UseCaseError::LinkedItemNotFound => (
+                    StatusCode::NOT_FOUND,
+                    "linked_item_not_found",
+                    "Linked item not found".into(),
+                ),
+                UseCaseError::LinkedItemProjectMismatch => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "linked_item_project_mismatch",
+                    "Linked item must belong to the same project".into(),
                 ),
                 UseCaseError::PreparedConvergenceMissing => (
                     StatusCode::CONFLICT,

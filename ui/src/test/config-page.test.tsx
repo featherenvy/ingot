@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { Toaster } from '../components/ui/sonner'
 import { TooltipProvider } from '../components/ui/tooltip'
@@ -72,6 +72,7 @@ describe('ConfigPage', () => {
     renderPage()
 
     expect(await screen.findByText('Project Defaults')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Copy project defaults' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Register Codex agent' })).toBeInTheDocument()
     expect(await screen.findByRole('button', { name: 'Reprobe' })).toBeInTheDocument()
     expect(screen.getByText('available')).toBeInTheDocument()
@@ -81,8 +82,37 @@ describe('ConfigPage', () => {
     expect(await screen.findByRole('dialog')).toBeInTheDocument()
     expect(screen.getByLabelText('Agent name')).toHaveValue('Codex CLI')
     expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('openai')
-    expect(screen.getByText('openai', { selector: 'option' })).toBeInTheDocument()
-    expect(screen.getByText('anthropic', { selector: 'option' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('combobox', { name: 'Provider' }))
+
+    const providerList = await screen.findByRole('listbox')
+    expect(within(providerList).getByText('openai')).toBeInTheDocument()
+    expect(within(providerList).getByText('anthropic')).toBeInTheDocument()
+  })
+
+  it('allows selecting a custom model value from the searchable combobox', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/projects/prj_1/config')) {
+        return Promise.resolve(jsonResponse({ branch: 'main', sandbox: 'enabled' }))
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Register Codex agent' }))
+    fireEvent.click(screen.getByRole('combobox', { name: 'Model' }))
+
+    const searchInput = screen.getByPlaceholderText('Filter models...')
+    fireEvent.change(searchInput, { target: { value: 'custom-model' } })
+
+    fireEvent.click(await screen.findByText('Use "custom-model"'))
+
+    expect(screen.getByRole('combobox', { name: 'Model' })).toHaveTextContent('custom-model')
   })
 
   it('only disables the clicked agent row while reprobe is pending', async () => {
@@ -165,7 +195,7 @@ describe('ConfigPage', () => {
     expect(await screen.findByText('Reprobe complete for Codex A.')).toBeInTheDocument()
   })
 
-  it('renders reprobe failures in an alert', async () => {
+  it('renders reprobe failures in a toast', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
       const url = String(input)
       const method = init?.method ?? 'GET'
@@ -211,7 +241,29 @@ describe('ConfigPage', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Reprobe' }))
 
-    expect(await screen.findByText('Reprobe failed')).toBeInTheDocument()
+    expect(await screen.findByText('Reprobe failed.')).toBeInTheDocument()
     expect(screen.getByText('Probe command failed.')).toBeInTheDocument()
+  })
+
+  it('renders a destructive alert when a page-critical config query fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+
+      if (url.endsWith('/api/projects/prj_1/config')) {
+        return Promise.reject(new Error('network down'))
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Config failed to load')).toBeInTheDocument()
+    expect(screen.getByText('Error: network down')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
   })
 })

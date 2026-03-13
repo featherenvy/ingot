@@ -69,6 +69,11 @@ pub enum DomainEvent {
         finding_id: FindingId,
         item_id: ItemId,
     },
+    FindingTriaged {
+        finding_id: FindingId,
+        item_id: ItemId,
+        triage_state: String,
+    },
     ApprovalRequested {
         item_id: ItemId,
     },

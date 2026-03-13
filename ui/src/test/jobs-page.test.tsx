@@ -79,4 +79,23 @@ describe('JobsPage', () => {
     expect(formattedTime).not.toHaveAttribute('title')
     expect(screen.queryByText('2026-03-11T00:01:00Z')).not.toBeInTheDocument()
   })
+
+  it('renders a destructive alert when the jobs query fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/projects/prj_1/jobs')) {
+        return Promise.reject(new Error('network down'))
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Jobs failed to load')).toBeInTheDocument()
+    expect(screen.getByText('Error: network down')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
 })

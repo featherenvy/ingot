@@ -1,5 +1,7 @@
+import { Loader2Icon } from 'lucide-react'
 import { Link } from 'react-router'
 import type { Evaluation } from '../../types/domain'
+import { ConfirmActionButton } from '../ConfirmActionButton'
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert'
 import { Button } from '../ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card'
@@ -20,14 +22,14 @@ export function OperatorActions({
   projectId,
   evaluation,
   actions,
-  errorMessage,
   queueBlocker,
+  agentsLoading,
 }: {
   projectId: string
   evaluation: Evaluation
   actions: OperatorActionSet
-  errorMessage: string | null
   queueBlocker: string | null
+  agentsLoading: boolean
 }) {
   const hasDispatch = !!evaluation.dispatchable_step_id
   const hasConvergence = evaluation.next_recommended_action === 'prepare_convergence'
@@ -68,15 +70,16 @@ export function OperatorActions({
               </Button>
             )}
             {hasReject && (
-              <Button
-                type="button"
-                size="sm"
-                variant="destructive"
-                onClick={actions.reject.run}
-                disabled={actions.reject.pending}
-              >
-                {actions.reject.pending ? 'Rejecting…' : 'Reject approval'}
-              </Button>
+              <ConfirmActionButton
+                title="Reject approval?"
+                description="This sends the item back for rework and clears the current approval decision."
+                triggerLabel="Reject approval"
+                confirmLabel="Reject approval"
+                pendingLabel="Rejecting…"
+                onConfirm={actions.reject.run}
+                pending={actions.reject.pending}
+                triggerVariant="destructive"
+              />
             )}
           </div>
         ) : (
@@ -84,12 +87,12 @@ export function OperatorActions({
             Waiting for workflow to advance — no operator actions available.
           </p>
         )}
-        {errorMessage && (
-          <Alert variant="destructive">
-            <AlertTitle>Action failed</AlertTitle>
-            <AlertDescription>{errorMessage}</AlertDescription>
-          </Alert>
-        )}
+        {agentsLoading ? (
+          <output className="flex items-center gap-2 text-sm text-muted-foreground" aria-live="polite">
+            <Loader2Icon className="size-4 animate-spin" />
+            Checking agent availability…
+          </output>
+        ) : null}
         {queueBlocker && (
           <Alert>
             <AlertTitle>Operator attention required</AlertTitle>

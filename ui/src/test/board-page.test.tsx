@@ -58,6 +58,21 @@ describe('BoardPage', () => {
     expect(screen.getByLabelText('Title')).toBeInTheDocument()
   })
 
+  it('uses the inline empty state when a lane has no items', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/projects/prj_1/items')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Board')).toBeInTheDocument()
+    expect(screen.getAllByText('No items in this lane.')).toHaveLength(4)
+  })
+
   it('shows field-level validation messages when submitting an empty item form', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
       const url = String(input)
@@ -75,5 +90,21 @@ describe('BoardPage', () => {
     expect(await screen.findByText('Title is required.')).toBeInTheDocument()
     expect(screen.getByText('Description is required.')).toBeInTheDocument()
     expect(screen.getByText('Acceptance criteria are required.')).toBeInTheDocument()
+  })
+
+  it('renders a destructive alert when the board query fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/projects/prj_1/items')) {
+        return Promise.reject(new Error('network down'))
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Board failed to load')).toBeInTheDocument()
+    expect(screen.getByText('Error: network down')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
   })
 })

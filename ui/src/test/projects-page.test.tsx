@@ -86,4 +86,20 @@ describe('ProjectsPage', () => {
 
     expect(await screen.findByText('Repository path is required.')).toBeInTheDocument()
   })
+
+  it('renders a destructive alert when the projects query fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/projects')) {
+        return Promise.reject(new Error('network down'))
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Projects failed to load')).toBeInTheDocument()
+    expect(screen.getByText('Error: network down')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
 })
