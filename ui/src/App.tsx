@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router'
 import ProjectLayout from './layouts/ProjectLayout'
 import RootLayout from './layouts/RootLayout'
+import ActivityPage from './pages/ActivityPage'
 import BoardPage from './pages/BoardPage'
 import ConfigPage from './pages/ConfigPage'
 import DashboardPage from './pages/DashboardPage'
@@ -21,6 +22,7 @@ export default function App() {
             <Route path="items/:itemId" element={<ItemDetailPage />} />
             <Route path="jobs" element={<JobsPage />} />
             <Route path="workspaces" element={<WorkspacesPage />} />
+            <Route path="activity" element={<ActivityPage />} />
             <Route path="config" element={<ConfigPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

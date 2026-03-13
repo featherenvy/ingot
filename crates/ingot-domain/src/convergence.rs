@@ -46,6 +46,7 @@ pub struct Convergence {
     pub input_target_commit_oid: Option<String>,
     pub prepared_commit_oid: Option<String>,
     pub final_target_commit_oid: Option<String>,
+    pub target_head_valid: Option<bool>,
     pub conflict_summary: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,

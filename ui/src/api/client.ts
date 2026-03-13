@@ -1,4 +1,14 @@
-import type { Item, ItemDetail, Project } from '../types/domain'
+import type {
+  Activity,
+  Agent,
+  ItemDetail,
+  ItemSummary,
+  Job,
+  JobLogs,
+  JsonObject,
+  Project,
+  Workspace,
+} from '../types/domain'
 
 const BASE = '/api'
 
@@ -30,44 +40,106 @@ export class ApiError extends Error {
 
 // Projects
 export const listProjects = () => request<Project[]>('/projects')
-export const createProject = (data: { name: string; path: string; default_branch?: string }) =>
-  request<Project>('/projects', { method: 'POST', body: JSON.stringify(data) })
+export const listProjectActivity = (projectId: string, params?: { limit?: number; offset?: number }) => {
+  const search = new URLSearchParams()
+  if (params?.limit !== undefined) search.set('limit', String(params.limit))
+  if (params?.offset !== undefined) search.set('offset', String(params.offset))
+
+  const query = search.toString()
+  return request<Activity[]>(`/projects/${projectId}/activity${query ? `?${query}` : ''}`)
+}
+export const createProject = (payload: { name?: string; path: string; default_branch?: string; color?: string }) =>
+  request<Project>('/projects', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const getProjectConfig = (projectId: string) => request<JsonObject>(`/projects/${projectId}/config`)
+
+// Agents
+export const listAgents = () => request<Agent[]>('/agents')
+export const createAgent = (payload: {
+  slug?: string
+  name: string
+  adapter_kind: 'claude_code' | 'codex'
+  provider: string
+  model: string
+  cli_path: string
+  capabilities?: string[]
+}) =>
+  request<Agent>('/agents', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const reprobeAgent = (agentId: string) =>
+  request<Agent>(`/agents/${agentId}/reprobe`, {
+    method: 'POST',
+  })
 
 // Items (project-scoped)
-export const listItems = (projectId: string) => request<Item[]>(`/projects/${projectId}/items`)
+export const listItems = (projectId: string) => request<ItemSummary[]>(`/projects/${projectId}/items`)
 export const getItem = (projectId: string, itemId: string) =>
   request<ItemDetail>(`/projects/${projectId}/items/${itemId}`)
-export const createItem = (
-  projectId: string,
-  data: {
-    classification: string
-    priority: string
-    title: string
-    description: string
-    acceptance_criteria: string
-    target_ref: string
-    approval_policy?: string
-  },
-) => request<Item>(`/projects/${projectId}/items`, { method: 'POST', body: JSON.stringify(data) })
 
-// Item commands
-export const deferItem = (projectId: string, itemId: string) =>
-  request(`/projects/${projectId}/items/${itemId}/defer`, { method: 'POST' })
-export const resumeItem = (projectId: string, itemId: string) =>
-  request(`/projects/${projectId}/items/${itemId}/resume`, { method: 'POST' })
-export const dismissItem = (projectId: string, itemId: string) =>
-  request(`/projects/${projectId}/items/${itemId}/dismiss`, { method: 'POST' })
-export const approveItem = (projectId: string, itemId: string) =>
-  request(`/projects/${projectId}/items/${itemId}/approval/approve`, { method: 'POST' })
-export const rejectItem = (projectId: string, itemId: string) =>
-  request(`/projects/${projectId}/items/${itemId}/approval/reject`, { method: 'POST' })
+export interface CreateItemPayload {
+  title: string
+  description: string
+  acceptance_criteria: string
+}
 
-// Jobs
-export const dispatchJob = (projectId: string, itemId: string) =>
-  request(`/projects/${projectId}/items/${itemId}/jobs`, { method: 'POST' })
-export const cancelJob = (projectId: string, itemId: string, jobId: string) =>
-  request(`/projects/${projectId}/items/${itemId}/jobs/${jobId}/cancel`, { method: 'POST' })
+export const createItem = (projectId: string, payload: CreateItemPayload) =>
+  request<ItemDetail>(`/projects/${projectId}/items`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 
-// Convergence
+export const dispatchItemJob = (projectId: string, itemId: string, stepId?: string) =>
+  request(`/projects/${projectId}/items/${itemId}/jobs`, {
+    method: 'POST',
+    body: JSON.stringify(stepId ? { step_id: stepId } : {}),
+  })
+
+export const retryItemJob = (projectId: string, itemId: string, jobId: string) =>
+  request(`/projects/${projectId}/items/${itemId}/jobs/${jobId}/retry`, {
+    method: 'POST',
+  })
+
+export const cancelItemJob = (projectId: string, itemId: string, jobId: string) =>
+  request(`/projects/${projectId}/items/${itemId}/jobs/${jobId}/cancel`, {
+    method: 'POST',
+  })
+
 export const prepareConvergence = (projectId: string, itemId: string) =>
-  request(`/projects/${projectId}/items/${itemId}/convergence/prepare`, { method: 'POST' })
+  request(`/projects/${projectId}/items/${itemId}/convergence/prepare`, {
+    method: 'POST',
+  })
+
+export const approveItem = (projectId: string, itemId: string) =>
+  request<ItemDetail>(`/projects/${projectId}/items/${itemId}/approval/approve`, {
+    method: 'POST',
+  })
+
+export const rejectApproval = (projectId: string, itemId: string) =>
+  request<ItemDetail>(`/projects/${projectId}/items/${itemId}/approval/reject`, {
+    method: 'POST',
+    body: '{}',
+  })
+
+export const listProjectJobs = (projectId: string) => request<Job[]>(`/projects/${projectId}/jobs`)
+export const getJobLogs = (jobId: string) => request<JobLogs>(`/jobs/${jobId}/logs`)
+export const listProjectWorkspaces = (projectId: string) => request<Workspace[]>(`/projects/${projectId}/workspaces`)
+export const resetWorkspace = (projectId: string, workspaceId: string) =>
+  request<Workspace>(`/projects/${projectId}/workspaces/${workspaceId}/reset`, {
+    method: 'POST',
+  })
+
+export const abandonWorkspace = (projectId: string, workspaceId: string) =>
+  request<Workspace>(`/projects/${projectId}/workspaces/${workspaceId}/abandon`, {
+    method: 'POST',
+  })
+
+export const removeWorkspace = (projectId: string, workspaceId: string) =>
+  request<Workspace>(`/projects/${projectId}/workspaces/${workspaceId}/remove`, {
+    method: 'POST',
+  })

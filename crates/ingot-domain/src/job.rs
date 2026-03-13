@@ -47,6 +47,8 @@ pub enum PhaseKind {
     Author,
     Validate,
     Review,
+    Investigate,
+    System,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +56,7 @@ pub enum PhaseKind {
 pub enum ExecutionPermission {
     MayMutate,
     MustNotMutate,
+    DaemonOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +73,7 @@ pub enum OutputArtifactKind {
     Commit,
     ReviewReport,
     ValidationReport,
+    FindingReport,
     None,
 }
 

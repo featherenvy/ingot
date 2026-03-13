@@ -33,8 +33,106 @@ pub async fn head_oid(repo_path: &Path) -> Result<String, GitCommandError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Get the current branch name for HEAD.
+pub async fn current_branch_name(repo_path: &Path) -> Result<String, GitCommandError> {
+    let output = git(repo_path, &["symbolic-ref", "--short", "HEAD"]).await?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// Get the OID a ref points to.
 pub async fn ref_oid(repo_path: &Path, ref_name: &str) -> Result<String, GitCommandError> {
     let output = git(repo_path, &["rev-parse", ref_name]).await?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Resolve a ref if it exists, returning None for missing refs.
+pub async fn resolve_ref_oid(
+    repo_path: &Path,
+    ref_name: &str,
+) -> Result<Option<String>, GitCommandError> {
+    verify_revision(repo_path, ref_name).await
+}
+
+/// Return whether the commit is reachable from any local ref.
+pub async fn is_commit_reachable_from_any_ref(
+    repo_path: &Path,
+    commit_oid: &str,
+) -> Result<bool, GitCommandError> {
+    let verify_arg = format!("{commit_oid}^{{commit}}");
+    if verify_revision(repo_path, &verify_arg).await?.is_none() {
+        return Ok(false);
+    }
+
+    let output = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--contains",
+            commit_oid,
+            "--format=%(refname)",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(GitCommandError::CommandFailed(stderr.to_string()));
+    }
+
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+/// Return whether the commit object exists in the repository.
+pub async fn commit_exists(repo_path: &Path, commit_oid: &str) -> Result<bool, GitCommandError> {
+    let verify_arg = format!("{commit_oid}^{{commit}}");
+    verify_revision(repo_path, &verify_arg)
+        .await
+        .map(|resolved| resolved.is_some())
+}
+
+async fn verify_revision(
+    repo_path: &Path,
+    revision: &str,
+) -> Result<Option<String>, GitCommandError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", revision])
+        .current_dir(repo_path)
+        .output()
+        .await?;
+
+    decode_optional_verify(output)
+}
+
+fn decode_optional_verify(output: Output) -> Result<Option<String>, GitCommandError> {
+    if output.status.success() {
+        return Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.code() == Some(1) && stderr.trim().is_empty() {
+        return Ok(None);
+    }
+
+    Err(GitCommandError::CommandFailed(stderr.to_string()))
+}
+
+pub async fn compare_and_swap_ref(
+    repo_path: &Path,
+    ref_name: &str,
+    new_oid: &str,
+    expected_old_oid: &str,
+) -> Result<(), GitCommandError> {
+    git(
+        repo_path,
+        &["update-ref", ref_name, new_oid, expected_old_oid],
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_ref(repo_path: &Path, ref_name: &str) -> Result<(), GitCommandError> {
+    git(repo_path, &["update-ref", "-d", ref_name]).await?;
+    Ok(())
 }

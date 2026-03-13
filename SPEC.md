@@ -47,7 +47,7 @@ v1 operates on local repositories and local refs only. Remote push, PR creation,
 * Prompt templates that alter workflow semantics.
 * In-system manual conflict continuation.
 * Agent-driven conflict resolution.
-* Report-only workflow steps.
+* Arbitrary user-authored report-only workflow graphs.
 * Remote Git push, PR creation, or hosted CI orchestration.
 * Filesystem hot-reload watchers for live config/template changes.
 
@@ -100,6 +100,7 @@ SQLite:
 * revision contexts
 * workspaces
 * jobs
+* findings
 * convergences
 * git operations
 * activity
@@ -177,7 +178,7 @@ There is no generic shell adapter contract in v1. Only named adapters (`claude_c
 Required fields:
 
 * `slug`
-* `phase_kind` with values `author|validate|review`
+* `phase_kind` with values `author|validate|review|investigate`
 * `prompt`
 * `enabled`
 
@@ -197,7 +198,7 @@ A workflow definition specifies:
 
 * unique stable `step_id` values
 * step contracts
-* allowed transitions
+* allowed transitions, including auxiliary report-only dispatch rules when present
 * semantic loop budgets
 * default step-to-template mapping
 * default repo-context policies
@@ -237,7 +238,7 @@ Semantics:
 Lifecycle rules:
 
 * authoring workspace: one per revision, seeded from `seed_commit_oid`, reused within the revision
-* review workspace: fresh per review job, ephemeral by default
+* review workspace: fresh per review or investigation job, ephemeral by default
 * integration workspace: one per convergence attempt, provisioned from current `target_ref` head
 
 Field nullability and conditional requirements:
@@ -266,6 +267,8 @@ Required fields:
 * `escalation_state` with values `none|operator_required`
 * `escalation_reason` with values `candidate_rework_budget_exhausted|integration_rework_budget_exhausted|convergence_conflict|step_failed|protocol_violation|manual_decision_required|other`
 * `current_revision_id`
+* `origin_kind` with values `manual|promoted_finding`
+* `origin_finding_id`
 * `priority` with values `critical|major|minor`
 * `labels`
 * `operator_notes`
@@ -278,12 +281,14 @@ Semantics:
 * `current_step_id` is derived, not canonical
 * `next_recommended_action` is derived, not canonical
 * `classification` affects UI only, not workflow semantics
+* `origin_kind` captures how the item was created and remains stable across later revisions
 * the item survives retries, rework, approval rejection, revision changes, defer/resume, and manual terminal decisions
 
 Field nullability and conditional requirements:
 
 * `done_reason`, `resolution_source`, and `closed_at` are null while `lifecycle_state=open` and required when `lifecycle_state=done`.
 * `escalation_reason` is null when `escalation_state=none` and required when `escalation_state=operator_required`.
+* `origin_finding_id` is null when `origin_kind=manual` and required when `origin_kind=promoted_finding`.
 
 ### 4.7 ItemRevision
 
@@ -307,9 +312,17 @@ Required fields:
 Semantics:
 
 * revisions are immutable once created
-* any change to title, description, acceptance criteria, target ref, approval policy, or seed commit creates a new revision
+* any change to title, description, acceptance criteria, target ref, approval policy, `seed_commit_oid`, or `seed_target_commit_oid` creates a new revision
 * old revisions remain for audit
 * future jobs for a revision read only that revision's frozen snapshots
+* `seed_commit_oid` is the source baseline from which authoring for the revision proceeds
+* `seed_target_commit_oid` is the target baseline captured at revision creation for audit, target-baseline history across superseding revisions, and downstream promotion defaults
+* `seed_target_commit_oid` does not by itself change the current candidate diff subject, which continues to derive from `seed_commit_oid` and the current authoring head
+* `seed_commit_oid` and `seed_target_commit_oid` MUST remain reachable local commits for as long as the revision is current and may still dispatch jobs
+* explicit or derived seed OIDs MUST be validated as reachable local commits in the project repository at revision-creation time
+* when a default seed depends on the current `target_ref` head, the daemon MUST capture that head atomically with revision creation so later ref movement cannot rewrite the revision baseline
+* `policy_snapshot` freezes execution policy, including the default repo-context policy and any step-specific repo-context overrides
+* every repo-context policy object stored in `policy_snapshot` MUST conform to `repo_context_policy:v1`
 
 Field nullability and conditional requirements:
 
@@ -334,6 +347,17 @@ Required fields:
 * execution-relevant operator notes
 * prior accepted structured results
 
+`schema_version` MUST be `revision_context:v1` in v1.
+
+`payload` MUST use the canonical core schema plus optional `extensions` object. Required core fields are:
+
+* `authoring_head_commit_oid`
+* `changed_paths` as an ordered list of repo-relative paths
+* `latest_validation` as either null or an object with `job_id`, `schema_version`, `outcome`, and `summary`
+* `latest_review` as either null or an object with `job_id`, `schema_version`, `outcome`, and `summary`
+* `accepted_result_refs` as an ordered list of objects with `job_id`, `step_id`, `schema_version`, `outcome`, and `summary`
+* `operator_notes_excerpt`
+
 Steps with `context_policy=resume_context` receive the current snapshot.
 
 ### 4.9 Job
@@ -350,7 +374,7 @@ Required fields:
 * `supersedes_job_id`
 * `status` with values `queued|assigned|running|completed|failed|cancelled|expired|superseded`
 * `outcome_class` with values `clean|findings|transient_failure|terminal_failure|protocol_violation|cancelled`
-* `phase_kind` with values `author|validate|review`
+* `phase_kind` with values `author|validate|review|investigate`
 * `workspace_id`
 * `workspace_kind`
 * `execution_permission` with values `may_mutate|must_not_mutate`
@@ -360,7 +384,7 @@ Required fields:
 * `prompt_snapshot`
 * `input_base_commit_oid`
 * `input_head_commit_oid`
-* `output_artifact_kind` with values `commit|review_report|validation_report|none`
+* `output_artifact_kind` with values `commit|review_report|validation_report|finding_report|none`
 * `output_commit_oid`
 * `result_schema_version`
 * `result_payload`
@@ -379,16 +403,23 @@ Semantics:
 
 * every job is a new subprocess
 * there is no provider-native hidden conversation reuse
+* `validate` jobs perform objective verification over a concrete workspace subject and emit `validation_report`
+* `review` jobs perform agent judgment over an explicit diff subject and emit `review_report`
 * `semantic_attempt_no` increments only when the workflow semantically re-enters the same step
 * redispatch of the same semantic attempt keeps `semantic_attempt_no` and increments `retry_no`
 * successful mutating jobs always end in exactly one daemon-created canonical commit
+* when a job produces a structured terminal result with `output_artifact_kind=validation_report`, `result_schema_version` MUST be `validation_report:v1`
+* when a job produces a structured terminal result with `output_artifact_kind=review_report`, `result_schema_version` MUST be `review_report:v1`
+* when a job produces a structured terminal result with `output_artifact_kind=finding_report`, `result_schema_version` MUST be `finding_report:v1`
+* `result_payload` MUST conform to the canonical core schema named by `result_schema_version`; non-core provider, project, or adapter data MAY appear only under `extensions`
+* workflow evaluation, prompt assembly, UI, and conformance tests MUST rely only on canonical core fields, never on `extensions`
 
 Field nullability and conditional requirements:
 
 * `supersedes_job_id` is null on first dispatch of a semantic attempt and required on retries or manual redispatch lineage.
 * `outcome_class` is null until the job reaches a terminal state.
 * `workspace_id` is null while queued and required once the job is assigned.
-* `input_base_commit_oid` is required for review jobs and other jobs that evaluate a diff subject; otherwise it may be null.
+* `input_base_commit_oid` is required for review jobs, investigation jobs, `validate_integrated`, and other jobs that evaluate a diff subject; otherwise it may be null.
 * `input_head_commit_oid` is required once execution begins.
 * `output_commit_oid` is required for successful mutating jobs and null otherwise.
 * `result_schema_version` and `result_payload` are required when the job produces a structured terminal result and null otherwise.
@@ -478,7 +509,51 @@ Field nullability and conditional requirements:
 * `commit_oid` is required for commit-creating operations once the commit exists.
 * `completed_at` is null while the operation is unresolved and required for terminal journal states.
 
-### 4.12 Activity
+### 4.12 Finding
+
+Required fields:
+
+* `id`
+* `project_id`
+* `source_item_id`
+* `source_item_revision_id`
+* `source_job_id`
+* `source_step_id`
+* `source_report_schema_version`
+* `source_finding_key`
+* `source_subject_kind` with values `candidate|integrated`
+* `source_subject_base_commit_oid`
+* `source_subject_head_commit_oid`
+* `code`
+* `severity` with values `low|medium|high|critical`
+* `summary`
+* `paths`
+* `evidence`
+* `triage_state` with values `untriaged|promoted|dismissed`
+* `promoted_item_id`
+* `dismissal_reason`
+* `created_at`
+* `triaged_at`
+
+Semantics:
+
+* a `Finding` is durable runtime state extracted from a canonical structured report
+* findings never touch Git and are stored only in SQLite
+* a finding captures the exact candidate or integrated subject that produced it
+* promotion creates a new item in the same project and links it bidirectionally through `promoted_item_id` and the promoted item's `origin_finding_id`
+* dismissal never deletes the finding; it only records triage state and reason
+* the daemon MUST preserve reachability of `source_subject_head_commit_oid` until the finding is triaged
+* when `source_subject_kind=integrated`, the daemon MUST also preserve reachability of `source_subject_base_commit_oid` until the finding is triaged
+
+Field nullability and conditional requirements:
+
+* `source_subject_head_commit_oid` is required for every finding.
+* `source_subject_base_commit_oid` is required when `source_subject_kind=integrated` and optional otherwise.
+* `promoted_item_id` is required iff `triage_state=promoted`.
+* `dismissal_reason` is required iff `triage_state=dismissed`.
+* `triaged_at` is null while `triage_state=untriaged` and required otherwise.
+
+### 4.13 Activity
 
 Activity is an append-only structured event log. Typical event types:
 
@@ -496,6 +571,9 @@ Activity is an append-only structured event log. Typical event types:
 * `job_completed`
 * `job_failed`
 * `job_cancelled`
+* `finding_recorded`
+* `finding_promoted`
+* `finding_dismissed`
 * `approval_requested`
 * `approval_approved`
 * `approval_rejected`
@@ -519,56 +597,75 @@ v1 ships with exactly one runtime workflow:
 
 All items use this workflow. A `bug` item still executes through `delivery:v1`; classification affects operator framing, not runtime graph. If reproduction steps or regression expectations matter for a bug, they belong in the revision contract (description and acceptance criteria), not in a separate runtime construct.
 
+`delivery:v1` also includes built-in auxiliary report-only steps. They are part of the built-in workflow surface, but they do not advance or rewind closure state.
+
 ### 5.2 Step Contracts
 
-| `step_id`                           | `phase_kind` | `workspace_kind` | `execution_permission` | `context_policy` | `output_artifact_kind` | Default template      |
-| ----------------------------------- | ------------ | ---------------- | ---------------------- | ---------------- | ---------------------- | --------------------- |
-| `author_initial`                    | `author`     | `authoring`      | `may_mutate`           | `fresh`          | `commit`               | `author-initial`      |
-| `validate_candidate_initial`        | `validate`   | `authoring`      | `must_not_mutate`      | `resume_context` | `validation_report`    | `validate-candidate`  |
-| `review_candidate_initial`          | `review`     | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `review-candidate`    |
-| `repair_candidate`                  | `author`     | `authoring`      | `may_mutate`           | `resume_context` | `commit`               | `repair-candidate`    |
-| `validate_candidate_repair`         | `validate`   | `authoring`      | `must_not_mutate`      | `resume_context` | `validation_report`    | `validate-candidate`  |
-| `review_candidate_repair`           | `review`     | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `review-candidate`    |
-| `prepare_convergence`               | `system`     | `integration`    | `daemon_only`          | `none`           | `none`                 | —                     |
-| `validate_integrated`               | `validate`   | `integration`    | `must_not_mutate`      | `resume_context` | `validation_report`    | `validate-integrated` |
-| `repair_after_integration`          | `author`     | `authoring`      | `may_mutate`           | `resume_context` | `commit`               | `repair-integrated`   |
-| `validate_after_integration_repair` | `validate`   | `authoring`      | `must_not_mutate`      | `resume_context` | `validation_report`    | `validate-candidate`  |
-| `review_after_integration_repair`   | `review`     | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `review-candidate`    |
+| `step_id`                           | `phase_kind`  | `workspace_kind` | `execution_permission` | `context_policy` | `output_artifact_kind` | `closure_relevance` | Default template      |
+| ----------------------------------- | ------------- | ---------------- | ---------------------- | ---------------- | ---------------------- | ------------------- | --------------------- |
+| `author_initial`                    | `author`      | `authoring`      | `may_mutate`           | `fresh`          | `commit`               | `closure_relevant`  | `author-initial`      |
+| `review_incremental_initial`        | `review`      | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `closure_relevant`  | `review-incremental`  |
+| `review_candidate_initial`          | `review`      | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `closure_relevant`  | `review-candidate`    |
+| `validate_candidate_initial`        | `validate`    | `authoring`      | `must_not_mutate`      | `resume_context` | `validation_report`    | `closure_relevant`  | `validate-candidate`  |
+| `repair_candidate`                  | `author`      | `authoring`      | `may_mutate`           | `resume_context` | `commit`               | `closure_relevant`  | `repair-candidate`    |
+| `review_incremental_repair`         | `review`      | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `closure_relevant`  | `review-incremental`  |
+| `review_candidate_repair`           | `review`      | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `closure_relevant`  | `review-candidate`    |
+| `validate_candidate_repair`         | `validate`    | `authoring`      | `must_not_mutate`      | `resume_context` | `validation_report`    | `closure_relevant`  | `validate-candidate`  |
+| `investigate_item`                  | `investigate` | `review`         | `must_not_mutate`      | `fresh`          | `finding_report`       | `report_only`       | `investigate-item`    |
+| `prepare_convergence`               | `system`      | `integration`    | `daemon_only`          | `none`           | `none`                 | `closure_relevant`  | —                     |
+| `validate_integrated`               | `validate`    | `integration`    | `must_not_mutate`      | `resume_context` | `validation_report`    | `closure_relevant`  | `validate-integrated` |
+| `repair_after_integration`          | `author`      | `authoring`      | `may_mutate`           | `resume_context` | `commit`               | `closure_relevant`  | `repair-integrated`   |
+| `review_incremental_after_integration_repair` | `review` | `review` | `must_not_mutate` | `fresh` | `review_report` | `closure_relevant` | `review-incremental` |
+| `review_after_integration_repair`   | `review`      | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `closure_relevant`  | `review-candidate`    |
+| `validate_after_integration_repair` | `validate`    | `authoring`      | `must_not_mutate`      | `resume_context` | `validation_report`    | `closure_relevant`  | `validate-candidate`  |
 
 Important semantics:
 
 * `step_id` values are workflow truth
 * repeated `phase_kind` does not imply repeated step identity
 * `prepare_convergence` is a system step, not a job
-* every runtime step in v1 is closure-relevant
+* `closure_relevant` steps advance or rewind delivery closure state
+* every successful mutating authoring step is followed by a mandatory incremental review of just the newly produced commit range
+* whole-candidate review and final candidate validation are mandatory closure-relevant gates before convergence prepare
+* `report_only` steps are auxiliary, never consume candidate or integration rework budget, and never change the closure graph position
 
 ### 5.3 Workflow Graph
 
 ```text
 author_initial
-  -> validate_candidate_initial
+  -> review_incremental_initial
 
-validate_candidate_initial(clean)
+review_incremental_initial(clean)
   -> review_candidate_initial
-validate_candidate_initial(findings)
+review_incremental_initial(findings)
   -> repair_candidate
 
 review_candidate_initial(clean)
-  -> prepare_convergence
+  -> validate_candidate_initial
 review_candidate_initial(findings)
   -> repair_candidate
 
-repair_candidate
-  -> validate_candidate_repair
+validate_candidate_initial(clean)
+  -> prepare_convergence
+validate_candidate_initial(findings)
+  -> repair_candidate
 
-validate_candidate_repair(clean)
+repair_candidate
+  -> review_incremental_repair
+
+review_incremental_repair(clean)
   -> review_candidate_repair
-validate_candidate_repair(findings)
+review_incremental_repair(findings)
   -> repair_candidate
 
 review_candidate_repair(clean)
-  -> prepare_convergence
+  -> validate_candidate_repair
 review_candidate_repair(findings)
+  -> repair_candidate
+
+validate_candidate_repair(clean)
+  -> prepare_convergence
+validate_candidate_repair(findings)
   -> repair_candidate
 
 prepare_convergence(prepared)
@@ -584,22 +681,33 @@ validate_integrated(findings)
   -> repair_after_integration
 
 repair_after_integration
-  -> validate_after_integration_repair
+  -> review_incremental_after_integration_repair
 
-validate_after_integration_repair(clean)
+review_incremental_after_integration_repair(clean)
   -> review_after_integration_repair
-validate_after_integration_repair(findings)
+review_incremental_after_integration_repair(findings)
   -> repair_after_integration
 
 review_after_integration_repair(clean)
-  -> prepare_convergence
+  -> validate_after_integration_repair
 review_after_integration_repair(findings)
+  -> repair_after_integration
+
+validate_after_integration_repair(clean)
+  -> prepare_convergence
+validate_after_integration_repair(findings)
   -> repair_after_integration
 ```
 
 Successful `validate_integrated` does not create another job step. It either enters the approval gate or projects the daemon-only `finalize_prepared_convergence` action according to the revision's `approval_policy`.
 
 If a prepared convergence later becomes stale because `target_ref` moved, the daemon MUST execute the daemon-only `invalidate_prepared_convergence` action before approval or finalization can proceed.
+
+`investigate_item` is an explicit auxiliary report-only step. It MAY be dispatched when an item is open, idle, not pending approval, and the evaluator does not currently project a daemon-only next action. Its completion records `Finding` rows but does not change `current_step_id`, `dispatchable_step_id`, approval state, or closure progress.
+
+Auxiliary report-only transition rule:
+
+* from any open, idle, non-pending item state that is not currently projected toward a daemon-only next action, `investigate_item` MAY be dispatched alongside the current closure position; after `clean`, `findings`, `transient_failure`, `terminal_failure`, `protocol_violation`, or `cancelled`, the item returns to the same closure position
 
 ### 5.4 Default Budgets
 
@@ -653,6 +761,7 @@ The evaluator computes but does not canonically store:
 * `phase_status`
 * `next_recommended_action`
 * `dispatchable_step_id`
+* `auxiliary_dispatchable_step_ids`
 * `allowed_actions`
 * `board_status`
 * `attention_badges`
@@ -666,7 +775,10 @@ Operational terms used elsewhere:
 * `next_recommended_action` may point to a job dispatch, a daemon-only operation, or a human command.
 * daemon-only `next_recommended_action` values used in v1 are `prepare_convergence`, `finalize_prepared_convergence`, and `invalidate_prepared_convergence`.
 * `dispatchable_step_id` is the legal job `step_id` to dispatch next, or null when the next recommended action is a human or daemon-only action such as approval or convergence prepare.
-* `board_status` MUST be one of `INBOX|WORKING|APPROVAL|DONE`. `DONE` applies iff `lifecycle_state=done`. `APPROVAL` applies iff `lifecycle_state=open`, `approval_state=pending`, and `next_recommended_action!=invalidate_prepared_convergence`. `INBOX` applies to remaining open items only when there is no active job, no active convergence, and the current revision has no non-superseded terminal jobs yet. `WORKING` applies to all other remaining open items.
+* `auxiliary_dispatchable_step_ids` is an ordered list of zero or more legal built-in report-only `step_id` values that MAY be dispatched without changing the current closure position
+* report-only steps never change closure workflow position; while a report-only job is running, `current_step_id` continues to reflect the closure-relevant step
+* `board_status` MUST be one of `INBOX|WORKING|APPROVAL|DONE`. `DONE` applies iff `lifecycle_state=done`. `APPROVAL` applies iff `lifecycle_state=open`, `approval_state=pending`, and `next_recommended_action!=invalidate_prepared_convergence`. `INBOX` applies to remaining open items only when there is no active job, no active convergence, and the current revision has no non-superseded terminal closure-relevant jobs yet. `WORKING` applies to all other remaining open items.
+* while a report-only job is running, `current_phase_kind` and `phase_status` MUST reflect the active report-only job, even though `current_step_id` continues to reflect the closure-relevant step
 * `attention_badges` MUST be an ordered list containing zero or more of `escalated` and `deferred`. Include `escalated` when `escalation_state=operator_required`. Include `deferred` when `parking_state=deferred`. If both apply, the recommended order is `["escalated", "deferred"]`. `Blocked` is not a canonical value in v1.
 
 ### 6.3 Normalized Outcomes
@@ -684,11 +796,11 @@ Job progression uses this vocabulary:
 
 ### 6.4 Outcome Handling
 
-* `clean` follows the success edge
-* `findings` follows the findings edge only for validate and review steps
-* `transient_failure` redispatches the same step while transport retry budget remains, else escalates with `step_failed`
-* `terminal_failure` escalates with `step_failed`
-* `protocol_violation` escalates with `protocol_violation`
+* `clean` follows the success edge for closure-relevant steps; for `report_only` steps it records the structured result and leaves closure state unchanged
+* `findings` follows the findings edge only for closure-relevant validate and review steps; for `report_only` steps it records findings and leaves closure state unchanged
+* `transient_failure` redispatches the same step while transport retry budget remains for closure-relevant steps; for `report_only` steps it MAY redispatch while retry budget remains and otherwise leaves closure state unchanged without escalation
+* `terminal_failure` escalates with `step_failed` for closure-relevant steps; for `report_only` steps it leaves closure state unchanged and preserves explicit redispatch availability
+* `protocol_violation` escalates with `protocol_violation` for closure-relevant steps; for `report_only` steps it leaves closure state unchanged and preserves explicit redispatch availability
 * `cancelled` remains on the same step with no automatic redispatch
 
 ### 6.5 Evaluation Algorithm
@@ -697,8 +809,8 @@ For one item:
 
 1. If `lifecycle_state=done`, the item is terminal.
 2. If `parking_state=deferred`, no auto-dispatch occurs.
-3. If there is an active job or active convergence for the current revision, project the current step as running.
-4. Otherwise determine workflow position from canonical rows for the current revision: latest non-superseded terminal jobs, current convergence state, and canonical approval state.
+3. If there is an active closure-relevant job or active convergence for the current revision, project the current step as running. If the only active job is report-only, keep the closure-relevant step projection and mark the item as working.
+4. Otherwise determine workflow position from canonical rows for the current revision using only closure-relevant terminal jobs, plus current convergence state and canonical approval state. Terminal report-only jobs never advance or rewind the closure graph.
 5. If candidate or integration rework budget is exhausted, project operator-required attention and a human next action. The command or system action that exhausts the budget MUST materialize the corresponding escalation state canonically.
 6. If the current convergence is `conflicted`, project operator-required attention and a human next action. The convergence handler MUST materialize `escalation_state=operator_required` with reason `convergence_conflict` canonically.
 7. If the workflow is at the approval gate and `approval_policy=required`, project approval actions from canonical `approval_state`. Clean completion of `validate_integrated` MUST materialize `approval_state=pending` as part of job-completion handling.
@@ -765,12 +877,20 @@ HTTP queries and WebSocket delivery MUST NOT execute daemon-only system actions 
 
 `POST /items/:id/approval/reject` MUST:
 
+Request body:
+
+* MAY include the same optional revision-contract overrides and optional seed fields as `POST /items/:id/revise`
+
 1. verify `approval_state=pending`
 2. verify there are no active jobs or active convergence operations
 3. cancel the prepared convergence
-4. create a new revision that supersedes the current one with the same title, description, acceptance criteria, target ref, and approval policy by default; `seed_commit_oid` defaults to the prior revision's authoring head
-5. set `approval_state` for the new revision to `not_requested` or `not_required` per the revision's approval policy
-6. keep `lifecycle_state=open` and `parking_state=active`
+4. create a new revision that supersedes the current one with the same title, description, acceptance criteria, target ref, and approval policy by default
+5. set the new revision's `seed_commit_oid` from explicit input when provided; otherwise derive it from the prior revision's current authoring head, or fall back to the prior revision's `seed_commit_oid` when no authoring workspace exists
+6. set the new revision's `seed_target_commit_oid` from explicit input when provided; otherwise derive it from the current head of the new revision's `target_ref`
+7. capture any default derived from `target_ref` atomically with revision creation
+8. note that rebinding `seed_target_commit_oid` records a new target baseline but does not itself rebase carried-forward work
+9. set `approval_state` for the new revision to `not_requested` or `not_required` per the revision's approval policy
+10. keep `lifecycle_state=open` and `parking_state=active`
 
 Approval is not durable if finalization fails. If target ref moved before approval finalization, the approval command MUST fail safely by applying the same state transition as `invalidate_prepared_convergence`, then require a new prepare attempt.
 
@@ -840,12 +960,23 @@ For a non-mutating job the daemon MUST:
 
 ### 7.6 Review Subjects
 
-Review jobs MUST record both:
+Review and investigation jobs MUST record both:
 
 * `input_base_commit_oid`
 * `input_head_commit_oid`
 
-A review result MUST be attributable to a specific diff subject.
+A review or investigation result MUST be attributable to a specific diff subject.
+
+Closure-relevant review steps in `delivery:v1` use these diff subjects:
+
+* `review_incremental_initial` MUST review only the newly produced initial authoring commit range, with `input_base_commit_oid=seed_commit_oid` and `input_head_commit_oid` equal to the current authoring workspace head
+* `review_incremental_repair` and `review_incremental_after_integration_repair` MUST review only the newly produced repair commit range, with `input_base_commit_oid` equal to the authoring workspace head before the repair job and `input_head_commit_oid` equal to the current authoring workspace head after the repair job
+* `review_candidate_initial`, `review_candidate_repair`, and `review_after_integration_repair` MUST review the full current candidate subject for the revision, with `input_base_commit_oid=seed_commit_oid` and `input_head_commit_oid` equal to the current authoring workspace head, or `seed_commit_oid` when no authoring workspace exists yet
+
+`investigate_item` uses a review workspace and MUST also record a specific diff subject:
+
+* on the candidate side, `input_base_commit_oid` defaults to `seed_commit_oid` and `input_head_commit_oid` defaults to the current authoring workspace head, or `seed_commit_oid` when no authoring workspace exists yet
+* when a valid prepared convergence is the current integrated subject, `input_base_commit_oid` MUST be that convergence's `input_target_commit_oid` and `input_head_commit_oid` MUST be its `prepared_commit_oid`
 
 ### 7.7 Convergence Lifecycle
 
@@ -861,7 +992,7 @@ Prepare:
 
 Validate and finalize:
 
-1. run `validate_integrated` against the prepared result
+1. run `validate_integrated` against the prepared result and record `input_base_commit_oid=input_target_commit_oid` plus `input_head_commit_oid=prepared_commit_oid`
 2. if validation finds issues, return to the post-integration repair loop
 3. if approval is required, the clean completion handler for `validate_integrated` MUST set `approval_state=pending` and wait for explicit approval
 4. if approval is not required, the daemon MUST project and execute `finalize_prepared_convergence`
@@ -885,6 +1016,9 @@ When convergence becomes `conflicted`:
 * authoring workspaces are retained through the active revision and cleaned up after revision supersession or item closure unless retained for debug
 * review workspaces are removed after completion unless retained for debug
 * integration workspaces are retained while convergence is `running`, `conflicted`, or `prepared`, then removed after finalization, failure, or explicit cleanup
+* any authoring or integration workspace, scratch ref, or equivalent daemon-owned anchor that is the only remaining support for a current revision's `seed_commit_oid` or `seed_target_commit_oid` MUST be retained until that revision is superseded or the item is closed
+* however, any authoring workspace or equivalent daemon-owned ref that is the only remaining anchor for an untriaged candidate finding subject MUST be retained until all such findings are triaged
+* likewise, any integration workspace or equivalent daemon-owned ref that is the only remaining anchor for an untriaged integrated finding subject MUST be retained until all such findings are triaged
 
 ### 7.10 Journal and Crash Recovery
 
@@ -953,7 +1087,7 @@ There is no workflow CRUD in v1.
 
 * `POST .../items`
 * `GET .../items` with derived `board_status`, `attention_badges`, `current_step_id`, and `next_recommended_action`
-* `GET .../items/:item_id` with current revision contract, revision history, jobs, workspaces, convergences, revision-context summary, and diagnostics
+* `GET .../items/:item_id` with current revision contract, revision history, jobs, workspaces, convergences, findings, revision-context summary, and diagnostics
 * `GET .../items/:item_id/evaluation`
 * `PATCH .../items/:item_id`
 * `POST .../items/:item_id/revise`
@@ -967,19 +1101,27 @@ There is no workflow CRUD in v1.
 
 Item command semantics:
 
+* revision-creating commands accept JSON bodies containing the applicable revision contract fields. `seed_commit_oid` and `seed_target_commit_oid` are optional independent fields on `POST /items`, `POST /items/:id/revise`, `POST /items/:id/reopen`, and `POST /items/:id/approval/reject`.
+* when provided explicitly, each seed field MUST be a reachable local commit in the project repository; otherwise the command MUST fail with `revision_seed_unreachable`
+* when a seed field is omitted, that field MUST be derived independently by the command's default rules
+* when command-specific defaults require resolving the current `target_ref` head and that ref does not resolve to a local commit in the project repository, the command MUST fail with `target_ref_unresolved`
+* `POST /items` creates a manual item with `origin_kind=manual` and `origin_finding_id=null`. It MUST also create the initial revision. If `seed_commit_oid` is omitted, the daemon MUST resolve `target_ref`, read its current head, and use that head. If `seed_target_commit_oid` is omitted, the daemon MUST use that same resolved head.
 * `PATCH /items/:id` MAY update only `classification`, `priority`, `labels`, and `operator_notes`
-* `POST /items/:id/revise` is required for changes to title, description, acceptance criteria, target ref, approval policy, or seed commit. The revise procedure MUST:
+* `POST /items/:id/revise` is required for changes to title, description, acceptance criteria, target ref, approval policy, `seed_commit_oid`, or `seed_target_commit_oid`. The revise procedure MUST:
   1. verify the item is open and idle
   2. create a new immutable revision
   3. freeze a new policy snapshot and template map snapshot for the new revision
-  4. seed the new revision from explicit `seed_commit_oid` if provided, otherwise from the prior revision's authoring head
-  5. clear escalation
-  6. reset approval state based on the new revision's approval policy
-  7. leave prior jobs, workspaces, and convergences as historical lineage
+  4. set `seed_commit_oid` from explicit input when provided; otherwise derive it from the prior revision's current authoring head, or fall back to the prior revision's `seed_commit_oid` when no authoring workspace exists
+  5. set `seed_target_commit_oid` from explicit input when provided; otherwise derive it from the current head of the new revision's `target_ref`
+  6. capture any default derived from `target_ref` atomically with revision creation
+  7. note that rebinding `seed_target_commit_oid` records a new target baseline but does not itself rebase carried-forward work
+  8. clear escalation
+  9. reset approval state based on the new revision's approval policy
+  10. leave prior jobs, workspaces, and convergences as historical lineage
 * `POST /items/:id/defer` requires the item to be open, idle, and not pending approval; sets `parking_state=deferred`
 * `POST /items/:id/resume` requires `parking_state=deferred`; sets `parking_state=active`
 * `POST /items/:id/dismiss` and `POST /items/:id/invalidate` require the item to be open and idle
-* `POST /items/:id/reopen` is allowed only for dismissed or invalidated items, never completed items. The reopen procedure MUST create a new revision cloned from the last revision by default, set `lifecycle_state=open`, set `parking_state=active`, reset approval state for the new revision, and clear escalation
+* `POST /items/:id/reopen` is allowed only for dismissed or invalidated items, never completed items. Its request body MAY include the same optional revision-contract overrides and optional seed fields as `POST /items/:id/revise`. The reopen procedure MUST create a new revision cloned from the last revision by default, derive `seed_commit_oid` and `seed_target_commit_oid` using the same default rules as `POST /items/:id/revise`, set `lifecycle_state=open`, set `parking_state=active`, reset approval state for the new revision, and clear escalation
 
 ### 8.5 Job Endpoints
 
@@ -1002,8 +1144,10 @@ Daemon-only system actions such as `finalize_prepared_convergence` and `invalida
 
 Job command semantics:
 
-* `POST .../items/:item_id/jobs` dispatches either the current `dispatchable_step_id` or an explicit legal current job step. If `dispatchable_step_id` is null and no explicit legal job step is provided, the command MUST fail without mutating item state.
-* `POST .../items/:item_id/jobs/:job_id/retry` is allowed only when the referenced job is terminal and non-success, the item is open and idle, the job belongs to the current revision, and the same `step_id` is still currently dispatchable. It creates a new job row, preserves `semantic_attempt_no`, increments `retry_no`, sets `supersedes_job_id`, and leaves the prior job as historical lineage.
+* `POST .../items/:item_id/jobs` dispatches either the current `dispatchable_step_id`, one of the current `auxiliary_dispatchable_step_ids`, or an explicit equivalent legal current job step. If none is available and no explicit legal current job step is provided, the command MUST fail without mutating item state.
+* workflow-projected mandatory stages such as incremental review, whole-candidate review, and final candidate validation are automatic only in the sense that the evaluator projects them as the sole closure-relevant `dispatchable_step_id`; the daemon is not required to launch them without a dispatch command
+* explicit legal current job steps MAY include built-in report-only steps such as `investigate_item`. Dispatching a report-only step requires the item to be open, idle, not pending approval, and not currently projected toward a daemon-only next action, and MUST be reflected in `auxiliary_dispatchable_step_ids`; it MUST NOT change closure position, approval state, or rework budgets.
+* `POST .../items/:item_id/jobs/:job_id/retry` is allowed only when the referenced job is terminal and non-success, the item is open and idle, the job belongs to the current revision, and either the same `step_id` is still currently dispatchable or it remains a legal explicit report-only step for the current item state. It creates a new job row, preserves `semantic_attempt_no`, increments `retry_no`, sets `supersedes_job_id`, and leaves the prior job as historical lineage.
 * `POST .../items/:item_id/jobs/:job_id/cancel` is allowed only when the referenced job is `queued`, `assigned`, or `running`. It terminates any subprocess when present, marks the job `cancelled`, clears active workspace attachment, and leaves the item on the same step with no automatic redispatch.
 
 ### 8.6 Workspace and Convergence Endpoints
@@ -1027,13 +1171,28 @@ Workspace and convergence command semantics:
 * `POST .../items/:item_id/convergence/prepare` is allowed only when the evaluator projects `next_recommended_action=prepare_convergence` and there is no active convergence for the current revision.
 * `POST .../convergences/:convergence_id/abort` is allowed only when the convergence is `queued`, `running`, or `prepared` and not finalized. It cancels active convergence work, clears pending approval if this convergence was the prepared current convergence, marks the convergence `cancelled`, and then removes or retains the integration workspace according to retention policy.
 
-### 8.7 Activity and Stats Endpoints
+### 8.7 Finding Endpoints
+
+* `GET .../items/:item_id/findings`
+* `GET .../findings/:finding_id`
+* `POST .../findings/:finding_id/promote`
+* `POST .../findings/:finding_id/dismiss`
+
+Finding command semantics:
+
+* when a job completes successfully with `validation_report:v1`, `review_report:v1`, or `finding_report:v1`, the daemon MUST extract each canonical `finding:v1` object into a durable `Finding` row keyed by `source_job_id + source_finding_key`
+* finding extraction MUST determine `source_subject_kind` canonically: `validate_integrated` findings are always `integrated`; review or investigation findings are `integrated` iff their `input_base_commit_oid` and `input_head_commit_oid` match the prepared or finalized integrated subject for the same revision; all other findings are `candidate`
+* finding extraction MUST persist `source_subject_head_commit_oid=input_head_commit_oid`; it MUST also persist `source_subject_base_commit_oid=input_base_commit_oid` whenever present
+* `POST .../findings/:finding_id/promote` is allowed only when `triage_state=untriaged`. It MUST verify that `source_subject_head_commit_oid` remains reachable and, when `source_subject_kind=integrated`, that `source_subject_base_commit_oid` remains reachable; otherwise it MUST fail with `finding_subject_unreachable`. It creates a new item in the same project with `origin_kind=promoted_finding` and `origin_finding_id=<finding_id>`, defaults `classification=bug`, defaults title and description from the finding summary and evidence, defaults `acceptance_criteria` to resolving the promoted finding and validating that it no longer reproduces, defaults `target_ref` and `approval_policy` from the source item revision unless overridden, defaults `seed_commit_oid` to `source_subject_head_commit_oid` for both candidate and integrated findings, defaults `seed_target_commit_oid` to `source_subject_base_commit_oid` when `source_subject_kind=integrated`, and otherwise defaults `seed_target_commit_oid` to the source item revision's `seed_target_commit_oid`. It records the new item's initial revision and sets `triage_state=promoted` with `promoted_item_id`
+* `POST .../findings/:finding_id/dismiss` is allowed only when `triage_state=untriaged`. It records `triage_state=dismissed`, persists `dismissal_reason`, and keeps the finding attached to the source job and item for audit
+
+### 8.8 Activity and Stats Endpoints
 
 * `GET .../activity`
 * `GET /api/activity`
 * `GET /api/stats`
 
-### 8.8 Example Payloads
+### 8.9 Example Payloads
 
 Create item request:
 
@@ -1079,6 +1238,8 @@ The fully assembled prompt MUST be deterministic and ordered as:
 6. convergence metadata when relevant
 7. structured output instructions and schema hints
 
+For validate, review, and report-only investigation steps, structured output instructions and schema hints MUST target the canonical core schema for that step and MUST instruct adapters to place any non-core data under `extensions`.
+
 The fully assembled prompt MUST be written to disk before execution.
 
 ### 9.2 Budget Rules
@@ -1119,6 +1280,111 @@ v1 supports:
 
 `result_payload` in SQLite is canonical. `result.json` is a copied inspection artifact.
 
+### 9.5 Canonical Structured Contracts
+
+General rules:
+
+* v1 defines canonical core schemas for `finding:v1`, `validation_report:v1`, `review_report:v1`, `finding_report:v1`, `revision_context:v1`, and `repo_context_policy:v1`
+* each structured object consists of required core fields plus an optional `extensions` object
+* producers MUST populate all required core fields and MUST place non-core data only under `extensions`
+* consumers MUST ignore unknown `extensions` keys
+* evaluator logic, prompt assembly, UI projections, and conformance tests MUST rely only on core fields
+
+#### 9.5.1 `finding:v1`
+
+Required core fields:
+
+* `finding_key`
+* `code`
+* `severity` with values `low|medium|high|critical`
+* `summary`
+* `paths`
+* `evidence` as an ordered list of strings
+
+Semantics:
+
+* `finding_key` MUST be stable within the source report and unique within `source_job_id`
+* `paths` entries MUST be repo-relative paths
+
+#### 9.5.2 `validation_report:v1`
+
+Required core fields:
+
+* `outcome` with values `clean|findings`
+* `summary`
+* `checks` as an ordered list of objects with `name`, `status` (`pass|fail|skip`), and `summary`
+* `findings` as an ordered list of `finding:v1` objects
+
+Semantics:
+
+* validation reports represent objective checks over the job's current workspace subject
+* `outcome=clean` requires `findings=[]`
+* `outcome=findings` requires at least one failed check or one finding
+
+#### 9.5.3 `review_report:v1`
+
+Required core fields:
+
+* `outcome` with values `clean|findings`
+* `summary`
+* `review_subject` as an object with `base_commit_oid` and `head_commit_oid`
+* `overall_risk` with values `low|medium|high`
+* `findings` as an ordered list of `finding:v1` objects
+
+Semantics:
+
+* `review_subject.base_commit_oid` and `review_subject.head_commit_oid` MUST match the job's `input_base_commit_oid` and `input_head_commit_oid`
+* `outcome=clean` requires `findings=[]`
+
+#### 9.5.4 `finding_report:v1`
+
+Required core fields:
+
+* `outcome` with values `clean|findings`
+* `summary`
+* `findings` as an ordered list of `finding:v1` objects
+
+Semantics:
+
+* `outcome=clean` requires `findings=[]`
+* `outcome=findings` requires at least one finding
+
+#### 9.5.5 `revision_context:v1`
+
+Required core fields:
+
+* `authoring_head_commit_oid`
+* `changed_paths` as an ordered list of repo-relative paths
+* `latest_validation` as either null or an object with `job_id`, `schema_version`, `outcome`, and `summary`
+* `latest_review` as either null or an object with `job_id`, `schema_version`, `outcome`, and `summary`
+* `accepted_result_refs` as an ordered list of objects with `job_id`, `step_id`, `schema_version`, `outcome`, and `summary`
+* `operator_notes_excerpt`
+
+Semantics:
+
+* `latest_validation` and `latest_review` summaries MUST be derived from the canonical core fields of the latest non-superseded structured results for the current revision
+* `accepted_result_refs` MAY reference only jobs from the current revision
+
+#### 9.5.6 `repo_context_policy:v1`
+
+Required core fields:
+
+* `profile` with values `none|manifest_only|changed_files|changed_snippets`
+* `max_repo_context_tokens`
+* `max_files`
+* `max_snippet_lines_per_file`
+* `include_diff_hunks`
+* `include_symbol_summaries`
+
+Semantics:
+
+* `policy_snapshot` MUST store one default `repo_context_policy:v1` object and MAY store step-specific overrides keyed by `step_id`
+* `profile=none` yields no repository context
+* `profile=manifest_only` yields changed path manifest only
+* `profile=changed_files` yields changed path manifest plus selected full contents of changed files subject to caps
+* `profile=changed_snippets` yields changed path manifest plus selected snippets or diff hunks from changed files subject to caps
+* `include_diff_hunks` and `include_symbol_summaries` further constrain what is included; they MUST NOT expand selection beyond the chosen `profile`
+
 ## 10. Failure Model and Error Taxonomy
 
 ### 10.1 Error Classes
@@ -1138,6 +1404,10 @@ Command precondition errors:
 * `illegal_step_dispatch`
 * `active_job_exists`
 * `active_convergence_exists`
+* `finding_not_untriaged`
+* `finding_subject_unreachable`
+* `revision_seed_unreachable`
+* `target_ref_unresolved`
 * `completed_item_cannot_reopen`
 * `prepared_convergence_missing`
 
@@ -1172,9 +1442,9 @@ Recovery errors:
 
 ### 10.2 Handling Rules
 
-* `transient_failure` MAY redispatch while the step's transport retry budget remains.
-* `terminal_failure` escalates the item with reason `step_failed`.
-* `protocol_violation` escalates immediately and MUST NOT be silently retried.
+* `transient_failure` MAY redispatch while the step's transport retry budget remains for closure-relevant steps. For report-only steps it MAY redispatch while retry budget remains and otherwise leaves closure state unchanged without escalation.
+* `terminal_failure` escalates the item with reason `step_failed` for closure-relevant steps. For report-only steps it leaves closure state unchanged and MAY be retried explicitly.
+* `protocol_violation` escalates immediately and MUST NOT be silently retried for closure-relevant steps. For report-only steps it leaves closure state unchanged and MAY be retried explicitly.
 * `convergence_conflict` retains the integration workspace if configured and escalates the item.
 * `target_ref_moved` MUST be applied through `invalidate_prepared_convergence`, which fails the prepared convergence, clears pending approval when present, and requires a new prepare attempt.
 * command precondition failures MUST NOT partially mutate state.
@@ -1198,6 +1468,9 @@ Recovery errors:
 12. Every daemon-owned Git side effect requires a corresponding `GitOperation`.
 13. Existing item semantics do not change when live config or templates change.
 14. A completed item cannot be reopened.
+15. `item.origin_kind=promoted_finding` implies `item.origin_finding_id` is present and the referenced finding has `triage_state=promoted` with `promoted_item_id=item.id`.
+16. `finding.triage_state=promoted` implies `finding.promoted_item_id` is present and the referenced item has `origin_kind=promoted_finding` with `origin_finding_id=finding.id`.
+17. Every finding belongs to exactly one project, one source item, one source item revision, and one source job, and those source relationships must be mutually consistent.
 
 ### 11.2 Database Enforcement
 
@@ -1210,9 +1483,12 @@ An implementation SHOULD enforce at least:
 * item done-field coupling
 * unique `revision_no` per item
 * stable `step_id + semantic_attempt_no + retry_no` uniqueness per item revision
-* same-project relationships across item, revision, job, workspace, convergence, and GitOperation
+* same-project relationships across item, revision, job, workspace, convergence, GitOperation, and Finding
+* unique `source_job_id + source_finding_key` per finding
+* at most one promoted item per finding
+* backlink consistency between `finding.promoted_item_id` and `item.origin_finding_id`
 
-Cross-row conditions such as approval pending requiring a prepared convergence for the current revision, and approval or finalization requiring that convergence to still match the current `target_ref` head, MUST be enforced transactionally.
+Cross-row conditions such as approval pending requiring a prepared convergence for the current revision, approval or finalization requiring that convergence to still match the current `target_ref` head, finding source relationships remaining mutually consistent, and bidirectional finding-promotion links remaining consistent, MUST be enforced transactionally.
 
 ### 11.3 Idempotency and Stale Events
 
@@ -1244,8 +1520,9 @@ At startup the daemon MUST:
 6. if an integration workspace contains unresolved conflicts, mark convergence `conflicted`
 7. if a full prepared replay chain exists and the journaled side effect is present, reconcile it and adopt the prepared state using the rewritten tip
 8. if only a replay prefix exists without unresolved conflicts, mark the prepare operation failed and the integration workspace `stale`
-9. if finalization already happened, reconcile and mark convergence `finalized`
-10. rebuild derived projections from canonical rows
+9. inspect untriaged findings and verify that each candidate subject head remains reachable from a retained daemon-owned authoring anchor or other durable local commit reference, and that each integrated subject remains reachable either from a finalized durable ref or from a retained daemon-owned integration anchor; if not, emit operator-visible diagnostics and require repair before promotion
+10. if finalization already happened, reconcile and mark convergence `finalized`
+11. rebuild derived projections from canonical rows
 
 ## 12. Reference Algorithms
 
@@ -1448,7 +1725,9 @@ Recommended `GET .../items/:item_id` shape:
     "lifecycle_state": "open",
     "parking_state": "active",
     "approval_state": "pending",
-    "current_revision_id": "rev_7"
+    "current_revision_id": "rev_7",
+    "origin_kind": "manual",
+    "origin_finding_id": null
   },
   "current_revision": {
     "id": "rev_7",
@@ -1465,6 +1744,7 @@ Recommended `GET .../items/:item_id` shape:
     "current_step_id": "validate_integrated",
     "next_recommended_action": "approval_approve",
     "dispatchable_step_id": null,
+    "auxiliary_dispatchable_step_ids": [],
     "allowed_actions": ["approval_approve", "approval_reject"]
   },
   "revision_context_summary": {
@@ -1475,6 +1755,7 @@ Recommended `GET .../items/:item_id` shape:
   },
   "revision_history": [],
   "jobs": [],
+  "findings": [],
   "workspaces": [
     {
       "id": "wrk_1",
@@ -1509,26 +1790,38 @@ Recommended `GET .../items/:item_id` shape:
 * reload affects future revisions and jobs only
 * workflow version is frozen at item creation
 * policy snapshot and template map snapshot are frozen at revision creation
+* every revision stores both `seed_commit_oid` and `seed_target_commit_oid` deterministically
+* default seed values derived from `target_ref` are captured atomically with revision creation
+* `seed_target_commit_oid` records target-baseline history and promotion defaults without changing the current candidate diff subject
+* frozen repo-context policy objects conform to `repo_context_policy:v1`
 * prompt snapshot and template digest are frozen at job dispatch
 
 ### 14.2 State Evaluation
 
 * evaluator derives the current step from canonical rows only and never mutates durable state or Git
 * deferred items do not auto-dispatch
+* automatic candidate-stage review and validation gates are expressed by projecting exactly one closure-relevant `dispatchable_step_id`, not by implicit daemon execution
 * exhausted rework budgets escalate correctly
 * pending approval requires a prepared convergence, and approval actions require that it is still valid for the current target head
 * target-ref drift projects daemon-only invalidation and requires new prepare
+* `RevisionContext.payload` conforms to `revision_context:v1`
 * completed items cannot reopen
 
 ### 14.3 Workspace and Job Protocols
 
 * one authoring workspace exists per revision
-* review workspaces are fresh per review job
+* review workspaces are fresh per review or report-only investigation job
 * integration workspaces are one per convergence attempt
 * mutating jobs produce exactly one daemon-owned commit
 * mutating jobs fail if the result is empty
 * non-mutating jobs fail if the workspace becomes dirty
 * unexpected agent Git writes are treated as protocol violations
+* every successful authoring commit is followed by incremental review of the new commit range before whole-candidate review
+* every clean whole-candidate review is followed by final candidate validation before convergence prepare becomes legal
+* validation, review, and report-only investigation jobs normalize structured results into canonical core schemas with optional `extensions`
+* canonical report findings are extracted into durable `Finding` rows keyed by source job and finding key
+* investigation jobs record an explicit diff subject via `input_base_commit_oid` and `input_head_commit_oid`
+* report-only steps do not advance or rewind closure state
 
 ### 14.4 Convergence and Approval
 
@@ -1546,6 +1839,7 @@ Recommended `GET .../items/:item_id` shape:
 * every daemon-owned Git side effect has a corresponding `GitOperation`
 * `prepare_convergence_commit` journals the ordered source and prepared commit chains for replayed prepare work
 * startup reconciliation adopts already-applied side effects when evidence is clear
+* startup reconciliation verifies reachability of untriaged candidate and integrated finding subjects
 * partial prepare replay never counts as implicit success
 * uncertain process death never becomes implicit success
 * stale callbacks no-op when revision, job, or lease owner no longer match
@@ -1553,8 +1847,12 @@ Recommended `GET .../items/:item_id` shape:
 ### 14.6 API and Transport
 
 * command precondition failures do not partially mutate state
+* revision-creating commands expose optional independent seed fields and either validate explicit reachable seed OIDs or derive omitted fields by the canonical default rules
+* commands that must derive a seed from `target_ref` fail with `target_ref_unresolved` when that ref does not resolve locally
 * item list includes derived board status, attention badges, current step, and recommended action
-* item detail includes current revision contract, revision history, jobs, workspaces, convergences, revision-context summary, and diagnostics
+* item detail includes current revision contract, revision history, jobs, workspaces, convergences, findings, revision-context summary, and diagnostics
+* finding endpoints support listing, promotion, and dismissal without touching Git
+* promoted items carry a canonical backlink through `origin_kind=promoted_finding` and `origin_finding_id`
 * WebSocket events carry monotonic sequence numbers
 * clients can recover from sequence gaps via HTTP resync
 
@@ -1565,8 +1863,10 @@ Required for conformance:
 * SQLite-backed canonical runtime state
 * built-in `delivery:v1` workflow
 * immutable revision snapshots
+* canonical core schemas for `finding:v1`, `validation_report:v1`, `review_report:v1`, `finding_report:v1`, `revision_context:v1`, and `repo_context_policy:v1`
 * daemon-owned canonical commits and ref movement
 * explicit convergence prepare and finalize lifecycle
+* built-in report-only workflow steps and durable finding triage
 * prepare preserves the full current-revision authoring chain during convergence replay
 * daemon-only finalization and prepared-convergence invalidation actions
 * approval gate with approve and reject commands
@@ -1591,7 +1891,7 @@ The following are intentionally deferred and MUST NOT leak into v1 through tempo
 * parent/child items and dependency edges
 * clone workspaces
 * Docker workspaces
-* report-only workflow steps
+* arbitrary user-authored report-only workflow graphs
 * prompt templates that alter step semantics
 * workflow authoring in the UI or API
 * in-system manual conflict resolution continuation

@@ -4,4 +4,4 @@ pub mod step;
 
 pub use evaluator::{Evaluation, Evaluator};
 pub use graph::WorkflowGraph;
-pub use step::{DELIVERY_V1_STEPS, StepContract, StepId};
+pub use step::{ClosureRelevance, DELIVERY_V1_STEPS, StepContract, StepId};

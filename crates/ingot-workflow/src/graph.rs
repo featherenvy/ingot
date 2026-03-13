@@ -32,20 +32,20 @@ impl WorkflowGraph {
     pub fn delivery_v1() -> Self {
         Self {
             transitions: vec![
-                // author_initial -> validate_candidate_initial
+                // author_initial -> review_incremental_initial
                 Transition {
                     from_step: AUTHOR_INITIAL,
                     outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(VALIDATE_CANDIDATE_INITIAL),
+                    to: TransitionTarget::Step(REVIEW_INCREMENTAL_INITIAL),
                 },
-                // validate_candidate_initial
+                // review_incremental_initial
                 Transition {
-                    from_step: VALIDATE_CANDIDATE_INITIAL,
+                    from_step: REVIEW_INCREMENTAL_INITIAL,
                     outcome: TransitionOutcome::Clean,
                     to: TransitionTarget::Step(REVIEW_CANDIDATE_INITIAL),
                 },
                 Transition {
-                    from_step: VALIDATE_CANDIDATE_INITIAL,
+                    from_step: REVIEW_INCREMENTAL_INITIAL,
                     outcome: TransitionOutcome::Findings,
                     to: TransitionTarget::Step(REPAIR_CANDIDATE),
                 },
@@ -53,27 +53,37 @@ impl WorkflowGraph {
                 Transition {
                     from_step: REVIEW_CANDIDATE_INITIAL,
                     outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(PREPARE_CONVERGENCE),
+                    to: TransitionTarget::Step(VALIDATE_CANDIDATE_INITIAL),
                 },
                 Transition {
                     from_step: REVIEW_CANDIDATE_INITIAL,
                     outcome: TransitionOutcome::Findings,
                     to: TransitionTarget::Step(REPAIR_CANDIDATE),
                 },
-                // repair_candidate -> validate_candidate_repair
+                // validate_candidate_initial
+                Transition {
+                    from_step: VALIDATE_CANDIDATE_INITIAL,
+                    outcome: TransitionOutcome::Clean,
+                    to: TransitionTarget::Step(PREPARE_CONVERGENCE),
+                },
+                Transition {
+                    from_step: VALIDATE_CANDIDATE_INITIAL,
+                    outcome: TransitionOutcome::Findings,
+                    to: TransitionTarget::Step(REPAIR_CANDIDATE),
+                },
+                // repair_candidate -> review_incremental_repair
                 Transition {
                     from_step: REPAIR_CANDIDATE,
                     outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(VALIDATE_CANDIDATE_REPAIR),
+                    to: TransitionTarget::Step(REVIEW_INCREMENTAL_REPAIR),
                 },
-                // validate_candidate_repair
                 Transition {
-                    from_step: VALIDATE_CANDIDATE_REPAIR,
+                    from_step: REVIEW_INCREMENTAL_REPAIR,
                     outcome: TransitionOutcome::Clean,
                     to: TransitionTarget::Step(REVIEW_CANDIDATE_REPAIR),
                 },
                 Transition {
-                    from_step: VALIDATE_CANDIDATE_REPAIR,
+                    from_step: REVIEW_INCREMENTAL_REPAIR,
                     outcome: TransitionOutcome::Findings,
                     to: TransitionTarget::Step(REPAIR_CANDIDATE),
                 },
@@ -81,23 +91,23 @@ impl WorkflowGraph {
                 Transition {
                     from_step: REVIEW_CANDIDATE_REPAIR,
                     outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(PREPARE_CONVERGENCE),
+                    to: TransitionTarget::Step(VALIDATE_CANDIDATE_REPAIR),
                 },
                 Transition {
                     from_step: REVIEW_CANDIDATE_REPAIR,
                     outcome: TransitionOutcome::Findings,
                     to: TransitionTarget::Step(REPAIR_CANDIDATE),
                 },
-                // prepare_convergence
+                // validate_candidate_repair
                 Transition {
-                    from_step: PREPARE_CONVERGENCE,
+                    from_step: VALIDATE_CANDIDATE_REPAIR,
                     outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(VALIDATE_INTEGRATED),
+                    to: TransitionTarget::Step(PREPARE_CONVERGENCE),
                 },
                 Transition {
-                    from_step: PREPARE_CONVERGENCE,
+                    from_step: VALIDATE_CANDIDATE_REPAIR,
                     outcome: TransitionOutcome::Findings,
-                    to: TransitionTarget::Escalation("convergence_conflict"),
+                    to: TransitionTarget::Step(REPAIR_CANDIDATE),
                 },
                 // validate_integrated - clean goes to approval gate (handled by evaluator)
                 Transition {
@@ -109,16 +119,15 @@ impl WorkflowGraph {
                 Transition {
                     from_step: REPAIR_AFTER_INTEGRATION,
                     outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(VALIDATE_AFTER_INTEGRATION_REPAIR),
+                    to: TransitionTarget::Step(REVIEW_INCREMENTAL_AFTER_INTEGRATION_REPAIR),
                 },
-                // validate_after_integration_repair
                 Transition {
-                    from_step: VALIDATE_AFTER_INTEGRATION_REPAIR,
+                    from_step: REVIEW_INCREMENTAL_AFTER_INTEGRATION_REPAIR,
                     outcome: TransitionOutcome::Clean,
                     to: TransitionTarget::Step(REVIEW_AFTER_INTEGRATION_REPAIR),
                 },
                 Transition {
-                    from_step: VALIDATE_AFTER_INTEGRATION_REPAIR,
+                    from_step: REVIEW_INCREMENTAL_AFTER_INTEGRATION_REPAIR,
                     outcome: TransitionOutcome::Findings,
                     to: TransitionTarget::Step(REPAIR_AFTER_INTEGRATION),
                 },
@@ -126,10 +135,21 @@ impl WorkflowGraph {
                 Transition {
                     from_step: REVIEW_AFTER_INTEGRATION_REPAIR,
                     outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(PREPARE_CONVERGENCE),
+                    to: TransitionTarget::Step(VALIDATE_AFTER_INTEGRATION_REPAIR),
                 },
                 Transition {
                     from_step: REVIEW_AFTER_INTEGRATION_REPAIR,
+                    outcome: TransitionOutcome::Findings,
+                    to: TransitionTarget::Step(REPAIR_AFTER_INTEGRATION),
+                },
+                // validate_after_integration_repair
+                Transition {
+                    from_step: VALIDATE_AFTER_INTEGRATION_REPAIR,
+                    outcome: TransitionOutcome::Clean,
+                    to: TransitionTarget::Step(PREPARE_CONVERGENCE),
+                },
+                Transition {
+                    from_step: VALIDATE_AFTER_INTEGRATION_REPAIR,
                     outcome: TransitionOutcome::Findings,
                     to: TransitionTarget::Step(REPAIR_AFTER_INTEGRATION),
                 },

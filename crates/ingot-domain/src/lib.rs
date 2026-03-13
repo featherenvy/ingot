@@ -2,6 +2,7 @@ pub mod activity;
 pub mod agent;
 pub mod convergence;
 pub mod events;
+pub mod finding;
 pub mod git_operation;
 pub mod ids;
 pub mod item;

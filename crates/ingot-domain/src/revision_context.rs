@@ -4,6 +4,33 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{ItemRevisionId, JobId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionContextResultSummary {
+    pub job_id: String,
+    pub schema_version: String,
+    pub outcome: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionContextAcceptedResultRef {
+    pub job_id: String,
+    pub step_id: String,
+    pub schema_version: String,
+    pub outcome: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionContextSummary {
+    pub updated_at: DateTime<Utc>,
+    pub changed_paths: Vec<String>,
+    pub latest_validation: Option<RevisionContextResultSummary>,
+    pub latest_review: Option<RevisionContextResultSummary>,
+    pub accepted_result_refs: Vec<RevisionContextAcceptedResultRef>,
+    pub operator_notes_excerpt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevisionContext {
     pub item_revision_id: ItemRevisionId,
     pub schema_version: String,

@@ -1,173 +1,174 @@
-import { useQuery } from '@tanstack/react-query'
-import { useParams } from 'react-router'
-import { itemDetailQuery } from '../api/queries'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
+import { ApiError, approveItem, dispatchItemJob, prepareConvergence, rejectApproval } from '../api/client'
+import { agentsQuery, itemDetailQuery, queryKeys } from '../api/queries'
+import {
+  AcceptanceCriteriaSection,
+  ConvergencesTable,
+  DiagnosticsSection,
+  FindingsTable,
+  JobsTable,
+  OperatorActions,
+  OverviewPanels,
+  RevisionContextPanel,
+} from '../components/item-detail'
+import { ItemDetailSkeleton } from '../components/PageSkeletons'
+import { Alert, AlertDescription, AlertTitle } from '../components/ui/alert'
+import { useRequiredItemId, useRequiredProjectId } from '../hooks/useRequiredRouteParam'
+import { getQueuedJobBlocker } from '../jobBlockers'
 
 export default function ItemDetailPage() {
-  const { projectId, itemId } = useParams<{ projectId: string; itemId: string }>()
-  const { data: detail, isLoading, error } = useQuery(itemDetailQuery(projectId!, itemId!))
+  const projectId = useRequiredProjectId()
+  const itemId = useRequiredItemId()
+  const queryClient = useQueryClient()
+  const { data: detail, isLoading, error } = useQuery(itemDetailQuery(projectId, itemId))
+  const { data: agents } = useQuery(agentsQuery())
 
-  if (isLoading) return <p>Loading item...</p>
-  if (error) return <p>Error: {String(error)}</p>
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: queryKeys.items(projectId) })
+    queryClient.invalidateQueries({ queryKey: queryKeys.item(projectId, itemId) })
+  }
+
+  const dispatchMutation = useMutation({
+    mutationFn: () => dispatchItemJob(projectId, itemId, detail?.evaluation.dispatchable_step_id ?? undefined),
+    onSuccess: () => {
+      refresh()
+      toast.success('Job dispatched.')
+    },
+  })
+  const prepareMutation = useMutation({
+    mutationFn: () => prepareConvergence(projectId, itemId),
+    onSuccess: () => {
+      refresh()
+      toast.success('Convergence prepared.')
+    },
+  })
+  const approveMutation = useMutation({
+    mutationFn: () => approveItem(projectId, itemId),
+    onSuccess: () => {
+      refresh()
+      toast.success('Approval recorded.')
+    },
+  })
+  const rejectMutation = useMutation({
+    mutationFn: () => rejectApproval(projectId, itemId),
+    onSuccess: () => {
+      refresh()
+      toast.success('Approval rejected.')
+    },
+  })
+
+  const activeJob = detail?.jobs.find((job) => ['queued', 'assigned', 'running'].includes(job.status))
+  const retryableJobs = detail?.jobs.filter((job) => ['failed', 'cancelled', 'expired'].includes(job.status)) ?? []
+  const queueBlocker = getQueuedJobBlocker(activeJob ? [activeJob] : [], agents)
+
+  const currentError = dispatchMutation.error ?? prepareMutation.error ?? approveMutation.error ?? rejectMutation.error
+  const currentErrorMessage = currentError instanceof ApiError ? currentError.message : null
+  const retryableJobIds = new Set(retryableJobs.map((job) => job.id))
+
+  if (isLoading) return <ItemDetailSkeleton />
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>Item detail failed to load</AlertTitle>
+        <AlertDescription>{String(error)}</AlertDescription>
+      </Alert>
+    )
+  }
   if (!detail) return <p>Item not found.</p>
 
-  const { item, current_revision, evaluation } = detail
+  const {
+    item,
+    current_revision,
+    evaluation,
+    findings,
+    revision_context_summary: revisionContextSummary,
+    diagnostics,
+  } = detail
+
+  const sections: { id: string; label: string; count: number }[] = [
+    { id: 'jobs', label: 'Jobs', count: detail.jobs.length },
+    { id: 'findings', label: 'Findings', count: findings.length },
+    { id: 'convergences', label: 'Convergences', count: detail.convergences.length },
+    { id: 'revision-context', label: 'Revision Context', count: revisionContextSummary ? 1 : 0 },
+    { id: 'diagnostics', label: 'Diagnostics', count: diagnostics.length },
+  ].filter((s) => s.count > 0)
 
   return (
-    <div>
-      <h2>{current_revision.title}</h2>
-      <p style={{ color: '#666' }}>{current_revision.description}</p>
-
-      <div style={{ display: 'flex', gap: '2rem', marginTop: '1rem' }}>
-        <section>
-          <h3>State</h3>
-          <dl style={{ fontSize: '0.85rem' }}>
-            <dt>Lifecycle</dt>
-            <dd>{item.lifecycle_state}</dd>
-            <dt>Parking</dt>
-            <dd>{item.parking_state}</dd>
-            <dt>Approval</dt>
-            <dd>{item.approval_state}</dd>
-            <dt>Escalation</dt>
-            <dd>{item.escalation_state}</dd>
-            <dt>Priority</dt>
-            <dd>{item.priority}</dd>
-          </dl>
-        </section>
-
-        <section>
-          <h3>Evaluation</h3>
-          <dl style={{ fontSize: '0.85rem' }}>
-            <dt>Board</dt>
-            <dd>{evaluation.board_status}</dd>
-            <dt>Step</dt>
-            <dd>{evaluation.current_step_id ?? 'none'}</dd>
-            <dt>Next action</dt>
-            <dd>{evaluation.next_recommended_action}</dd>
-            <dt>Dispatchable</dt>
-            <dd>{evaluation.dispatchable_step_id ?? 'none'}</dd>
-            {evaluation.attention_badges.length > 0 && (
-              <>
-                <dt>Badges</dt>
-                <dd>{evaluation.attention_badges.join(', ')}</dd>
-              </>
-            )}
-          </dl>
-        </section>
-
-        <section>
-          <h3>Revision</h3>
-          <dl style={{ fontSize: '0.85rem' }}>
-            <dt>No.</dt>
-            <dd>{current_revision.revision_no}</dd>
-            <dt>Target ref</dt>
-            <dd>
-              <code>{current_revision.target_ref}</code>
-            </dd>
-            <dt>Approval policy</dt>
-            <dd>{current_revision.approval_policy}</dd>
-            <dt>Seed</dt>
-            <dd>
-              <code>{current_revision.seed_commit_oid.slice(0, 8)}</code>
-            </dd>
-          </dl>
-        </section>
+    <div className="space-y-6">
+      <div className="space-y-2">
+        <h2 className="text-2xl font-semibold tracking-tight">{current_revision.title}</h2>
+        <p className="max-w-3xl text-sm text-muted-foreground">{current_revision.description}</p>
       </div>
 
-      <section style={{ marginTop: '1.5rem' }}>
-        <h3>Acceptance Criteria</h3>
-        <pre style={{ background: '#f9f9f9', padding: '0.75rem', fontSize: '0.85rem', borderRadius: 4 }}>
-          {current_revision.acceptance_criteria}
-        </pre>
-      </section>
+      {sections.length > 0 && (
+        <nav className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
+          {sections.map((s) => (
+            <a key={s.id} href={`#${s.id}`} className="hover:text-foreground">
+              {s.label} ({s.count})
+            </a>
+          ))}
+        </nav>
+      )}
 
+      <OperatorActions
+        projectId={projectId}
+        evaluation={evaluation}
+        actions={{
+          dispatch: {
+            pending: dispatchMutation.isPending,
+            run: () => dispatchMutation.mutate(),
+          },
+          prepareConvergence: {
+            pending: prepareMutation.isPending,
+            run: () => prepareMutation.mutate(),
+          },
+          approve: {
+            pending: approveMutation.isPending,
+            run: () => approveMutation.mutate(),
+          },
+          reject: {
+            pending: rejectMutation.isPending,
+            run: () => rejectMutation.mutate(),
+          },
+        }}
+        errorMessage={currentErrorMessage}
+        queueBlocker={queueBlocker}
+      />
+      <OverviewPanels item={item} evaluation={evaluation} revision={current_revision} />
+      <AcceptanceCriteriaSection acceptanceCriteria={current_revision.acceptance_criteria} />
       {detail.jobs.length > 0 && (
-        <section style={{ marginTop: '1.5rem' }}>
-          <h3>Jobs ({detail.jobs.length})</h3>
-          <table style={{ fontSize: '0.85rem', borderCollapse: 'collapse', width: '100%' }}>
-            <thead>
-              <tr>
-                <th style={thStyle}>ID</th>
-                <th style={thStyle}>Step</th>
-                <th style={thStyle}>Phase</th>
-                <th style={thStyle}>Status</th>
-                <th style={thStyle}>Outcome</th>
-              </tr>
-            </thead>
-            <tbody>
-              {detail.jobs.map((job) => (
-                <tr key={job.id}>
-                  <td style={tdStyle}>
-                    <code>{job.id}</code>
-                  </td>
-                  <td style={tdStyle}>{job.step_id}</td>
-                  <td style={tdStyle}>{job.phase_kind}</td>
-                  <td style={tdStyle}>{job.status}</td>
-                  <td style={tdStyle}>{job.outcome_class ?? '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-      )}
-
-      {detail.convergences.length > 0 && (
-        <section style={{ marginTop: '1.5rem' }}>
-          <h3>Convergences ({detail.convergences.length})</h3>
-          <table style={{ fontSize: '0.85rem', borderCollapse: 'collapse', width: '100%' }}>
-            <thead>
-              <tr>
-                <th style={thStyle}>ID</th>
-                <th style={thStyle}>Status</th>
-                <th style={thStyle}>Prepared</th>
-                <th style={thStyle}>Valid</th>
-              </tr>
-            </thead>
-            <tbody>
-              {detail.convergences.map((c) => (
-                <tr key={c.id}>
-                  <td style={tdStyle}>
-                    <code>{c.id}</code>
-                  </td>
-                  <td style={tdStyle}>{c.status}</td>
-                  <td style={tdStyle}>
-                    <code>{c.prepared_commit_oid?.slice(0, 8) ?? '—'}</code>
-                  </td>
-                  <td style={tdStyle}>{c.target_head_valid ? 'yes' : 'no'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-      )}
-
-      {evaluation.diagnostics.length > 0 && (
-        <section style={{ marginTop: '1.5rem' }}>
-          <h3>Diagnostics</h3>
-          <ul style={{ fontSize: '0.85rem' }}>
-            {evaluation.diagnostics.map((d) => (
-              <li key={d}>{d}</li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      <section style={{ marginTop: '1.5rem' }}>
-        <h3>Allowed Actions</h3>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          {evaluation.allowed_actions.length > 0 ? (
-            evaluation.allowed_actions.map((a) => (
-              <button type="button" key={a} style={{ fontSize: '0.85rem' }}>
-                {a}
-              </button>
-            ))
-          ) : (
-            <span style={{ color: '#888', fontSize: '0.85rem' }}>none</span>
-          )}
+        <div id="jobs">
+          <JobsTable
+            projectId={projectId}
+            itemId={itemId}
+            jobs={detail.jobs}
+            activeJobId={activeJob?.id ?? null}
+            retryableJobIds={retryableJobIds}
+            onSuccess={refresh}
+          />
         </div>
-      </section>
+      )}
+      {findings.length > 0 && (
+        <div id="findings">
+          <FindingsTable findings={findings} />
+        </div>
+      )}
+      {detail.convergences.length > 0 && (
+        <div id="convergences">
+          <ConvergencesTable convergences={detail.convergences} />
+        </div>
+      )}
+      {revisionContextSummary && (
+        <div id="revision-context">
+          <RevisionContextPanel summary={revisionContextSummary} />
+        </div>
+      )}
+      {diagnostics.length > 0 && (
+        <div id="diagnostics">
+          <DiagnosticsSection diagnostics={diagnostics} />
+        </div>
+      )}
     </div>
   )
 }
-
-const thStyle: React.CSSProperties = { textAlign: 'left', borderBottom: '1px solid #e5e5e5', padding: '0.25rem 0.5rem' }
-const tdStyle: React.CSSProperties = { padding: '0.25rem 0.5rem', borderBottom: '1px solid #f0f0f0' }

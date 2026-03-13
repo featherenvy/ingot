@@ -1,4 +1,4 @@
-.PHONY: all build check test lint fmt clean dev dev-ui dev-daemon help
+.PHONY: all ci build check test lint fmt clean dev dev-ui dev-daemon help
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -6,6 +6,8 @@ help: ## Show this help
 # --- Top-level ---
 
 all: check test lint build ## Run check, test, lint, and build
+
+ci: check test ui-test lint ui-build ## Run backend/frontend type-checks, lints, and tests
 
 # --- Rust ---
 

@@ -5,14 +5,20 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ingot-config = { workspace = true }
 ingot-domain = { workspace = true }
+ingot-git = { workspace = true }
+ingot-store-sqlite = { workspace = true }
 ingot-usecases = { workspace = true }
+ingot-workflow = { workspace = true }
+ingot-workspace = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tower = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS items (
     escalation_state TEXT NOT NULL DEFAULT 'none' CHECK (escalation_state IN ('none', 'operator_required')),
     escalation_reason TEXT CHECK (escalation_reason IN ('candidate_rework_budget_exhausted', 'integration_rework_budget_exhausted', 'convergence_conflict', 'step_failed', 'protocol_violation', 'manual_decision_required', 'other')),
     current_revision_id TEXT NOT NULL,
+    origin_kind TEXT NOT NULL DEFAULT 'manual' CHECK (origin_kind IN ('manual', 'promoted_finding')),
+    origin_finding_id TEXT REFERENCES findings(id),
     priority TEXT NOT NULL DEFAULT 'major' CHECK (priority IN ('critical', 'major', 'minor')),
     labels TEXT NOT NULL DEFAULT '[]', -- JSON array
     operator_notes TEXT,
@@ -43,7 +45,6 @@ CREATE TABLE IF NOT EXISTS items (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     closed_at TEXT,
 
-    -- Illegal combination guards
     CHECK (NOT (lifecycle_state = 'done' AND parking_state = 'deferred')),
     CHECK (NOT (approval_state = 'pending' AND parking_state = 'deferred')),
     CHECK (NOT (escalation_state = 'operator_required' AND lifecycle_state = 'done')),
@@ -52,11 +53,16 @@ CREATE TABLE IF NOT EXISTS items (
     CHECK (NOT (lifecycle_state = 'done' AND closed_at IS NULL)),
     CHECK (NOT (lifecycle_state = 'open' AND approval_state = 'approved')),
     CHECK (NOT (escalation_state = 'none' AND escalation_reason IS NOT NULL)),
-    CHECK (NOT (escalation_state = 'operator_required' AND escalation_reason IS NULL))
+    CHECK (NOT (escalation_state = 'operator_required' AND escalation_reason IS NULL)),
+    CHECK (NOT (origin_kind = 'manual' AND origin_finding_id IS NOT NULL)),
+    CHECK (NOT (origin_kind = 'promoted_finding' AND origin_finding_id IS NULL))
 );
 
 CREATE INDEX idx_items_project ON items(project_id);
 CREATE INDEX idx_items_lifecycle ON items(lifecycle_state);
+CREATE UNIQUE INDEX idx_items_origin_finding
+    ON items(origin_finding_id)
+    WHERE origin_finding_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS item_revisions (
     id TEXT PRIMARY KEY NOT NULL,
@@ -120,17 +126,17 @@ CREATE TABLE IF NOT EXISTS jobs (
     supersedes_job_id TEXT REFERENCES jobs(id),
     status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'assigned', 'running', 'completed', 'failed', 'cancelled', 'expired', 'superseded')),
     outcome_class TEXT CHECK (outcome_class IN ('clean', 'findings', 'transient_failure', 'terminal_failure', 'protocol_violation', 'cancelled')),
-    phase_kind TEXT NOT NULL CHECK (phase_kind IN ('author', 'validate', 'review')),
+    phase_kind TEXT NOT NULL CHECK (phase_kind IN ('author', 'validate', 'review', 'investigate', 'system')),
     workspace_id TEXT REFERENCES workspaces(id),
     workspace_kind TEXT NOT NULL CHECK (workspace_kind IN ('authoring', 'review', 'integration')),
-    execution_permission TEXT NOT NULL CHECK (execution_permission IN ('may_mutate', 'must_not_mutate')),
+    execution_permission TEXT NOT NULL CHECK (execution_permission IN ('may_mutate', 'must_not_mutate', 'daemon_only')),
     context_policy TEXT NOT NULL CHECK (context_policy IN ('fresh', 'resume_context', 'none')),
     phase_template_slug TEXT NOT NULL,
     phase_template_digest TEXT,
     prompt_snapshot TEXT,
     input_base_commit_oid TEXT,
     input_head_commit_oid TEXT,
-    output_artifact_kind TEXT NOT NULL CHECK (output_artifact_kind IN ('commit', 'review_report', 'validation_report', 'none')),
+    output_artifact_kind TEXT NOT NULL CHECK (output_artifact_kind IN ('commit', 'review_report', 'validation_report', 'finding_report', 'none')),
     output_commit_oid TEXT,
     result_schema_version TEXT,
     result_payload TEXT, -- JSON
@@ -151,12 +157,10 @@ CREATE INDEX idx_jobs_item ON jobs(item_id);
 CREATE INDEX idx_jobs_revision ON jobs(item_revision_id);
 CREATE INDEX idx_jobs_status ON jobs(status);
 
--- At most one active job per item revision
 CREATE UNIQUE INDEX idx_jobs_active_per_revision
     ON jobs(item_revision_id)
     WHERE status IN ('queued', 'assigned', 'running');
 
--- Stable step+attempt+retry uniqueness per revision
 CREATE UNIQUE INDEX idx_jobs_step_attempt_retry
     ON jobs(item_revision_id, step_id, semantic_attempt_no, retry_no);
 
@@ -181,10 +185,57 @@ CREATE TABLE IF NOT EXISTS convergences (
 
 CREATE INDEX idx_convergences_revision ON convergences(item_revision_id);
 
--- At most one active convergence per item revision
 CREATE UNIQUE INDEX idx_convergences_active_per_revision
     ON convergences(item_revision_id)
     WHERE status IN ('queued', 'running', 'prepared');
+
+CREATE TABLE IF NOT EXISTS findings (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    source_item_id TEXT NOT NULL REFERENCES items(id),
+    source_item_revision_id TEXT NOT NULL REFERENCES item_revisions(id),
+    source_job_id TEXT NOT NULL REFERENCES jobs(id),
+    source_step_id TEXT NOT NULL,
+    source_report_schema_version TEXT NOT NULL,
+    source_finding_key TEXT NOT NULL,
+    source_subject_kind TEXT NOT NULL CHECK (source_subject_kind IN ('candidate', 'integrated')),
+    source_subject_base_commit_oid TEXT,
+    source_subject_head_commit_oid TEXT NOT NULL,
+    code TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK (severity IN ('low', 'medium', 'high', 'critical')),
+    summary TEXT NOT NULL,
+    paths TEXT NOT NULL DEFAULT '[]', -- JSON array
+    evidence TEXT NOT NULL DEFAULT '[]', -- JSON array
+    triage_state TEXT NOT NULL DEFAULT 'untriaged' CHECK (triage_state IN ('untriaged', 'promoted', 'dismissed')),
+    promoted_item_id TEXT REFERENCES items(id),
+    dismissal_reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    triaged_at TEXT,
+
+    CHECK (NOT (source_subject_kind = 'integrated' AND source_subject_base_commit_oid IS NULL)),
+    CHECK (NOT (source_subject_kind = 'candidate' AND source_subject_head_commit_oid IS NULL)),
+    CHECK (NOT (triage_state = 'untriaged' AND promoted_item_id IS NOT NULL)),
+    CHECK (NOT (triage_state = 'untriaged' AND dismissal_reason IS NOT NULL)),
+    CHECK (NOT (triage_state = 'untriaged' AND triaged_at IS NOT NULL)),
+    CHECK (NOT (triage_state = 'promoted' AND promoted_item_id IS NULL)),
+    CHECK (NOT (triage_state = 'promoted' AND dismissal_reason IS NOT NULL)),
+    CHECK (NOT (triage_state = 'promoted' AND triaged_at IS NULL)),
+    CHECK (NOT (triage_state = 'dismissed' AND dismissal_reason IS NULL)),
+    CHECK (NOT (triage_state = 'dismissed' AND promoted_item_id IS NOT NULL)),
+    CHECK (NOT (triage_state = 'dismissed' AND triaged_at IS NULL))
+);
+
+CREATE INDEX idx_findings_item ON findings(source_item_id);
+CREATE INDEX idx_findings_revision ON findings(source_item_revision_id);
+CREATE INDEX idx_findings_job ON findings(source_job_id);
+CREATE INDEX idx_findings_triage ON findings(triage_state);
+
+CREATE UNIQUE INDEX idx_findings_source_key
+    ON findings(source_job_id, source_finding_key);
+
+CREATE UNIQUE INDEX idx_findings_promoted_item
+    ON findings(promoted_item_id)
+    WHERE promoted_item_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS git_operations (
     id TEXT PRIMARY KEY NOT NULL,

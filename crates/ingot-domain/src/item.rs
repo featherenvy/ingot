@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{ItemId, ItemRevisionId, ProjectId};
+use crate::ids::{FindingId, ItemId, ItemRevisionId, ProjectId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +76,13 @@ pub enum Priority {
     Minor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OriginKind {
+    Manual,
+    PromotedFinding,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
     pub id: ItemId,
@@ -90,6 +97,8 @@ pub struct Item {
     pub escalation_state: EscalationState,
     pub escalation_reason: Option<EscalationReason>,
     pub current_revision_id: ItemRevisionId,
+    pub origin_kind: OriginKind,
+    pub origin_finding_id: Option<FindingId>,
     pub priority: Priority,
     pub labels: Vec<String>,
     pub operator_notes: Option<String>,

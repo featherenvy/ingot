@@ -60,6 +60,15 @@ pub enum DomainEvent {
         job_id: JobId,
         item_id: ItemId,
     },
+    FindingPromoted {
+        finding_id: FindingId,
+        item_id: ItemId,
+        promoted_item_id: ItemId,
+    },
+    FindingDismissed {
+        finding_id: FindingId,
+        item_id: ItemId,
+    },
     ApprovalRequested {
         item_id: ItemId,
     },

@@ -6,7 +6,17 @@ rust-version.workspace = true
 
 [dependencies]
 ingot-domain = { workspace = true }
+ingot-git = { workspace = true }
+ingot-store-sqlite = { workspace = true }
+ingot-usecases = { workspace = true }
+ingot-workspace = { workspace = true }
+ingot-agent-adapters = { workspace = true }
+ingot-workflow = { workspace = true }
 ingot-agent-protocol = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
+sha2 = "0.10"

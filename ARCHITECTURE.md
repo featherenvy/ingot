@@ -162,6 +162,7 @@ SQLite:
 * canonical item state
 * immutable revisions
 * jobs and retry lineage
+* findings and finding triage
 * workspaces and convergence records
 * Git operation journal
 * activity history
@@ -202,14 +203,14 @@ ingot/
 
 | Crate                  | Responsibility                                                                                           | Must not depend on                               |
 | ---------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `ingot-domain`         | Pure entities, enums, invariants, value objects, repository ports, event types                           | `sqlx`, `axum`, `tokio::process`                 |
+| `ingot-domain`         | Pure entities, enums, invariants, value objects, repository ports, event types, finding triage rules     | `sqlx`, `axum`, `tokio::process`                 |
 | `ingot-workflow`       | Built-in workflow definitions, step contracts, pure evaluator, transition tables                         | `sqlx`, `axum`, adapter code                     |
-| `ingot-usecases`       | Command handlers, transaction boundaries, use-case orchestration, port composition, daemon-only system actions | `axum`, `sqlx` concrete types, CLI-specific code |
+| `ingot-usecases`       | Command handlers, transaction boundaries, use-case orchestration, port composition, daemon-only system actions, finding promotion and dismissal | `axum`, `sqlx` concrete types, CLI-specific code |
 | `ingot-config`         | YAML loading, merge logic, config schema validation, template override loading                           | `axum`, `sqlx`                                   |
 | `ingot-store-sqlite`   | sqlx models, migrations, repository implementations, transaction adapters, replay-journal persistence    | `axum`, adapter crates                           |
 | `ingot-git`            | Safe Git wrappers, diff generation, ref validation, commit trailers, convergence helpers, ordered commit replay, target-ref CAS | `axum`, workflow logic                           |
 | `ingot-workspace`      | Worktree provisioning, reset, reuse, and cleanup using `ingot-git`                                       | `axum`, `sqlx`                                   |
-| `ingot-agent-protocol` | Adapter traits, request and response types, result schemas, progress events                              | `sqlx`, `axum`                                   |
+| `ingot-agent-protocol` | Adapter traits, request and response types, canonical core result schemas, extension-bag normalization, progress events | `sqlx`, `axum`                                   |
 | `ingot-agent-adapters` | Built-in Claude and Codex adapter implementations                                                        | `sqlx`, `axum`, workflow crates                  |
 | `ingot-agent-runtime`  | Subprocess spawning, cancellation, heartbeats, log writing, adapter supervision                          | `axum`, workflow crates                          |
 | `ingot-http-api`       | Axum routes, DTOs, auth middleware, WebSocket transport                                                  | `sqlx` direct queries, adapter code              |
@@ -297,6 +298,7 @@ That leads directly to the core detail-pane ingredients:
 * recommended next action and legal alternatives
 * revision history
 * full job timeline
+* findings and their triage state
 * latest revision context summary
 * workspace summary with target ref, workspace ref, base/head, and diff manifest
 * convergence summary with prepare/finalize state and target-head validity
@@ -373,7 +375,7 @@ The following remain deliberately deferred:
 * parent and child items with dependency edges
 * clone workspaces
 * Docker workspaces
-* report-only workflow steps
+* arbitrary user-authored report-only workflow graphs
 * prompt templates that alter step semantics
 * workflow authoring in the UI or API
 * in-system manual conflict continuation
