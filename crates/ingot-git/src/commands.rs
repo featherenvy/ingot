@@ -39,6 +39,17 @@ pub async fn current_branch_name(repo_path: &Path) -> Result<String, GitCommandE
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Get the symbolic ref for HEAD, or None when detached.
+pub async fn current_head_ref(repo_path: &Path) -> Result<Option<String>, GitCommandError> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .await?;
+
+    decode_optional_verify(output)
+}
+
 /// Get the OID a ref points to.
 pub async fn ref_oid(repo_path: &Path, ref_name: &str) -> Result<String, GitCommandError> {
     let output = git(repo_path, &["rev-parse", ref_name]).await?;

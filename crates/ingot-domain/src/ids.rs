@@ -73,6 +73,7 @@ define_id!(ItemRevisionId, "rev");
 define_id!(JobId, "job");
 define_id!(WorkspaceId, "wrk");
 define_id!(ConvergenceId, "conv");
+define_id!(ConvergenceQueueEntryId, "cqe");
 define_id!(GitOperationId, "gop");
 define_id!(ActivityId, "act");
 define_id!(FindingId, "fnd");

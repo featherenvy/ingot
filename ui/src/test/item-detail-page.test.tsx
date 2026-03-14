@@ -55,6 +55,14 @@ function makeItemDetail(): ItemDetail {
       terminal_readiness: false,
       diagnostics: [],
     },
+    queue: {
+      state: null,
+      position: null,
+      lane_owner_item_id: null,
+      lane_target_ref: null,
+      checkout_sync_blocked: false,
+      checkout_sync_message: null,
+    },
     revision_history: [],
     jobs: [],
     findings: [],
@@ -416,12 +424,12 @@ describe('ItemDetailPage', () => {
     renderPage()
 
     expect(await screen.findByRole('heading', { name: 'Ship the feature' })).toBeInTheDocument()
-    // Section nav anchors
-    expect(screen.getByRole('link', { name: 'Jobs (1)' })).toHaveAttribute('href', '#jobs')
-    expect(screen.getByRole('link', { name: 'Findings (1)' })).toHaveAttribute('href', '#findings')
-    expect(screen.getByRole('link', { name: 'Convergences (1)' })).toHaveAttribute('href', '#convergences')
-    expect(screen.getByRole('link', { name: 'Revision Context (1)' })).toHaveAttribute('href', '#revision-context')
-    expect(screen.getByRole('link', { name: 'Diagnostics (1)' })).toHaveAttribute('href', '#diagnostics')
+    // Section nav buttons
+    expect(screen.getByRole('button', { name: /Jobs\s*1/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Findings\s*1/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Convergences\s*1/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Revision Context\s*1/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Diagnostics\s*1/ })).toBeInTheDocument()
     expect(screen.getByText('Mar 12, 2026, 12:00 AM UTC')).toBeInTheDocument()
     expect(screen.getByText('Missing regression coverage')).toBeInTheDocument()
     expect(screen.getByText('validate_initial:clean')).toBeInTheDocument()

@@ -15,16 +15,25 @@ export function RevisionContextPanel({ summary }: { summary: RevisionContextSumm
             { label: 'Updated', value: <Timestamp value={summary.updated_at} /> },
             {
               label: 'Changed paths',
-              value: summary.changed_paths.length > 0 ? summary.changed_paths.join(', ') : 'none',
+              value:
+                summary.changed_paths.length > 0 ? (
+                  <code>{summary.changed_paths.join(', ')}</code>
+                ) : (
+                  <span className="text-muted-foreground">none</span>
+                ),
             },
             { label: 'Latest validation', value: formatResultSummary(summary.latest_validation) },
             { label: 'Latest review', value: formatResultSummary(summary.latest_review) },
             {
               label: 'Accepted results',
               value:
-                summary.accepted_result_refs.length > 0
-                  ? summary.accepted_result_refs.map((result) => `${result.step_id}:${result.outcome}`).join(', ')
-                  : 'none',
+                summary.accepted_result_refs.length > 0 ? (
+                  <code>
+                    {summary.accepted_result_refs.map((result) => `${result.step_id}:${result.outcome}`).join(', ')}
+                  </code>
+                ) : (
+                  <span className="text-muted-foreground">none</span>
+                ),
             },
             { label: 'Operator notes', value: summary.operator_notes_excerpt ?? 'none' },
           ]}

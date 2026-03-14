@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::activity::Activity;
 use crate::agent::Agent;
 use crate::convergence::Convergence;
+use crate::convergence_queue::ConvergenceQueueEntry;
 use crate::finding::Finding;
 use crate::git_operation::GitOperation;
 use crate::ids::*;
@@ -20,9 +21,9 @@ pub trait ProjectRepository: Send + Sync {
     fn list(&self) -> impl Future<Output = Result<Vec<Project>, RepositoryError>> + Send;
     fn get(&self, id: ProjectId) -> impl Future<Output = Result<Project, RepositoryError>> + Send;
     fn create(&self, project: &Project)
-    -> impl Future<Output = Result<(), RepositoryError>> + Send;
+        -> impl Future<Output = Result<(), RepositoryError>> + Send;
     fn update(&self, project: &Project)
-    -> impl Future<Output = Result<(), RepositoryError>> + Send;
+        -> impl Future<Output = Result<(), RepositoryError>> + Send;
     fn delete(&self, id: ProjectId) -> impl Future<Output = Result<(), RepositoryError>> + Send;
 }
 
@@ -145,9 +146,9 @@ pub trait FindingRepository: Send + Sync {
     ) -> impl Future<Output = Result<Vec<Finding>, RepositoryError>> + Send;
     fn get(&self, id: FindingId) -> impl Future<Output = Result<Finding, RepositoryError>> + Send;
     fn create(&self, finding: &Finding)
-    -> impl Future<Output = Result<(), RepositoryError>> + Send;
+        -> impl Future<Output = Result<(), RepositoryError>> + Send;
     fn update(&self, finding: &Finding)
-    -> impl Future<Output = Result<(), RepositoryError>> + Send;
+        -> impl Future<Output = Result<(), RepositoryError>> + Send;
     fn find_by_source(
         &self,
         job_id: JobId,
@@ -235,6 +236,112 @@ pub trait JobCompletionRepository: Send + Sync {
         &self,
         mutation: JobCompletionMutation,
     ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
+}
+
+#[derive(Debug, Clone)]
+pub struct ConvergenceQueuePrepareContext {
+    pub project: Project,
+    pub item: Item,
+    pub revision: ItemRevision,
+    pub jobs: Vec<Job>,
+    pub findings: Vec<Finding>,
+    pub convergences: Vec<Convergence>,
+    pub active_queue_entry: Option<ConvergenceQueueEntry>,
+    pub lane_head: Option<ConvergenceQueueEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConvergenceSystemActionContext {
+    pub project: Project,
+    pub item: Item,
+    pub revision: ItemRevision,
+    pub jobs: Vec<Job>,
+    pub findings: Vec<Finding>,
+    pub convergences: Vec<Convergence>,
+    pub active_queue_entry: Option<ConvergenceQueueEntry>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UseCasePortError {
+    #[error("repository error: {0}")]
+    Repository(#[from] RepositoryError),
+    #[error("external error: {0}")]
+    External(String),
+}
+
+pub trait ConvergenceServicePort: Send + Sync {
+    fn queue_prepare_context(
+        &self,
+        project_id: ProjectId,
+        item_id: ItemId,
+    ) -> impl Future<Output = Result<ConvergenceQueuePrepareContext, UseCasePortError>> + Send;
+
+    fn create_queue_entry(
+        &self,
+        queue_entry: &ConvergenceQueueEntry,
+    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
+
+    fn update_queue_entry(
+        &self,
+        queue_entry: &ConvergenceQueueEntry,
+    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
+
+    fn append_activity(
+        &self,
+        activity: &Activity,
+    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
+
+    fn list_projects(&self) -> impl Future<Output = Result<Vec<Project>, UseCasePortError>> + Send;
+
+    fn list_items_by_project(
+        &self,
+        project_id: ProjectId,
+    ) -> impl Future<Output = Result<Vec<Item>, UseCasePortError>> + Send;
+
+    fn load_system_action_context(
+        &self,
+        project_id: ProjectId,
+        item_id: ItemId,
+    ) -> impl Future<Output = Result<ConvergenceSystemActionContext, UseCasePortError>> + Send;
+
+    fn promote_queue_heads(
+        &self,
+        project_id: ProjectId,
+    ) -> impl Future<Output = Result<bool, UseCasePortError>> + Send;
+
+    fn prepare_queue_head_convergence(
+        &self,
+        project_id: ProjectId,
+        item_id: ItemId,
+    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
+
+    fn auto_finalize_prepared_convergence(
+        &self,
+        project_id: ProjectId,
+        item_id: ItemId,
+    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
+
+    fn invalidate_prepared_convergence(
+        &self,
+        project_id: ProjectId,
+        item_id: ItemId,
+    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
+}
+
+pub trait ReconciliationServicePort: Send + Sync {
+    fn reconcile_git_operations(
+        &self,
+    ) -> impl Future<Output = Result<bool, UseCasePortError>> + Send;
+
+    fn reconcile_active_jobs(&self) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
+
+    fn reconcile_active_convergences(
+        &self,
+    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
+
+    fn reconcile_workspace_retention(
+        &self,
+    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
 }
 
 pub trait ProjectMutationLockPort: Send + Sync {

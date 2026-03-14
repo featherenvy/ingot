@@ -86,6 +86,32 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn ensure_default_agent_persists_unavailable_agent_when_probe_fails() {
+        let root = temp_test_root("runtime-bootstrap-failed-probe");
+        let db = open_db(&root).await;
+        let fake_codex = write_bad_codex_cli(&root);
+
+        ensure_default_agent_with(
+            &db,
+            bootstrap_codex_agent_with(fake_codex.to_string_lossy(), "gpt-5.4"),
+        )
+        .await
+        .expect("bootstrap unavailable default agent");
+
+        let agents = db.list_agents().await.expect("list agents");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].status, AgentStatus::Unavailable);
+        assert!(
+            agents[0]
+                .health_check
+                .as_deref()
+                .is_some_and(|message| message.contains("missing required flags"))
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     async fn open_db(root: &Path) -> Database {
         fs::create_dir_all(root).expect("create test root");
         let db = Database::connect(&root.join("ingot.db"))
@@ -110,6 +136,22 @@ mod tests {
                 .permissions();
             permissions.set_mode(0o755);
             fs::set_permissions(&path, permissions).expect("chmod fake codex");
+        }
+
+        path
+    }
+
+    fn write_bad_codex_cli(root: &Path) -> PathBuf {
+        let path = root.join("fake-codex-bad.sh");
+        fs::write(&path, "#!/bin/sh\necho '--json'\n").expect("write bad fake codex");
+
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&path)
+                .expect("bad fake codex metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("chmod bad fake codex");
         }
 
         path

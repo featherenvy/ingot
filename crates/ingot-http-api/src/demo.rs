@@ -165,7 +165,7 @@ pub async fn create_demo_project(
     // Create sample items
     let config = load_effective_config(Some(&project))?;
     let configured_approval_policy = parse_config_approval_policy(&config)?;
-    let target_ref = normalize_target_ref(&project.default_branch);
+    let target_ref = normalize_target_ref(&project.default_branch)?;
     let repo_path = std::path::Path::new(&project.path);
     let resolved_target_head = resolve_ref_oid(repo_path, &target_ref)
         .await

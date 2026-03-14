@@ -6,8 +6,8 @@ import { projectsQuery } from '../api/queries'
 import { cn } from '../lib/utils'
 import { ProjectColorDot } from './ProjectColorDot'
 import { RegisterProjectDialog } from './RegisterProjectDialog'
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from './ui/command'
 import { Button } from './ui/button'
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from './ui/command'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
 
 type ProjectSwitcherProps = {

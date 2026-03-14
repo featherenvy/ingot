@@ -8,6 +8,8 @@ use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
 use ingot_workflow::step::DELIVERY_V1_STEPS;
 use serde_json::{Map, Value, json};
 
+use crate::UseCaseError;
+
 const DELIVERY_WORKFLOW_VERSION: &str = "delivery:v1";
 
 #[derive(Debug, Clone)]
@@ -98,12 +100,18 @@ pub fn create_manual_item(
     (item, revision)
 }
 
-pub fn normalize_target_ref(target_ref: &str) -> String {
-    if target_ref.starts_with("refs/") {
-        target_ref.into()
-    } else {
-        format!("refs/heads/{target_ref}")
+pub fn normalize_target_ref(target_ref: &str) -> Result<String, UseCaseError> {
+    if let Some(branch_name) = target_ref.strip_prefix("refs/heads/") {
+        validate_branch_name(target_ref, branch_name)?;
+        return Ok(target_ref.into());
     }
+
+    if target_ref.starts_with("refs/") {
+        return Err(UseCaseError::InvalidTargetRef(target_ref.into()));
+    }
+
+    validate_branch_name(target_ref, target_ref)
+        .map(|branch_name| format!("refs/heads/{branch_name}"))
 }
 
 pub fn approval_state_for_policy(approval_policy: ApprovalPolicy) -> ApprovalState {
@@ -136,6 +144,41 @@ pub fn default_template_map_snapshot() -> Value {
         .collect::<Map<String, Value>>();
 
     Value::Object(map)
+}
+
+fn validate_branch_name(original: &str, branch_name: &str) -> Result<String, UseCaseError> {
+    if branch_name.is_empty()
+        || branch_name == "@"
+        || branch_name.starts_with('-')
+        || branch_name.starts_with('/')
+        || branch_name.ends_with('/')
+        || branch_name.ends_with('.')
+        || branch_name.contains("//")
+        || branch_name.contains("..")
+        || branch_name.contains("@{")
+    {
+        return Err(UseCaseError::InvalidTargetRef(original.into()));
+    }
+
+    for component in branch_name.split('/') {
+        if component.is_empty()
+            || component.starts_with('.')
+            || component.ends_with(".lock")
+            || component.ends_with('.')
+        {
+            return Err(UseCaseError::InvalidTargetRef(original.into()));
+        }
+    }
+
+    if branch_name.chars().any(is_forbidden_branch_char) {
+        return Err(UseCaseError::InvalidTargetRef(original.into()));
+    }
+
+    Ok(branch_name.into())
+}
+
+fn is_forbidden_branch_char(ch: char) -> bool {
+    ch.is_ascii_control() || matches!(ch, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\')
 }
 
 pub fn rework_budgets_from_policy_snapshot(policy_snapshot: &Value) -> Option<(u32, u32)> {
@@ -216,11 +259,81 @@ mod tests {
 
     #[test]
     fn normalize_target_ref_prefixes_branch_names() {
-        assert_eq!(normalize_target_ref("main"), "refs/heads/main");
         assert_eq!(
-            normalize_target_ref("refs/heads/release"),
+            normalize_target_ref("main").expect("normalize main"),
+            "refs/heads/main"
+        );
+        assert_eq!(
+            normalize_target_ref("refs/heads/release").expect("normalize heads ref"),
             "refs/heads/release"
         );
+    }
+
+    #[test]
+    fn normalize_target_ref_rejects_non_branch_refs() {
+        assert_eq!(
+            normalize_target_ref("refs/tags/v1")
+                .expect_err("reject tag ref")
+                .to_string(),
+            "invalid target ref: refs/tags/v1"
+        );
+        assert_eq!(
+            normalize_target_ref("refs/remotes/origin/main")
+                .expect_err("reject remote ref")
+                .to_string(),
+            "invalid target ref: refs/remotes/origin/main"
+        );
+    }
+
+    #[test]
+    fn normalize_target_ref_accepts_valid_branch_names() {
+        assert_eq!(
+            normalize_target_ref("feature/ref-hardening").expect("normalize nested branch"),
+            "refs/heads/feature/ref-hardening"
+        );
+        assert_eq!(
+            normalize_target_ref("release-2026.03").expect("normalize dotted branch"),
+            "refs/heads/release-2026.03"
+        );
+        assert_eq!(
+            normalize_target_ref("refs/heads/hotfix_123").expect("normalize full ref"),
+            "refs/heads/hotfix_123"
+        );
+    }
+
+    #[test]
+    fn normalize_target_ref_rejects_git_invalid_branch_names() {
+        let invalid_refs = [
+            "foo..bar",
+            "foo.lock",
+            "bad@{name}",
+            "@",
+            "-leading-dash",
+            ".hidden",
+            "feature/.hidden",
+            "feature/trailing.",
+            "feature//double-slash",
+            "with space",
+            "with~tilde",
+            "with^caret",
+            "with:colon",
+            "with?question",
+            "with*star",
+            "with[bracket",
+            "with\\backslash",
+            "line\nbreak",
+            "tab\tname",
+        ];
+
+        for invalid_ref in invalid_refs {
+            let error = normalize_target_ref(invalid_ref)
+                .err()
+                .unwrap_or_else(|| panic!("expected invalid ref: {invalid_ref}"));
+            assert_eq!(
+                error.to_string(),
+                format!("invalid target ref: {invalid_ref}")
+            );
+        }
     }
 
     #[test]

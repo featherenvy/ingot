@@ -1,4 +1,4 @@
-# Auto-dispatch incremental review after commit jobs
+# Auto-dispatch projected review jobs
 
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds.
 
@@ -6,7 +6,7 @@ This document must be maintained in accordance with [.agent/PLANS.md](/Users/aa/
 
 ## Purpose / Big Picture
 
-After this change, a clean commit-producing workflow step such as `author_initial` or `repair_candidate` will immediately queue the next incremental review job without requiring the operator to press Dispatch again. A user can see the behavior by running the runtime tests: after the authoring job finishes, the database should already contain a queued `review_incremental_initial` job, and after a repair job finishes, it should already contain a queued `review_incremental_repair` job.
+After this change, any closure-relevant `review_*` workflow step will queue automatically without requiring the operator to press Dispatch. A user can see the behavior by running the runtime tests: after an authoring job finishes, the database should already contain a queued incremental review job; after a clean incremental review finishes, the database should already contain a queued whole-candidate review job; and after non-blocking triage clears an incremental review finding set, the daemon should recover and queue the next candidate review on its own.
 
 ## Progress
 
@@ -17,6 +17,10 @@ After this change, a clean commit-producing workflow step such as `author_initia
 - [x] (2026-03-13 19:36Z) Ran targeted and full `ingot-agent-runtime` Rust tests successfully.
 - [x] (2026-03-13 19:44Z) Extended startup reconciliation for adopted `create_job_commit` operations so crash recovery also auto-queues incremental review.
 - [x] (2026-03-13 19:46Z) Strengthened the startup adoption test to assert the queued review job and reran the full runtime suite.
+- [x] (2026-03-14 19:20Z) Expanded the runtime helper from incremental-only review to any projected closure-relevant `review_*` step.
+- [x] (2026-03-14 19:27Z) Added a tick-time review auto-dispatch sweep so triage completion, resume, and recovery states self-heal even when no commit just finished.
+- [x] (2026-03-14 19:34Z) Updated runtime tests to cover automatic candidate review after clean review completion and after non-blocking incremental-review triage.
+- [x] (2026-03-14 19:40Z) Ran targeted review auto-dispatch tests and the full `cargo test -p ingot-agent-runtime` suite successfully.
 
 ## Surprises & Discoveries
 
@@ -32,6 +36,9 @@ After this change, a clean commit-producing workflow step such as `author_initia
 - Observation: Startup reconciliation used a separate adoption path for already-applied `create_job_commit` operations, so the first implementation still left a crash window where review was not auto-queued.
   Evidence: `adopt_create_job_commit` completed the recovered job and refreshed revision context, but did not call the runtime auto-dispatch helper until this follow-up fix.
 
+- Observation: Broadening auto-dispatch from incremental review to all `review_*` steps exposed another seam: an item can become eligible for candidate review after finding triage or resume without any new job completion event.
+  Evidence: `crates/ingot-http-api/src/router.rs` updates finding triage state but does not create successor jobs, and `POST /items/:id/resume` only clears `parking_state`.
+
 ## Decision Log
 
 - Decision: Keep evaluator semantics unchanged and implement the feature in the runtime orchestration layer.
@@ -42,11 +49,19 @@ After this change, a clean commit-producing workflow step such as `author_initia
   Rationale: That matches the user request and keeps manual operator control for candidate review, validation, approval, and other non-incremental steps.
   Date/Author: 2026-03-13 / Codex
 
+- Decision: Replace the incremental-only rule with auto-dispatch for every projected closure-relevant `review_*` step, while leaving authoring, validation, approval, and convergence progression unchanged.
+  Rationale: The updated user requirement is that all review jobs are unnecessary operator work. Restricting the automation to review steps preserves the existing control points for the rest of the workflow.
+  Date/Author: 2026-03-14 / Codex
+
+- Decision: Keep immediate post-completion auto-dispatch hooks and add a tick-time sweep over idle items.
+  Rationale: The immediate hooks avoid a needless poll delay after successful commit and review jobs, while the sweep closes the gaps for triage-completed, resumed, or recovered items that become review-eligible without a fresh completion callback.
+  Date/Author: 2026-03-14 / Codex
+
 ## Outcomes & Retrospective
 
-The runtime now auto-queues `review_incremental_initial`, `review_incremental_repair`, and `review_incremental_after_integration_repair` immediately after successful commit-producing jobs when those steps are the next legal workflow action. This keeps the workflow moving without changing evaluator semantics or broadening auto-dispatch to candidate review, validation, approval, or convergence work.
+The runtime now auto-queues any projected closure-relevant `review_*` step. That includes the original incremental review handoffs after successful commit-producing jobs, the whole-candidate review handoffs after clean incremental review jobs, and idle-item recovery cases where non-blocking triage or resume makes a review step legal again. Validation, approval, and convergence behavior remain unchanged.
 
-The tests confirm the intended behavior in three ways: a new test proves a clean `author_initial` run leaves a queued incremental review job with the expected review subject commits, the startup reconciliation test now proves that recovering an already-applied authoring commit also queues review, and the repaired candidate loop still reaches `prepare_convergence` while relying on auto-dispatched incremental review steps. A pre-existing retry test was updated because the queue now advances one step further than before.
+The tests now confirm the behavior in four ways: a clean `author_initial` run leaves a queued incremental review job with the expected review subject commits; startup reconciliation still proves that recovering an already-applied authoring commit also queues review; the repaired candidate loop reaches `prepare_convergence` while both incremental and candidate review steps auto-queue; and a new idle-item test proves that non-blocking triage on an incremental review findings set queues the next candidate review without any manual dispatch call. The full `ingot-agent-runtime` test suite also passed after the change, which lowers the risk that older maintenance or convergence paths were relying on manual review dispatch.
 
 ## Context and Orientation
 
@@ -54,25 +69,26 @@ The relevant runtime loop lives in `crates/ingot-agent-runtime/src/lib.rs`. A "c
 
 The workflow evaluator lives in `crates/ingot-workflow/src/evaluator.rs`. It does not create jobs; it only inspects the current item, revision, jobs, and convergences and reports which step is next. The dispatch use case lives in `crates/ingot-usecases/src/job.rs`, and the HTTP route in `crates/ingot-http-api/src/router.rs` uses it to create a new queued job when an operator presses Dispatch.
 
-The gap is that the runtime never performs that same dispatch step after a successful commit job, even when the evaluator says the next step is an incremental review. The implementation should reuse the existing dispatch use case under the project mutation lock so the behavior remains consistent with operator-triggered dispatch.
+The gap is that the runtime historically only performed that successor dispatch after a successful commit job, and only for incremental review. Items that became eligible for candidate review after clean review completion, non-blocking triage, or resume still waited for manual operator dispatch. The implementation should reuse the existing dispatch use case under the project mutation lock so the behavior remains consistent with operator-triggered dispatch.
 
 ## Plan of Work
 
-Add a small helper in `crates/ingot-agent-runtime/src/lib.rs` that runs after `complete_commit_run` persists the successful commit. The helper should reload the current item state under the project lock, evaluate the workflow using the latest jobs and hydrated convergences, and, when the next dispatchable step is one of the incremental review steps, call `dispatch_job` and persist the resulting queued job. It should also append the same `job_dispatched` activity record used by the HTTP API so the timeline remains consistent.
+Add a small helper in `crates/ingot-agent-runtime/src/lib.rs` that reloads the current item state under the project lock, evaluates the workflow using the latest jobs and hydrated convergences, and, when the next dispatchable step is any closure-relevant `review_*` step, calls `dispatch_job` and persists the resulting queued job. It should also append the same `job_dispatched` activity record used by the HTTP API so the timeline remains consistent.
 
-Keep the helper narrow. It should not auto-dispatch candidate review, validation, approval, or convergence work. It should not change the evaluator or the HTTP API. It should rely on the existing use case for computing input base and head commits, so the review subject remains identical to manual dispatch.
+Keep the helper narrow. It should auto-dispatch only closure-relevant review steps. It should not auto-dispatch validation, approval, or convergence work. It should not change the evaluator. It should rely on the existing use case for computing input base and head commits, so the review subject remains identical to manual dispatch.
 
-Update runtime tests in `crates/ingot-agent-runtime/src/lib.rs` to prove the new behavior. One test should verify that a successful `author_initial` run leaves behind a queued `review_incremental_initial` job with the expected base and head commit inputs. Another test should cover the repair loop and show that a successful `repair_candidate` run leaves behind a queued `review_incremental_repair` job automatically before candidate review is dispatched manually.
+Invoke the helper immediately after successful commit and report completions, and add a small tick-time sweep over idle items so states reached through finding triage, resume, or recovery also self-dispatch review jobs. Update runtime tests in `crates/ingot-agent-runtime/src/lib.rs` to prove the broadened behavior. One test should verify that a successful `author_initial` run leaves behind a queued `review_incremental_initial` job with the expected base and head commit inputs. Another test should cover the repair loop and show that a clean `review_incremental_repair` run leaves behind a queued `review_candidate_repair` job automatically. A third test should cover an idle item whose incremental-review findings were triaged non-blocking and prove that the next candidate review job is auto-queued on the next dispatcher tick.
 
 ## Concrete Steps
 
 From `/Users/aa/Documents/ingot`:
 
-1. Edit `crates/ingot-agent-runtime/src/lib.rs` to add the auto-dispatch helper and invoke it from `complete_commit_run`.
-2. Edit the runtime tests in the same file so they assert queued incremental review jobs exist after commit-producing steps finish.
+1. Edit `crates/ingot-agent-runtime/src/lib.rs` to generalize the review auto-dispatch helper, invoke it from successful commit and report completion paths, and add the idle-item sweep in `tick`.
+2. Edit the runtime tests in the same file so they assert queued review jobs exist after commit-producing steps finish, after clean review completion, and after non-blocking triage recovery.
 3. Run targeted tests:
 
        cargo test -p ingot-agent-runtime auto_dispatch
+       cargo test -p ingot-agent-runtime idle_item_auto_dispatches_candidate_review_after_nonblocking_incremental_triage
        cargo test -p ingot-agent-runtime candidate_repair_loop_advances_to_prepare_convergence
 
 4. If those pass, run the full crate tests:
@@ -84,12 +100,13 @@ From `/Users/aa/Documents/ingot`:
 Acceptance is satisfied when these behaviors are observable:
 
 1. After a clean `author_initial` runtime execution, the database contains a completed author job and a queued `review_incremental_initial` job without any explicit dispatch call between them.
-2. The queued incremental review job uses the expected review subject, with `input_base_commit_oid` equal to the seed or previous authoring head and `input_head_commit_oid` equal to the newly created authoring commit.
-3. After a clean repair commit, the database contains a queued `review_incremental_repair` job automatically, and the existing repair loop test still reaches `prepare_convergence`.
+2. After a clean incremental review execution, the database contains the next queued whole-candidate review job without any explicit dispatch call between them.
+3. After non-blocking triage resolves the latest incremental-review findings set, the next dispatcher tick queues the successor candidate review job automatically.
+4. Validation, approval, and convergence steps still require the same explicit commands or daemon-only rules they required before.
 
 ## Idempotence and Recovery
 
-The runtime helper must run under the existing project mutation lock so it cannot race a manual dispatch for the same item. If the helper does not find an auto-dispatchable incremental review step, it should return without side effects. If a test fails partway through, it can be rerun safely because each runtime test uses a temporary repository and database.
+The runtime helper must run under the existing project mutation lock so it cannot race a manual dispatch for the same item. If the helper does not find an auto-dispatchable review step, it should return without side effects. The idle-item sweep should be safe to rerun because it only creates a job when the evaluator still projects a review step and no active execution already exists. If a test fails partway through, it can be rerun safely because each runtime test uses a temporary repository and database.
 
 Startup reconciliation must follow the same rule. If the daemon restarts after creating the canonical commit but before queuing the next incremental review, the `adopt_create_job_commit` path must also invoke the helper so recovery closes that gap instead of reintroducing a manual-dispatch requirement.
 
@@ -121,3 +138,5 @@ Revision note: created this ExecPlan before implementation to capture the produc
 Revision note: updated after implementation to record the new runtime helper, the revised retry expectation, and the passing targeted and full crate test runs.
 
 Revision note: updated after a post-implementation code review found that startup reconciliation still bypassed auto-dispatch for recovered `create_job_commit` operations; the plan now records that fix and the added regression coverage.
+
+Revision note: updated on 2026-03-14 to widen the behavior from incremental-only review auto-dispatch to all projected closure-relevant `review_*` steps, including idle-item recovery after non-blocking triage or resume.

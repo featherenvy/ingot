@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::UseCaseError;
 use crate::finding::extract_findings;
@@ -12,6 +13,7 @@ use ingot_domain::ports::{
     JobCompletionRepository, PreparedConvergenceGuard, ProjectMutationLockPort, RepositoryError,
     TargetRefHoldError,
 };
+use ingot_domain::project::Project;
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
 use ingot_workflow::step;
 use ingot_workflow::{ClosureRelevance, Evaluation, Evaluator};
@@ -77,14 +79,30 @@ pub struct CompleteJobService<R, G, L> {
     repository: R,
     git: G,
     project_locks: L,
+    repo_path_resolver: Arc<dyn Fn(&Project) -> PathBuf + Send + Sync>,
 }
 
 impl<R, G, L> CompleteJobService<R, G, L> {
     pub fn new(repository: R, git: G, project_locks: L) -> Self {
+        Self::with_repo_path_resolver(
+            repository,
+            git,
+            project_locks,
+            Arc::new(|project: &Project| PathBuf::from(&project.path)),
+        )
+    }
+
+    pub fn with_repo_path_resolver(
+        repository: R,
+        git: G,
+        project_locks: L,
+        repo_path_resolver: Arc<dyn Fn(&Project) -> PathBuf + Send + Sync>,
+    ) -> Self {
         Self {
             repository,
             git,
             project_locks,
+            repo_path_resolver,
         }
     }
 }
@@ -131,12 +149,12 @@ where
         let plan = self
             .prepare_job_completion(&context, normalized_command)
             .await?;
-        let repo_path = Path::new(&context.project.path);
+        let repo_path = (self.repo_path_resolver)(&context.project);
         let ref_hold = if let Some(guard) = plan.prepared_convergence_guard.as_ref() {
             Some(
                 self.git
                     .verify_and_hold_target_ref(
-                        repo_path,
+                        repo_path.as_path(),
                         &guard.target_ref,
                         &guard.expected_target_head_oid,
                     )
@@ -251,7 +269,10 @@ where
 
                 let commit_is_present = self
                     .git
-                    .commit_exists(Path::new(&context.project.path), &output_commit_oid)
+                    .commit_exists(
+                        (self.repo_path_resolver)(&context.project).as_path(),
+                        &output_commit_oid,
+                    )
                     .await
                     .map_err(map_git_port_error)?;
                 if !commit_is_present {

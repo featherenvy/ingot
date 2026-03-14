@@ -79,6 +79,7 @@ struct RevisionContextPayload {
 #[serde(rename_all = "snake_case")]
 struct ValidationCheckV1 {
     name: String,
+    #[allow(dead_code)]
     status: ValidationCheckStatus,
     summary: String,
 }

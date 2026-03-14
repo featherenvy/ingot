@@ -1,12 +1,14 @@
 use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
 use ingot_domain::ids::AgentId;
 use tokio::process::Command;
+use tokio::time::{Duration, timeout};
 
 pub const DEFAULT_CODEX_SLUG: &str = "codex";
 pub const DEFAULT_CODEX_NAME: &str = "Codex";
 pub const DEFAULT_CODEX_PROVIDER: &str = "openai";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.4";
 pub const DEFAULT_CODEX_CLI_PATH: &str = "codex";
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn default_agent_capabilities(adapter_kind: AdapterKind) -> Vec<AgentCapability> {
     match adapter_kind {
@@ -42,10 +44,14 @@ pub fn bootstrap_codex_agent_with(cli_path: impl Into<String>, model: impl Into<
 }
 
 pub async fn probe_and_apply(agent: &mut Agent) {
+    probe_and_apply_with_timeout(agent, PROBE_TIMEOUT).await;
+}
+
+async fn probe_and_apply_with_timeout(agent: &mut Agent, timeout_duration: Duration) {
     agent.status = AgentStatus::Probing;
     agent.health_check = None;
 
-    match probe_agent_cli(agent).await {
+    match probe_agent_cli(agent, timeout_duration).await {
         Ok(message) => {
             agent.status = AgentStatus::Available;
             agent.health_check = Some(if message.is_empty() {
@@ -61,19 +67,21 @@ pub async fn probe_and_apply(agent: &mut Agent) {
     }
 }
 
-async fn probe_agent_cli(agent: &Agent) -> Result<String, String> {
+async fn probe_agent_cli(agent: &Agent, timeout_duration: Duration) -> Result<String, String> {
     match agent.adapter_kind {
-        AdapterKind::Codex => probe_codex_cli(&agent.cli_path).await,
-        AdapterKind::ClaudeCode => probe_claude_code_cli(&agent.cli_path).await,
+        AdapterKind::Codex => probe_codex_cli(&agent.cli_path, timeout_duration).await,
+        AdapterKind::ClaudeCode => probe_claude_code_cli(&agent.cli_path, timeout_duration).await,
     }
 }
 
-async fn probe_codex_cli(cli_path: &str) -> Result<String, String> {
-    let output = Command::new(cli_path)
-        .args(["exec", "--help"])
-        .output()
-        .await
-        .map_err(|error| error.to_string())?;
+async fn probe_codex_cli(cli_path: &str, timeout_duration: Duration) -> Result<String, String> {
+    let output = run_probe_command(
+        cli_path,
+        ["exec", "--help"],
+        timeout_duration,
+        "codex exec --help",
+    )
+    .await?;
 
     let combined = combined_output(&output.stdout, &output.stderr);
     if output.status.success() {
@@ -85,12 +93,17 @@ async fn probe_codex_cli(cli_path: &str) -> Result<String, String> {
     }
 }
 
-async fn probe_claude_code_cli(cli_path: &str) -> Result<String, String> {
-    let output = Command::new(cli_path)
-        .arg("--version")
-        .output()
-        .await
-        .map_err(|error| error.to_string())?;
+async fn probe_claude_code_cli(
+    cli_path: &str,
+    timeout_duration: Duration,
+) -> Result<String, String> {
+    let output = run_probe_command(
+        cli_path,
+        ["--version"],
+        timeout_duration,
+        "claude-code --version",
+    )
+    .await?;
 
     let combined = combined_output(&output.stdout, &output.stderr);
     if output.status.success() {
@@ -100,6 +113,23 @@ async fn probe_claude_code_cli(cli_path: &str) -> Result<String, String> {
     } else {
         Err(combined)
     }
+}
+
+async fn run_probe_command<const N: usize>(
+    cli_path: &str,
+    args: [&str; N],
+    timeout_duration: Duration,
+    probe_label: &str,
+) -> Result<std::process::Output, String> {
+    timeout(timeout_duration, Command::new(cli_path).args(args).output())
+        .await
+        .map_err(|_| {
+            format!(
+                "{probe_label} timed out after {}s",
+                timeout_duration.as_secs()
+            )
+        })?
+        .map_err(|error| error.to_string())
 }
 
 fn combined_output(stdout: &[u8], stderr: &[u8]) -> String {
@@ -137,11 +167,13 @@ mod tests {
     use super::{
         DEFAULT_CODEX_CLI_PATH, DEFAULT_CODEX_MODEL, bootstrap_codex_agent,
         bootstrap_codex_agent_with, default_agent_capabilities, probe_and_apply,
+        probe_and_apply_with_timeout,
     };
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::time::Duration;
 
     use ingot_domain::agent::{AdapterKind, AgentStatus};
 
@@ -191,6 +223,24 @@ mod tests {
                 .health_check
                 .as_deref()
                 .is_some_and(|message| message.contains("--sandbox"))
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn probe_and_apply_marks_codex_unavailable_when_probe_times_out() {
+        let root = temp_test_root("codex-probe-timeout");
+        let fake_codex = write_script(&root, "fake-codex.sh", "#!/bin/sh\nsleep 1\n");
+        let mut agent = bootstrap_codex_agent_with(fake_codex.to_string_lossy(), "gpt-5.4");
+
+        probe_and_apply_with_timeout(&mut agent, Duration::from_millis(50)).await;
+
+        assert_eq!(agent.status, AgentStatus::Unavailable);
+        assert!(
+            agent
+                .health_check
+                .as_deref()
+                .is_some_and(|message| message.contains("timed out"))
         );
         let _ = fs::remove_dir_all(root);
     }

@@ -31,6 +31,27 @@ impl ConvergenceStatus {
     }
 }
 
+impl Convergence {
+    pub fn target_head_valid_for_resolved_oid(&self, resolved_target_oid: Option<&str>) -> Option<bool> {
+        let input_target_oid = self.input_target_commit_oid.as_deref()?;
+        if resolved_target_oid == Some(input_target_oid) {
+            return Some(true);
+        }
+
+        let integrated_target_oid = self
+            .final_target_commit_oid
+            .as_deref()
+            .or(self.prepared_commit_oid.as_deref());
+        if let Some(integrated_target_oid) = integrated_target_oid
+            && resolved_target_oid == Some(integrated_target_oid)
+        {
+            return Some(true);
+        }
+
+        Some(false)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Convergence {
     pub id: ConvergenceId,

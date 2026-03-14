@@ -638,6 +638,7 @@ Important semantics:
 * `prepare_convergence` is a system step, not a job
 * `closure_relevant` steps advance or rewind delivery closure state
 * every successful mutating authoring step is followed by a mandatory incremental review of just the newly produced commit range
+* every closure-relevant `review_*` step is daemon auto-dispatched by default as soon as it becomes the sole legal closure-relevant next job step, unless the item is deferred or another active job or convergence already blocks dispatch
 * whole-candidate review and final candidate validation are mandatory closure-relevant gates before convergence prepare
 * `report_only` steps are auxiliary, never consume candidate or integration rework budget, and never change the closure graph position
 
@@ -794,6 +795,7 @@ Operational terms used elsewhere:
 * `next_recommended_action` may point to a job dispatch, a daemon-only operation, or a human command.
 * daemon-only `next_recommended_action` values used in v1 are `prepare_convergence`, `finalize_prepared_convergence`, and `invalidate_prepared_convergence`.
 * `dispatchable_step_id` is the legal job `step_id` to dispatch next, or null when the next recommended action is a human or daemon-only action such as approval or convergence prepare.
+* when `dispatchable_step_id` names a closure-relevant `review_*` step for an open, idle, non-deferred item, the daemon MUST promptly create that queued review job outside the evaluator; until the queued job exists, the projected `dispatchable_step_id` remains the legal current step
 * `auxiliary_dispatchable_step_ids` is an ordered list of zero or more legal built-in report-only `step_id` values that MAY be dispatched without changing the current closure position
 * report-only steps never change closure workflow position; while a report-only job is running, `current_step_id` continues to reflect the closure-relevant step
 * `board_status` MUST be one of `INBOX|WORKING|APPROVAL|DONE`. `DONE` applies iff `lifecycle_state=done`. `APPROVAL` applies iff `lifecycle_state=open`, `approval_state=pending`, and `next_recommended_action!=invalidate_prepared_convergence`. `INBOX` applies to remaining open items only when there is no active job, no active convergence, and the current revision has no non-superseded terminal closure-relevant jobs yet. `WORKING` applies to all other remaining open items.
@@ -827,7 +829,7 @@ Job progression uses this vocabulary:
 For one item:
 
 1. If `lifecycle_state=done`, the item is terminal.
-2. If `parking_state=deferred`, no auto-dispatch occurs.
+2. If `parking_state=deferred`, no daemon auto-dispatch occurs.
 3. If there is an active closure-relevant job or active convergence for the current revision, project the current step as running. If the only active job is report-only, keep the closure-relevant step projection and mark the item as working.
 4. Otherwise determine workflow position from canonical rows for the current revision using only closure-relevant terminal jobs, plus current convergence state and canonical approval state. Terminal report-only jobs never advance or rewind the closure graph.
 5. If candidate or integration rework budget is exhausted, project operator-required attention and a human next action. The command or system action that exhausts the budget MUST materialize the corresponding escalation state canonically.
@@ -835,6 +837,7 @@ For one item:
 7. If the workflow is at the approval gate and `approval_policy=required`, project approval actions from canonical `approval_state`. Clean completion of `validate_integrated` MUST materialize `approval_state=pending` as part of job-completion handling.
 8. If the workflow is at the approval gate and `approval_policy=not_required`, project `next_recommended_action=finalize_prepared_convergence` and `dispatchable_step_id=null`. The daemon MUST finalize through the daemon-only action, not inside the evaluator.
 9. If a prepared convergence exists but the current `target_ref` head no longer matches `input_target_commit_oid`, project `next_recommended_action=invalidate_prepared_convergence`, remove approval and finalization commands from `allowed_actions`, and require the daemon-only invalidation action before projecting `prepare_convergence` again.
+10. If the resulting `dispatchable_step_id` is a closure-relevant `review_*` step and the item is open, idle, and not deferred, the daemon MUST queue that job outside the evaluator without waiting for an operator dispatch command.
 
 ### 6.6 Terminal Readiness
 
@@ -1164,7 +1167,8 @@ Daemon-only system actions such as `finalize_prepared_convergence` and `invalida
 Job command semantics:
 
 * `POST .../items/:item_id/jobs` dispatches either the current `dispatchable_step_id`, one of the current `auxiliary_dispatchable_step_ids`, or an explicit equivalent legal current job step. If none is available and no explicit legal current job step is provided, the command MUST fail without mutating item state.
-* workflow-projected mandatory stages such as incremental review, whole-candidate review, and final candidate validation are automatic only in the sense that the evaluator projects them as the sole closure-relevant `dispatchable_step_id`; the daemon is not required to launch them without a dispatch command
+* when the evaluator projects a closure-relevant `review_*` step as the sole legal `dispatchable_step_id`, the daemon MUST create that review job automatically without waiting for an operator dispatch command
+* non-review closure-relevant stages such as authoring, validation, and approval-gated progression remain command-driven unless another explicit daemon-only rule in this spec says otherwise
 * explicit legal current job steps MAY include built-in report-only steps such as `investigate_item`. Dispatching a report-only step requires the item to be open, idle, not pending approval, and not currently projected toward a daemon-only next action, and MUST be reflected in `auxiliary_dispatchable_step_ids`; it MUST NOT change closure position, approval state, or rework budgets.
 * `POST .../items/:item_id/jobs/:job_id/retry` is allowed only when the referenced job is terminal and non-success, the item is open and idle, the job belongs to the current revision, and either the same `step_id` is still currently dispatchable or it remains a legal explicit report-only step for the current item state. It creates a new job row, preserves `semantic_attempt_no`, increments `retry_no`, sets `supersedes_job_id`, and leaves the prior job as historical lineage.
 * `POST .../items/:item_id/jobs/:job_id/cancel` is allowed only when the referenced job is `queued`, `assigned`, or `running`. It terminates any subprocess when present, marks the job `cancelled`, clears active workspace attachment, and leaves the item on the same step with no automatic redispatch.
@@ -1609,6 +1613,21 @@ complete_mutating_job(job_id, result):
   persist result_payload and output_commit_oid
   complete job with outcome clean or findings
   rebuild revision context
+  if evaluate(item).dispatchable_step_id is review_*:
+    create_job_for_step(step)
+```
+
+### 12.3.1 Complete Report Job
+
+```text
+complete_report_job(job_id, result):
+  job = load_running_job(job_id)
+  verify the read-only workspace remained clean and on the expected head
+  validate the structured report payload against the job contract
+  persist the report, extracted findings, and canonical outcome
+  rebuild revision context
+  if evaluate(item).dispatchable_step_id is review_*:
+    create_job_for_step(step)
 ```
 
 ### 12.4 Prepare Convergence
@@ -1825,8 +1844,9 @@ Recommended `GET .../items/:item_id` shape:
 ### 14.2 State Evaluation
 
 * evaluator derives the current step from canonical rows only and never mutates durable state or Git
-* deferred items do not auto-dispatch
-* automatic candidate-stage review and validation gates are expressed by projecting exactly one closure-relevant `dispatchable_step_id`, not by implicit daemon execution
+* deferred items do not daemon-auto-dispatch
+* closure-relevant review gates are expressed by projecting exactly one `dispatchable_step_id`, and the daemon auto-dispatches that projected `review_*` job while the item remains open and idle
+* validation gates remain projected but are not auto-dispatched unless a separate daemon-only rule applies
 * exhausted rework budgets escalate correctly
 * pending approval requires a prepared convergence, and approval actions require that it is still valid for the current target head
 * target-ref drift projects daemon-only invalidation and requires new prepare

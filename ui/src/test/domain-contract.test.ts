@@ -39,6 +39,14 @@ describe('domain contract typing', () => {
         terminal_readiness: false,
         diagnostics: ['active investigation job'],
       },
+      queue: {
+        state: null,
+        position: null,
+        lane_owner_item_id: null,
+        lane_target_ref: null,
+        checkout_sync_blocked: false,
+        checkout_sync_message: null,
+      },
     }
 
     expect(summary.item.origin_finding_id).toBe('fnd_1')
@@ -95,6 +103,14 @@ describe('domain contract typing', () => {
         allowed_actions: ['approval_approve', 'approval_reject'],
         terminal_readiness: false,
         diagnostics: [],
+      },
+      queue: {
+        state: 'head',
+        position: 1,
+        lane_owner_item_id: 'itm_1',
+        lane_target_ref: 'refs/heads/main',
+        checkout_sync_blocked: false,
+        checkout_sync_message: null,
       },
       revision_history: [],
       jobs: [

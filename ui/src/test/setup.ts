@@ -42,3 +42,12 @@ Object.defineProperty(window, 'ResizeObserver', {
     disconnect() {}
   },
 })
+
+Object.defineProperty(window, 'IntersectionObserver', {
+  writable: true,
+  value: class IntersectionObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  },
+})

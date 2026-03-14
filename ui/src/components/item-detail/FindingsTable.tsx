@@ -48,12 +48,14 @@ export function FindingsTable({
               <TableCell>{finding.severity}</TableCell>
               <TableCell>{finding.source_subject_kind}</TableCell>
               <TableCell className="whitespace-normal">
-                <div>{finding.triage_state}</div>
+                <div className="font-mono">{finding.triage_state}</div>
                 {finding.triage_note ? (
                   <div className="text-xs text-muted-foreground">{finding.triage_note}</div>
                 ) : null}
                 {finding.linked_item_id ? (
-                  <div className="text-xs text-muted-foreground">linked: {finding.linked_item_id}</div>
+                  <div className="text-xs text-muted-foreground">
+                    linked: <code>{finding.linked_item_id}</code>
+                  </div>
                 ) : null}
               </TableCell>
               <TableCell className="whitespace-normal">{finding.summary}</TableCell>

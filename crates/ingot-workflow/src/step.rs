@@ -180,3 +180,10 @@ pub static DELIVERY_V1_STEPS: &[StepContract] = &[
 pub fn find_step(step_id: &str) -> Option<&'static StepContract> {
     DELIVERY_V1_STEPS.iter().find(|s| s.step_id == step_id)
 }
+
+pub fn is_closure_relevant_review_step(step_id: &str) -> bool {
+    find_step(step_id).is_some_and(|contract| {
+        contract.phase_kind == PhaseKind::Review
+            && contract.closure_relevance == ClosureRelevance::ClosureRelevant
+    })
+}

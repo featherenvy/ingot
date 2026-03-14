@@ -5,12 +5,13 @@ export type LifecycleState = 'open' | 'done'
 export type ParkingState = 'active' | 'deferred'
 export type DoneReason = 'completed' | 'dismissed' | 'invalidated'
 export type ResolutionSource = 'system_command' | 'approval_command' | 'manual_command'
-export type ApprovalState = 'not_required' | 'not_requested' | 'pending' | 'approved'
+export type ApprovalState = 'not_required' | 'not_requested' | 'pending' | 'granted' | 'approved'
 export type EscalationState = 'none' | 'operator_required'
 export type EscalationReason =
   | 'candidate_rework_budget_exhausted'
   | 'integration_rework_budget_exhausted'
   | 'convergence_conflict'
+  | 'checkout_sync_blocked'
   | 'step_failed'
   | 'protocol_violation'
   | 'manual_decision_required'
@@ -92,11 +93,15 @@ export type ActivityEventType =
   | 'approval_requested'
   | 'approval_approved'
   | 'approval_rejected'
+  | 'convergence_queued'
+  | 'convergence_lane_acquired'
   | 'convergence_started'
   | 'convergence_conflicted'
   | 'convergence_prepared'
   | 'convergence_finalized'
   | 'convergence_failed'
+  | 'checkout_sync_blocked'
+  | 'checkout_sync_cleared'
   | 'git_operation_planned'
   | 'git_operation_reconciled'
 
@@ -193,10 +198,20 @@ export interface Evaluation {
   diagnostics: string[]
 }
 
+export interface QueueStatus {
+  state: 'queued' | 'head' | 'released' | 'cancelled' | null
+  position: number | null
+  lane_owner_item_id: string | null
+  lane_target_ref: string | null
+  checkout_sync_blocked: boolean
+  checkout_sync_message: string | null
+}
+
 export interface ItemSummary {
   item: Item
   title: string
   evaluation: Evaluation
+  queue: QueueStatus
 }
 
 export interface Job {
@@ -297,6 +312,7 @@ export interface ItemDetail {
   item: Item
   current_revision: ItemRevision
   evaluation: Evaluation
+  queue: QueueStatus
   revision_history: ItemRevision[]
   jobs: Job[]
   findings: Finding[]

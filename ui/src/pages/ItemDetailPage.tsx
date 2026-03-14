@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMemo } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
 import { approveItem, dispatchItemJob, prepareConvergence, rejectApproval, triageFinding } from '../api/client'
-import type { FindingTriageState } from '../types/domain'
 import { agentsQuery, itemDetailQuery, queryKeys } from '../api/queries'
 import {
   AcceptanceCriteriaSection,
+  ActivityTimeline,
   ConvergencesTable,
   DiagnosticsSection,
   FindingsTable,
@@ -13,10 +14,12 @@ import {
   OperatorActions,
   OverviewPanels,
   RevisionContextPanel,
+  WorkflowStepper,
 } from '../components/item-detail'
 import { PageHeader } from '../components/PageHeader'
 import { PageQueryError } from '../components/PageQueryError'
 import { ItemDetailSkeleton } from '../components/PageSkeletons'
+import { SectionNav } from '../components/SectionNav'
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -26,8 +29,10 @@ import {
   BreadcrumbSeparator,
 } from '../components/ui/breadcrumb'
 import { useRequiredItemId, useRequiredProjectId } from '../hooks/useRequiredRouteParam'
+import { useSectionObserver } from '../hooks/useSectionObserver'
 import { getQueuedJobBlocker } from '../jobBlockers'
 import { showErrorToast } from '../lib/toast'
+import type { FindingTriageState } from '../types/domain'
 
 type DetailSection = {
   id: string
@@ -61,7 +66,7 @@ export default function ItemDetailPage(): React.JSX.Element {
     mutationFn: () => prepareConvergence(projectId, itemId),
     onSuccess: () => {
       refresh()
-      toast.success('Convergence prepared.')
+      toast.success('Convergence queued.')
     },
     onError: (error) => {
       showErrorToast('Convergence preparation failed.', error)
@@ -112,8 +117,25 @@ export default function ItemDetailPage(): React.JSX.Element {
   const retryableJobs = detail?.jobs.filter((job) => ['failed', 'cancelled', 'expired'].includes(job.status)) ?? []
   const isAgentAvailabilityLoading = isAgentsLoading && !!activeJob
   const queueBlocker = isAgentAvailabilityLoading ? null : getQueuedJobBlocker(activeJob ? [activeJob] : [], agents)
+  const operatorBlocker = detail?.queue.checkout_sync_message ?? queueBlocker
 
   const retryableJobIds = new Set(retryableJobs.map((job) => job.id))
+
+  const hasActivity = (detail?.jobs.length ?? 0) + (detail?.findings.length ?? 0) + (detail?.convergences.length ?? 0)
+
+  const sections: DetailSection[] = useMemo(() => {
+    if (!detail) return []
+    return [
+      { id: 'jobs', label: 'Jobs', count: detail.jobs.length },
+      { id: 'findings', label: 'Findings', count: detail.findings.length },
+      { id: 'convergences', label: 'Convergences', count: detail.convergences.length },
+      { id: 'revision-context', label: 'Revision Context', count: detail.revision_context_summary ? 1 : 0 },
+      { id: 'diagnostics', label: 'Diagnostics', count: detail.diagnostics.length },
+    ].filter((s) => s.count > 0)
+  }, [detail])
+
+  const sectionIds = useMemo(() => sections.map((s) => s.id), [sections])
+  const activeSectionId = useSectionObserver(sectionIds)
 
   if (isLoading) return <ItemDetailSkeleton />
   if (isError) {
@@ -129,14 +151,6 @@ export default function ItemDetailPage(): React.JSX.Element {
     revision_context_summary: revisionContextSummary,
     diagnostics,
   } = detail
-
-  const sections: DetailSection[] = [
-    { id: 'jobs', label: 'Jobs', count: detail.jobs.length },
-    { id: 'findings', label: 'Findings', count: findings.length },
-    { id: 'convergences', label: 'Convergences', count: detail.convergences.length },
-    { id: 'revision-context', label: 'Revision Context', count: revisionContextSummary ? 1 : 0 },
-    { id: 'diagnostics', label: 'Diagnostics', count: diagnostics.length },
-  ].filter((s) => s.count > 0)
 
   return (
     <div className="space-y-6">
@@ -160,15 +174,7 @@ export default function ItemDetailPage(): React.JSX.Element {
         descriptionClassName="max-w-3xl"
       />
 
-      {sections.length > 0 && (
-        <nav className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
-          {sections.map((s) => (
-            <a key={s.id} href={`#${s.id}`} className="hover:text-foreground">
-              {s.label} ({s.count})
-            </a>
-          ))}
-        </nav>
-      )}
+      <WorkflowStepper currentStepId={evaluation.current_step_id} />
 
       <OperatorActions
         projectId={projectId}
@@ -191,11 +197,19 @@ export default function ItemDetailPage(): React.JSX.Element {
             run: () => rejectMutation.mutate(),
           },
         }}
-        queueBlocker={queueBlocker}
+        queueBlocker={operatorBlocker}
+        queue={detail.queue}
         agentsLoading={isAgentAvailabilityLoading}
       />
       <OverviewPanels item={item} evaluation={evaluation} revision={current_revision} />
       <AcceptanceCriteriaSection acceptanceCriteria={current_revision.acceptance_criteria} />
+
+      {hasActivity > 0 && (
+        <ActivityTimeline jobs={detail.jobs} findings={findings} convergences={detail.convergences} />
+      )}
+
+      {sections.length > 0 && <SectionNav sections={sections} activeSectionId={activeSectionId} />}
+
       {detail.jobs.length > 0 && (
         <div id="jobs">
           <JobsTable

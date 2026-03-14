@@ -1,4 +1,6 @@
-.PHONY: all ci build check test lint fmt clean dev dev-ui dev-daemon help
+.PHONY: all ci build check test lint fmt clean dev dev-ui dev-daemon help tla-check
+
+TLA_TOOLS_JAR ?= tools/tla2tools.jar
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -69,3 +71,8 @@ lint: clippy ui-lint fmt-check ## Run all linters (clippy + biome + fmt check)
 clean: ## Remove build artifacts
 	cargo clean
 	rm -rf ui/dist ui/node_modules/.tmp
+
+tla-check: ## Run TLC against the minimal control model
+	test -f $(TLA_TOOLS_JAR)
+	mkdir -p target/tla
+	cd formal && java -cp ../$(TLA_TOOLS_JAR) tlc2.TLC -cleanup -metadir ../target/tla/IngotControl -config IngotControl.cfg IngotControl

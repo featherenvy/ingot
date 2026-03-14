@@ -319,6 +319,16 @@ impl Evaluator {
 
             if last_job.step_id == step::VALIDATE_INTEGRATED && outcome == OutcomeClass::Clean {
                 if prepared_convergence.is_none() {
+                    if item.approval_state == ApprovalState::Granted {
+                        return IdleProjection {
+                            current_step_id,
+                            phase_status: "awaiting_convergence",
+                            next_recommended_action: step::PREPARE_CONVERGENCE.into(),
+                            dispatchable_step_id: None,
+                            allowed_actions: vec![],
+                            terminal_readiness: false,
+                        };
+                    }
                     diagnostics.push(
                         "validate_integrated clean but no prepared convergence exists".into(),
                     );
@@ -607,6 +617,16 @@ fn triaged_findings_clean_projection(
 ) -> Option<IdleProjection> {
     if latest_closure_job.step_id == step::VALIDATE_INTEGRATED {
         if prepared_convergence.is_none() {
+            if item.approval_state == ApprovalState::Granted {
+                return Some(IdleProjection {
+                    current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
+                    phase_status: "awaiting_convergence",
+                    next_recommended_action: step::PREPARE_CONVERGENCE.into(),
+                    dispatchable_step_id: None,
+                    allowed_actions: vec![],
+                    terminal_readiness: false,
+                });
+            }
             return Some(IdleProjection {
                 current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
                 phase_status: "unknown",
@@ -956,6 +976,33 @@ mod tests {
         );
         assert_eq!(evaluation.board_status, BoardStatus::Working);
         assert!(evaluation.allowed_actions.is_empty());
+    }
+
+    #[test]
+    fn granted_without_prepared_convergence_requeues_prepare() {
+        let evaluator = Evaluator::new();
+        let mut item = test_item();
+        item.approval_state = ApprovalState::Granted;
+
+        let revision = test_revision(ApprovalPolicy::Required);
+        let jobs = vec![test_job(
+            step::VALIDATE_INTEGRATED,
+            PhaseKind::Validate,
+            JobStatus::Completed,
+            Some(OutcomeClass::Clean),
+        )];
+
+        let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
+
+        assert_eq!(
+            evaluation.next_recommended_action,
+            step::PREPARE_CONVERGENCE
+        );
+        assert_eq!(
+            evaluation.phase_status.as_deref(),
+            Some("awaiting_convergence")
+        );
+        assert_eq!(evaluation.dispatchable_step_id, None);
     }
 
     #[test]

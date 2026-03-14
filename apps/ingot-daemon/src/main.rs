@@ -11,7 +11,7 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 #[tokio::main]
 async fn main() -> Result<()> {
     let state_root = dirs();
-    let _file_log_guard = init_tracing(&state_root.join("log"))?;
+    let _file_log_guard = init_tracing(&state_root.join("logs"))?;
 
     tracing::info!("starting ingotd");
 
@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     let dispatcher = JobDispatcher::new(
         db.clone(),
         project_locks.clone(),
-        DispatcherConfig::new(state_root),
+        DispatcherConfig::new(state_root.clone()),
     );
     dispatcher.reconcile_startup().await?;
     tokio::spawn(async move {
@@ -34,7 +34,11 @@ async fn main() -> Result<()> {
     tracing::info!("background dispatcher started");
 
     // HTTP server
-    let app = ingot_http_api::build_router_with_project_locks(db.clone(), project_locks);
+    let app = ingot_http_api::build_router_with_project_locks_and_state_root(
+        db.clone(),
+        project_locks,
+        state_root.clone(),
+    );
     let addr = SocketAddr::from(([127, 0, 0, 1], 4190));
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("listening on {addr}");

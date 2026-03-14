@@ -81,7 +81,13 @@ pub async fn create_daemon_commit_from_staged(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(GitCommandError::CommandFailed(stderr.trim().to_string()));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let message = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        return Err(GitCommandError::CommandFailed(message));
     }
 
     head_oid(repo_path).await

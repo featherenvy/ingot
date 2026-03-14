@@ -42,8 +42,12 @@ export function JobsTable({
                   <code>{shortId(job.id)}</code>
                 </TooltipValue>
               </TableCell>
-              <TableCell>{job.step_id}</TableCell>
-              <TableCell>{job.phase_kind}</TableCell>
+              <TableCell>
+                <code>{job.step_id}</code>
+              </TableCell>
+              <TableCell>
+                <span className="font-mono">{job.phase_kind}</span>
+              </TableCell>
               <TableCell>
                 <StatusBadge status={job.status} />
               </TableCell>

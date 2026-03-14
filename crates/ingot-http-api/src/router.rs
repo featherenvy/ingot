@@ -1,6 +1,7 @@
 use std::path::Path as FsPath;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -15,9 +16,12 @@ use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
 use serde::{Deserialize, Serialize};
 
 use ingot_domain::convergence::Convergence;
+use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::{Finding, FindingTriageState};
 use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
-use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
+use ingot_domain::ids::{
+    AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId,
+};
 use ingot_domain::item::{
     ApprovalState, Classification, DoneReason, EscalationReason, Item, LifecycleState, OriginKind,
     Priority, ResolutionSource,
@@ -30,15 +34,20 @@ use ingot_domain::revision_context::RevisionContextSummary;
 use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
 use ingot_git::GitJobCompletionPort;
 use ingot_git::commands::{
-    compare_and_swap_ref, current_branch_name, delete_ref, git, is_commit_reachable_from_any_ref,
-    resolve_ref_oid,
+    current_branch_name, delete_ref, git, is_commit_reachable_from_any_ref, resolve_ref_oid,
 };
 use ingot_git::commit::{
     ConvergenceCommitTrailers, abort_cherry_pick, cherry_pick_no_commit, commit_message,
-    create_daemon_convergence_commit, list_commits_oldest_first,
+    create_daemon_convergence_commit, list_commits_oldest_first, working_tree_has_changes,
 };
 use ingot_git::diff::changed_paths_between;
+use ingot_git::project_repo::{
+    CheckoutSyncStatus, checkout_sync_status, ensure_mirror, project_repo_paths,
+};
 use ingot_store_sqlite::{Database, FinishJobNonSuccessParams, StartJobExecutionParams};
+use ingot_usecases::convergence::{
+    ConvergenceCommandPort, ConvergenceService, ConvergenceSystemActionPort,
+};
 use ingot_usecases::finding::{
     BacklogFindingOverrides, TriageFindingInput, backlog_finding, parse_revision_context_summary,
     triage_finding,
@@ -52,10 +61,10 @@ use ingot_usecases::{
     CompleteJobCommand, CompleteJobError, CompleteJobService, ProjectLocks, UseCaseError,
     rebuild_revision_context,
 };
-use ingot_workflow::{Evaluation, Evaluator};
+use ingot_workflow::{Evaluation, Evaluator, step};
 use ingot_workspace::{
     WorkspaceError, ensure_authoring_workspace_state, provision_integration_workspace,
-    provision_review_workspace, remove_workspace, workspace_root_path,
+    provision_review_workspace, remove_workspace,
 };
 
 use crate::error::ApiError;
@@ -65,6 +74,407 @@ pub(crate) struct AppState {
     pub(crate) db: Database,
     complete_job_service: CompleteJobService<Database, GitJobCompletionPort, ProjectLocks>,
     pub(crate) project_locks: ProjectLocks,
+    state_root: PathBuf,
+}
+
+#[derive(Clone)]
+struct HttpConvergencePort {
+    state: AppState,
+}
+
+impl ConvergenceCommandPort for HttpConvergencePort {
+    fn load_queue_prepare_context(
+        &self,
+        project_id: ProjectId,
+        item_id: ItemId,
+    ) -> impl std::future::Future<
+        Output = Result<ingot_domain::ports::ConvergenceQueuePrepareContext, UseCaseError>,
+    > + Send {
+        let state = self.state.clone();
+        async move {
+            let project = state
+                .db
+                .get_project(project_id)
+                .await
+                .map_err(repo_to_project)
+                .map_err(api_to_usecase_error)?;
+            let paths = refresh_project_mirror(&state, &project)
+                .await
+                .map_err(api_to_usecase_error)?;
+            let item = state
+                .db
+                .get_item(item_id)
+                .await
+                .map_err(repo_to_item)
+                .map_err(api_to_usecase_error)?;
+            let revision = state
+                .db
+                .get_revision(item.current_revision_id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let jobs = state
+                .db
+                .list_jobs_by_item(item.id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let findings = state
+                .db
+                .list_findings_by_item(item.id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let convergences = hydrate_convergence_validity(
+                paths.mirror_git_dir.as_path(),
+                state
+                    .db
+                    .list_convergences_by_item(item.id)
+                    .await
+                    .map_err(UseCaseError::Repository)?,
+            )
+            .await
+            .map_err(api_to_usecase_error)?;
+            let active_queue_entry = state
+                .db
+                .find_active_queue_entry_for_revision(revision.id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let lane_head = state
+                .db
+                .find_queue_head(project.id, &revision.target_ref)
+                .await
+                .map_err(UseCaseError::Repository)?;
+
+            Ok(ingot_domain::ports::ConvergenceQueuePrepareContext {
+                project,
+                item,
+                revision,
+                jobs,
+                findings,
+                convergences,
+                active_queue_entry,
+                lane_head,
+            })
+        }
+    }
+
+    fn create_queue_entry(
+        &self,
+        queue_entry: &ConvergenceQueueEntry,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        let state = self.state.clone();
+        let queue_entry = queue_entry.clone();
+        async move {
+            state
+                .db
+                .create_queue_entry(&queue_entry)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            Ok(())
+        }
+    }
+
+    fn update_queue_entry(
+        &self,
+        queue_entry: &ConvergenceQueueEntry,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        let state = self.state.clone();
+        let queue_entry = queue_entry.clone();
+        async move {
+            state
+                .db
+                .update_queue_entry(&queue_entry)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            Ok(())
+        }
+    }
+
+    fn append_activity(
+        &self,
+        activity: &Activity,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        let state = self.state.clone();
+        let activity = activity.clone();
+        async move {
+            state
+                .db
+                .append_activity(&activity)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            Ok(())
+        }
+    }
+
+    fn load_approval_context(
+        &self,
+        project_id: ProjectId,
+        item_id: ItemId,
+    ) -> impl std::future::Future<
+        Output = Result<ingot_usecases::convergence::ConvergenceApprovalContext, UseCaseError>,
+    > + Send {
+        let state = self.state.clone();
+        async move {
+            let project = state
+                .db
+                .get_project(project_id)
+                .await
+                .map_err(repo_to_project)
+                .map_err(api_to_usecase_error)?;
+            let paths = refresh_project_mirror(&state, &project)
+                .await
+                .map_err(api_to_usecase_error)?;
+            let item = state
+                .db
+                .get_item(item_id)
+                .await
+                .map_err(repo_to_item)
+                .map_err(api_to_usecase_error)?;
+            if item.project_id != project_id {
+                return Err(UseCaseError::ItemNotFound);
+            }
+            let revision = state
+                .db
+                .get_revision(item.current_revision_id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let jobs = state
+                .db
+                .list_jobs_by_item(item.id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let convergences = hydrate_convergence_validity(
+                paths.mirror_git_dir.as_path(),
+                state
+                    .db
+                    .list_convergences_by_item(item.id)
+                    .await
+                    .map_err(UseCaseError::Repository)?,
+            )
+            .await
+            .map_err(api_to_usecase_error)?;
+            let queue_entry = state
+                .db
+                .find_active_queue_entry_for_revision(revision.id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+
+            Ok(ingot_usecases::convergence::ConvergenceApprovalContext {
+                item,
+                has_active_job: jobs
+                    .iter()
+                    .any(|job| job.item_revision_id == revision.id && job.status.is_active()),
+                has_active_convergence: convergences.iter().any(|convergence| {
+                    convergence.item_revision_id == revision.id
+                        && matches!(
+                            convergence.status,
+                            ingot_domain::convergence::ConvergenceStatus::Queued
+                                | ingot_domain::convergence::ConvergenceStatus::Running
+                        )
+                }),
+                prepared_convergence_id: convergences
+                    .iter()
+                    .filter(|convergence| convergence.item_revision_id == revision.id)
+                    .find(|convergence| {
+                        convergence.status
+                            == ingot_domain::convergence::ConvergenceStatus::Prepared
+                    })
+                    .map(|convergence| convergence.id),
+                prepared_target_valid: convergences
+                    .iter()
+                    .filter(|convergence| convergence.item_revision_id == revision.id)
+                    .find(|convergence| {
+                        convergence.status
+                            == ingot_domain::convergence::ConvergenceStatus::Prepared
+                    })
+                    .and_then(|convergence| convergence.target_head_valid)
+                    .unwrap_or(false),
+                queue_entry,
+            })
+        }
+    }
+
+    fn update_item(
+        &self,
+        item: &Item,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        let state = self.state.clone();
+        let item = item.clone();
+        async move {
+            state
+                .db
+                .update_item(&item)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            Ok(())
+        }
+    }
+
+    fn load_reject_approval_context(
+        &self,
+        project_id: ProjectId,
+        item_id: ItemId,
+    ) -> impl std::future::Future<
+        Output = Result<ingot_usecases::convergence::RejectApprovalContext, UseCaseError>,
+    > + Send {
+        let state = self.state.clone();
+        async move {
+            let item = state
+                .db
+                .get_item(item_id)
+                .await
+                .map_err(repo_to_item)
+                .map_err(api_to_usecase_error)?;
+            if item.project_id != project_id {
+                return Err(UseCaseError::ItemNotFound);
+            }
+            let revision = state
+                .db
+                .get_revision(item.current_revision_id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let jobs = state
+                .db
+                .list_jobs_by_item(item.id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let has_active_job = jobs
+                .iter()
+                .any(|job| job.item_revision_id == revision.id && job.status.is_active());
+            let convergences = state
+                .db
+                .list_convergences_by_item(item.id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let has_active_convergence = convergences.iter().any(|convergence| {
+                convergence.item_revision_id == revision.id
+                    && matches!(
+                        convergence.status,
+                        ingot_domain::convergence::ConvergenceStatus::Queued
+                            | ingot_domain::convergence::ConvergenceStatus::Running
+                    )
+            });
+
+            Ok(ingot_usecases::convergence::RejectApprovalContext {
+                item,
+                has_active_job,
+                has_active_convergence,
+            })
+        }
+    }
+
+    fn teardown_reject_approval(
+        &self,
+        project_id: ProjectId,
+        item_id: ItemId,
+    ) -> impl std::future::Future<
+        Output = Result<ingot_usecases::convergence::RejectApprovalTeardown, UseCaseError>,
+    > + Send {
+        let state = self.state.clone();
+        async move {
+            let project = state
+                .db
+                .get_project(project_id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let item = state
+                .db
+                .get_item(item_id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let revision = state
+                .db
+                .get_revision(item.current_revision_id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let teardown =
+                teardown_revision_lane_state(&state, &project, item.id, &revision)
+                    .await
+                    .map_err(api_to_usecase_error)?;
+            Ok(ingot_usecases::convergence::RejectApprovalTeardown {
+                has_cancelled_convergence: teardown.has_cancelled_convergence(),
+                has_cancelled_queue_entry: teardown.has_cancelled_queue_entry(),
+                first_cancelled_convergence_id: teardown
+                    .first_cancelled_convergence_id()
+                    .map(ToOwned::to_owned),
+                first_cancelled_queue_entry_id: teardown
+                    .first_cancelled_queue_entry_id()
+                    .map(ToOwned::to_owned),
+            })
+        }
+    }
+
+    fn apply_rejected_approval(
+        &self,
+        item: &Item,
+        next_revision: &ItemRevision,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        let state = self.state.clone();
+        let item = item.clone();
+        let next_revision = next_revision.clone();
+        async move {
+            state
+                .db
+                .create_revision(&next_revision)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            state
+                .db
+                .update_item(&item)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            Ok(())
+        }
+    }
+}
+
+impl ConvergenceSystemActionPort for HttpConvergencePort {
+    fn load_system_action_projects(
+        &self,
+    ) -> impl std::future::Future<
+        Output = Result<Vec<ingot_usecases::convergence::SystemActionProjectState>, UseCaseError>,
+    > + Send {
+        async move { Err(UseCaseError::Internal("http convergence port does not load system actions".into())) }
+    }
+
+    fn promote_queue_heads(
+        &self,
+        _project_id: ProjectId,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        async move { Err(UseCaseError::Internal("http convergence port does not promote queue heads".into())) }
+    }
+
+    fn prepare_queue_head_convergence(
+        &self,
+        _project: &Project,
+        _state: &ingot_usecases::convergence::SystemActionItemState,
+        _queue_entry: &ConvergenceQueueEntry,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        async move { Err(UseCaseError::Internal("http convergence port does not prepare queue heads".into())) }
+    }
+
+    fn invalidate_prepared_convergence(
+        &self,
+        _project_id: ProjectId,
+        _item_id: ItemId,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        async move { Err(UseCaseError::Internal("http convergence port does not invalidate prepared convergence".into())) }
+    }
+
+    fn reconcile_checkout_sync_ready(
+        &self,
+        _project: &Project,
+        _item_id: ItemId,
+        _revision: &ItemRevision,
+    ) -> impl std::future::Future<Output = Result<bool, UseCaseError>> + Send {
+        async move { Err(UseCaseError::Internal("http convergence port does not reconcile checkout sync".into())) }
+    }
+
+    fn auto_finalize_prepared_convergence(
+        &self,
+        _project_id: ProjectId,
+        _item_id: ItemId,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        async move { Err(UseCaseError::Internal("http convergence port does not auto-finalize convergence".into())) }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +482,7 @@ pub struct ItemSummaryResponse {
     pub item: Item,
     pub title: String,
     pub evaluation: Evaluation,
+    pub queue: QueueStatusResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,10 +496,21 @@ pub struct ConvergenceResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct QueueStatusResponse {
+    pub state: Option<String>,
+    pub position: Option<u32>,
+    pub lane_owner_item_id: Option<String>,
+    pub lane_target_ref: Option<String>,
+    pub checkout_sync_blocked: bool,
+    pub checkout_sync_message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ItemDetailResponse {
     pub item: Item,
     pub current_revision: ItemRevision,
     pub evaluation: Evaluation,
+    pub queue: QueueStatusResponse,
     pub revision_history: Vec<ItemRevision>,
     pub jobs: Vec<Job>,
     pub findings: Vec<Finding>,
@@ -108,12 +530,6 @@ pub struct PromoteFindingResponse {
 #[derive(Debug, Serialize)]
 pub struct CompleteJobResponse {
     pub finding_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PrepareConvergenceResponse {
-    pub convergence: ConvergenceResponse,
-    pub validation_job: Job,
 }
 
 #[derive(Debug, Serialize)]
@@ -287,18 +703,40 @@ pub struct FailJobRequest {
 
 /// Build the Axum router with all API routes.
 pub fn build_router(db: Database) -> Router {
-    build_router_with_project_locks(db, ProjectLocks::default())
+    build_router_with_project_locks_and_state_root(
+        db,
+        ProjectLocks::default(),
+        default_state_root(),
+    )
 }
 
 pub fn build_router_with_project_locks(db: Database, project_locks: ProjectLocks) -> Router {
+    build_router_with_project_locks_and_state_root(db, project_locks, default_state_root())
+}
+
+pub fn build_router_with_project_locks_and_state_root(
+    db: Database,
+    project_locks: ProjectLocks,
+    state_root: PathBuf,
+) -> Router {
+    let repo_path_resolver_root = state_root.clone();
     let state = AppState {
         db: db.clone(),
-        complete_job_service: CompleteJobService::new(
+        complete_job_service: CompleteJobService::with_repo_path_resolver(
             db,
             GitJobCompletionPort,
             project_locks.clone(),
+            Arc::new(move |project: &Project| {
+                project_repo_paths(
+                    repo_path_resolver_root.as_path(),
+                    project.id,
+                    FsPath::new(&project.path),
+                )
+                .mirror_git_dir
+            }),
         ),
         project_locks,
+        state_root,
     };
 
     Router::new()
@@ -481,6 +919,7 @@ async fn reset_workspace_route(
         .get_project(project_id)
         .await
         .map_err(repo_to_project)?;
+    let paths = refresh_project_mirror(&state, &project).await?;
     let _guard = state
         .project_locks
         .acquire_project_mutation(project_id)
@@ -548,7 +987,7 @@ async fn reset_workspace_route(
                 .map_err(git_to_internal)?;
             if let Some(workspace_ref) = workspace.workspace_ref.as_deref() {
                 ingot_git::commands::git(
-                    FsPath::new(&project.path),
+                    paths.mirror_git_dir.as_path(),
                     &["update-ref", workspace_ref, &expected_head],
                 )
                 .await
@@ -557,7 +996,7 @@ async fn reset_workspace_route(
         }
         WorkspaceKind::Review => {
             provision_review_workspace(
-                FsPath::new(&project.path),
+                paths.mirror_git_dir.as_path(),
                 FsPath::new(&workspace.path),
                 &expected_head,
             )
@@ -634,6 +1073,7 @@ async fn remove_workspace_route(
         .get_project(project_id)
         .await
         .map_err(repo_to_project)?;
+    let paths = refresh_project_mirror(&state, &project).await?;
     let _guard = state
         .project_locks
         .acquire_project_mutation(project_id)
@@ -659,39 +1099,39 @@ async fn remove_workspace_route(
         .map_err(repo_to_internal)?;
 
     if PathBuf::from(&workspace.path).exists() {
-        remove_workspace(FsPath::new(&project.path), FsPath::new(&workspace.path))
+        remove_workspace(paths.mirror_git_dir.as_path(), FsPath::new(&workspace.path))
             .await
             .map_err(workspace_to_api_error)?;
     }
-    if let Some(workspace_ref) = workspace.workspace_ref.as_deref()
-        && resolve_ref_oid(FsPath::new(&project.path), workspace_ref)
+    if let Some(workspace_ref) = workspace.workspace_ref.as_deref() {
+        let mirror_ref_exists = resolve_ref_oid(paths.mirror_git_dir.as_path(), workspace_ref)
             .await
             .map_err(git_to_internal)?
-            .is_some()
-    {
-        let now = Utc::now();
-        let mut operation = GitOperation {
-            id: ingot_domain::ids::GitOperationId::new(),
-            project_id,
-            operation_kind: OperationKind::RemoveWorkspaceRef,
-            entity_type: GitEntityType::Workspace,
-            entity_id: workspace.id.to_string(),
-            workspace_id: Some(workspace.id),
-            ref_name: Some(workspace_ref.into()),
-            expected_old_oid: workspace.head_commit_oid.clone(),
-            new_oid: None,
-            commit_oid: None,
-            status: GitOperationStatus::Planned,
-            metadata: None,
-            created_at: now,
-            completed_at: None,
-        };
-        state
-            .db
-            .create_git_operation(&operation)
-            .await
-            .map_err(repo_to_internal)?;
-        append_activity(
+            .is_some();
+        if mirror_ref_exists {
+            let now = Utc::now();
+            let mut operation = GitOperation {
+                id: ingot_domain::ids::GitOperationId::new(),
+                project_id,
+                operation_kind: OperationKind::RemoveWorkspaceRef,
+                entity_type: GitEntityType::Workspace,
+                entity_id: workspace.id.to_string(),
+                workspace_id: Some(workspace.id),
+                ref_name: Some(workspace_ref.into()),
+                expected_old_oid: workspace.head_commit_oid.clone(),
+                new_oid: None,
+                commit_oid: None,
+                status: GitOperationStatus::Planned,
+                metadata: None,
+                created_at: now,
+                completed_at: None,
+            };
+            state
+                .db
+                .create_git_operation(&operation)
+                .await
+                .map_err(repo_to_internal)?;
+            append_activity(
             &state,
             project_id,
             ActivityEventType::GitOperationPlanned,
@@ -700,16 +1140,17 @@ async fn remove_workspace_route(
             serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
         )
         .await?;
-        delete_ref(FsPath::new(&project.path), workspace_ref)
-            .await
-            .map_err(git_to_internal)?;
-        operation.status = GitOperationStatus::Applied;
-        operation.completed_at = Some(Utc::now());
-        state
-            .db
-            .update_git_operation(&operation)
-            .await
-            .map_err(repo_to_internal)?;
+            delete_ref(paths.mirror_git_dir.as_path(), workspace_ref)
+                .await
+                .map_err(git_to_internal)?;
+            operation.status = GitOperationStatus::Applied;
+            operation.completed_at = Some(Utc::now());
+            state
+                .db
+                .update_git_operation(&operation)
+                .await
+                .map_err(repo_to_internal)?;
+        }
     }
 
     workspace.status = WorkspaceStatus::Abandoned;
@@ -750,6 +1191,7 @@ async fn create_project(
         .create_project(&project)
         .await
         .map_err(repo_to_project_mutation)?;
+    refresh_project_mirror(&state, &project).await?;
 
     Ok((StatusCode::CREATED, Json(project)))
 }
@@ -798,6 +1240,7 @@ async fn update_project(
         .update_project(&project)
         .await
         .map_err(repo_to_project_mutation)?;
+    refresh_project_mirror(&state, &project).await?;
 
     Ok(Json(project))
 }
@@ -963,6 +1406,7 @@ async fn create_item(
         .project_locks
         .acquire_project_mutation(project_id)
         .await;
+    let paths = refresh_project_mirror(&state, &project).await?;
     let config = load_effective_config(Some(&project))?;
     let configured_approval_policy = parse_config_approval_policy(&config)?;
 
@@ -971,8 +1415,8 @@ async fn create_item(
             .target_ref
             .as_deref()
             .unwrap_or(project.default_branch.as_str()),
-    );
-    let repo_path = FsPath::new(&project.path);
+    )?;
+    let repo_path = paths.mirror_git_dir.as_path();
     let resolved_target_head = resolve_ref_oid(repo_path, &target_ref)
         .await
         .map_err(git_to_internal)?
@@ -1045,6 +1489,7 @@ async fn list_items(
         .get_project(project_id)
         .await
         .map_err(repo_to_project)?;
+    let paths = refresh_project_mirror(&state, &project).await?;
     let items = state
         .db
         .list_items_by_project(project_id)
@@ -1074,15 +1519,26 @@ async fn list_items(
             .list_convergences_by_item(item.id)
             .await
             .map_err(repo_to_internal)?;
-        let convergences = hydrate_convergence_validity(&project, convergences).await?;
+        let convergences =
+            hydrate_convergence_validity(paths.mirror_git_dir.as_path(), convergences).await?;
         let evaluation =
             evaluator.evaluate(&item, &current_revision, &jobs, &findings, &convergences);
+        let queue =
+            load_queue_status(&state, &item, &current_revision, &project, &evaluation).await?;
+        let evaluation = overlay_evaluation_with_queue_state(
+            &item,
+            &current_revision,
+            &convergences,
+            evaluation,
+            &queue,
+        );
 
         let title = current_revision.title.clone();
         summaries.push(ItemSummaryResponse {
             item,
             title,
             evaluation,
+            queue,
         });
     }
 
@@ -1180,8 +1636,7 @@ async fn revise_item(
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
     let request: ReviseItemRequest = maybe_request
         .map(|Json(request)| request)
-        .unwrap_or_default()
-        .into();
+        .unwrap_or_default();
     let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let project = state
@@ -1203,13 +1658,15 @@ async fn revise_item(
         .get_revision(item.current_revision_id)
         .await
         .map_err(repo_to_internal)?;
+    let _ = teardown_revision_lane_state(&state, &project, item.id, &current_revision).await?;
     let jobs = state
         .db
         .list_jobs_by_item(item.id)
         .await
         .map_err(repo_to_internal)?;
     let next_revision =
-        build_superseding_revision(&project, &item, &current_revision, &jobs, request).await?;
+        build_superseding_revision(&state, &project, &item, &current_revision, &jobs, request)
+            .await?;
     state
         .db
         .create_revision(&next_revision)
@@ -1257,7 +1714,7 @@ async fn defer_item(
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
     let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     let item_id = parse_id::<ItemId>(&item_id, "item")?;
-    state
+    let project = state
         .db
         .get_project(project_id)
         .await
@@ -1277,7 +1734,16 @@ async fn defer_item(
             message: "Pending approval items cannot be deferred".into(),
         });
     }
+    let current_revision = state
+        .db
+        .get_revision(item.current_revision_id)
+        .await
+        .map_err(repo_to_internal)?;
+    let _ = teardown_revision_lane_state(&state, &project, item.id, &current_revision).await?;
     item.parking_state = ingot_domain::item::ParkingState::Deferred;
+    item.approval_state = approval_state_for_policy(current_revision.approval_policy);
+    item.escalation_state = ingot_domain::item::EscalationState::None;
+    item.escalation_reason = None;
     item.updated_at = Utc::now();
     state
         .db
@@ -1377,8 +1843,7 @@ async fn reopen_item(
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
     let request: ReviseItemRequest = maybe_request
         .map(|Json(request)| request)
-        .unwrap_or_default()
-        .into();
+        .unwrap_or_default();
     let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let project = state
@@ -1415,7 +1880,8 @@ async fn reopen_item(
         .await
         .map_err(repo_to_internal)?;
     let next_revision =
-        build_superseding_revision(&project, &item, &current_revision, &jobs, request).await?;
+        build_superseding_revision(&state, &project, &item, &current_revision, &jobs, request)
+            .await?;
     state
         .db
         .create_revision(&next_revision)
@@ -1499,6 +1965,7 @@ async fn dispatch_item_job(
         .get_project(project_id)
         .await
         .map_err(repo_to_project)?;
+    let paths = refresh_project_mirror(&state, &project).await?;
     let _guard = state
         .project_locks
         .acquire_project_mutation(project_id)
@@ -1529,7 +1996,8 @@ async fn dispatch_item_job(
         .list_convergences_by_item(item.id)
         .await
         .map_err(repo_to_internal)?;
-    let convergences = hydrate_convergence_validity(&project, convergences).await?;
+    let convergences =
+        hydrate_convergence_validity(paths.mirror_git_dir.as_path(), convergences).await?;
     let command = DispatchJobCommand {
         step_id: maybe_request.and_then(|Json(request)| request.step_id),
     };
@@ -1563,6 +2031,69 @@ async fn dispatch_item_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
+async fn auto_dispatch_projected_review_job(
+    state: &AppState,
+    project: &Project,
+    item_id: ItemId,
+) -> Result<Option<Job>, ApiError> {
+    let item = state.db.get_item(item_id).await.map_err(repo_to_item)?;
+    let current_revision = state
+        .db
+        .get_revision(item.current_revision_id)
+        .await
+        .map_err(repo_to_internal)?;
+    let jobs = state
+        .db
+        .list_jobs_by_item(item.id)
+        .await
+        .map_err(repo_to_internal)?;
+    let findings = state
+        .db
+        .list_findings_by_item(item.id)
+        .await
+        .map_err(repo_to_internal)?;
+    let convergences = state
+        .db
+        .list_convergences_by_item(item.id)
+        .await
+        .map_err(repo_to_internal)?;
+    let paths = refresh_project_mirror(state, project).await?;
+    let convergences =
+        hydrate_convergence_validity(paths.mirror_git_dir.as_path(), convergences).await?;
+    let evaluation =
+        Evaluator::new().evaluate(&item, &current_revision, &jobs, &findings, &convergences);
+    let Some(step_id) = evaluation.dispatchable_step_id.as_deref() else {
+        return Ok(None);
+    };
+
+    if !step::is_closure_relevant_review_step(step_id) {
+        return Ok(None);
+    }
+
+    let job = dispatch_job(
+        &item,
+        &current_revision,
+        &jobs,
+        &findings,
+        &convergences,
+        DispatchJobCommand {
+            step_id: Some(step_id.to_string()),
+        },
+    )?;
+    state.db.create_job(&job).await.map_err(repo_to_internal)?;
+    append_activity(
+        state,
+        project.id,
+        ActivityEventType::JobDispatched,
+        "job",
+        job.id,
+        serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
+    )
+    .await?;
+
+    Ok(Some(job))
+}
+
 async fn retry_item_job(
     State(state): State<AppState>,
     Path((project_id, item_id, job_id)): Path<(String, String, String)>,
@@ -1575,6 +2106,7 @@ async fn retry_item_job(
         .get_project(project_id)
         .await
         .map_err(repo_to_project)?;
+    let paths = refresh_project_mirror(&state, &project).await?;
     let _guard = state
         .project_locks
         .acquire_project_mutation(project_id)
@@ -1612,7 +2144,8 @@ async fn retry_item_job(
         .list_convergences_by_item(item.id)
         .await
         .map_err(repo_to_internal)?;
-    let convergences = hydrate_convergence_validity(&project, convergences).await?;
+    let convergences =
+        hydrate_convergence_validity(paths.mirror_git_dir.as_path(), convergences).await?;
 
     let mut job = retry_job(
         &item,
@@ -1865,7 +2398,7 @@ async fn get_job_logs(
 ) -> Result<Json<JobLogsResponse>, ApiError> {
     let job_id = parse_id::<JobId>(&job_id, "job")?;
     state.db.get_job(job_id).await.map_err(repo_to_internal)?;
-    let logs_dir = logs_root().join(job_id.to_string());
+    let logs_dir = logs_root(state.state_root.as_path()).join(job_id.to_string());
 
     let prompt = read_optional_text(logs_dir.join("prompt.txt")).await?;
     let stdout = read_optional_text(logs_dir.join("stdout.log")).await?;
@@ -1883,124 +2416,21 @@ async fn get_job_logs(
 async fn prepare_item_convergence(
     State(state): State<AppState>,
     Path((project_id, item_id)): Path<(String, String)>,
-) -> Result<(StatusCode, Json<PrepareConvergenceResponse>), ApiError> {
+) -> Result<Json<ItemDetailResponse>, ApiError> {
     let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     let item_id = parse_id::<ItemId>(&item_id, "item")?;
-    let project = state
-        .db
-        .get_project(project_id)
-        .await
-        .map_err(repo_to_project)?;
     let _guard = state
         .project_locks
         .acquire_project_mutation(project_id)
         .await;
-
-    let item = state.db.get_item(item_id).await.map_err(repo_to_item)?;
-    if item.project_id != project_id {
-        return Err(UseCaseError::ItemNotFound.into());
-    }
-
-    let current_revision = state
-        .db
-        .get_revision(item.current_revision_id)
-        .await
-        .map_err(repo_to_internal)?;
-    let jobs = state
-        .db
-        .list_jobs_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    let findings = state
-        .db
-        .list_findings_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    let convergences = state
-        .db
-        .list_convergences_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    let convergences = hydrate_convergence_validity(&project, convergences).await?;
-    let evaluation =
-        Evaluator::new().evaluate(&item, &current_revision, &jobs, &findings, &convergences);
-
-    if evaluation.next_recommended_action != "prepare_convergence" {
-        return Err(ApiError::Conflict {
-            code: "convergence_not_preparable",
-            message: "Convergence cannot be prepared in the current item state".into(),
-        });
-    }
-
-    let source_workspace = state
-        .db
-        .find_authoring_workspace_for_revision(current_revision.id)
-        .await
-        .map_err(repo_to_internal)?
-        .ok_or_else(|| ApiError::Conflict {
-            code: "authoring_workspace_missing",
-            message: "Authoring workspace is required before preparing convergence".into(),
-        })?;
-
-    let source_head_commit_oid = current_authoring_head_for_revision(&jobs, &current_revision);
-    let prepared = prepare_convergence_workspace(
-        &state,
-        &project,
-        &item,
-        &current_revision,
-        &source_workspace,
-        &source_head_commit_oid,
-    )
-    .await?;
-    let all_convergences = {
-        let mut all = convergences.clone();
-        all.push(prepared.clone());
-        all
-    };
-    let mut validation_job = dispatch_job(
-        &item,
-        &current_revision,
-        &jobs,
-        &findings,
-        &all_convergences,
-        DispatchJobCommand {
-            step_id: Some("validate_integrated".into()),
-        },
-    )?;
-    validation_job.workspace_id = prepared.integration_workspace_id;
-    state
-        .db
-        .create_job(&validation_job)
-        .await
-        .map_err(repo_to_internal)?;
-    append_activity(
-        &state,
-        project_id,
-        ActivityEventType::ConvergencePrepared,
-        "convergence",
-        prepared.id,
-        serde_json::json!({ "item_id": item.id, "validation_job_id": validation_job.id }),
-    )
-    .await?;
-    append_activity(
-        &state,
-        project_id,
-        ActivityEventType::JobDispatched,
-        "job",
-        validation_job.id,
-        serde_json::json!({ "item_id": item.id, "step_id": validation_job.step_id }),
-    )
-    .await?;
-    refresh_revision_context_for_job_like(&state, &item, &current_revision, project.path.as_str())
-        .await?;
-
-    Ok((
-        StatusCode::CREATED,
-        Json(PrepareConvergenceResponse {
-            convergence: convergence_response(prepared),
-            validation_job,
-        }),
-    ))
+    ConvergenceService::new(HttpConvergencePort {
+        state: state.clone(),
+    })
+    .queue_prepare(project_id, item_id)
+    .await
+    .map_err(ApiError::from)?;
+    let detail = load_item_detail(&state, project_id, item_id).await?;
+    Ok(Json(detail))
 }
 
 async fn approve_item(
@@ -2009,165 +2439,17 @@ async fn approve_item(
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
     let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     let item_id = parse_id::<ItemId>(&item_id, "item")?;
-    let project = state
-        .db
-        .get_project(project_id)
-        .await
-        .map_err(repo_to_project)?;
     let _guard = state
         .project_locks
         .acquire_project_mutation(project_id)
         .await;
-
-    let mut item = state.db.get_item(item_id).await.map_err(repo_to_item)?;
-    if item.project_id != project_id {
-        return Err(UseCaseError::ItemNotFound.into());
-    }
-    if item.approval_state != ApprovalState::Pending {
-        return Err(UseCaseError::ApprovalNotPending.into());
-    }
-
-    let current_revision = state
-        .db
-        .get_revision(item.current_revision_id)
-        .await
-        .map_err(repo_to_internal)?;
-    let jobs = state
-        .db
-        .list_jobs_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    if jobs
-        .iter()
-        .any(|job| job.item_revision_id == current_revision.id && job.status.is_active())
-    {
-        return Err(UseCaseError::ActiveJobExists.into());
-    }
-    let convergences = state
-        .db
-        .list_convergences_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    if convergences.iter().any(|convergence| {
-        convergence.item_revision_id == current_revision.id
-            && matches!(
-                convergence.status,
-                ingot_domain::convergence::ConvergenceStatus::Queued
-                    | ingot_domain::convergence::ConvergenceStatus::Running
-            )
-    }) {
-        return Err(UseCaseError::ActiveConvergenceExists.into());
-    }
-    let mut convergence = convergences
-        .into_iter()
-        .filter(|convergence| convergence.item_revision_id == current_revision.id)
-        .find(|convergence| {
-            convergence.status == ingot_domain::convergence::ConvergenceStatus::Prepared
-        })
-        .ok_or(UseCaseError::PreparedConvergenceMissing)?;
-    convergence.target_head_valid =
-        compute_target_head_valid(FsPath::new(&project.path), &convergence).await?;
-    if convergence.target_head_valid == Some(false) {
-        return Err(UseCaseError::PreparedConvergenceStale.into());
-    }
-
-    let prepared_commit_oid = convergence
-        .prepared_commit_oid
-        .clone()
-        .ok_or(UseCaseError::PreparedConvergenceMissing)?;
-    let input_target_commit_oid = convergence
-        .input_target_commit_oid
-        .clone()
-        .ok_or(UseCaseError::PreparedConvergenceMissing)?;
-
-    let mut operation = GitOperation {
-        id: ingot_domain::ids::GitOperationId::new(),
-        project_id: project.id,
-        operation_kind: OperationKind::FinalizeTargetRef,
-        entity_type: GitEntityType::Convergence,
-        entity_id: convergence.id.to_string(),
-        workspace_id: convergence.integration_workspace_id,
-        ref_name: Some(convergence.target_ref.clone()),
-        expected_old_oid: Some(input_target_commit_oid.clone()),
-        new_oid: Some(prepared_commit_oid.clone()),
-        commit_oid: Some(prepared_commit_oid.clone()),
-        status: GitOperationStatus::Planned,
-        metadata: None,
-        created_at: Utc::now(),
-        completed_at: None,
-    };
-    state
-        .db
-        .create_git_operation(&operation)
-        .await
-        .map_err(repo_to_internal)?;
-    append_activity(
-        &state,
-        project_id,
-        ActivityEventType::GitOperationPlanned,
-        "git_operation",
-        operation.id,
-        serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
-    )
-    .await?;
-
-    compare_and_swap_ref(
-        FsPath::new(&project.path),
-        &convergence.target_ref,
-        &prepared_commit_oid,
-        &input_target_commit_oid,
-    )
+    ConvergenceService::new(HttpConvergencePort {
+        state: state.clone(),
+    })
+    .approve_item(project_id, item_id)
     .await
-    .map_err(git_to_internal)?;
-
-    operation.status = GitOperationStatus::Applied;
-    operation.completed_at = Some(Utc::now());
-    state
-        .db
-        .update_git_operation(&operation)
-        .await
-        .map_err(repo_to_internal)?;
-
-    convergence.status = ingot_domain::convergence::ConvergenceStatus::Finalized;
-    convergence.final_target_commit_oid = Some(prepared_commit_oid);
-    convergence.completed_at = Some(Utc::now());
-    state
-        .db
-        .update_convergence(&convergence)
-        .await
-        .map_err(repo_to_internal)?;
-
-    item.approval_state = ApprovalState::Approved;
-    item.lifecycle_state = LifecycleState::Done;
-    item.done_reason = Some(DoneReason::Completed);
-    item.resolution_source = Some(ResolutionSource::ApprovalCommand);
-    item.closed_at = Some(Utc::now());
-    item.updated_at = Utc::now();
-    state
-        .db
-        .update_item(&item)
-        .await
-        .map_err(repo_to_internal)?;
-    append_activity(
-        &state,
-        project_id,
-        ActivityEventType::ApprovalApproved,
-        "item",
-        item.id,
-        serde_json::json!({ "convergence_id": convergence.id }),
-    )
-    .await?;
-    append_activity(
-        &state,
-        project_id,
-        ActivityEventType::ConvergenceFinalized,
-        "convergence",
-        convergence.id,
-        serde_json::json!({ "item_id": item.id }),
-    )
-    .await?;
-
-    let detail = load_item_detail(&state, project_id, item.id).await?;
+    .map_err(ApiError::from)?;
+    let detail = load_item_detail(&state, project_id, item_id).await?;
     Ok(Json(detail))
 }
 
@@ -2188,14 +2470,10 @@ async fn reject_item_approval(
         .acquire_project_mutation(project_id)
         .await;
 
-    let mut item = state.db.get_item(item_id).await.map_err(repo_to_item)?;
+    let item = state.db.get_item(item_id).await.map_err(repo_to_item)?;
     if item.project_id != project_id {
         return Err(UseCaseError::ItemNotFound.into());
     }
-    if item.approval_state != ApprovalState::Pending {
-        return Err(UseCaseError::ApprovalNotPending.into());
-    }
-
     let current_revision = state
         .db
         .get_revision(item.current_revision_id)
@@ -2206,102 +2484,32 @@ async fn reject_item_approval(
         .list_jobs_by_item(item.id)
         .await
         .map_err(repo_to_internal)?;
-    if jobs
-        .iter()
-        .any(|job| job.item_revision_id == current_revision.id && job.status.is_active())
-    {
-        return Err(UseCaseError::ActiveJobExists.into());
-    }
-    let mut convergences = state
-        .db
-        .list_convergences_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    if convergences.iter().any(|convergence| {
-        convergence.item_revision_id == current_revision.id
-            && matches!(
-                convergence.status,
-                ingot_domain::convergence::ConvergenceStatus::Queued
-                    | ingot_domain::convergence::ConvergenceStatus::Running
-            )
-    }) {
-        return Err(UseCaseError::ActiveConvergenceExists.into());
-    }
-    let mut prepared_convergence = convergences
-        .iter_mut()
-        .find(|convergence| {
-            convergence.item_revision_id == current_revision.id
-                && convergence.status == ingot_domain::convergence::ConvergenceStatus::Prepared
-        })
-        .ok_or(UseCaseError::PreparedConvergenceMissing)?
-        .clone();
-
-    prepared_convergence.status = ingot_domain::convergence::ConvergenceStatus::Cancelled;
-    prepared_convergence.completed_at = Some(Utc::now());
-    state
-        .db
-        .update_convergence(&prepared_convergence)
-        .await
-        .map_err(repo_to_internal)?;
-
-    if let Some(workspace_id) = prepared_convergence.integration_workspace_id {
-        let workspace = state
-            .db
-            .get_workspace(workspace_id)
-            .await
-            .map_err(repo_to_internal)?;
-        if PathBuf::from(&workspace.path).exists() {
-            let _ = ingot_workspace::remove_workspace(
-                FsPath::new(&project.path),
-                FsPath::new(&workspace.path),
-            )
-            .await;
-        }
-        let mut abandoned_workspace = workspace;
-        abandoned_workspace.status = ingot_domain::workspace::WorkspaceStatus::Abandoned;
-        abandoned_workspace.current_job_id = None;
-        abandoned_workspace.updated_at = Utc::now();
-        state
-            .db
-            .update_workspace(&abandoned_workspace)
-            .await
-            .map_err(repo_to_internal)?;
-    }
-
     let request: ReviseItemRequest = maybe_request
         .map(|Json(request)| request)
         .unwrap_or_default()
         .into();
     let next_revision =
-        build_superseding_revision(&project, &item, &current_revision, &jobs, request).await?;
-    state
-        .db
-        .create_revision(&next_revision)
-        .await
-        .map_err(repo_to_internal)?;
-
+        build_superseding_revision(&state, &project, &item, &current_revision, &jobs, request)
+            .await?;
     let cleared_escalation =
         item.escalation_state == ingot_domain::item::EscalationState::OperatorRequired;
-    item.current_revision_id = next_revision.id;
-    item.approval_state = approval_state_for_policy(next_revision.approval_policy);
-    item.lifecycle_state = LifecycleState::Open;
-    item.parking_state = ingot_domain::item::ParkingState::Active;
-    item.done_reason = None;
-    item.resolution_source = None;
-    item.closed_at = None;
-    item.updated_at = Utc::now();
-    state
-        .db
-        .update_item(&item)
-        .await
-        .map_err(repo_to_internal)?;
+    let teardown = ConvergenceService::new(HttpConvergencePort {
+        state: state.clone(),
+    })
+    .reject_item_approval(project_id, item.id, &next_revision)
+    .await
+    .map_err(ApiError::from)?;
     append_activity(
         &state,
         project_id,
         ActivityEventType::ApprovalRejected,
         "item",
         item.id,
-        serde_json::json!({ "new_revision_id": next_revision.id, "cancelled_convergence_id": prepared_convergence.id }),
+        serde_json::json!({
+            "new_revision_id": next_revision.id,
+            "cancelled_convergence_id": teardown.first_cancelled_convergence_id,
+            "cancelled_queue_entry_id": teardown.first_cancelled_queue_entry_id
+        }),
     )
     .await?;
     if cleared_escalation {
@@ -2449,7 +2657,7 @@ async fn apply_finding_triage(
 
     let applied = match request.triage_state {
         FindingTriageState::Backlog => {
-            ensure_finding_subject_reachable(&project, &finding).await?;
+            ensure_finding_subject_reachable(state, &project, &finding).await?;
             if let Some(linked_item_id) = parsed_linked_item_id {
                 let linked_item =
                     load_linked_item_for_finding(state, &source_item, linked_item_id).await?;
@@ -2558,7 +2766,6 @@ async fn apply_finding_triage(
             }
         }
     };
-
     maybe_enter_approval_after_finding_triage(
         state,
         &source_item,
@@ -2580,6 +2787,7 @@ async fn apply_finding_triage(
         }),
     )
     .await?;
+    auto_dispatch_projected_review_job(state, &project, source_item.id).await?;
 
     Ok(applied)
 }
@@ -2737,6 +2945,12 @@ async fn complete_job(
         .get_item(prior_job.item_id)
         .await
         .map_err(repo_to_item)?;
+    let project = state
+        .db
+        .get_project(prior_job.project_id)
+        .await
+        .map_err(repo_to_project)?;
+    refresh_project_mirror(&state, &project).await?;
     let result = state
         .complete_job_service
         .execute(CompleteJobCommand {
@@ -2913,6 +3127,7 @@ async fn load_item_detail(
         .get_project(item.project_id)
         .await
         .map_err(repo_to_project)?;
+    let paths = refresh_project_mirror(state, &project).await?;
 
     let current_revision = state
         .db
@@ -2944,7 +3159,8 @@ async fn load_item_detail(
         .list_convergences_by_item(item.id)
         .await
         .map_err(repo_to_internal)?;
-    let convergences = hydrate_convergence_validity(&project, convergences).await?;
+    let convergences =
+        hydrate_convergence_validity(paths.mirror_git_dir.as_path(), convergences).await?;
     let revision_context = state
         .db
         .get_revision_context(item.current_revision_id)
@@ -2953,12 +3169,21 @@ async fn load_item_detail(
     let revision_context_summary = parse_revision_context_summary(revision_context.as_ref())?;
     let evaluation =
         Evaluator::new().evaluate(&item, &current_revision, &jobs, &findings, &convergences);
+    let queue = load_queue_status(state, &item, &current_revision, &project, &evaluation).await?;
+    let evaluation = overlay_evaluation_with_queue_state(
+        &item,
+        &current_revision,
+        &convergences,
+        evaluation,
+        &queue,
+    );
     let diagnostics = evaluation.diagnostics.clone();
 
     Ok(ItemDetailResponse {
         item,
         current_revision,
         evaluation,
+        queue,
         revision_history,
         jobs,
         findings,
@@ -2982,14 +3207,16 @@ async fn refresh_revision_context_for_job(state: &AppState, job_id: JobId) -> Re
         .get_project(job.project_id)
         .await
         .map_err(repo_to_project)?;
-    refresh_revision_context_for_job_like(state, &item, &revision, &project.path).await
+    let paths = refresh_project_mirror(state, &project).await?;
+    refresh_revision_context_for_job_like(state, &item, &revision, paths.mirror_git_dir.as_path())
+        .await
 }
 
 async fn refresh_revision_context_for_job_like(
     state: &AppState,
     item: &Item,
     revision: &ItemRevision,
-    project_path: &str,
+    repo_path: &FsPath,
 ) -> Result<(), ApiError> {
     let jobs = state
         .db
@@ -2998,7 +3225,7 @@ async fn refresh_revision_context_for_job_like(
         .map_err(repo_to_internal)?;
     let authoring_head_commit_oid = current_authoring_head_for_revision(&jobs, revision);
     let changed_paths = changed_paths_between(
-        FsPath::new(project_path),
+        repo_path,
         &revision.seed_commit_oid,
         &authoring_head_commit_oid,
     )
@@ -3075,15 +3302,150 @@ fn convergence_response(convergence: Convergence) -> ConvergenceResponse {
     }
 }
 
-async fn hydrate_convergence_validity(
+fn empty_queue_status() -> QueueStatusResponse {
+    QueueStatusResponse {
+        state: None,
+        position: None,
+        lane_owner_item_id: None,
+        lane_target_ref: None,
+        checkout_sync_blocked: false,
+        checkout_sync_message: None,
+    }
+}
+
+fn overlay_evaluation_with_queue_state(
+    item: &Item,
+    revision: &ItemRevision,
+    convergences: &[Convergence],
+    mut evaluation: Evaluation,
+    queue: &QueueStatusResponse,
+) -> Evaluation {
+    let has_prepared_convergence = convergences.iter().any(|convergence| {
+        convergence.item_revision_id == revision.id
+            && convergence.status == ingot_domain::convergence::ConvergenceStatus::Prepared
+    });
+
+    if queue.state.is_some() && evaluation.next_recommended_action == "prepare_convergence" {
+        evaluation.next_recommended_action = "await_convergence_lane".into();
+        evaluation.dispatchable_step_id = None;
+        evaluation
+            .allowed_actions
+            .retain(|action| action != "prepare_convergence");
+        evaluation.phase_status = Some("awaiting_convergence".into());
+    }
+
+    if queue.state.as_deref() == Some("queued") {
+        evaluation.next_recommended_action = "await_convergence_lane".into();
+        evaluation.dispatchable_step_id = None;
+        evaluation
+            .allowed_actions
+            .retain(|action| action != "prepare_convergence");
+        evaluation.phase_status = Some("awaiting_convergence".into());
+    }
+
+    if item.approval_state == ApprovalState::Granted && has_prepared_convergence {
+        evaluation.next_recommended_action = if queue.checkout_sync_blocked {
+            "resolve_checkout_sync".into()
+        } else {
+            "finalize_prepared_convergence".into()
+        };
+        evaluation.dispatchable_step_id = None;
+        evaluation.allowed_actions = vec![];
+        evaluation.phase_status = Some(
+            if queue.checkout_sync_blocked {
+                "awaiting_convergence"
+            } else {
+                "finalization_ready"
+            }
+            .into(),
+        );
+    }
+
+    if queue.checkout_sync_blocked
+        && revision.approval_policy == ApprovalPolicy::NotRequired
+        && has_prepared_convergence
+        && evaluation.next_recommended_action == "finalize_prepared_convergence"
+    {
+        evaluation.next_recommended_action = "resolve_checkout_sync".into();
+        evaluation.dispatchable_step_id = None;
+        evaluation.allowed_actions = vec![];
+        evaluation.phase_status = Some("awaiting_convergence".into());
+    }
+
+    evaluation
+}
+
+async fn load_queue_status(
+    state: &AppState,
+    item: &Item,
+    revision: &ItemRevision,
     project: &Project,
+    evaluation: &Evaluation,
+) -> Result<QueueStatusResponse, ApiError> {
+    let Some(active_entry) = state
+        .db
+        .find_active_queue_entry_for_revision(revision.id)
+        .await
+        .map_err(repo_to_internal)?
+    else {
+        return Ok(empty_queue_status());
+    };
+
+    let lane_entries = state
+        .db
+        .list_active_queue_entries_for_lane(project.id, &revision.target_ref)
+        .await
+        .map_err(repo_to_internal)?;
+    let lane_owner_item_id = lane_entries
+        .iter()
+        .find(|entry| entry.status == ConvergenceQueueEntryStatus::Head)
+        .map(|entry| entry.item_id.to_string());
+    let position = lane_entries
+        .iter()
+        .position(|entry| entry.id == active_entry.id)
+        .map(|index| index as u32 + 1);
+
+    let mut queue = QueueStatusResponse {
+        state: Some(
+            serde_json::to_value(active_entry.status)
+                .ok()
+                .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                .unwrap_or_else(|| "unknown".into()),
+        ),
+        position,
+        lane_owner_item_id,
+        lane_target_ref: Some(active_entry.target_ref),
+        checkout_sync_blocked: false,
+        checkout_sync_message: None,
+    };
+
+    let should_check_checkout = active_entry.status == ConvergenceQueueEntryStatus::Head
+        && (item.approval_state == ApprovalState::Granted
+            || evaluation.next_recommended_action == "finalize_prepared_convergence");
+    if should_check_checkout {
+        match checkout_sync_status(FsPath::new(&project.path), &revision.target_ref)
+            .await
+            .map_err(git_to_internal)?
+        {
+            CheckoutSyncStatus::Ready => {}
+            CheckoutSyncStatus::Blocked { message, .. } => {
+                queue.checkout_sync_blocked = true;
+                queue.checkout_sync_message = Some(message);
+            }
+        }
+    }
+
+    Ok(queue)
+}
+
+async fn hydrate_convergence_validity(
+    repo_path: &FsPath,
     convergences: Vec<Convergence>,
 ) -> Result<Vec<Convergence>, ApiError> {
     let mut hydrated = Vec::with_capacity(convergences.len());
 
     for mut convergence in convergences {
-        convergence.target_head_valid =
-            compute_target_head_valid(FsPath::new(&project.path), &convergence).await?;
+        convergence.target_head_valid = compute_target_head_valid(repo_path, &convergence).await?;
         hydrated.push(convergence);
     }
 
@@ -3094,22 +3456,20 @@ async fn compute_target_head_valid(
     repo_path: &FsPath,
     convergence: &Convergence,
 ) -> Result<Option<bool>, ApiError> {
-    let Some(expected_target_oid) = convergence.input_target_commit_oid.as_deref() else {
-        return Ok(None);
-    };
-
     let resolved = resolve_ref_oid(repo_path, &convergence.target_ref)
         .await
         .map_err(|err| ApiError::from(UseCaseError::Internal(err.to_string())))?;
 
-    Ok(Some(resolved.as_deref() == Some(expected_target_oid)))
+    Ok(convergence.target_head_valid_for_resolved_oid(resolved.as_deref()))
 }
 
 async fn ensure_finding_subject_reachable(
+    state: &AppState,
     project: &Project,
     finding: &Finding,
 ) -> Result<(), ApiError> {
-    let repo_path = FsPath::new(&project.path);
+    let paths = refresh_project_mirror(state, project).await?;
+    let repo_path = paths.mirror_git_dir.as_path();
     let head_reachable =
         is_commit_reachable_from_any_ref(repo_path, &finding.source_subject_head_commit_oid)
             .await
@@ -3161,6 +3521,233 @@ fn ensure_item_open_idle(item: &Item) -> Result<(), ApiError> {
     Ok(())
 }
 
+#[derive(Default)]
+struct RevisionLaneTeardown {
+    cancelled_job_ids: Vec<String>,
+    cancelled_convergence_ids: Vec<String>,
+    cancelled_queue_entry_ids: Vec<String>,
+    reconciled_prepare_operation_ids: Vec<String>,
+    failed_finalize_operation_ids: Vec<String>,
+}
+
+impl RevisionLaneTeardown {
+    fn has_cancelled_convergence(&self) -> bool {
+        !self.cancelled_convergence_ids.is_empty()
+    }
+
+    fn has_cancelled_queue_entry(&self) -> bool {
+        !self.cancelled_queue_entry_ids.is_empty()
+    }
+
+    fn first_cancelled_convergence_id(&self) -> Option<&str> {
+        self.cancelled_convergence_ids.first().map(String::as_str)
+    }
+
+    fn first_cancelled_queue_entry_id(&self) -> Option<&str> {
+        self.cancelled_queue_entry_ids.first().map(String::as_str)
+    }
+}
+
+async fn teardown_revision_lane_state(
+    state: &AppState,
+    project: &Project,
+    item_id: ItemId,
+    revision: &ItemRevision,
+) -> Result<RevisionLaneTeardown, ApiError> {
+    let mut teardown = RevisionLaneTeardown::default();
+    let paths = refresh_project_mirror(state, project).await?;
+
+    for job in state
+        .db
+        .list_jobs_by_item(item_id)
+        .await
+        .map_err(repo_to_internal)?
+        .into_iter()
+        .filter(|job| job.item_revision_id == revision.id && job.status.is_active())
+    {
+        state
+            .db
+            .finish_job_non_success(FinishJobNonSuccessParams {
+                job_id: job.id,
+                item_id,
+                expected_item_revision_id: revision.id,
+                status: JobStatus::Cancelled,
+                outcome_class: Some(OutcomeClass::Cancelled),
+                error_code: Some("item_mutation_cancelled"),
+                error_message: None,
+                escalation_reason: None,
+            })
+            .await
+            .map_err(repo_to_job_failure)?;
+        teardown.cancelled_job_ids.push(job.id.to_string());
+
+        if let Some(workspace_id) = job.workspace_id {
+            let mut workspace = state
+                .db
+                .get_workspace(workspace_id)
+                .await
+                .map_err(repo_to_internal)?;
+            workspace.current_job_id = None;
+            if workspace.status == ingot_domain::workspace::WorkspaceStatus::Busy {
+                workspace.status = ingot_domain::workspace::WorkspaceStatus::Ready;
+            }
+            workspace.updated_at = Utc::now();
+            state
+                .db
+                .update_workspace(&workspace)
+                .await
+                .map_err(repo_to_internal)?;
+        }
+
+        refresh_revision_context_for_job(state, job.id).await?;
+        append_activity(
+            state,
+            project.id,
+            ActivityEventType::JobCancelled,
+            "job",
+            job.id,
+            serde_json::json!({ "item_id": item_id, "reason": "item_mutation_cancelled" }),
+        )
+        .await?;
+    }
+
+    for mut convergence in state
+        .db
+        .list_convergences_by_item(item_id)
+        .await
+        .map_err(repo_to_internal)?
+        .into_iter()
+        .filter(|convergence| {
+            convergence.item_revision_id == revision.id
+                && matches!(
+                    convergence.status,
+                    ingot_domain::convergence::ConvergenceStatus::Queued
+                        | ingot_domain::convergence::ConvergenceStatus::Running
+                        | ingot_domain::convergence::ConvergenceStatus::Prepared
+                )
+        })
+    {
+        convergence.status = ingot_domain::convergence::ConvergenceStatus::Cancelled;
+        convergence.completed_at = Some(Utc::now());
+        state
+            .db
+            .update_convergence(&convergence)
+            .await
+            .map_err(repo_to_internal)?;
+        teardown
+            .cancelled_convergence_ids
+            .push(convergence.id.to_string());
+
+        if let Some(workspace_id) = convergence.integration_workspace_id {
+            let workspace = state
+                .db
+                .get_workspace(workspace_id)
+                .await
+                .map_err(repo_to_internal)?;
+            if PathBuf::from(&workspace.path).exists() {
+                let _ = ingot_workspace::remove_workspace(
+                    paths.mirror_git_dir.as_path(),
+                    FsPath::new(&workspace.path),
+                )
+                .await;
+            }
+            if workspace.status != ingot_domain::workspace::WorkspaceStatus::Abandoned {
+                let mut abandoned_workspace = workspace;
+                abandoned_workspace.status = ingot_domain::workspace::WorkspaceStatus::Abandoned;
+                abandoned_workspace.current_job_id = None;
+                abandoned_workspace.updated_at = Utc::now();
+                state
+                    .db
+                    .update_workspace(&abandoned_workspace)
+                    .await
+                    .map_err(repo_to_internal)?;
+            }
+        }
+    }
+
+    if let Some(mut queue_entry) = state
+        .db
+        .find_active_queue_entry_for_revision(revision.id)
+        .await
+        .map_err(repo_to_internal)?
+    {
+        queue_entry.status = ConvergenceQueueEntryStatus::Cancelled;
+        queue_entry.released_at = Some(Utc::now());
+        queue_entry.updated_at = Utc::now();
+        state
+            .db
+            .update_queue_entry(&queue_entry)
+            .await
+            .map_err(repo_to_internal)?;
+        teardown
+            .cancelled_queue_entry_ids
+            .push(queue_entry.id.to_string());
+    }
+
+    if teardown.has_cancelled_convergence() {
+        for mut operation in state
+            .db
+            .list_unresolved_git_operations()
+            .await
+            .map_err(repo_to_internal)?
+            .into_iter()
+            .filter(|operation| {
+                operation.project_id == project.id
+                    && operation.entity_type == GitEntityType::Convergence
+                    && teardown
+                        .cancelled_convergence_ids
+                        .iter()
+                        .any(|convergence_id| convergence_id == &operation.entity_id)
+                    && matches!(
+                        operation.operation_kind,
+                        OperationKind::PrepareConvergenceCommit | OperationKind::FinalizeTargetRef
+                    )
+            })
+        {
+            match operation.operation_kind {
+                OperationKind::PrepareConvergenceCommit => {
+                    operation.status = GitOperationStatus::Reconciled;
+                    operation.completed_at = Some(Utc::now());
+                    state
+                        .db
+                        .update_git_operation(&operation)
+                        .await
+                        .map_err(repo_to_internal)?;
+                    append_activity(
+                        state,
+                        project.id,
+                        ActivityEventType::GitOperationReconciled,
+                        "git_operation",
+                        operation.id,
+                        serde_json::json!({ "operation_kind": operation.operation_kind }),
+                    )
+                    .await?;
+                    teardown
+                        .reconciled_prepare_operation_ids
+                        .push(operation.id.to_string());
+                }
+                OperationKind::FinalizeTargetRef => {
+                    operation.status = GitOperationStatus::Failed;
+                    operation.completed_at = Some(Utc::now());
+                    state
+                        .db
+                        .update_git_operation(&operation)
+                        .await
+                        .map_err(repo_to_internal)?;
+                    teardown
+                        .failed_finalize_operation_ids
+                        .push(operation.id.to_string());
+                }
+                OperationKind::CreateJobCommit
+                | OperationKind::ResetWorkspace
+                | OperationKind::RemoveWorkspaceRef => {}
+            }
+        }
+    }
+
+    Ok(teardown)
+}
+
 async fn finish_item_manually(
     state: AppState,
     project_id: ProjectId,
@@ -3168,7 +3755,7 @@ async fn finish_item_manually(
     done_reason: DoneReason,
     event_type: ActivityEventType,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
-    state
+    let project = state
         .db
         .get_project(project_id)
         .await
@@ -3182,16 +3769,19 @@ async fn finish_item_manually(
         return Err(UseCaseError::ItemNotFound.into());
     }
     ensure_item_open_idle(&item)?;
-    item.lifecycle_state = LifecycleState::Done;
-    item.done_reason = Some(done_reason);
-    item.resolution_source = Some(ResolutionSource::ManualCommand);
-    item.closed_at = Some(Utc::now());
     let revision = state
         .db
         .get_revision(item.current_revision_id)
         .await
         .map_err(repo_to_internal)?;
+    let _ = teardown_revision_lane_state(&state, &project, item.id, &revision).await?;
+    item.lifecycle_state = LifecycleState::Done;
+    item.done_reason = Some(done_reason);
+    item.resolution_source = Some(ResolutionSource::ManualCommand);
+    item.closed_at = Some(Utc::now());
     item.approval_state = approval_state_for_policy(revision.approval_policy);
+    item.escalation_state = ingot_domain::item::EscalationState::None;
+    item.escalation_reason = None;
     item.updated_at = Utc::now();
     state
         .db
@@ -3212,6 +3802,7 @@ async fn finish_item_manually(
 }
 
 async fn build_superseding_revision(
+    state: &AppState,
     project: &Project,
     item: &Item,
     current_revision: &ItemRevision,
@@ -3223,8 +3814,9 @@ async fn build_superseding_revision(
             .target_ref
             .as_deref()
             .unwrap_or(current_revision.target_ref.as_str()),
-    );
-    let repo_path = FsPath::new(&project.path);
+    )?;
+    let paths = refresh_project_mirror(state, project).await?;
+    let repo_path = paths.mirror_git_dir.as_path();
     let derived_target_head = resolve_ref_oid(repo_path, &target_ref)
         .await
         .map_err(git_to_internal)?
@@ -3302,6 +3894,7 @@ async fn ensure_authoring_workspace(
     job: &Job,
 ) -> Result<Workspace, ApiError> {
     let now = Utc::now();
+    let paths = refresh_project_mirror(state, project).await?;
     let existing = state
         .db
         .find_authoring_workspace_for_revision(revision.id)
@@ -3311,7 +3904,8 @@ async fn ensure_authoring_workspace(
     let workspace = ensure_authoring_workspace_state(
         existing,
         project.id,
-        FsPath::new(&project.path),
+        paths.mirror_git_dir.as_path(),
+        paths.worktree_root.as_path(),
         revision,
         job,
         now,
@@ -3336,6 +3930,7 @@ async fn ensure_authoring_workspace(
     Ok(workspace)
 }
 
+#[allow(dead_code)]
 async fn prepare_convergence_workspace(
     state: &AppState,
     project: &Project,
@@ -3344,15 +3939,17 @@ async fn prepare_convergence_workspace(
     source_workspace: &Workspace,
     source_head_commit_oid: &str,
 ) -> Result<Convergence, ApiError> {
-    let repo_path = FsPath::new(&project.path);
+    let paths = refresh_project_mirror(state, project).await?;
+    let repo_path = paths.mirror_git_dir.as_path();
     let input_target_commit_oid = resolve_ref_oid(repo_path, &revision.target_ref)
         .await
         .map_err(git_to_internal)?
         .ok_or_else(|| UseCaseError::TargetRefUnresolved(revision.target_ref.clone()))?;
 
     let integration_workspace_id = WorkspaceId::new();
-    let integration_workspace_path =
-        workspace_root_path(repo_path).join(integration_workspace_id.to_string());
+    let integration_workspace_path = paths
+        .worktree_root
+        .join(integration_workspace_id.to_string());
     let integration_workspace_ref = format!("refs/ingot/workspaces/{integration_workspace_id}");
     let now = Utc::now();
     let mut integration_workspace = Workspace {
@@ -3532,10 +4129,62 @@ async fn prepare_convergence_workspace(
             });
         }
 
-        let original_message = commit_message(repo_path, source_commit_oid)
+        let has_replay_changes = working_tree_has_changes(&integration_workspace_dir)
             .await
             .map_err(git_to_internal)?;
-        prepared_tip = create_daemon_convergence_commit(
+        if !has_replay_changes {
+            continue;
+        }
+
+        let original_message = match commit_message(repo_path, source_commit_oid).await {
+            Ok(message) => message,
+            Err(error) => {
+                integration_workspace.status = ingot_domain::workspace::WorkspaceStatus::Error;
+                integration_workspace.updated_at = Utc::now();
+                let _ = state.db.update_workspace(&integration_workspace).await;
+
+                convergence.status = ingot_domain::convergence::ConvergenceStatus::Failed;
+                convergence.conflict_summary = Some(error.to_string());
+                convergence.completed_at = Some(Utc::now());
+                let _ = state.db.update_convergence(&convergence).await;
+
+                let mut escalated_item = item.clone();
+                escalated_item.escalation_state = ingot_domain::item::EscalationState::OperatorRequired;
+                escalated_item.escalation_reason = Some(EscalationReason::StepFailed);
+                escalated_item.updated_at = Utc::now();
+                let _ = state.db.update_item(&escalated_item).await;
+
+                operation.status = GitOperationStatus::Failed;
+                operation.completed_at = Some(Utc::now());
+                operation.metadata = Some(serde_json::json!({
+                    "source_commit_oids": source_commit_oids,
+                    "prepared_commit_oids": prepared_commit_oids,
+                }));
+                let _ = state.db.update_git_operation(&operation).await;
+
+                let _ = append_activity(
+                    state,
+                    project.id,
+                    ActivityEventType::ConvergenceFailed,
+                    "convergence",
+                    convergence.id,
+                    serde_json::json!({ "item_id": item.id, "summary": error.to_string() }),
+                )
+                .await;
+                let _ = append_activity(
+                    state,
+                    project.id,
+                    ActivityEventType::ItemEscalated,
+                    "item",
+                    item.id,
+                    serde_json::json!({ "reason": EscalationReason::StepFailed }),
+                )
+                .await;
+
+                return Err(git_to_internal(error));
+            }
+        };
+        let next_prepared_tip = match create_daemon_convergence_commit(
             &integration_workspace_dir,
             &original_message,
             &ConvergenceCommitTrailers {
@@ -3547,13 +4196,105 @@ async fn prepare_convergence_workspace(
             },
         )
         .await
-        .map_err(git_to_internal)?;
-        prepared_commit_oids.push(prepared_tip.clone());
+        {
+            Ok(prepared_tip) => prepared_tip,
+            Err(error) => {
+                integration_workspace.status = ingot_domain::workspace::WorkspaceStatus::Error;
+                integration_workspace.updated_at = Utc::now();
+                let _ = state.db.update_workspace(&integration_workspace).await;
+
+                convergence.status = ingot_domain::convergence::ConvergenceStatus::Failed;
+                convergence.conflict_summary = Some(error.to_string());
+                convergence.completed_at = Some(Utc::now());
+                let _ = state.db.update_convergence(&convergence).await;
+
+                let mut escalated_item = item.clone();
+                escalated_item.escalation_state = ingot_domain::item::EscalationState::OperatorRequired;
+                escalated_item.escalation_reason = Some(EscalationReason::StepFailed);
+                escalated_item.updated_at = Utc::now();
+                let _ = state.db.update_item(&escalated_item).await;
+
+                operation.status = GitOperationStatus::Failed;
+                operation.completed_at = Some(Utc::now());
+                operation.metadata = Some(serde_json::json!({
+                    "source_commit_oids": source_commit_oids,
+                    "prepared_commit_oids": prepared_commit_oids,
+                }));
+                let _ = state.db.update_git_operation(&operation).await;
+
+                let _ = append_activity(
+                    state,
+                    project.id,
+                    ActivityEventType::ConvergenceFailed,
+                    "convergence",
+                    convergence.id,
+                    serde_json::json!({ "item_id": item.id, "summary": error.to_string() }),
+                )
+                .await;
+                let _ = append_activity(
+                    state,
+                    project.id,
+                    ActivityEventType::ItemEscalated,
+                    "item",
+                    item.id,
+                    serde_json::json!({ "reason": EscalationReason::StepFailed }),
+                )
+                .await;
+
+                return Err(git_to_internal(error));
+            }
+        };
         if let Some(workspace_ref) = integration_workspace.workspace_ref.as_deref() {
-            ingot_git::commands::git(repo_path, &["update-ref", workspace_ref, &prepared_tip])
-                .await
-                .map_err(git_to_internal)?;
+            if let Err(error) =
+                ingot_git::commands::git(repo_path, &["update-ref", workspace_ref, &next_prepared_tip]).await
+            {
+                integration_workspace.status = ingot_domain::workspace::WorkspaceStatus::Error;
+                integration_workspace.updated_at = Utc::now();
+                let _ = state.db.update_workspace(&integration_workspace).await;
+
+                convergence.status = ingot_domain::convergence::ConvergenceStatus::Failed;
+                convergence.conflict_summary = Some(error.to_string());
+                convergence.completed_at = Some(Utc::now());
+                let _ = state.db.update_convergence(&convergence).await;
+
+                let mut escalated_item = item.clone();
+                escalated_item.escalation_state = ingot_domain::item::EscalationState::OperatorRequired;
+                escalated_item.escalation_reason = Some(EscalationReason::StepFailed);
+                escalated_item.updated_at = Utc::now();
+                let _ = state.db.update_item(&escalated_item).await;
+
+                operation.status = GitOperationStatus::Failed;
+                operation.completed_at = Some(Utc::now());
+                operation.metadata = Some(serde_json::json!({
+                    "source_commit_oids": source_commit_oids,
+                    "prepared_commit_oids": prepared_commit_oids,
+                }));
+                let _ = state.db.update_git_operation(&operation).await;
+
+                let _ = append_activity(
+                    state,
+                    project.id,
+                    ActivityEventType::ConvergenceFailed,
+                    "convergence",
+                    convergence.id,
+                    serde_json::json!({ "item_id": item.id, "summary": error.to_string() }),
+                )
+                .await;
+                let _ = append_activity(
+                    state,
+                    project.id,
+                    ActivityEventType::ItemEscalated,
+                    "item",
+                    item.id,
+                    serde_json::json!({ "reason": EscalationReason::StepFailed }),
+                )
+                .await;
+
+                return Err(git_to_internal(error));
+            }
         }
+        prepared_tip = next_prepared_tip;
+        prepared_commit_oids.push(prepared_tip.clone());
     }
 
     integration_workspace.head_commit_oid = Some(prepared_tip.clone());
@@ -3601,18 +4342,57 @@ pub(crate) fn load_effective_config(project: Option<&Project>) -> Result<IngotCo
     })
 }
 
+#[cfg(not(test))]
+fn default_state_root() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".ingot")
+}
+
+#[cfg(test)]
+fn default_state_root() -> PathBuf {
+    std::env::temp_dir().join(format!("ingot-http-api-state-{}", uuid::Uuid::now_v7()))
+}
+
 fn global_config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".ingot").join("config.yml")
 }
 
-fn logs_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".ingot").join("logs")
+fn logs_root(state_root: &FsPath) -> PathBuf {
+    state_root.join("logs")
 }
 
 fn project_config_path(project: &Project) -> PathBuf {
     FsPath::new(&project.path).join(".ingot").join("config.yml")
+}
+
+fn project_paths(state: &AppState, project: &Project) -> ingot_git::project_repo::ProjectRepoPaths {
+    project_repo_paths(
+        state.state_root.as_path(),
+        project.id,
+        FsPath::new(&project.path),
+    )
+}
+
+async fn refresh_project_mirror(
+    state: &AppState,
+    project: &Project,
+) -> Result<ingot_git::project_repo::ProjectRepoPaths, ApiError> {
+    let paths = project_paths(state, project);
+    let has_unresolved_finalize = state
+        .db
+        .list_unresolved_git_operations()
+        .await
+        .map_err(repo_to_internal)?
+        .into_iter()
+        .any(|operation| {
+            operation.project_id == project.id
+                && operation.operation_kind == OperationKind::FinalizeTargetRef
+        });
+    if !(has_unresolved_finalize && paths.mirror_git_dir.exists()) {
+        ensure_mirror(&paths).await.map_err(git_to_internal)?;
+    }
+    Ok(paths)
 }
 
 pub(crate) fn parse_config_approval_policy(
@@ -3651,7 +4431,7 @@ pub(crate) async fn resolve_default_branch(
             })?
     };
 
-    let target_ref = normalize_target_ref(&branch);
+    let target_ref = normalize_target_ref(&branch)?;
     let resolved = resolve_ref_oid(repo_path, &target_ref)
         .await
         .map_err(|error| ApiError::BadRequest {
@@ -3794,6 +4574,15 @@ pub(crate) fn repo_to_internal(error: RepositoryError) -> ApiError {
 
 pub(crate) fn git_to_internal(error: ingot_git::commands::GitCommandError) -> ApiError {
     ApiError::from(UseCaseError::Internal(error.to_string()))
+}
+
+fn api_to_usecase_error(error: ApiError) -> UseCaseError {
+    match error {
+        ApiError::UseCase(error) => error,
+        ApiError::BadRequest { message, .. }
+        | ApiError::Conflict { message, .. }
+        | ApiError::NotFound { message, .. } => UseCaseError::Internal(message),
+    }
 }
 
 fn repo_to_job_completion(error: RepositoryError) -> ApiError {
@@ -3964,6 +4753,7 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
     use std::str::FromStr;
+    use std::sync::Arc;
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
@@ -3971,23 +4761,35 @@ mod tests {
     use ingot_domain::activity::ActivityEventType;
     use ingot_domain::convergence::{Convergence, ConvergenceStatus, ConvergenceStrategy};
     use ingot_domain::finding::{Finding, FindingSeverity, FindingSubjectKind, FindingTriageState};
+    use ingot_domain::git_operation::{
+        GitEntityType, GitOperation, GitOperationStatus, OperationKind,
+    };
     use ingot_domain::ids::{
-        ConvergenceId, FindingId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId,
+        ConvergenceId, FindingId, GitOperationId, ItemId, ItemRevisionId, JobId, ProjectId,
+        WorkspaceId,
     };
     use ingot_domain::job::{JobStatus, OutcomeClass};
     use ingot_domain::ports::RepositoryError;
     use ingot_domain::project::Project;
+    use ingot_git::GitJobCompletionPort;
+    use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
     use ingot_store_sqlite::Database;
-    use ingot_usecases::UseCaseError;
+    use ingot_usecases::{CompleteJobService, ProjectLocks, UseCaseError};
     use tower::ServiceExt;
     use uuid::Uuid;
 
     use crate::error::ApiError;
 
     use super::{
-        build_router, compute_target_head_valid, ensure_finding_subject_reachable, failure_status,
-        repo_to_job_expiration, repo_to_job_failure, repo_to_project,
+        AppState, FsPath, build_router, build_router_with_project_locks_and_state_root,
+        HttpConvergencePort, compute_target_head_valid, ensure_finding_subject_reachable,
+        failure_status, parse_id, repo_to_job_expiration, repo_to_job_failure, repo_to_project,
     };
+    use ingot_domain::item::{
+        ApprovalState, Classification, Item, LifecycleState, OriginKind, Priority,
+    };
+    use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
+    use ingot_usecases::convergence::ConvergenceCommandPort;
 
     #[tokio::test]
     async fn target_head_valid_tracks_ref_movement() {
@@ -4018,8 +4820,9 @@ mod tests {
         let project = test_project(repo.clone());
         let mut finding = test_finding();
         finding.source_subject_head_commit_oid = "deadbeef".into();
+        let state = test_app_state().await;
 
-        let result = ensure_finding_subject_reachable(&project, &finding).await;
+        let result = ensure_finding_subject_reachable(&state, &project, &finding).await;
 
         assert!(matches!(
             result,
@@ -4036,8 +4839,9 @@ mod tests {
         finding.source_subject_kind = FindingSubjectKind::Candidate;
         finding.source_subject_head_commit_oid = head;
         finding.source_subject_base_commit_oid = Some("deadbeef".into());
+        let state = test_app_state().await;
 
-        ensure_finding_subject_reachable(&project, &finding)
+        ensure_finding_subject_reachable(&state, &project, &finding)
             .await
             .expect("candidate finding should remain promotable");
     }
@@ -4055,7 +4859,7 @@ mod tests {
         let item_id = "itm_11111111111111111111111111111111";
         let revision_id = "rev_11111111111111111111111111111111";
         let job_id = "job_11111111111111111111111111111111";
-        let convergence_id = "cnv_11111111111111111111111111111111";
+        let convergence_id = "conv_11111111111111111111111111111111";
         let workspace_id = "wrk_11111111111111111111111111111111";
         let finding_id = "fnd_11111111111111111111111111111111";
 
@@ -4466,8 +5270,9 @@ mod tests {
         let project =
             test_project(std::env::temp_dir().join(format!("not-a-repo-{}", Uuid::now_v7())));
         let finding = test_finding();
+        let state = test_app_state().await;
 
-        let result = ensure_finding_subject_reachable(&project, &finding).await;
+        let result = ensure_finding_subject_reachable(&state, &project, &finding).await;
 
         assert!(matches!(
             result,
@@ -4483,6 +5288,99 @@ mod tests {
             error,
             ApiError::UseCase(UseCaseError::ProjectNotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn convergence_port_maps_missing_project_to_project_not_found() {
+        let state = test_app_state().await;
+        let error = HttpConvergencePort {
+            state: state.clone(),
+        }
+        .load_queue_prepare_context(ProjectId::new(), ItemId::new())
+        .await
+        .expect_err("missing project should fail");
+
+        assert!(matches!(error, UseCaseError::ProjectNotFound));
+    }
+
+    #[tokio::test]
+    async fn convergence_port_rejects_cross_project_approval_context() {
+        let state = test_app_state().await;
+        let repo_a = temp_git_repo();
+        let repo_b = temp_git_repo();
+        let project_a = Project {
+            id: ProjectId::new(),
+            name: "A".into(),
+            path: repo_a.display().to_string(),
+            default_branch: "main".into(),
+            color: "#000".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let project_b = Project {
+            id: ProjectId::new(),
+            name: "B".into(),
+            path: repo_b.display().to_string(),
+            default_branch: "main".into(),
+            color: "#111".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state.db.create_project(&project_a).await.expect("project a");
+        state.db.create_project(&project_b).await.expect("project b");
+
+        let item = Item {
+            id: ItemId::new(),
+            project_id: project_b.id,
+            classification: Classification::Change,
+            workflow_version: "delivery:v1".into(),
+            lifecycle_state: LifecycleState::Open,
+            parking_state: ingot_domain::item::ParkingState::Active,
+            done_reason: None,
+            resolution_source: None,
+            approval_state: ApprovalState::Pending,
+            escalation_state: ingot_domain::item::EscalationState::None,
+            escalation_reason: None,
+            current_revision_id: ItemRevisionId::new(),
+            origin_kind: OriginKind::Manual,
+            origin_finding_id: None,
+            priority: Priority::Major,
+            labels: vec![],
+            operator_notes: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            closed_at: None,
+        };
+        let revision = ItemRevision {
+            id: item.current_revision_id,
+            item_id: item.id,
+            revision_no: 1,
+            title: "Title".into(),
+            description: "Desc".into(),
+            acceptance_criteria: "AC".into(),
+            target_ref: "refs/heads/main".into(),
+            approval_policy: ApprovalPolicy::Required,
+            policy_snapshot: serde_json::json!({}),
+            template_map_snapshot: serde_json::json!({}),
+            seed_commit_oid: git_output(&repo_b, &["rev-parse", "HEAD"]),
+            seed_target_commit_oid: Some(git_output(&repo_b, &["rev-parse", "HEAD"])),
+            supersedes_revision_id: None,
+            created_at: Utc::now(),
+        };
+        state
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("item b");
+
+        let error = HttpConvergencePort {
+            state: state.clone(),
+        }
+        .load_approval_context(project_a.id, item.id)
+        .await
+        .expect_err("cross-project item should fail");
+
+        assert!(matches!(error, UseCaseError::ItemNotFound));
     }
 
     #[test]
@@ -5215,6 +6113,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_item_route_rejects_non_branch_target_ref() {
+        let repo = temp_git_repo();
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+
+        let project_id = "prj_00000000000000000000000000000022".to_string();
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/items"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "title": "Invalid target",
+                            "description": "Reject non-branch refs",
+                            "acceptance_criteria": "route returns invalid_target_ref",
+                            "target_ref": "refs/tags/v1"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("item response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["error"]["code"].as_str(), Some("invalid_target_ref"));
+    }
+
+    #[tokio::test]
+    async fn create_item_route_rejects_git_invalid_branch_name() {
+        let repo = temp_git_repo();
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+
+        let project_id = "prj_00000000000000000000000000000023".to_string();
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/items"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "title": "Invalid branch",
+                            "description": "Reject git-invalid branch names",
+                            "acceptance_criteria": "route returns invalid_target_ref",
+                            "target_ref": "foo..bar"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("item response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["error"]["code"].as_str(), Some("invalid_target_ref"));
+    }
+
+    #[tokio::test]
     async fn defer_and_resume_routes_toggle_parking_state() {
         let repo = temp_git_repo();
         let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
@@ -5292,6 +6282,148 @@ mod tests {
             .expect("resume body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("resume json");
         assert_eq!(json["item"]["parking_state"].as_str(), Some("active"));
+    }
+
+    #[tokio::test]
+    async fn defer_route_cancels_lane_head_and_clears_granted() {
+        let repo = temp_git_repo();
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        let project_id = "prj_00000000000000000000000000000056".to_string();
+        let item_id = "itm_00000000000000000000000000000056".to_string();
+        let revision_id = "rev_00000000000000000000000000000056".to_string();
+        let running_job_id = "job_00000000000000000000000000000056".to_string();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, escalation_reason, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'granted', 'operator_required', 'checkout_sync_blocked', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+        sqlx::query(
+            "INSERT INTO workspaces (
+                id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
+                target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
+                status, current_job_id, created_at, updated_at
+             ) VALUES ('wrk_00000000000000000000000000000056', ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', 'refs/ingot/workspaces/defer-source', ?, ?, 'persistent', 'busy', ?, '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.join("defer-source").display().to_string())
+        .bind(&revision_id)
+        .bind(&head)
+        .bind(&head)
+        .bind(&running_job_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO jobs (
+                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
+                status, phase_kind, workspace_id, workspace_kind, execution_permission, context_policy,
+                phase_template_slug, output_artifact_kind, input_head_commit_oid, created_at
+             ) VALUES (?, ?, ?, ?, 'author_initial', 1, 0, 'running', 'author', 'wrk_00000000000000000000000000000056', 'authoring', 'may_mutate', 'fresh', 'author-initial', 'commit', ?, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&running_job_id)
+        .bind(&project_id)
+        .bind(&item_id)
+        .bind(&revision_id)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert running job");
+        sqlx::query(
+            "INSERT INTO convergence_queue_entries (
+                id, project_id, item_id, item_revision_id, target_ref, status, head_acquired_at,
+                created_at, updated_at, released_at
+             ) VALUES (?, ?, ?, ?, 'refs/heads/main', 'head', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z', NULL)",
+        )
+        .bind("cqe_00000000000000000000000000000056")
+        .bind(&project_id)
+        .bind(&item_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert queue entry");
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/items/{item_id}/defer"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("build defer request"),
+            )
+            .await
+            .expect("defer route response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let item_state: (String, String, String) = sqlx::query_as(
+            "SELECT parking_state, approval_state, escalation_state FROM items WHERE id = ?",
+        )
+        .bind(&item_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("item state");
+        assert_eq!(item_state.0, "deferred");
+        assert_eq!(item_state.1, "not_requested");
+        assert_eq!(item_state.2, "none");
+
+        let queue_state: (String,) = sqlx::query_as(
+            "SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?",
+        )
+        .bind(&revision_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("queue state");
+        assert_eq!(queue_state.0, "cancelled");
+
+        let job_state: (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
+            .bind(&running_job_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("job state");
+        assert_eq!(job_state.0, "cancelled");
+
+        let workspace_state: (String, Option<String>) =
+            sqlx::query_as("SELECT status, current_job_id FROM workspaces WHERE id = ?")
+                .bind("wrk_00000000000000000000000000000056")
+                .fetch_one(&db.pool)
+                .await
+                .expect("workspace state");
+        assert_eq!(workspace_state.0, "ready");
+        assert_eq!(workspace_state.1, None);
     }
 
     #[tokio::test]
@@ -5408,6 +6540,354 @@ mod tests {
             revision_policy_snapshot["candidate_rework_budget"].as_u64(),
             Some(3)
         );
+    }
+
+    #[tokio::test]
+    async fn revise_route_cancels_current_lane_state() {
+        let repo = temp_git_repo();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        let project_id = "prj_00000000000000000000000000000057".to_string();
+        let item_id = "itm_00000000000000000000000000000057".to_string();
+        let revision_id = "rev_00000000000000000000000000000057".to_string();
+        let running_job_id = "job_00000000000000000000000000000057".to_string();
+        let convergence_id = "conv_00000000000000000000000000000057".to_string();
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+        sqlx::query(
+            "INSERT INTO workspaces (
+                id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
+                target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
+                status, current_job_id, created_at, updated_at
+             ) VALUES ('wrk_00000000000000000000000000000057', ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', 'refs/ingot/workspaces/revise-source', ?, ?, 'persistent', 'busy', ?, '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.join("revise-source").display().to_string())
+        .bind(&revision_id)
+        .bind(&head)
+        .bind(&head)
+        .bind(&running_job_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert source workspace");
+        sqlx::query(
+            "INSERT INTO jobs (
+                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
+                status, phase_kind, workspace_id, workspace_kind, execution_permission, context_policy,
+                phase_template_slug, output_artifact_kind, input_head_commit_oid, created_at
+             ) VALUES (?, ?, ?, ?, 'author_initial', 1, 0, 'running', 'author', 'wrk_00000000000000000000000000000057', 'authoring', 'may_mutate', 'fresh', 'author-initial', 'commit', ?, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&running_job_id)
+        .bind(&project_id)
+        .bind(&item_id)
+        .bind(&revision_id)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert running job");
+        sqlx::query(
+            "INSERT INTO convergences (
+                id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
+                source_head_commit_oid, target_ref, strategy, status, input_target_commit_oid,
+                prepared_commit_oid, final_target_commit_oid, conflict_summary, created_at, completed_at
+             ) VALUES (?, ?, ?, ?, 'wrk_00000000000000000000000000000057', NULL, ?, 'refs/heads/main', 'rebase_then_fast_forward', 'prepared', ?, ?, NULL, NULL, '2026-03-12T00:00:00Z', NULL)",
+        )
+        .bind(&convergence_id)
+        .bind(&project_id)
+        .bind(&item_id)
+        .bind(&revision_id)
+        .bind(&head)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert convergence");
+        sqlx::query(
+            "INSERT INTO convergence_queue_entries (
+                id, project_id, item_id, item_revision_id, target_ref, status, head_acquired_at,
+                created_at, updated_at, released_at
+             ) VALUES (?, ?, ?, ?, 'refs/heads/main', 'head', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z', NULL)",
+        )
+        .bind("cqe_00000000000000000000000000000057")
+        .bind(&project_id)
+        .bind(&item_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert queue entry");
+        db.create_git_operation(&GitOperation {
+            id: GitOperationId::new(),
+            project_id: parse_id::<ProjectId>(&project_id, "project").expect("parse project id"),
+            operation_kind: OperationKind::PrepareConvergenceCommit,
+            entity_type: GitEntityType::Convergence,
+            entity_id: convergence_id.clone(),
+            workspace_id: None,
+            ref_name: Some("refs/ingot/workspaces/revise-source".into()),
+            expected_old_oid: Some(head.clone()),
+            new_oid: Some(head.clone()),
+            commit_oid: Some(head.clone()),
+            status: GitOperationStatus::Applied,
+            metadata: None,
+            created_at: Utc::now(),
+            completed_at: None,
+        })
+        .await
+        .expect("insert prepare op");
+        db.create_git_operation(&GitOperation {
+            id: GitOperationId::new(),
+            project_id: parse_id::<ProjectId>(&project_id, "project").expect("parse project id"),
+            operation_kind: OperationKind::FinalizeTargetRef,
+            entity_type: GitEntityType::Convergence,
+            entity_id: convergence_id.clone(),
+            workspace_id: None,
+            ref_name: Some("refs/heads/main".into()),
+            expected_old_oid: Some(head.clone()),
+            new_oid: Some(head.clone()),
+            commit_oid: Some(head.clone()),
+            status: GitOperationStatus::Applied,
+            metadata: None,
+            created_at: Utc::now(),
+            completed_at: None,
+        })
+        .await
+        .expect("insert finalize op");
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/items/{item_id}/revise"))
+                    .method("POST")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{\"title\":\"Revised\"}"))
+                    .expect("build revise request"),
+            )
+            .await
+            .expect("revise route response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let queue_state: (String,) = sqlx::query_as(
+            "SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?",
+        )
+        .bind(&revision_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("queue state");
+        assert_eq!(queue_state.0, "cancelled");
+
+        let convergence_state: (String,) =
+            sqlx::query_as("SELECT status FROM convergences WHERE id = ?")
+                .bind(&convergence_id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("convergence state");
+        assert_eq!(convergence_state.0, "cancelled");
+
+        let job_state: (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
+            .bind(&running_job_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("job state");
+        assert_eq!(job_state.0, "cancelled");
+
+        let workspace_state: (String, Option<String>) =
+            sqlx::query_as("SELECT status, current_job_id FROM workspaces WHERE id = ?")
+                .bind("wrk_00000000000000000000000000000057")
+                .fetch_one(&db.pool)
+                .await
+                .expect("workspace state");
+        assert_eq!(workspace_state.0, "ready");
+        assert_eq!(workspace_state.1, None);
+
+        let op_states: Vec<(String, String)> = sqlx::query_as(
+            "SELECT operation_kind, status FROM git_operations WHERE entity_id = ? ORDER BY operation_kind ASC",
+        )
+        .bind(&convergence_id)
+        .fetch_all(&db.pool)
+        .await
+        .expect("operation states");
+        assert!(
+            op_states
+                .iter()
+                .any(|(kind, status)| { kind == "finalize_target_ref" && status == "failed" })
+        );
+        assert!(
+            op_states
+                .iter()
+                .all(|(_, status)| { status == "failed" || status == "reconciled" })
+        );
+    }
+
+    #[tokio::test]
+    async fn revise_route_rejects_non_branch_target_ref() {
+        let repo = temp_git_repo();
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        let project_id = "prj_00000000000000000000000000000058".to_string();
+        let item_id = "itm_00000000000000000000000000000058".to_string();
+        let revision_id = "rev_00000000000000000000000000000058".to_string();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/items/{item_id}/revise"))
+                    .method("POST")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{\"target_ref\":\"refs/remotes/origin/main\"}"))
+                    .expect("build revise request"),
+            )
+            .await
+            .expect("revise route response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["error"]["code"].as_str(), Some("invalid_target_ref"));
+    }
+
+    #[tokio::test]
+    async fn revise_route_rejects_git_invalid_branch_name() {
+        let repo = temp_git_repo();
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        let project_id = "prj_00000000000000000000000000000061".to_string();
+        let item_id = "itm_00000000000000000000000000000061".to_string();
+        let revision_id = "rev_00000000000000000000000000000061".to_string();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/items/{item_id}/revise"))
+                    .method("POST")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{\"target_ref\":\"bad@{name}\"}"))
+                    .expect("build revise request"),
+            )
+            .await
+            .expect("revise route response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["error"]["code"].as_str(), Some("invalid_target_ref"));
     }
 
     #[tokio::test]
@@ -5535,6 +7015,132 @@ mod tests {
             revision_policy_snapshot["candidate_rework_budget"].as_u64(),
             Some(5)
         );
+    }
+
+    #[tokio::test]
+    async fn dismiss_route_cancels_lane_state() {
+        let repo = temp_git_repo();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        let project_id = "prj_00000000000000000000000000000059".to_string();
+        let item_id = "itm_00000000000000000000000000000059".to_string();
+        let revision_id = "rev_00000000000000000000000000000059".to_string();
+        let convergence_id = "conv_00000000000000000000000000000059".to_string();
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'granted', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+        sqlx::query(
+            "INSERT INTO workspaces (
+                id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
+                target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
+                status, current_job_id, created_at, updated_at
+             ) VALUES ('wrk_00000000000000000000000000000059', ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', 'refs/ingot/workspaces/dismiss-source', ?, ?, 'persistent', 'ready', NULL, '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.join("dismiss-source").display().to_string())
+        .bind(&revision_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert source workspace");
+        sqlx::query(
+            "INSERT INTO convergences (
+                id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
+                source_head_commit_oid, target_ref, strategy, status, input_target_commit_oid,
+                prepared_commit_oid, final_target_commit_oid, conflict_summary, created_at, completed_at
+             ) VALUES (?, ?, ?, ?, 'wrk_00000000000000000000000000000059', NULL, ?, 'refs/heads/main', 'rebase_then_fast_forward', 'running', ?, ?, NULL, NULL, '2026-03-12T00:00:00Z', NULL)",
+        )
+        .bind(&convergence_id)
+        .bind(&project_id)
+        .bind(&item_id)
+        .bind(&revision_id)
+        .bind(&head)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert convergence");
+        sqlx::query(
+            "INSERT INTO convergence_queue_entries (
+                id, project_id, item_id, item_revision_id, target_ref, status, head_acquired_at,
+                created_at, updated_at, released_at
+             ) VALUES (?, ?, ?, ?, 'refs/heads/main', 'head', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z', NULL)",
+        )
+        .bind("cqe_00000000000000000000000000000059")
+        .bind(&project_id)
+        .bind(&item_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert queue entry");
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/projects/{project_id}/items/{item_id}/dismiss"
+                    ))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("build dismiss request"),
+            )
+            .await
+            .expect("dismiss response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let queue_state: (String,) = sqlx::query_as(
+            "SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?",
+        )
+        .bind(&revision_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("queue state");
+        assert_eq!(queue_state.0, "cancelled");
+
+        let convergence_state: (String,) =
+            sqlx::query_as("SELECT status FROM convergences WHERE id = ?")
+                .bind(&convergence_id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("convergence state");
+        assert_eq!(convergence_state.0, "cancelled");
     }
 
     #[tokio::test]
@@ -5772,7 +7378,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_convergence_route_replays_authoring_chain_and_queues_integrated_validation() {
+    async fn prepare_convergence_route_queues_lane_head_for_async_prepare() {
         let repo = temp_git_repo();
         let base_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
         write_file(&repo.join("tracked.txt"), "candidate change");
@@ -5910,57 +7516,27 @@ mod tests {
             .await
             .expect("route response");
 
-        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("read body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
 
-        assert_eq!(json["convergence"]["status"].as_str(), Some("prepared"));
-        assert_eq!(
-            json["validation_job"]["step_id"].as_str(),
-            Some("validate_integrated")
-        );
-        assert_eq!(json["validation_job"]["status"].as_str(), Some("queued"));
-        let prepared_commit_oid = json["convergence"]["prepared_commit_oid"]
-            .as_str()
-            .expect("prepared commit oid");
-        let integration_workspace_id = json["validation_job"]["workspace_id"]
-            .as_str()
-            .expect("integration workspace id");
-
-        let integration_workspace = db
-            .get_workspace(
-                integration_workspace_id
-                    .parse::<WorkspaceId>()
-                    .expect("parse workspace id"),
-            )
-            .await
-            .expect("integration workspace");
-        assert_eq!(
-            integration_workspace.kind,
-            ingot_domain::workspace::WorkspaceKind::Integration
-        );
-        assert!(PathBuf::from(&integration_workspace.path).exists());
-        assert_eq!(
-            git_output(
-                &PathBuf::from(&integration_workspace.path),
-                &["rev-parse", "HEAD"]
-            ),
-            prepared_commit_oid
-        );
-
-        let convergence_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM convergences WHERE item_revision_id = ?")
-                .bind(&revision_id)
-                .fetch_one(&db.pool)
-                .await
-                .expect("convergence count");
-        assert_eq!(convergence_count, 1);
+        assert_eq!(json["queue"]["state"].as_str(), Some("head"));
+        assert_eq!(json["queue"]["position"].as_i64(), Some(1));
+        assert_eq!(json["convergences"].as_array().map(Vec::len), Some(0));
+        let queue_state: (String,) = sqlx::query_as(
+            "SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?",
+        )
+        .bind(&revision_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("queue state");
+        assert_eq!(queue_state.0, "head");
     }
 
     #[tokio::test]
-    async fn approve_route_finalizes_prepared_convergence_and_closes_item() {
+    async fn approve_route_grants_lane_head_without_finalizing_synchronously() {
         let repo = temp_git_repo();
         let base_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
         write_file(&repo.join("tracked.txt"), "prepared change");
@@ -5999,9 +7575,9 @@ mod tests {
         sqlx::query(
             "INSERT INTO items (
                 id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                approval_state, escalation_state, escalation_reason, current_revision_id, origin_kind, origin_finding_id,
                 priority, labels, created_at, updated_at
-             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'pending', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'pending', 'operator_required', 'manual_decision_required', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
         )
         .bind(&item_id)
         .bind(&project_id)
@@ -6061,6 +7637,19 @@ mod tests {
         .execute(&db.pool)
         .await
         .expect("insert convergence");
+        sqlx::query(
+            "INSERT INTO convergence_queue_entries (
+                id, project_id, item_id, item_revision_id, target_ref, status, head_acquired_at,
+                created_at, updated_at, released_at
+            ) VALUES (?, ?, ?, ?, 'refs/heads/main', 'head', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z', NULL)",
+        )
+        .bind("cqe_00000000000000000000000000000063")
+        .bind(&project_id)
+        .bind(&item_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert queue entry");
 
         let app = build_router(db.clone());
         let response = app
@@ -6079,32 +7668,23 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             git_output(&repo, &["rev-parse", "refs/heads/main"]),
-            prepared_commit_oid
+            base_commit_oid
         );
 
-        let item_state: (String, String, String) = sqlx::query_as(
+        let item_state: (String, String, Option<String>) = sqlx::query_as(
             "SELECT lifecycle_state, approval_state, resolution_source FROM items WHERE id = ?",
         )
         .bind(&item_id)
         .fetch_one(&db.pool)
         .await
         .expect("item state");
-        assert_eq!(item_state.0, "done");
-        assert_eq!(item_state.1, "approved");
-        assert_eq!(item_state.2, "approval_command");
-
-        let convergence_state: (String, String) =
-            sqlx::query_as("SELECT status, final_target_commit_oid FROM convergences WHERE id = ?")
-                .bind(&convergence_id)
-                .fetch_one(&db.pool)
-                .await
-                .expect("convergence state");
-        assert_eq!(convergence_state.0, "finalized");
-        assert_eq!(convergence_state.1, prepared_commit_oid);
+        assert_eq!(item_state.0, "open");
+        assert_eq!(item_state.1, "granted");
+        assert_eq!(item_state.2, None);
     }
 
     #[tokio::test]
-    async fn prepare_convergence_conflict_escalates_item() {
+    async fn prepare_convergence_route_only_queues_even_when_future_prepare_would_conflict() {
         let repo = temp_git_repo();
         let base_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
         write_file(&repo.join("tracked.txt"), "source change");
@@ -6245,15 +7825,15 @@ mod tests {
             .await
             .expect("route response");
 
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let item_state: (String, String) =
+        assert_eq!(response.status(), StatusCode::OK);
+        let item_state: (String, Option<String>) =
             sqlx::query_as("SELECT escalation_state, escalation_reason FROM items WHERE id = ?")
                 .bind(&item_id)
                 .fetch_one(&db.pool)
                 .await
                 .expect("item state");
-        assert_eq!(item_state.0, "operator_required");
-        assert_eq!(item_state.1, "convergence_conflict");
+        assert_eq!(item_state.0, "none");
+        assert_eq!(item_state.1, None);
     }
 
     #[tokio::test]
@@ -6289,9 +7869,9 @@ mod tests {
         sqlx::query(
             "INSERT INTO items (
                 id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                approval_state, escalation_state, escalation_reason, current_revision_id, origin_kind, origin_finding_id,
                 priority, labels, created_at, updated_at
-             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'pending', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'pending', 'operator_required', 'manual_decision_required', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
         )
         .bind(&item_id)
         .bind(&project_id)
@@ -6441,6 +8021,15 @@ mod tests {
             Some(7)
         );
 
+        let item_escalation: (String, Option<String>) =
+            sqlx::query_as("SELECT escalation_state, escalation_reason FROM items WHERE id = ?")
+                .bind(&item_id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("item escalation");
+        assert_eq!(item_escalation.0, "none");
+        assert_eq!(item_escalation.1, None);
+
         let convergence_status: String =
             sqlx::query_scalar("SELECT status FROM convergences WHERE id = ?")
                 .bind(&convergence_id)
@@ -6448,6 +8037,109 @@ mod tests {
                 .await
                 .expect("convergence status");
         assert_eq!(convergence_status, "cancelled");
+
+        let item_state: (String, Option<String>) =
+            sqlx::query_as("SELECT escalation_state, escalation_reason FROM items WHERE id = ?")
+                .bind(&item_id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("item state");
+        assert_eq!(item_state.0, "none");
+        assert_eq!(item_state.1, None);
+    }
+
+    #[tokio::test]
+    async fn reject_route_allows_granted_without_prepared_convergence() {
+        let repo = temp_git_repo();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        let project_id = "prj_00000000000000000000000000000060".to_string();
+        let item_id = "itm_00000000000000000000000000000060".to_string();
+        let revision_id = "rev_00000000000000000000000000000060".to_string();
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'granted', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(&head)
+        .bind(&head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+        sqlx::query(
+            "INSERT INTO convergence_queue_entries (
+                id, project_id, item_id, item_revision_id, target_ref, status, head_acquired_at,
+                created_at, updated_at, released_at
+             ) VALUES (?, ?, ?, ?, 'refs/heads/main', 'head', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z', NULL)",
+        )
+        .bind("cqe_00000000000000000000000000000060")
+        .bind(&project_id)
+        .bind(&item_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert queue entry");
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/projects/{project_id}/items/{item_id}/approval/reject"
+                    ))
+                    .method("POST")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{\"approval_policy\":\"not_required\"}"))
+                    .expect("build request"),
+            )
+            .await
+            .expect("reject response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let queue_state: (String,) = sqlx::query_as(
+            "SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?",
+        )
+        .bind(&revision_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("queue state");
+        assert_eq!(queue_state.0, "cancelled");
+
+        let revision_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM item_revisions WHERE item_id = ?")
+                .bind(&item_id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("revision count");
+        assert_eq!(revision_count, 2);
     }
 
     #[tokio::test]
@@ -6758,8 +8450,19 @@ mod tests {
             "ingot-http-api-remove-workspace-{}",
             Uuid::now_v7()
         ));
+
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        let project_id = "prj_00000000000000000000000000000043".to_string();
+        let workspace_id = "wrk_00000000000000000000000000000043".to_string();
+        let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
+        let state_root =
+            std::env::temp_dir().join(format!("ingot-http-api-remove-state-{}", Uuid::now_v7()));
+        let paths = project_repo_paths(state_root.as_path(), project_uuid, &repo);
+        ensure_mirror(&paths).await.expect("ensure mirror");
         git(
-            &repo,
+            &paths.mirror_git_dir,
             &[
                 "update-ref",
                 "refs/ingot/workspaces/wrk_remove_test",
@@ -6767,7 +8470,7 @@ mod tests {
             ],
         );
         git(
-            &repo,
+            &paths.mirror_git_dir,
             &[
                 "worktree",
                 "add",
@@ -6776,12 +8479,6 @@ mod tests {
                 "refs/ingot/workspaces/wrk_remove_test",
             ],
         );
-
-        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-        let db = Database::connect(&db_path).await.expect("connect db");
-        db.migrate().await.expect("migrate db");
-        let project_id = "prj_00000000000000000000000000000043".to_string();
-        let workspace_id = "wrk_00000000000000000000000000000043".to_string();
 
         sqlx::query(
             "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
@@ -6809,7 +8506,11 @@ mod tests {
         .await
         .expect("insert workspace");
 
-        let app = build_router(db.clone());
+        let app = build_router_with_project_locks_and_state_root(
+            db.clone(),
+            ProjectLocks::default(),
+            state_root,
+        );
         let response = app
             .oneshot(
                 Request::builder()
@@ -6832,7 +8533,7 @@ mod tests {
                 "--quiet",
                 "refs/ingot/workspaces/wrk_remove_test",
             ])
-            .current_dir(&repo)
+            .current_dir(paths.mirror_git_dir)
             .status()
             .expect("check ref");
         assert!(!ref_exists.success());
@@ -7417,6 +9118,34 @@ exit 1
             color: "#000000".into(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    async fn test_app_state() -> AppState {
+        let db_path =
+            std::env::temp_dir().join(format!("ingot-http-api-test-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        let state_root =
+            std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
+        let resolver_state_root = state_root.clone();
+        AppState {
+            db: db.clone(),
+            complete_job_service: CompleteJobService::with_repo_path_resolver(
+                db,
+                GitJobCompletionPort,
+                ProjectLocks::default(),
+                Arc::new(move |project: &Project| {
+                    project_repo_paths(
+                        resolver_state_root.as_path(),
+                        project.id,
+                        FsPath::new(&project.path),
+                    )
+                    .mirror_git_dir
+                }),
+            ),
+            project_locks: ProjectLocks::default(),
+            state_root,
         }
     }
 

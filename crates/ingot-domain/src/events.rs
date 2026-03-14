@@ -85,6 +85,14 @@ pub enum DomainEvent {
         item_id: ItemId,
         new_revision_id: ItemRevisionId,
     },
+    ConvergenceQueued {
+        queue_entry_id: ConvergenceQueueEntryId,
+        item_id: ItemId,
+    },
+    ConvergenceLaneAcquired {
+        queue_entry_id: ConvergenceQueueEntryId,
+        item_id: ItemId,
+    },
     ConvergenceStarted {
         convergence_id: ConvergenceId,
         item_id: ItemId,
@@ -103,6 +111,12 @@ pub enum DomainEvent {
     },
     ConvergenceFailed {
         convergence_id: ConvergenceId,
+        item_id: ItemId,
+    },
+    CheckoutSyncBlocked {
+        item_id: ItemId,
+    },
+    CheckoutSyncCleared {
         item_id: ItemId,
     },
 }

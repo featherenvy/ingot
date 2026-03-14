@@ -10,6 +10,12 @@ pub enum UseCaseError {
     ItemNotIdle,
     #[error("approval not pending")]
     ApprovalNotPending,
+    #[error("convergence is not preparable")]
+    ConvergenceNotPreparable,
+    #[error("convergence is not queued")]
+    ConvergenceNotQueued,
+    #[error("convergence is not lane head")]
+    ConvergenceNotLaneHead,
     #[error("job is not active")]
     JobNotActive,
     #[error("finding not found")]
@@ -28,6 +34,8 @@ pub enum UseCaseError {
     ActiveConvergenceExists,
     #[error("completed item cannot reopen")]
     CompletedItemCannotReopen,
+    #[error("invalid target ref: {0}")]
+    InvalidTargetRef(String),
     #[error("target ref unresolved: {0}")]
     TargetRefUnresolved(String),
     #[error("revision seed unreachable: {0}")]

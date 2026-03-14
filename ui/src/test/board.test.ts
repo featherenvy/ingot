@@ -45,7 +45,19 @@ function makeEvaluation(overrides: Partial<Evaluation> = {}): Evaluation {
 }
 
 function makeItemSummary(item: Item, evaluation: Evaluation, title = 'Test item'): ItemSummary {
-  return { item, title, evaluation }
+  return {
+    item,
+    title,
+    evaluation,
+    queue: {
+      state: null,
+      position: null,
+      lane_owner_item_id: null,
+      lane_target_ref: null,
+      checkout_sync_blocked: false,
+      checkout_sync_message: null,
+    },
+  }
 }
 
 describe('board column derivation', () => {

@@ -50,6 +50,21 @@ impl IntoResponse for ApiError {
                     "approval_not_pending",
                     "Approval is not pending".into(),
                 ),
+                UseCaseError::ConvergenceNotPreparable => (
+                    StatusCode::CONFLICT,
+                    "convergence_not_preparable",
+                    "Convergence cannot be prepared in the current item state".into(),
+                ),
+                UseCaseError::ConvergenceNotQueued => (
+                    StatusCode::CONFLICT,
+                    "convergence_not_queued",
+                    "A lane head is required before approval can be granted".into(),
+                ),
+                UseCaseError::ConvergenceNotLaneHead => (
+                    StatusCode::CONFLICT,
+                    "convergence_not_lane_head",
+                    "Only the target-ref lane head can be approved".into(),
+                ),
                 UseCaseError::JobNotActive => (
                     StatusCode::CONFLICT,
                     "job_not_active",
@@ -94,6 +109,11 @@ impl IntoResponse for ApiError {
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "completed_item_cannot_reopen",
                     "Completed items cannot be reopened".into(),
+                ),
+                UseCaseError::InvalidTargetRef(target_ref) => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "invalid_target_ref",
+                    format!("Target ref must be a branch under refs/heads/*: {target_ref}"),
                 ),
                 UseCaseError::TargetRefUnresolved(target_ref) => (
                     StatusCode::UNPROCESSABLE_ENTITY,

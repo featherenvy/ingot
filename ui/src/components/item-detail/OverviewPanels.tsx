@@ -26,8 +26,15 @@ export function OverviewPanels({
               { label: 'Parking', value: <StatusBadge status={item.parking_state} /> },
               { label: 'Approval', value: <StatusBadge status={item.approval_state} /> },
               { label: 'Escalation', value: <StatusBadge status={item.escalation_state} /> },
-              { label: 'Origin', value: item.origin_kind },
-              { label: 'Origin finding', value: item.origin_finding_id ?? 'none' },
+              { label: 'Origin', value: <span className="font-mono">{item.origin_kind}</span> },
+              {
+                label: 'Origin finding',
+                value: item.origin_finding_id ? (
+                  <code>{item.origin_finding_id}</code>
+                ) : (
+                  <span className="text-muted-foreground">none</span>
+                ),
+              },
               { label: 'Priority', value: <Badge variant="secondary">{item.priority}</Badge> },
             ]}
           />
@@ -42,24 +49,59 @@ export function OverviewPanels({
           <DetailList
             items={[
               { label: 'Board', value: <StatusBadge status={evaluation.board_status} /> },
-              { label: 'Step', value: evaluation.current_step_id ?? 'none' },
-              { label: 'Phase', value: evaluation.current_phase_kind ?? 'none' },
+              {
+                label: 'Step',
+                value: evaluation.current_step_id ? (
+                  <code>{evaluation.current_step_id}</code>
+                ) : (
+                  <span className="text-muted-foreground">none</span>
+                ),
+              },
+              {
+                label: 'Phase',
+                value: evaluation.current_phase_kind ? (
+                  <span className="font-mono">{evaluation.current_phase_kind}</span>
+                ) : (
+                  <span className="text-muted-foreground">none</span>
+                ),
+              },
               {
                 label: 'Phase status',
-                value: evaluation.phase_status ? <StatusBadge status={evaluation.phase_status} /> : 'none',
+                value: evaluation.phase_status ? (
+                  <StatusBadge status={evaluation.phase_status} />
+                ) : (
+                  <span className="text-muted-foreground">none</span>
+                ),
               },
-              { label: 'Next action', value: evaluation.next_recommended_action },
-              { label: 'Dispatchable', value: evaluation.dispatchable_step_id ?? 'none' },
+              {
+                label: 'Next action',
+                value: <span className="font-mono">{evaluation.next_recommended_action}</span>,
+              },
+              {
+                label: 'Dispatchable',
+                value: evaluation.dispatchable_step_id ? (
+                  <code>{evaluation.dispatchable_step_id}</code>
+                ) : (
+                  <span className="text-muted-foreground">none</span>
+                ),
+              },
               {
                 label: 'Auxiliary',
                 value:
-                  evaluation.auxiliary_dispatchable_step_ids.length > 0
-                    ? evaluation.auxiliary_dispatchable_step_ids.join(', ')
-                    : 'none',
+                  evaluation.auxiliary_dispatchable_step_ids.length > 0 ? (
+                    <code>{evaluation.auxiliary_dispatchable_step_ids.join(', ')}</code>
+                  ) : (
+                    <span className="text-muted-foreground">none</span>
+                  ),
               },
               {
                 label: 'Badges',
-                value: evaluation.attention_badges.length > 0 ? evaluation.attention_badges.join(', ') : 'none',
+                value:
+                  evaluation.attention_badges.length > 0 ? (
+                    evaluation.attention_badges.join(', ')
+                  ) : (
+                    <span className="text-muted-foreground">none</span>
+                  ),
               },
             ]}
           />
@@ -73,7 +115,7 @@ export function OverviewPanels({
         <CardContent>
           <DetailList
             items={[
-              { label: 'No.', value: revision.revision_no },
+              { label: 'No.', value: <span className="font-mono tabular-nums">{revision.revision_no}</span> },
               { label: 'Target ref', value: <code>{revision.target_ref}</code> },
               { label: 'Approval policy', value: <Badge variant="outline">{revision.approval_policy}</Badge> },
               { label: 'Seed', value: <code>{revision.seed_commit_oid.slice(0, 8)}</code> },

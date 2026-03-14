@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use ingot_domain::ids::ProjectId;
 use ingot_domain::job::Job;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::workspace::{
@@ -25,6 +26,10 @@ pub fn workspace_root_path(repo_path: &Path) -> PathBuf {
     let repo_path = repo_path.to_path_buf();
     let parent = repo_path.parent().unwrap_or(repo_path.as_path());
     parent.join(".ingot-workspaces")
+}
+
+pub fn managed_workspace_root_path(state_root: &Path, project_id: ProjectId) -> PathBuf {
+    state_root.join("worktrees").join(project_id.to_string())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -190,6 +195,7 @@ pub async fn ensure_authoring_workspace_state(
     existing: Option<Workspace>,
     project_id: ingot_domain::ids::ProjectId,
     repo_path: &Path,
+    workspace_root: &Path,
     revision: &ItemRevision,
     job: &Job,
     now: DateTime<Utc>,
@@ -205,7 +211,7 @@ pub async fn ensure_authoring_workspace_state(
     let workspace_path = existing
         .as_ref()
         .map(|workspace| PathBuf::from(&workspace.path))
-        .unwrap_or_else(|| workspace_root_path(repo_path).join(workspace_id.to_string()));
+        .unwrap_or_else(|| workspace_root.join(workspace_id.to_string()));
     let workspace_ref = existing
         .as_ref()
         .and_then(|workspace| workspace.workspace_ref.clone())

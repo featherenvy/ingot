@@ -46,6 +46,7 @@ pub enum ApprovalState {
     NotRequired,
     NotRequested,
     Pending,
+    Granted,
     Approved,
 }
 
@@ -62,6 +63,7 @@ pub enum EscalationReason {
     CandidateReworkBudgetExhausted,
     IntegrationReworkBudgetExhausted,
     ConvergenceConflict,
+    CheckoutSyncBlocked,
     StepFailed,
     ProtocolViolation,
     ManualDecisionRequired,
