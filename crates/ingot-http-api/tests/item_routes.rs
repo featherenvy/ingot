@@ -5,11 +5,11 @@ use axum::http::{Request, StatusCode, header};
 use chrono::Utc;
 use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
 use ingot_domain::ids::{GitOperationId, ProjectId};
-use ingot_domain::job::{ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind};
+use ingot_domain::job::{
+    ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
+};
 use ingot_domain::workspace::WorkspaceKind;
-use ingot_store_sqlite::Database;
 use tower::ServiceExt;
-use uuid::Uuid;
 
 mod common;
 use common::*;
@@ -17,9 +17,7 @@ use common::*;
 #[tokio::test]
 async fn create_item_route_uses_project_config_defaults_when_policy_is_omitted() {
     let repo = temp_git_repo("ingot-http-api");
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let app = test_router(db.clone());
 
     fs::create_dir_all(repo.join(".ingot")).expect("create config dir");
@@ -99,9 +97,7 @@ async fn create_item_route_uses_project_config_defaults_when_policy_is_omitted()
 async fn create_item_route_derives_initial_revision_with_null_seed_commit() {
     let repo = temp_git_repo("ingot-http-api");
     let seed_head = git_output(&repo, &["rev-parse", "HEAD"]);
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
 
     let project_id = "prj_00000000000000000000000000000021".to_string();
     sqlx::query(
@@ -169,9 +165,7 @@ async fn create_item_route_derives_initial_revision_with_null_seed_commit() {
 #[tokio::test]
 async fn create_item_route_rejects_non_branch_target_ref() {
     let repo = temp_git_repo("ingot-http-api");
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
 
     let project_id = "prj_00000000000000000000000000000022".to_string();
     sqlx::query(
@@ -217,9 +211,7 @@ async fn create_item_route_rejects_non_branch_target_ref() {
 #[tokio::test]
 async fn create_item_route_rejects_git_invalid_branch_name() {
     let repo = temp_git_repo("ingot-http-api");
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
 
     let project_id = "prj_00000000000000000000000000000023".to_string();
     sqlx::query(
@@ -265,9 +257,7 @@ async fn create_item_route_rejects_git_invalid_branch_name() {
 #[tokio::test]
 async fn defer_and_resume_routes_toggle_parking_state() {
     let repo = temp_git_repo("ingot-http-api");
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000055".to_string();
     let item_id = "itm_00000000000000000000000000000055".to_string();
     let revision_id = "rev_00000000000000000000000000000055".to_string();
@@ -356,9 +346,7 @@ async fn resume_route_auto_dispatches_projected_review_job() {
     git(&repo, &["commit", "-m", "authored change"]);
     let authored_head = git_output(&repo, &["rev-parse", "HEAD"]);
 
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000058".to_string();
     let item_id = "itm_00000000000000000000000000000058".to_string();
     let revision_id = "rev_00000000000000000000000000000058".to_string();
@@ -470,11 +458,149 @@ async fn resume_route_auto_dispatches_projected_review_job() {
 }
 
 #[tokio::test]
+async fn resume_route_returns_success_when_projected_review_auto_dispatch_cannot_bind_subject() {
+    let repo = temp_git_repo("ingot-http-api");
+    let db = migrated_test_db("ingot-http-api-db").await;
+    let project_id = "prj_00000000000000000000000000000063".to_string();
+    let item_id = "itm_00000000000000000000000000000063".to_string();
+    let revision_id = "rev_00000000000000000000000000000063".to_string();
+    let author_job_id = "job_00000000000000000000000000000063".to_string();
+
+    sqlx::query(
+        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
+    )
+    .bind(&project_id)
+    .bind(repo.display().to_string())
+    .bind(TS)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert project");
+    sqlx::query(
+        "INSERT INTO items (
+            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+            priority, labels, created_at, updated_at
+         ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'deferred', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
+    )
+    .bind(&item_id)
+    .bind(&project_id)
+    .bind(&revision_id)
+    .bind(TS)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert item");
+    sqlx::query(
+        "INSERT INTO item_revisions (
+            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+            seed_target_commit_oid, supersedes_revision_id, created_at
+         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', NULL, NULL, NULL, ?)",
+    )
+    .bind(&revision_id)
+    .bind(&item_id)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert revision");
+    insert_test_job_row(
+        &db,
+        TestJobInsert {
+            id: &author_job_id,
+            project_id: &project_id,
+            item_id: &item_id,
+            item_revision_id: &revision_id,
+            step_id: "author_initial",
+            status: JobStatus::Completed,
+            outcome_class: Some(OutcomeClass::Clean),
+            phase_kind: PhaseKind::Author,
+            workspace_kind: WorkspaceKind::Authoring,
+            execution_permission: ExecutionPermission::MayMutate,
+            context_policy: ContextPolicy::Fresh,
+            phase_template_slug: "author-initial",
+            output_artifact_kind: OutputArtifactKind::Commit,
+            job_input: TestJobInput::AuthoringHead("missing-head"),
+            created_at: "2026-03-12T00:00:00Z",
+            started_at: Some("2026-03-12T00:00:00Z"),
+            ended_at: Some("2026-03-12T00:01:00Z"),
+            ..TestJobInsert::new(
+                &author_job_id,
+                &project_id,
+                &item_id,
+                &revision_id,
+                "author_initial",
+            )
+        },
+    )
+    .await;
+
+    let response = test_router(db.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{project_id}/items/{item_id}/resume"))
+                .method("POST")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("resume route response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("resume body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("resume json");
+    assert_eq!(json["item"]["parking_state"].as_str(), Some("active"));
+
+    let queued_review_jobs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM jobs
+         WHERE item_id = ? AND step_id = 'review_incremental_initial' AND status = 'queued'",
+    )
+    .bind(&item_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("count queued review jobs");
+    assert_eq!(queued_review_jobs, 0);
+
+    let parsed_project_id = parse_id::<ProjectId>(&project_id);
+    let parsed_item_id = parse_id(&item_id);
+    let parsed_revision_id = parse_id(&revision_id);
+
+    let project = db.get_project(parsed_project_id).await.expect("project");
+    let item = db.get_item(parsed_item_id).await.expect("item");
+    let revision = db.get_revision(parsed_revision_id).await.expect("revision");
+    let jobs = db.list_jobs_by_item(parsed_item_id).await.expect("jobs");
+    let findings = db
+        .list_findings_by_item(parsed_item_id)
+        .await
+        .expect("findings");
+
+    let result = ingot_usecases::dispatch::auto_dispatch_review(
+        &db,
+        &db,
+        &db,
+        &project,
+        &item,
+        &revision,
+        &jobs,
+        &findings,
+        &[],
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(ingot_usecases::UseCaseError::Internal(message))
+            if message.contains("incomplete candidate subject")
+    ));
+}
+
+#[tokio::test]
 async fn defer_route_cancels_lane_head_and_clears_granted() {
     let repo = temp_git_repo("ingot-http-api");
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000056".to_string();
     let item_id = "itm_00000000000000000000000000000056".to_string();
     let revision_id = "rev_00000000000000000000000000000056".to_string();
@@ -608,13 +734,12 @@ async fn defer_route_cancels_lane_head_and_clears_granted() {
     assert_eq!(item_state.1, "not_requested");
     assert_eq!(item_state.2, "none");
 
-    let queue_state: (String,) = sqlx::query_as(
-        "SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?",
-    )
-    .bind(&revision_id)
-    .fetch_one(&db.pool)
-    .await
-    .expect("queue state");
+    let queue_state: (String,) =
+        sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
+            .bind(&revision_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("queue state");
     assert_eq!(queue_state.0, "cancelled");
 
     let job_state: (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
@@ -635,11 +760,170 @@ async fn defer_route_cancels_lane_head_and_clears_granted() {
 }
 
 #[tokio::test]
+async fn defer_route_refreshes_revision_context_summary_after_cancelling_jobs() {
+    let repo = temp_git_repo("ingot-http-api");
+    let db = migrated_test_db("ingot-http-api-db").await;
+    let project_id = "prj_00000000000000000000000000000062";
+    let item_id = "itm_00000000000000000000000000000062";
+    let revision_id = "rev_00000000000000000000000000000062";
+    let running_job_id = "job_00000000000000000000000000000062";
+    let workspace_id = "wrk_00000000000000000000000000000062";
+    let head = git_output(&repo, &["rev-parse", "HEAD"]);
+    let stale_revision_context = serde_json::json!({
+        "authoring_head_commit_oid": "stale-head",
+        "changed_paths": ["src/lib.rs"],
+        "latest_validation": serde_json::Value::Null,
+        "latest_review": {
+            "job_id": running_job_id,
+            "schema_version": "review_report:v1",
+            "outcome": "clean",
+            "summary": "stale summary"
+        },
+        "accepted_result_refs": [{
+            "job_id": running_job_id,
+            "step_id": "review_candidate_initial",
+            "schema_version": "review_report:v1",
+            "outcome": "clean",
+            "summary": "stale summary"
+        }],
+        "operator_notes_excerpt": serde_json::Value::Null,
+    });
+
+    sqlx::query(
+        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
+    )
+    .bind(&project_id)
+    .bind(repo.display().to_string())
+    .bind(TS)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert project");
+    sqlx::query(
+        "INSERT INTO items (
+            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+            priority, labels, created_at, updated_at
+         ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
+    )
+    .bind(&item_id)
+    .bind(&project_id)
+    .bind(&revision_id)
+    .bind(TS)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert item");
+    sqlx::query(
+        "INSERT INTO item_revisions (
+            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+            seed_target_commit_oid, supersedes_revision_id, created_at
+         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, ?)",
+    )
+    .bind(&revision_id)
+    .bind(&item_id)
+    .bind(&head)
+    .bind(&head)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert revision");
+    sqlx::query(
+        "INSERT INTO workspaces (
+            id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
+            target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
+            status, current_job_id, created_at, updated_at
+         ) VALUES (?, ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', 'refs/ingot/workspaces/defer-refresh', ?, ?, 'persistent', 'busy', ?, ?, ?)",
+    )
+    .bind(workspace_id)
+    .bind(&project_id)
+    .bind(repo.join("defer-refresh").display().to_string())
+    .bind(&revision_id)
+    .bind(&head)
+    .bind(&head)
+    .bind(&running_job_id)
+    .bind(TS)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert workspace");
+    insert_test_job_row(
+        &db,
+        TestJobInsert {
+            id: &running_job_id,
+            project_id: &project_id,
+            item_id: &item_id,
+            item_revision_id: &revision_id,
+            step_id: "review_candidate_initial",
+            status: JobStatus::Running,
+            phase_kind: PhaseKind::Review,
+            workspace_id: Some(workspace_id),
+            workspace_kind: WorkspaceKind::Review,
+            execution_permission: ExecutionPermission::MustNotMutate,
+            context_policy: ContextPolicy::ResumeContext,
+            phase_template_slug: "review-candidate",
+            output_artifact_kind: OutputArtifactKind::ReviewReport,
+            job_input: TestJobInput::CandidateSubject(&head, &head),
+            created_at: "2026-03-12T00:00:00Z",
+            ..TestJobInsert::new(
+                &running_job_id,
+                &project_id,
+                &item_id,
+                &revision_id,
+                "review_candidate_initial",
+            )
+        },
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO revision_contexts (
+            item_revision_id, schema_version, payload, updated_from_job_id, updated_at
+         ) VALUES (?, 'revision_context:v1', ?, ?, ?)",
+    )
+    .bind(&revision_id)
+    .bind(stale_revision_context.to_string())
+    .bind(&running_job_id)
+    .bind(Utc::now())
+    .execute(&db.pool)
+    .await
+    .expect("insert stale revision context");
+
+    let response = test_router(db.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{project_id}/items/{item_id}/defer"))
+                .method("POST")
+                .body(Body::empty())
+                .expect("build defer request"),
+        )
+        .await
+        .expect("defer route response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+    assert_eq!(
+        json["revision_context_summary"]["latest_review"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        json["revision_context_summary"]["accepted_result_refs"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        json["revision_context_summary"]["changed_paths"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
 async fn revise_route_creates_superseding_revision() {
     let repo = temp_git_repo("ingot-http-api");
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000054".to_string();
     let item_id = "itm_00000000000000000000000000000054".to_string();
     let revision_id = "rev_00000000000000000000000000000054".to_string();
@@ -759,9 +1043,7 @@ async fn revise_route_creates_superseding_revision() {
 async fn revise_route_cancels_current_lane_state() {
     let repo = temp_git_repo("ingot-http-api");
     let head = git_output(&repo, &["rev-parse", "HEAD"]);
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000057".to_string();
     let item_id = "itm_00000000000000000000000000000057".to_string();
     let revision_id = "rev_00000000000000000000000000000057".to_string();
@@ -939,13 +1221,12 @@ async fn revise_route_cancels_current_lane_state() {
         .expect("revise route response");
     assert_eq!(response.status(), StatusCode::OK);
 
-    let queue_state: (String,) = sqlx::query_as(
-        "SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?",
-    )
-    .bind(&revision_id)
-    .fetch_one(&db.pool)
-    .await
-    .expect("queue state");
+    let queue_state: (String,) =
+        sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
+            .bind(&revision_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("queue state");
     assert_eq!(queue_state.0, "cancelled");
 
     let convergence_state: (String,) =
@@ -994,9 +1275,7 @@ async fn revise_route_cancels_current_lane_state() {
 #[tokio::test]
 async fn revise_route_rejects_non_branch_target_ref() {
     let repo = temp_git_repo("ingot-http-api");
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000058".to_string();
     let item_id = "itm_00000000000000000000000000000058".to_string();
     let revision_id = "rev_00000000000000000000000000000058".to_string();
@@ -1067,9 +1346,7 @@ async fn revise_route_rejects_non_branch_target_ref() {
 #[tokio::test]
 async fn revise_route_rejects_git_invalid_branch_name() {
     let repo = temp_git_repo("ingot-http-api");
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000061".to_string();
     let item_id = "itm_00000000000000000000000000000061".to_string();
     let revision_id = "rev_00000000000000000000000000000061".to_string();
@@ -1140,9 +1417,7 @@ async fn revise_route_rejects_git_invalid_branch_name() {
 #[tokio::test]
 async fn dismiss_and_reopen_routes_close_and_reopen_item() {
     let repo = temp_git_repo("ingot-http-api");
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000053".to_string();
     let item_id = "itm_00000000000000000000000000000053".to_string();
     let revision_id = "rev_00000000000000000000000000000053".to_string();
@@ -1273,9 +1548,7 @@ async fn dismiss_and_reopen_routes_close_and_reopen_item() {
 async fn dismiss_route_cancels_lane_state() {
     let repo = temp_git_repo("ingot-http-api");
     let head = git_output(&repo, &["rev-parse", "HEAD"]);
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000059".to_string();
     let item_id = "itm_00000000000000000000000000000059".to_string();
     let revision_id = "rev_00000000000000000000000000000059".to_string();
@@ -1388,13 +1661,12 @@ async fn dismiss_route_cancels_lane_state() {
         .expect("dismiss response");
     assert_eq!(response.status(), StatusCode::OK);
 
-    let queue_state: (String,) = sqlx::query_as(
-        "SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?",
-    )
-    .bind(&revision_id)
-    .fetch_one(&db.pool)
-    .await
-    .expect("queue state");
+    let queue_state: (String,) =
+        sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
+            .bind(&revision_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("queue state");
     assert_eq!(queue_state.0, "cancelled");
 
     let convergence_state: (String,) =

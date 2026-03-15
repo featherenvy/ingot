@@ -1,24 +1,28 @@
+#![allow(dead_code, unused_imports)]
+
+// Shared runtime-test helpers are compiled into multiple test binaries, and each binary
+// intentionally uses only a subset of them.
+
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
 use ingot_agent_runtime::{AgentRunner, DispatcherConfig, JobDispatcher};
-use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
+use ingot_domain::agent::{Agent, AgentCapability};
 use ingot_domain::ids;
 use ingot_domain::job::{ExecutionPermission, Job, JobInput, OutputArtifactKind, PhaseKind};
 use ingot_domain::project::Project;
-use ingot_domain::revision::ItemRevision;
-use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
+use ingot_domain::workspace::WorkspaceKind;
 use ingot_git::commands::head_oid;
 use ingot_git::project_repo::{ProjectRepoPaths, ensure_mirror, project_repo_paths};
 use ingot_store_sqlite::Database;
 pub use ingot_test_support::fixtures::{
-    ConvergenceBuilder, FindingBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
+    AgentBuilder, ConvergenceBuilder, ConvergenceQueueEntryBuilder, FindingBuilder,
+    GitOperationBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
     WorkspaceBuilder, default_timestamp,
 };
 use ingot_test_support::git::unique_temp_path;
@@ -27,7 +31,6 @@ use ingot_test_support::reports::{
 };
 pub use ingot_test_support::sqlite::migrated_test_db;
 use ingot_usecases::ProjectLocks;
-use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // TestHarness
@@ -73,63 +76,41 @@ impl TestHarness {
     }
 
     pub async fn register_mutating_agent(&self) -> Agent {
-        let agent = Agent {
-            id: ids::AgentId::new(),
-            slug: "codex".into(),
-            name: "Codex".into(),
-            adapter_kind: AdapterKind::Codex,
-            provider: "openai".into(),
-            model: "gpt-5-codex".into(),
-            cli_path: "codex".into(),
-            capabilities: vec![
+        let agent = AgentBuilder::new(
+            "codex",
+            vec![
                 AgentCapability::MutatingJobs,
                 AgentCapability::StructuredOutput,
             ],
-            health_check: Some("ok".into()),
-            status: AgentStatus::Available,
-        };
+        )
+        .build();
         self.db.create_agent(&agent).await.expect("create agent");
         agent
     }
 
-    #[allow(dead_code)]
     pub async fn register_review_agent(&self) -> Agent {
-        let agent = Agent {
-            id: ids::AgentId::new(),
-            slug: "codex-review".into(),
-            name: "Codex".into(),
-            adapter_kind: AdapterKind::Codex,
-            provider: "openai".into(),
-            model: "gpt-5-codex".into(),
-            cli_path: "codex".into(),
-            capabilities: vec![
+        let agent = AgentBuilder::new(
+            "codex-review",
+            vec![
                 AgentCapability::ReadOnlyJobs,
                 AgentCapability::StructuredOutput,
             ],
-            health_check: Some("ok".into()),
-            status: AgentStatus::Available,
-        };
+        )
+        .build();
         self.db.create_agent(&agent).await.expect("create agent");
         agent
     }
 
     pub async fn register_full_agent(&self) -> Agent {
-        let agent = Agent {
-            id: ids::AgentId::new(),
-            slug: "codex".into(),
-            name: "Codex".into(),
-            adapter_kind: AdapterKind::Codex,
-            provider: "openai".into(),
-            model: "gpt-5-codex".into(),
-            cli_path: "codex".into(),
-            capabilities: vec![
+        let agent = AgentBuilder::new(
+            "codex",
+            vec![
                 AgentCapability::MutatingJobs,
                 AgentCapability::ReadOnlyJobs,
                 AgentCapability::StructuredOutput,
             ],
-            health_check: Some("ok".into()),
-            status: AgentStatus::Available,
-        };
+        )
+        .build();
         self.db.create_agent(&agent).await.expect("create agent");
         agent
     }
@@ -138,19 +119,6 @@ impl TestHarness {
 // ---------------------------------------------------------------------------
 // Entity builders
 // ---------------------------------------------------------------------------
-
-pub fn test_item(
-    project_id: ids::ProjectId,
-    revision_id: ids::ItemRevisionId,
-) -> ingot_domain::item::Item {
-    ItemBuilder::new(project_id, revision_id).build()
-}
-
-pub fn test_revision(item_id: ids::ItemId, seed_commit: &str) -> ItemRevision {
-    RevisionBuilder::new(item_id)
-        .explicit_seed(seed_commit)
-        .build()
-}
 
 pub fn test_authoring_job(
     project_id: ids::ProjectId,
@@ -229,16 +197,10 @@ impl AgentRunner for StaticReviewRunner {
                 exit_code: 0,
                 stdout: String::new(),
                 stderr: String::new(),
-                result: Some(serde_json::json!({
-                    "outcome": "clean",
-                    "summary": "No issues found",
-                    "review_subject": {
-                        "base_commit_oid": self.base_commit_oid,
-                        "head_commit_oid": self.head_commit_oid
-                    },
-                    "overall_risk": "low",
-                    "findings": []
-                })),
+                result: Some(clean_review_report(
+                    &self.base_commit_oid,
+                    &self.head_commit_oid,
+                )),
             })
         })
     }
@@ -366,8 +328,7 @@ pub async fn create_mirror_only_commit(
     workspace_ref: &str,
     message: &str,
 ) -> (PathBuf, String) {
-    let worktree_path =
-        std::env::temp_dir().join(format!("ingot-runtime-mirror-only-{}", Uuid::now_v7()));
+    let worktree_path = unique_temp_path("ingot-runtime-mirror-only");
     git_sync(
         mirror_git_dir,
         &[
@@ -398,69 +359,4 @@ pub fn prompt_value(prompt: &str, label: &str) -> Option<String> {
         let prefix = format!("- {label}: ");
         line.strip_prefix(&prefix).map(ToOwned::to_owned)
     })
-}
-
-// ---------------------------------------------------------------------------
-// Legacy make_runtime_* helpers (used by reconciliation.rs mixed-state tests)
-// ---------------------------------------------------------------------------
-
-pub fn make_runtime_item(
-    project_id: ids::ProjectId,
-    revision_id: ids::ItemRevisionId,
-    item_id: ids::ItemId,
-    created_at: DateTime<Utc>,
-) -> ingot_domain::item::Item {
-    ItemBuilder::new(project_id, revision_id)
-        .id(item_id)
-        .created_at(created_at)
-        .build()
-}
-
-pub fn make_runtime_revision(
-    item_id: ids::ItemId,
-    revision_no: u32,
-    seed_commit_oid: &str,
-    created_at: DateTime<Utc>,
-) -> ItemRevision {
-    RevisionBuilder::new(item_id)
-        .revision_no(revision_no)
-        .explicit_seed(seed_commit_oid)
-        .created_at(created_at)
-        .build()
-}
-
-pub fn make_runtime_workspace(
-    project_id: ids::ProjectId,
-    revision_id: Option<ids::ItemRevisionId>,
-    kind: WorkspaceKind,
-    status: WorkspaceStatus,
-    head_commit_oid: &str,
-    created_at: DateTime<Utc>,
-) -> Workspace {
-    let mut builder = WorkspaceBuilder::new(project_id, kind)
-        .base_commit_oid(head_commit_oid)
-        .head_commit_oid(head_commit_oid)
-        .status(status)
-        .created_at(created_at);
-    if let Some(revision_id) = revision_id {
-        builder = builder.created_for_revision_id(revision_id);
-    }
-    builder.build()
-}
-
-pub fn make_runtime_job(
-    project_id: ids::ProjectId,
-    item_id: ids::ItemId,
-    revision_id: ids::ItemRevisionId,
-    step_id: &str,
-    workspace_kind: WorkspaceKind,
-    output_artifact_kind: OutputArtifactKind,
-    created_at: DateTime<Utc>,
-) -> Job {
-    JobBuilder::new(project_id, item_id, revision_id, step_id)
-        .workspace_kind(workspace_kind)
-        .job_input(JobInput::authoring_head("seed"))
-        .output_artifact_kind(output_artifact_kind)
-        .created_at(created_at)
-        .build()
 }

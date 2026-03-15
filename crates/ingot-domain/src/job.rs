@@ -77,9 +77,10 @@ pub enum OutputArtifactKind {
     None,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobInput {
+    #[default]
     None,
     AuthoringHead {
         head_commit_oid: String,
@@ -92,12 +93,6 @@ pub enum JobInput {
         base_commit_oid: String,
         head_commit_oid: String,
     },
-}
-
-impl Default for JobInput {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl JobInput {

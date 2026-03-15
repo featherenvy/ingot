@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::Duration as ChronoDuration;
 use ingot_agent_runtime::{DispatcherConfig, JobDispatcher};
 use ingot_domain::activity::ActivityEventType;
 use ingot_domain::convergence::ConvergenceStatus;
-use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
-use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
-use ingot_domain::ids::{GitOperationId, WorkspaceId};
+use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
+use ingot_domain::git_operation::{GitEntityType, GitOperationStatus, OperationKind};
 use ingot_domain::item::{
     ApprovalState, DoneReason, EscalationReason, LifecycleState, ResolutionSource,
 };
@@ -14,14 +13,12 @@ use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
     PhaseKind,
 };
-use ingot_domain::revision::ItemRevision;
-use ingot_domain::workspace::{
-    RetentionPolicy, Workspace, WorkspaceKind, WorkspaceStatus, WorkspaceStrategy,
-};
+use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::{compare_and_swap_ref, delete_ref, head_oid};
+use ingot_test_support::fixtures::GitOperationBuilder;
+use ingot_test_support::git::unique_temp_path;
 use ingot_usecases::ProjectLocks;
 use ingot_workflow::step;
-use uuid::Uuid;
 
 mod common;
 use common::*;
@@ -34,42 +31,31 @@ async fn reconcile_startup_expires_stale_running_jobs_and_marks_workspace_stale(
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
 
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        ..test_item(h.project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        ..test_revision(item_id, &seed_commit)
-    };
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
 
-    let created_at = Utc::now();
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: h.project.id,
-        kind: WorkspaceKind::Authoring,
-        strategy: WorkspaceStrategy::Worktree,
-        path: std::env::temp_dir()
-            .join(format!("ingot-runtime-stale-workspace-{}", Uuid::now_v7()))
-            .display()
-            .to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/reconcile".into()),
-        base_commit_oid: Some(seed_commit.clone()),
-        head_commit_oid: Some(seed_commit.clone()),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Busy,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let created_at = default_timestamp();
+    let workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
+        .path(
+            unique_temp_path("ingot-runtime-stale-workspace")
+                .display()
+                .to_string(),
+        )
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Busy)
+        .base_commit_oid(&seed_commit)
+        .head_commit_oid(&seed_commit)
+        .workspace_ref("refs/ingot/workspaces/reconcile")
+        .created_at(created_at)
+        .build();
     h.db.create_workspace(&workspace)
         .await
         .expect("create workspace");
@@ -115,45 +101,31 @@ async fn reconcile_active_jobs_reports_progress_when_it_expires_a_running_job() 
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
 
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        ..test_item(h.project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        ..test_revision(item_id, &seed_commit)
-    };
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
 
-    let created_at = Utc::now();
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: h.project.id,
-        kind: WorkspaceKind::Authoring,
-        strategy: WorkspaceStrategy::Worktree,
-        path: std::env::temp_dir()
-            .join(format!(
-                "ingot-runtime-progress-workspace-{}",
-                Uuid::now_v7()
-            ))
-            .display()
-            .to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/progress".into()),
-        base_commit_oid: Some(seed_commit.clone()),
-        head_commit_oid: Some(seed_commit.clone()),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Busy,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let created_at = default_timestamp();
+    let workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
+        .path(
+            unique_temp_path("ingot-runtime-progress-workspace")
+                .display()
+                .to_string(),
+        )
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Busy)
+        .base_commit_oid(&seed_commit)
+        .head_commit_oid(&seed_commit)
+        .workspace_ref("refs/ingot/workspaces/progress")
+        .created_at(created_at)
+        .build();
     h.db.create_workspace(&workspace)
         .await
         .expect("create workspace");
@@ -192,42 +164,31 @@ async fn reconcile_startup_fails_inflight_convergences_and_marks_workspace_stale
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
 
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        ..test_item(h.project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        ..test_revision(item_id, &seed_commit)
-    };
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
 
-    let created_at = Utc::now();
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: h.project.id,
-        kind: WorkspaceKind::Integration,
-        strategy: WorkspaceStrategy::Worktree,
-        path: std::env::temp_dir()
-            .join(format!("ingot-runtime-conv-workspace-{}", Uuid::now_v7()))
-            .display()
-            .to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/reconcile-conv".into()),
-        base_commit_oid: Some(seed_commit.clone()),
-        head_commit_oid: Some(seed_commit.clone()),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Busy,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let created_at = default_timestamp();
+    let workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Integration)
+        .path(
+            unique_temp_path("ingot-runtime-conv-workspace")
+                .display()
+                .to_string(),
+        )
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Busy)
+        .base_commit_oid(&seed_commit)
+        .head_commit_oid(&seed_commit)
+        .workspace_ref("refs/ingot/workspaces/reconcile-conv")
+        .created_at(created_at)
+        .build();
     h.db.create_workspace(&workspace)
         .await
         .expect("create workspace");
@@ -280,52 +241,38 @@ async fn reconcile_startup_marks_finalized_target_ref_git_operation_reconciled()
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
-        DispatcherConfig::new(
-            std::env::temp_dir().join(format!("ingot-runtime-gop-state-{}", Uuid::now_v7())),
-        ),
+        DispatcherConfig::new(unique_temp_path("ingot-runtime-gop-state")),
         Arc::new(FakeRunner),
     );
 
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     db.create_project(&project).await.expect("create project");
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        ..test_item(project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        seed_commit_oid: Some(base_commit.clone()),
-        seed_target_commit_oid: Some(base_commit.clone()),
-        ..test_revision(item_id, &base_commit)
-    };
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(base_commit.clone()))
+        .seed_target_commit_oid(Some(base_commit.clone()))
+        .explicit_seed(&base_commit)
+        .build();
     db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
 
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: project.id,
-        kind: WorkspaceKind::Integration,
-        strategy: WorkspaceStrategy::Worktree,
-        path: repo.display().to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/finalize-adopt".into()),
-        base_commit_oid: Some(base_commit.clone()),
-        head_commit_oid: Some(new_head.clone()),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Ready,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Integration)
+        .path(repo.display().to_string())
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Ready)
+        .base_commit_oid(&base_commit)
+        .head_commit_oid(&new_head)
+        .workspace_ref("refs/ingot/workspaces/finalize-adopt")
+        .created_at(created_at)
+        .build();
     db.create_workspace(&workspace)
         .await
         .expect("create workspace");
@@ -343,22 +290,19 @@ async fn reconcile_startup_marks_finalized_target_ref_git_operation_reconciled()
         .await
         .expect("create convergence");
 
-    let operation = GitOperation {
-        id: GitOperationId::new(),
-        project_id: project.id,
-        operation_kind: OperationKind::FinalizeTargetRef,
-        entity_type: GitEntityType::Convergence,
-        entity_id: convergence.id.to_string(),
-        workspace_id: None,
-        ref_name: Some("refs/heads/main".into()),
-        expected_old_oid: Some(base_commit.clone()),
-        new_oid: Some(new_head.clone()),
-        commit_oid: Some(new_head),
-        status: GitOperationStatus::Applied,
-        metadata: None,
-        created_at,
-        completed_at: None,
-    };
+    let operation = GitOperationBuilder::new(
+        project.id,
+        OperationKind::FinalizeTargetRef,
+        GitEntityType::Convergence,
+        convergence.id.to_string(),
+    )
+    .ref_name("refs/heads/main")
+    .expected_old_oid(base_commit.clone())
+    .new_oid(new_head.clone())
+    .commit_oid(new_head)
+    .status(GitOperationStatus::Applied)
+    .created_at(created_at)
+    .build();
     db.create_git_operation(&operation)
         .await
         .expect("create git operation");
@@ -431,56 +375,42 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
-        DispatcherConfig::new(std::env::temp_dir().join(format!(
-            "ingot-runtime-finalize-sync-state-{}",
-            Uuid::now_v7()
-        ))),
+        DispatcherConfig::new(unique_temp_path("ingot-runtime-finalize-sync-state")),
         Arc::new(FakeRunner),
     );
 
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     db.create_project(&project).await.expect("create project");
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        approval_state: ApprovalState::Granted,
-        ..test_item(project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        seed_commit_oid: Some(base_commit.clone()),
-        seed_target_commit_oid: Some(base_commit.clone()),
-        ..test_revision(item_id, &base_commit)
-    };
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .approval_state(ApprovalState::Granted)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(base_commit.clone()))
+        .seed_target_commit_oid(Some(base_commit.clone()))
+        .explicit_seed(&base_commit)
+        .build();
     db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
-    let source_workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: project.id,
-        kind: WorkspaceKind::Authoring,
-        strategy: WorkspaceStrategy::Worktree,
-        path: std::env::temp_dir()
-            .join(format!("ingot-runtime-finalize-source-{}", Uuid::now_v7()))
-            .display()
-            .to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/finalize-source".into()),
-        base_commit_oid: Some(base_commit.clone()),
-        head_commit_oid: Some(prepared_commit.clone()),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Ready,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let source_workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
+        .path(
+            unique_temp_path("ingot-runtime-finalize-source")
+                .display()
+                .to_string(),
+        )
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Ready)
+        .base_commit_oid(&base_commit)
+        .head_commit_oid(&prepared_commit)
+        .workspace_ref("refs/ingot/workspaces/finalize-source")
+        .created_at(created_at)
+        .build();
     db.create_workspace(&source_workspace)
         .await
         .expect("create source workspace");
@@ -497,18 +427,11 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
     db.create_convergence(&convergence)
         .await
         .expect("create convergence");
-    db.create_queue_entry(&ConvergenceQueueEntry {
-        id: ingot_domain::ids::ConvergenceQueueEntryId::new(),
-        project_id: project.id,
-        item_id,
-        item_revision_id: revision_id,
-        target_ref: "refs/heads/main".into(),
-        status: ConvergenceQueueEntryStatus::Head,
-        head_acquired_at: Some(created_at),
-        created_at,
-        updated_at: created_at,
-        released_at: None,
-    })
+    db.create_queue_entry(
+        &ConvergenceQueueEntryBuilder::new(project.id, item_id, revision_id)
+            .created_at(created_at)
+            .build(),
+    )
     .await
     .expect("insert queue entry");
 
@@ -525,22 +448,20 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
     .await
     .expect("move mirror ref");
 
-    let operation = GitOperation {
-        id: GitOperationId::new(),
-        project_id: project.id,
-        operation_kind: OperationKind::FinalizeTargetRef,
-        entity_type: GitEntityType::Convergence,
-        entity_id: convergence.id.to_string(),
-        workspace_id: None,
-        ref_name: Some("refs/heads/main".into()),
-        expected_old_oid: Some(base_commit.clone()),
-        new_oid: Some(prepared_commit.clone()),
-        commit_oid: Some(prepared_commit.clone()),
-        status: GitOperationStatus::Applied,
-        metadata: None,
-        created_at,
-        completed_at: Some(created_at),
-    };
+    let operation = GitOperationBuilder::new(
+        project.id,
+        OperationKind::FinalizeTargetRef,
+        GitEntityType::Convergence,
+        convergence.id.to_string(),
+    )
+    .ref_name("refs/heads/main")
+    .expected_old_oid(base_commit.clone())
+    .new_oid(prepared_commit.clone())
+    .commit_oid(prepared_commit.clone())
+    .status(GitOperationStatus::Applied)
+    .created_at(created_at)
+    .completed_at(created_at)
+    .build();
     db.create_git_operation(&operation)
         .await
         .expect("create git operation");
@@ -593,59 +514,42 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
-        DispatcherConfig::new(std::env::temp_dir().join(format!(
-            "ingot-runtime-finalize-blocked-state-{}",
-            Uuid::now_v7()
-        ))),
+        DispatcherConfig::new(unique_temp_path("ingot-runtime-finalize-blocked-state")),
         Arc::new(FakeRunner),
     );
 
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     db.create_project(&project).await.expect("create project");
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        approval_state: ApprovalState::Granted,
-        ..test_item(project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        seed_commit_oid: Some(base_commit.clone()),
-        seed_target_commit_oid: Some(base_commit.clone()),
-        ..test_revision(item_id, &base_commit)
-    };
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .approval_state(ApprovalState::Granted)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(base_commit.clone()))
+        .seed_target_commit_oid(Some(base_commit.clone()))
+        .explicit_seed(&base_commit)
+        .build();
     db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
-    let source_workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: project.id,
-        kind: WorkspaceKind::Authoring,
-        strategy: WorkspaceStrategy::Worktree,
-        path: std::env::temp_dir()
-            .join(format!(
-                "ingot-runtime-finalize-blocked-source-{}",
-                Uuid::now_v7()
-            ))
-            .display()
-            .to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/finalize-blocked-source".into()),
-        base_commit_oid: Some(base_commit.clone()),
-        head_commit_oid: Some(prepared_commit.clone()),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Ready,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let source_workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
+        .path(
+            unique_temp_path("ingot-runtime-finalize-blocked-source")
+                .display()
+                .to_string(),
+        )
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Ready)
+        .base_commit_oid(&base_commit)
+        .head_commit_oid(&prepared_commit)
+        .workspace_ref("refs/ingot/workspaces/finalize-blocked-source")
+        .created_at(created_at)
+        .build();
     db.create_workspace(&source_workspace)
         .await
         .expect("create source workspace");
@@ -662,18 +566,11 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
     db.create_convergence(&convergence)
         .await
         .expect("create convergence");
-    db.create_queue_entry(&ConvergenceQueueEntry {
-        id: ingot_domain::ids::ConvergenceQueueEntryId::new(),
-        project_id: project.id,
-        item_id,
-        item_revision_id: revision_id,
-        target_ref: "refs/heads/main".into(),
-        status: ConvergenceQueueEntryStatus::Head,
-        head_acquired_at: Some(created_at),
-        created_at,
-        updated_at: created_at,
-        released_at: None,
-    })
+    db.create_queue_entry(
+        &ConvergenceQueueEntryBuilder::new(project.id, item_id, revision_id)
+            .created_at(created_at)
+            .build(),
+    )
     .await
     .expect("insert queue entry");
 
@@ -690,27 +587,25 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
     .await
     .expect("move mirror ref");
 
-    let operation = GitOperation {
-        id: GitOperationId::new(),
-        project_id: project.id,
-        operation_kind: OperationKind::FinalizeTargetRef,
-        entity_type: GitEntityType::Convergence,
-        entity_id: convergence.id.to_string(),
-        workspace_id: None,
-        ref_name: Some("refs/heads/main".into()),
-        expected_old_oid: Some(base_commit),
-        new_oid: Some(prepared_commit),
-        commit_oid: Some(
-            convergence
-                .prepared_commit_oid
-                .clone()
-                .expect("prepared oid"),
-        ),
-        status: GitOperationStatus::Applied,
-        metadata: None,
-        created_at,
-        completed_at: Some(created_at),
-    };
+    let operation = GitOperationBuilder::new(
+        project.id,
+        OperationKind::FinalizeTargetRef,
+        GitEntityType::Convergence,
+        convergence.id.to_string(),
+    )
+    .ref_name("refs/heads/main")
+    .expected_old_oid(base_commit)
+    .new_oid(prepared_commit)
+    .commit_oid(
+        convergence
+            .prepared_commit_oid
+            .clone()
+            .expect("prepared oid"),
+    )
+    .status(GitOperationStatus::Applied)
+    .created_at(created_at)
+    .completed_at(created_at)
+    .build();
     db.create_git_operation(&operation)
         .await
         .expect("create git operation");
@@ -769,53 +664,38 @@ async fn reconcile_startup_adopts_prepared_convergence_from_git_operation() {
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
-        DispatcherConfig::new(std::env::temp_dir().join(format!(
-            "ingot-runtime-prepare-adopt-state-{}",
-            Uuid::now_v7()
-        ))),
+        DispatcherConfig::new(unique_temp_path("ingot-runtime-prepare-adopt-state")),
         Arc::new(FakeRunner),
     );
 
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     db.create_project(&project).await.expect("create project");
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        ..test_item(project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        seed_commit_oid: Some(base_commit.clone()),
-        seed_target_commit_oid: Some(base_commit.clone()),
-        ..test_revision(item_id, &base_commit)
-    };
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(base_commit.clone()))
+        .seed_target_commit_oid(Some(base_commit.clone()))
+        .explicit_seed(&base_commit)
+        .build();
     db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
 
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: project.id,
-        kind: WorkspaceKind::Integration,
-        strategy: WorkspaceStrategy::Worktree,
-        path: repo.display().to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/prepare-adopt".into()),
-        base_commit_oid: Some(base_commit.clone()),
-        head_commit_oid: Some(base_commit.clone()),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Busy,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Integration)
+        .path(repo.display().to_string())
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Busy)
+        .base_commit_oid(&base_commit)
+        .head_commit_oid(&base_commit)
+        .workspace_ref("refs/ingot/workspaces/prepare-adopt")
+        .created_at(created_at)
+        .build();
     db.create_workspace(&workspace)
         .await
         .expect("create workspace");
@@ -833,25 +713,29 @@ async fn reconcile_startup_adopts_prepared_convergence_from_git_operation() {
         .await
         .expect("create convergence");
 
-    let operation = GitOperation {
-        id: GitOperationId::new(),
-        project_id: project.id,
-        operation_kind: OperationKind::PrepareConvergenceCommit,
-        entity_type: GitEntityType::Convergence,
-        entity_id: convergence.id.to_string(),
-        workspace_id: Some(workspace.id),
-        ref_name: workspace.workspace_ref.clone(),
-        expected_old_oid: workspace.base_commit_oid.clone(),
-        new_oid: Some(prepared_head.clone()),
-        commit_oid: Some(prepared_head.clone()),
-        status: GitOperationStatus::Applied,
-        metadata: Some(serde_json::json!({
-            "source_commit_oids": [prepared_head],
-            "prepared_commit_oids": [prepared_head]
-        })),
-        created_at,
-        completed_at: None,
-    };
+    let operation = GitOperationBuilder::new(
+        project.id,
+        OperationKind::PrepareConvergenceCommit,
+        GitEntityType::Convergence,
+        convergence.id.to_string(),
+    )
+    .workspace_id(workspace.id)
+    .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
+    .expected_old_oid(
+        workspace
+            .base_commit_oid
+            .clone()
+            .expect("workspace base commit"),
+    )
+    .new_oid(prepared_head.clone())
+    .commit_oid(prepared_head.clone())
+    .status(GitOperationStatus::Applied)
+    .metadata(serde_json::json!({
+        "source_commit_oids": [prepared_head],
+        "prepared_commit_oids": [prepared_head]
+    }))
+    .created_at(created_at)
+    .build();
     db.create_git_operation(&operation)
         .await
         .expect("create operation");
@@ -902,53 +786,38 @@ async fn reconcile_startup_does_not_resurrect_cancelled_convergence_from_prepare
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
-        DispatcherConfig::new(std::env::temp_dir().join(format!(
-            "ingot-runtime-prepare-cancelled-state-{}",
-            Uuid::now_v7()
-        ))),
+        DispatcherConfig::new(unique_temp_path("ingot-runtime-prepare-cancelled-state")),
         Arc::new(FakeRunner),
     );
 
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     db.create_project(&project).await.expect("create project");
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        ..test_item(project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        seed_commit_oid: Some(base_commit.clone()),
-        seed_target_commit_oid: Some(base_commit.clone()),
-        ..test_revision(item_id, &base_commit)
-    };
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(base_commit.clone()))
+        .seed_target_commit_oid(Some(base_commit.clone()))
+        .explicit_seed(&base_commit)
+        .build();
     db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
 
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: project.id,
-        kind: WorkspaceKind::Integration,
-        strategy: WorkspaceStrategy::Worktree,
-        path: repo.display().to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/prepare-cancelled".into()),
-        base_commit_oid: Some(base_commit.clone()),
-        head_commit_oid: Some(prepared_head.clone()),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Abandoned,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Integration)
+        .path(repo.display().to_string())
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Abandoned)
+        .base_commit_oid(&base_commit)
+        .head_commit_oid(&prepared_head)
+        .workspace_ref("refs/ingot/workspaces/prepare-cancelled")
+        .created_at(created_at)
+        .build();
     db.create_workspace(&workspace)
         .await
         .expect("create workspace");
@@ -967,25 +836,29 @@ async fn reconcile_startup_does_not_resurrect_cancelled_convergence_from_prepare
         .await
         .expect("create convergence");
 
-    let operation = GitOperation {
-        id: GitOperationId::new(),
-        project_id: project.id,
-        operation_kind: OperationKind::PrepareConvergenceCommit,
-        entity_type: GitEntityType::Convergence,
-        entity_id: convergence.id.to_string(),
-        workspace_id: Some(workspace.id),
-        ref_name: workspace.workspace_ref.clone(),
-        expected_old_oid: workspace.base_commit_oid.clone(),
-        new_oid: Some(prepared_head.clone()),
-        commit_oid: Some(prepared_head),
-        status: GitOperationStatus::Applied,
-        metadata: Some(serde_json::json!({
-            "source_commit_oids": [],
-            "prepared_commit_oids": []
-        })),
-        created_at,
-        completed_at: None,
-    };
+    let operation = GitOperationBuilder::new(
+        project.id,
+        OperationKind::PrepareConvergenceCommit,
+        GitEntityType::Convergence,
+        convergence.id.to_string(),
+    )
+    .workspace_id(workspace.id)
+    .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
+    .expected_old_oid(
+        workspace
+            .base_commit_oid
+            .clone()
+            .expect("workspace base commit"),
+    )
+    .new_oid(prepared_head.clone())
+    .commit_oid(prepared_head)
+    .status(GitOperationStatus::Applied)
+    .metadata(serde_json::json!({
+        "source_commit_oids": [],
+        "prepared_commit_oids": []
+    }))
+    .created_at(created_at)
+    .build();
     db.create_git_operation(&operation)
         .await
         .expect("create operation");
@@ -1031,52 +904,38 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
-        DispatcherConfig::new(
-            std::env::temp_dir().join(format!("ingot-runtime-adopt-job-state-{}", Uuid::now_v7())),
-        ),
+        DispatcherConfig::new(unique_temp_path("ingot-runtime-adopt-job-state")),
         Arc::new(FakeRunner),
     );
 
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     db.create_project(&project).await.expect("create project");
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        ..test_item(project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        seed_commit_oid: Some(base_commit.clone()),
-        seed_target_commit_oid: Some(base_commit.clone()),
-        ..test_revision(item_id, &base_commit)
-    };
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(base_commit.clone()))
+        .seed_target_commit_oid(Some(base_commit.clone()))
+        .explicit_seed(&base_commit)
+        .build();
     db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
 
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: project.id,
-        kind: WorkspaceKind::Authoring,
-        strategy: WorkspaceStrategy::Worktree,
-        path: repo.display().to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/adopt-job".into()),
-        base_commit_oid: Some(base_commit.clone()),
-        head_commit_oid: Some(base_commit.clone()),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Busy,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
+        .path(repo.display().to_string())
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Busy)
+        .base_commit_oid(&base_commit)
+        .head_commit_oid(&base_commit)
+        .workspace_ref("refs/ingot/workspaces/adopt-job")
+        .created_at(created_at)
+        .build();
     db.create_workspace(&workspace)
         .await
         .expect("create workspace");
@@ -1096,22 +955,20 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
         .build();
     db.create_job(&job).await.expect("create job");
 
-    let operation = GitOperation {
-        id: GitOperationId::new(),
-        project_id: project.id,
-        operation_kind: OperationKind::CreateJobCommit,
-        entity_type: GitEntityType::Job,
-        entity_id: job.id.to_string(),
-        workspace_id: Some(workspace.id),
-        ref_name: workspace.workspace_ref.clone(),
-        expected_old_oid: Some(base_commit.clone()),
-        new_oid: Some(authored_commit.clone()),
-        commit_oid: Some(authored_commit.clone()),
-        status: GitOperationStatus::Applied,
-        metadata: None,
-        created_at,
-        completed_at: None,
-    };
+    let operation = GitOperationBuilder::new(
+        project.id,
+        OperationKind::CreateJobCommit,
+        GitEntityType::Job,
+        job.id.to_string(),
+    )
+    .workspace_id(workspace.id)
+    .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
+    .expected_old_oid(base_commit.clone())
+    .new_oid(authored_commit.clone())
+    .commit_oid(authored_commit.clone())
+    .status(GitOperationStatus::Applied)
+    .created_at(created_at)
+    .build();
     db.create_git_operation(&operation)
         .await
         .expect("create operation");
@@ -1167,99 +1024,91 @@ async fn reconcile_startup_continues_review_recovery_past_broken_project() {
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
-        DispatcherConfig::new(std::env::temp_dir().join(format!(
-            "ingot-runtime-startup-review-recovery-state-{}",
-            Uuid::now_v7()
-        ))),
+        DispatcherConfig::new(unique_temp_path(
+            "ingot-runtime-startup-review-recovery-state",
+        )),
         Arc::new(FakeRunner),
     );
 
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
 
     // Broken project
-    let broken_project = ProjectBuilder::new(
-        std::env::temp_dir().join(format!("ingot-missing-project-{}", Uuid::now_v7())),
-    )
-    .name("broken")
-    .created_at(created_at)
-    .build();
+    let broken_project = ProjectBuilder::new(unique_temp_path("ingot-missing-project"))
+        .name("broken")
+        .created_at(created_at)
+        .build();
     db.create_project(&broken_project)
         .await
         .expect("create broken project");
 
     let broken_item_id = ingot_domain::ids::ItemId::new();
     let broken_revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let broken_item = ingot_domain::item::Item {
-        id: broken_item_id,
-        project_id: broken_project.id,
-        current_revision_id: broken_revision_id,
-        ..test_item(broken_project.id, broken_revision_id)
-    };
-    let broken_revision = ItemRevision {
-        id: broken_revision_id,
-        item_id: broken_item_id,
-        seed_commit_oid: Some("missing-seed".into()),
-        seed_target_commit_oid: Some("missing-seed".into()),
-        ..test_revision(broken_item_id, "missing-seed")
-    };
+    let broken_item = ItemBuilder::new(broken_project.id, broken_revision_id)
+        .id(broken_item_id)
+        .build();
+    let broken_revision = RevisionBuilder::new(broken_item_id)
+        .id(broken_revision_id)
+        .seed_commit_oid(Some("missing-seed"))
+        .seed_target_commit_oid(Some("missing-seed"))
+        .explicit_seed("missing-seed")
+        .build();
     db.create_item_with_revision(&broken_item, &broken_revision)
         .await
         .expect("create broken item");
-    let broken_workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: broken_project.id,
-        kind: WorkspaceKind::Authoring,
-        strategy: WorkspaceStrategy::Worktree,
-        path: broken_project.path.clone(),
-        created_for_revision_id: Some(broken_revision_id),
-        parent_workspace_id: None,
-        target_ref: None,
-        workspace_ref: None,
-        base_commit_oid: Some("missing-seed".into()),
-        head_commit_oid: Some("missing-prepared".into()),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Ready,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let broken_workspace = WorkspaceBuilder::new(broken_project.id, WorkspaceKind::Authoring)
+        .path(broken_project.path.clone())
+        .created_for_revision_id(broken_revision_id)
+        .status(WorkspaceStatus::Ready)
+        .base_commit_oid("missing-seed")
+        .head_commit_oid("missing-prepared")
+        .no_target_ref()
+        .no_workspace_ref()
+        .created_at(created_at)
+        .build();
     db.create_workspace(&broken_workspace)
         .await
         .expect("create broken workspace");
-    db.create_convergence(&ConvergenceBuilder::new(broken_project.id, broken_item_id, broken_revision_id)
-        .source_workspace_id(broken_workspace.id)
-        .integration_workspace_id(broken_workspace.id)
-        .source_head_commit_oid("missing-prepared")
-        .input_target_commit_oid("missing-seed")
-        .prepared_commit_oid("missing-prepared")
-        .created_at(created_at)
-        .build())
+    db.create_convergence(
+        &ConvergenceBuilder::new(broken_project.id, broken_item_id, broken_revision_id)
+            .source_workspace_id(broken_workspace.id)
+            .integration_workspace_id(broken_workspace.id)
+            .source_head_commit_oid("missing-prepared")
+            .input_target_commit_oid("missing-seed")
+            .prepared_commit_oid("missing-prepared")
+            .created_at(created_at)
+            .build(),
+    )
     .await
     .expect("create broken convergence");
 
     // Healthy project
-    let healthy_project = ProjectBuilder::new(&healthy_repo).name("healthy").created_at(created_at).build();
+    let healthy_project = ProjectBuilder::new(&healthy_repo)
+        .name("healthy")
+        .created_at(created_at)
+        .build();
     db.create_project(&healthy_project)
         .await
         .expect("create healthy project");
 
     let healthy_item_id = ingot_domain::ids::ItemId::new();
     let healthy_revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let healthy_item = ingot_domain::item::Item {
-        id: healthy_item_id,
-        project_id: healthy_project.id,
-        current_revision_id: healthy_revision_id,
-        ..test_item(healthy_project.id, healthy_revision_id)
-    };
-    let healthy_revision = ItemRevision {
-        id: healthy_revision_id,
-        item_id: healthy_item_id,
-        ..test_revision(healthy_item_id, &healthy_seed_commit)
-    };
+    let healthy_item = ItemBuilder::new(healthy_project.id, healthy_revision_id)
+        .id(healthy_item_id)
+        .build();
+    let healthy_revision = RevisionBuilder::new(healthy_item_id)
+        .id(healthy_revision_id)
+        .explicit_seed(&healthy_seed_commit)
+        .build();
     db.create_item_with_revision(&healthy_item, &healthy_revision)
         .await
         .expect("create healthy item");
-    db.create_job(&JobBuilder::new(healthy_project.id, healthy_item_id, healthy_revision_id, "author_initial")
+    db.create_job(
+        &JobBuilder::new(
+            healthy_project.id,
+            healthy_item_id,
+            healthy_revision_id,
+            "author_initial",
+        )
         .status(JobStatus::Completed)
         .outcome_class(OutcomeClass::Clean)
         .workspace_kind(WorkspaceKind::Authoring)
@@ -1270,7 +1119,8 @@ async fn reconcile_startup_continues_review_recovery_past_broken_project() {
         .output_commit_oid(healthy_authored_commit.clone())
         .started_at(created_at)
         .ended_at(created_at)
-        .build())
+        .build(),
+    )
     .await
     .expect("create healthy author job");
 
@@ -1302,45 +1152,38 @@ async fn reconcile_startup_continues_review_recovery_past_broken_project() {
 async fn reconcile_startup_adopts_reset_workspace_operation() {
     let h = TestHarness::new(Arc::new(FakeRunner)).await;
     let head = head_oid(&h.repo_path).await.expect("head");
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
 
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: h.project.id,
-        kind: WorkspaceKind::Authoring,
-        strategy: WorkspaceStrategy::Worktree,
-        path: h.repo_path.display().to_string(),
-        created_for_revision_id: None,
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/reset-adopt".into()),
-        base_commit_oid: Some(head.clone()),
-        head_commit_oid: Some(head.clone()),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Busy,
-        current_job_id: Some(ingot_domain::ids::JobId::new()),
-        created_at,
-        updated_at: created_at,
-    };
+    let workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
+        .path(h.repo_path.display().to_string())
+        .status(WorkspaceStatus::Busy)
+        .base_commit_oid(&head)
+        .head_commit_oid(&head)
+        .workspace_ref("refs/ingot/workspaces/reset-adopt")
+        .current_job_id(ingot_domain::ids::JobId::new())
+        .created_at(created_at)
+        .build();
     h.db.create_workspace(&workspace)
         .await
         .expect("create workspace");
-    let operation = GitOperation {
-        id: GitOperationId::new(),
-        project_id: h.project.id,
-        operation_kind: OperationKind::ResetWorkspace,
-        entity_type: GitEntityType::Workspace,
-        entity_id: workspace.id.to_string(),
-        workspace_id: Some(workspace.id),
-        ref_name: workspace.workspace_ref.clone(),
-        expected_old_oid: workspace.head_commit_oid.clone(),
-        new_oid: Some(head),
-        commit_oid: None,
-        status: GitOperationStatus::Applied,
-        metadata: None,
-        created_at,
-        completed_at: None,
-    };
+    let operation = GitOperationBuilder::new(
+        h.project.id,
+        OperationKind::ResetWorkspace,
+        GitEntityType::Workspace,
+        workspace.id.to_string(),
+    )
+    .workspace_id(workspace.id)
+    .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
+    .expected_old_oid(
+        workspace
+            .head_commit_oid
+            .clone()
+            .expect("workspace head commit"),
+    )
+    .new_oid(head)
+    .status(GitOperationStatus::Applied)
+    .created_at(created_at)
+    .build();
     h.db.create_git_operation(&operation)
         .await
         .expect("create operation");
@@ -1359,21 +1202,17 @@ async fn reconcile_startup_adopts_reset_workspace_operation() {
 async fn reconcile_startup_adopts_remove_workspace_ref_operation() {
     let repo = temp_git_repo("ingot-runtime-repo");
     let head = head_oid(&repo).await.expect("head");
-    let workspace_path =
-        std::env::temp_dir().join(format!("ingot-runtime-remove-adopt-{}", Uuid::now_v7()));
+    let workspace_path = unique_temp_path("ingot-runtime-remove-adopt");
 
     let db = migrated_test_db("ingot-runtime").await;
-    let state_root = std::env::temp_dir().join(format!(
-        "ingot-runtime-remove-adopt-state-{}",
-        Uuid::now_v7()
-    ));
+    let state_root = unique_temp_path("ingot-runtime-remove-adopt-state");
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
         DispatcherConfig::new(state_root.clone()),
         Arc::new(FakeRunner),
     );
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     db.create_project(&project).await.expect("create project");
     let paths = ensure_test_mirror(state_root.as_path(), &project).await;
@@ -1394,43 +1233,37 @@ async fn reconcile_startup_adopts_remove_workspace_ref_operation() {
     delete_ref(&paths.mirror_git_dir, "refs/ingot/workspaces/remove-adopt")
         .await
         .expect("delete ref");
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: project.id,
-        kind: WorkspaceKind::Review,
-        strategy: WorkspaceStrategy::Worktree,
-        path: workspace_path.display().to_string(),
-        created_for_revision_id: None,
-        parent_workspace_id: None,
-        target_ref: None,
-        workspace_ref: Some("refs/ingot/workspaces/remove-adopt".into()),
-        base_commit_oid: Some(head.clone()),
-        head_commit_oid: Some(head),
-        retention_policy: RetentionPolicy::Ephemeral,
-        status: WorkspaceStatus::Removing,
-        current_job_id: Some(ingot_domain::ids::JobId::new()),
-        created_at,
-        updated_at: created_at,
-    };
+    let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Review)
+        .path(workspace_path.display().to_string())
+        .status(WorkspaceStatus::Removing)
+        .base_commit_oid(&head)
+        .head_commit_oid(&head)
+        .no_target_ref()
+        .workspace_ref("refs/ingot/workspaces/remove-adopt")
+        .retention_policy(RetentionPolicy::Ephemeral)
+        .current_job_id(ingot_domain::ids::JobId::new())
+        .created_at(created_at)
+        .build();
     db.create_workspace(&workspace)
         .await
         .expect("create workspace");
-    let operation = GitOperation {
-        id: GitOperationId::new(),
-        project_id: project.id,
-        operation_kind: OperationKind::RemoveWorkspaceRef,
-        entity_type: GitEntityType::Workspace,
-        entity_id: workspace.id.to_string(),
-        workspace_id: Some(workspace.id),
-        ref_name: workspace.workspace_ref.clone(),
-        expected_old_oid: workspace.head_commit_oid.clone(),
-        new_oid: None,
-        commit_oid: None,
-        status: GitOperationStatus::Applied,
-        metadata: None,
-        created_at,
-        completed_at: None,
-    };
+    let operation = GitOperationBuilder::new(
+        project.id,
+        OperationKind::RemoveWorkspaceRef,
+        GitEntityType::Workspace,
+        workspace.id.to_string(),
+    )
+    .workspace_id(workspace.id)
+    .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
+    .expected_old_oid(
+        workspace
+            .head_commit_oid
+            .clone()
+            .expect("workspace head commit"),
+    )
+    .status(GitOperationStatus::Applied)
+    .created_at(created_at)
+    .build();
     db.create_git_operation(&operation)
         .await
         .expect("create operation");
@@ -1449,12 +1282,10 @@ async fn reconcile_startup_adopts_remove_workspace_ref_operation() {
 #[tokio::test]
 async fn reconcile_startup_removes_abandoned_review_workspace_when_safe() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let workspace_path =
-        std::env::temp_dir().join(format!("ingot-runtime-review-cleanup-{}", Uuid::now_v7()));
+    let workspace_path = unique_temp_path("ingot-runtime-review-cleanup");
 
     let db = migrated_test_db("ingot-runtime").await;
-    let state_root =
-        std::env::temp_dir().join(format!("ingot-runtime-cleanup-state-{}", Uuid::now_v7()));
+    let state_root = unique_temp_path("ingot-runtime-cleanup-state");
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
@@ -1462,7 +1293,7 @@ async fn reconcile_startup_removes_abandoned_review_workspace_when_safe() {
         Arc::new(FakeRunner),
     );
 
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     let seed_commit = head_oid(&repo).await.expect("seed head");
     db.create_project(&project).await.expect("create project");
@@ -1480,42 +1311,32 @@ async fn reconcile_startup_removes_abandoned_review_workspace_when_safe() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        lifecycle_state: LifecycleState::Done,
-        done_reason: Some(DoneReason::Completed),
-        resolution_source: Some(ResolutionSource::ManualCommand),
-        closed_at: Some(created_at),
-        ..test_item(project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        ..test_revision(item_id, &seed_commit)
-    };
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .lifecycle_state(LifecycleState::Done)
+        .done_reason(DoneReason::Completed)
+        .resolution_source(ResolutionSource::ManualCommand)
+        .closed_at(created_at)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .build();
     db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
 
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: project.id,
-        kind: WorkspaceKind::Review,
-        strategy: WorkspaceStrategy::Worktree,
-        path: workspace_path.display().to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: None,
-        workspace_ref: None,
-        base_commit_oid: Some(seed_commit.clone()),
-        head_commit_oid: Some(seed_commit),
-        retention_policy: RetentionPolicy::Ephemeral,
-        status: WorkspaceStatus::Abandoned,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Review)
+        .path(workspace_path.display().to_string())
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Abandoned)
+        .base_commit_oid(&seed_commit)
+        .head_commit_oid(&seed_commit)
+        .no_target_ref()
+        .no_workspace_ref()
+        .retention_policy(RetentionPolicy::Ephemeral)
+        .created_at(created_at)
+        .build();
     db.create_workspace(&workspace)
         .await
         .expect("create workspace");
@@ -1534,14 +1355,10 @@ async fn reconcile_startup_removes_abandoned_review_workspace_when_safe() {
 #[tokio::test]
 async fn reconcile_startup_removes_abandoned_authoring_workspace_when_item_is_done_and_safe() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let workspace_path =
-        std::env::temp_dir().join(format!("ingot-runtime-author-cleanup-{}", Uuid::now_v7()));
+    let workspace_path = unique_temp_path("ingot-runtime-author-cleanup");
 
     let db = migrated_test_db("ingot-runtime").await;
-    let state_root = std::env::temp_dir().join(format!(
-        "ingot-runtime-author-cleanup-state-{}",
-        Uuid::now_v7()
-    ));
+    let state_root = unique_temp_path("ingot-runtime-author-cleanup-state");
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
@@ -1549,7 +1366,7 @@ async fn reconcile_startup_removes_abandoned_authoring_workspace_when_item_is_do
         Arc::new(FakeRunner),
     );
 
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     let seed_commit = head_oid(&repo).await.expect("seed head");
     db.create_project(&project).await.expect("create project");
@@ -1575,42 +1392,30 @@ async fn reconcile_startup_removes_abandoned_authoring_workspace_when_item_is_do
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        lifecycle_state: LifecycleState::Done,
-        done_reason: Some(DoneReason::Completed),
-        resolution_source: Some(ResolutionSource::ManualCommand),
-        closed_at: Some(created_at),
-        ..test_item(project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        ..test_revision(item_id, &seed_commit)
-    };
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .lifecycle_state(LifecycleState::Done)
+        .done_reason(DoneReason::Completed)
+        .resolution_source(ResolutionSource::ManualCommand)
+        .closed_at(created_at)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .build();
     db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
 
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: project.id,
-        kind: WorkspaceKind::Authoring,
-        strategy: WorkspaceStrategy::Worktree,
-        path: workspace_path.display().to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/author-cleanup".into()),
-        base_commit_oid: Some(seed_commit.clone()),
-        head_commit_oid: Some(seed_commit),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Abandoned,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
+        .path(workspace_path.display().to_string())
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Abandoned)
+        .base_commit_oid(&seed_commit)
+        .head_commit_oid(&seed_commit)
+        .workspace_ref("refs/ingot/workspaces/author-cleanup")
+        .created_at(created_at)
+        .build();
     db.create_workspace(&workspace)
         .await
         .expect("create workspace");
@@ -1631,8 +1436,7 @@ async fn reconcile_startup_retains_abandoned_authoring_workspace_with_untriaged_
 {
     let repo = temp_git_repo("ingot-runtime-repo");
     let seed_commit = head_oid(&repo).await.expect("seed head");
-    let workspace_path =
-        std::env::temp_dir().join(format!("ingot-runtime-author-retain-{}", Uuid::now_v7()));
+    let workspace_path = unique_temp_path("ingot-runtime-author-retain");
     git_sync(
         &repo,
         &[
@@ -1648,54 +1452,41 @@ async fn reconcile_startup_retains_abandoned_authoring_workspace_with_untriaged_
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
-        DispatcherConfig::new(
-            std::env::temp_dir().join(format!("ingot-runtime-retain-state-{}", Uuid::now_v7())),
-        ),
+        DispatcherConfig::new(unique_temp_path("ingot-runtime-retain-state")),
         Arc::new(FakeRunner),
     );
 
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     db.create_project(&project).await.expect("create project");
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        lifecycle_state: LifecycleState::Done,
-        done_reason: Some(DoneReason::Dismissed),
-        resolution_source: Some(ResolutionSource::ManualCommand),
-        closed_at: Some(created_at),
-        ..test_item(project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        ..test_revision(item_id, &seed_commit)
-    };
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .lifecycle_state(LifecycleState::Done)
+        .done_reason(DoneReason::Dismissed)
+        .resolution_source(ResolutionSource::ManualCommand)
+        .closed_at(created_at)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .build();
     db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
 
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: project.id,
-        kind: WorkspaceKind::Authoring,
-        strategy: WorkspaceStrategy::Worktree,
-        path: workspace_path.display().to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/retain".into()),
-        base_commit_oid: Some(seed_commit.clone()),
-        head_commit_oid: Some(seed_commit.clone()),
-        retention_policy: RetentionPolicy::Ephemeral,
-        status: WorkspaceStatus::Abandoned,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
+        .path(workspace_path.display().to_string())
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Abandoned)
+        .base_commit_oid(&seed_commit)
+        .head_commit_oid(&seed_commit)
+        .workspace_ref("refs/ingot/workspaces/retain")
+        .retention_policy(RetentionPolicy::Ephemeral)
+        .created_at(created_at)
+        .build();
     db.create_workspace(&workspace)
         .await
         .expect("create workspace");
@@ -1708,7 +1499,10 @@ async fn reconcile_startup_retains_abandoned_authoring_workspace_with_untriaged_
         .workspace_kind(WorkspaceKind::Review)
         .execution_permission(ExecutionPermission::MustNotMutate)
         .phase_template_slug("review-candidate")
-        .job_input(JobInput::candidate_subject(seed_commit.clone(), seed_commit.clone()))
+        .job_input(JobInput::candidate_subject(
+            seed_commit.clone(),
+            seed_commit.clone(),
+        ))
         .output_artifact_kind(OutputArtifactKind::ReviewReport)
         .result_schema_version("review_report:v1")
         .result_payload(serde_json::json!({
@@ -1752,10 +1546,7 @@ async fn reconcile_startup_retains_abandoned_integration_workspace_with_untriage
  {
     let repo = temp_git_repo("ingot-runtime-repo");
     let seed_commit = head_oid(&repo).await.expect("seed head");
-    let workspace_path = std::env::temp_dir().join(format!(
-        "ingot-runtime-integration-retain-{}",
-        Uuid::now_v7()
-    ));
+    let workspace_path = unique_temp_path("ingot-runtime-integration-retain");
     git_sync(
         &repo,
         &[
@@ -1771,33 +1562,27 @@ async fn reconcile_startup_retains_abandoned_integration_workspace_with_untriage
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
-        DispatcherConfig::new(std::env::temp_dir().join(format!(
-            "ingot-runtime-integration-retain-state-{}",
-            Uuid::now_v7()
-        ))),
+        DispatcherConfig::new(unique_temp_path("ingot-runtime-integration-retain-state")),
         Arc::new(FakeRunner),
     );
 
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     db.create_project(&project).await.expect("create project");
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        lifecycle_state: LifecycleState::Done,
-        done_reason: Some(DoneReason::Completed),
-        resolution_source: Some(ResolutionSource::ManualCommand),
-        closed_at: Some(created_at),
-        ..test_item(project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        ..test_revision(item_id, &seed_commit)
-    };
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .lifecycle_state(LifecycleState::Done)
+        .done_reason(DoneReason::Completed)
+        .resolution_source(ResolutionSource::ManualCommand)
+        .closed_at(created_at)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .build();
     db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
@@ -1810,7 +1595,10 @@ async fn reconcile_startup_retains_abandoned_integration_workspace_with_untriage
         .execution_permission(ExecutionPermission::MustNotMutate)
         .context_policy(ContextPolicy::ResumeContext)
         .phase_template_slug("validate-integrated")
-        .job_input(JobInput::integrated_subject(seed_commit.clone(), seed_commit.clone()))
+        .job_input(JobInput::integrated_subject(
+            seed_commit.clone(),
+            seed_commit.clone(),
+        ))
         .output_artifact_kind(OutputArtifactKind::ValidationReport)
         .result_schema_version("validation_report:v1")
         .result_payload(serde_json::json!({
@@ -1825,24 +1613,15 @@ async fn reconcile_startup_retains_abandoned_integration_workspace_with_untriage
         .build();
     db.create_job(&source_job).await.expect("create source job");
 
-    let workspace = Workspace {
-        id: WorkspaceId::new(),
-        project_id: project.id,
-        kind: WorkspaceKind::Integration,
-        strategy: WorkspaceStrategy::Worktree,
-        path: workspace_path.display().to_string(),
-        created_for_revision_id: Some(revision.id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some("refs/ingot/workspaces/integration-retain".into()),
-        base_commit_oid: Some(seed_commit.clone()),
-        head_commit_oid: Some(seed_commit.clone()),
-        retention_policy: RetentionPolicy::Persistent,
-        status: WorkspaceStatus::Abandoned,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
-    };
+    let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Integration)
+        .path(workspace_path.display().to_string())
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Abandoned)
+        .base_commit_oid(&seed_commit)
+        .head_commit_oid(&seed_commit)
+        .workspace_ref("refs/ingot/workspaces/integration-retain")
+        .created_at(created_at)
+        .build();
     db.create_workspace(&workspace)
         .await
         .expect("create workspace");
@@ -1877,72 +1656,76 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
     let h = TestHarness::new(Arc::new(FakeRunner)).await;
 
     let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
-    let created_at = Utc::now();
+    let created_at = default_timestamp();
 
-    let rev_a = make_runtime_revision(
-        ingot_domain::ids::ItemId::new(),
-        1,
-        &seed_commit,
-        created_at,
-    );
-    let item_a = make_runtime_item(h.project.id, rev_a.id, rev_a.item_id, created_at);
+    let item_a_id = ingot_domain::ids::ItemId::new();
+    let rev_a_id = ingot_domain::ids::ItemRevisionId::new();
+    let rev_a = RevisionBuilder::new(item_a_id)
+        .id(rev_a_id)
+        .revision_no(1)
+        .explicit_seed(&seed_commit)
+        .created_at(created_at)
+        .build();
+    let item_a = ItemBuilder::new(h.project.id, rev_a.id)
+        .id(rev_a.item_id)
+        .created_at(created_at)
+        .build();
     h.db.create_item_with_revision(&item_a, &rev_a)
         .await
         .expect("create item a");
-    let workspace_a = make_runtime_workspace(
-        h.project.id,
-        Some(rev_a.id),
-        WorkspaceKind::Authoring,
-        WorkspaceStatus::Busy,
-        &seed_commit,
-        created_at,
-    );
+    let workspace_a = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
+        .path(h.repo_path.display().to_string())
+        .created_for_revision_id(rev_a.id)
+        .status(WorkspaceStatus::Busy)
+        .base_commit_oid(&seed_commit)
+        .head_commit_oid(&seed_commit)
+        .created_at(created_at)
+        .build();
     h.db.create_workspace(&workspace_a)
         .await
         .expect("workspace a");
-    let mut assigned_job = make_runtime_job(
-        h.project.id,
-        item_a.id,
-        rev_a.id,
-        "author_initial",
-        WorkspaceKind::Authoring,
-        OutputArtifactKind::Commit,
-        created_at,
-    );
+    let mut assigned_job = JobBuilder::new(h.project.id, item_a.id, rev_a.id, "author_initial")
+        .workspace_kind(WorkspaceKind::Authoring)
+        .job_input(JobInput::authoring_head(&seed_commit))
+        .output_artifact_kind(OutputArtifactKind::Commit)
+        .created_at(created_at)
+        .build();
     assigned_job.status = JobStatus::Assigned;
     assigned_job.workspace_id = Some(workspace_a.id);
     h.db.create_job(&assigned_job).await.expect("assigned job");
 
-    let rev_b = make_runtime_revision(
-        ingot_domain::ids::ItemId::new(),
-        1,
-        &seed_commit,
-        created_at,
-    );
-    let item_b = make_runtime_item(h.project.id, rev_b.id, rev_b.item_id, created_at);
+    let item_b_id = ingot_domain::ids::ItemId::new();
+    let rev_b_id = ingot_domain::ids::ItemRevisionId::new();
+    let rev_b = RevisionBuilder::new(item_b_id)
+        .id(rev_b_id)
+        .revision_no(1)
+        .explicit_seed(&seed_commit)
+        .created_at(created_at)
+        .build();
+    let item_b = ItemBuilder::new(h.project.id, rev_b.id)
+        .id(rev_b.item_id)
+        .created_at(created_at)
+        .build();
     h.db.create_item_with_revision(&item_b, &rev_b)
         .await
         .expect("create item b");
-    let workspace_b = make_runtime_workspace(
-        h.project.id,
-        Some(rev_b.id),
-        WorkspaceKind::Authoring,
-        WorkspaceStatus::Busy,
-        &seed_commit,
-        created_at,
-    );
+    let workspace_b = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
+        .path(h.repo_path.display().to_string())
+        .created_for_revision_id(rev_b.id)
+        .status(WorkspaceStatus::Busy)
+        .base_commit_oid(&seed_commit)
+        .head_commit_oid(&seed_commit)
+        .created_at(created_at)
+        .build();
     h.db.create_workspace(&workspace_b)
         .await
         .expect("workspace b");
-    let mut running_job = make_runtime_job(
-        h.project.id,
-        item_b.id,
-        rev_b.id,
-        "author_initial",
-        WorkspaceKind::Authoring,
-        OutputArtifactKind::Commit,
-        created_at,
-    );
+    let mut running_job = JobBuilder::new(h.project.id, item_b.id, rev_b.id, "author_initial")
+        .workspace_kind(WorkspaceKind::Authoring)
+        .job_input(JobInput::authoring_head(&seed_commit))
+        .output_artifact_kind(OutputArtifactKind::Commit)
+        .created_at(created_at)
+        .build();
     running_job.status = JobStatus::Running;
     running_job.workspace_id = Some(workspace_b.id);
     running_job.lease_owner_id = Some("old-daemon".into());

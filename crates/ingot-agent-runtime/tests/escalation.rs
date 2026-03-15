@@ -7,7 +7,6 @@ use ingot_agent_runtime::AgentRunner;
 use ingot_domain::agent::Agent;
 use ingot_domain::item::EscalationState;
 use ingot_domain::job::{JobInput, JobStatus, OutcomeClass, OutputArtifactKind};
-use ingot_domain::revision::ItemRevision;
 use ingot_git::commands::head_oid;
 
 mod common;
@@ -42,17 +41,14 @@ async fn runtime_terminal_failure_escalates_closure_relevant_item() {
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
 
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        ..test_item(h.project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        template_map_snapshot: serde_json::json!({ "author_initial": "author-initial" }),
-        ..test_revision(item_id, &seed_commit)
-    };
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
+        .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
@@ -82,26 +78,23 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
 
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        escalation_state: EscalationState::OperatorRequired,
-        escalation_reason: Some(EscalationReason::StepFailed),
-        ..test_item(h.project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        template_map_snapshot: serde_json::json!({ "author_initial": "author-initial" }),
-        ..test_revision(item_id, &seed_commit)
-    };
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .escalation_state(EscalationState::OperatorRequired)
+        .escalation_reason(EscalationReason::StepFailed)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
+        .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
 
     // Create the failed job
     let failed_job_id = ingot_domain::ids::JobId::new();
-    let created_at = chrono::Utc::now();
+    let created_at = default_timestamp();
     let failed_job = JobBuilder::new(h.project.id, item_id, revision_id, "author_initial")
         .id(failed_job_id)
         .status(JobStatus::Failed)
@@ -126,9 +119,7 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
         .job_input(JobInput::authoring_head(&seed_commit))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .build();
-    h.db.create_job(&retry_job)
-        .await
-        .expect("create retry job");
+    h.db.create_job(&retry_job).await.expect("create retry job");
 
     assert!(h.dispatcher.tick().await.expect("tick should run"));
 

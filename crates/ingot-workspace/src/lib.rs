@@ -285,8 +285,7 @@ mod tests {
     async fn provision_authoring_workspace_creates_worktree_and_anchor_ref() {
         let repo = temp_git_repo("ingot-workspace");
         let expected_head = git_output(&repo, &["rev-parse", "HEAD"]);
-        let workspace_path =
-            unique_temp_path("ingot-workspace");
+        let workspace_path = unique_temp_path("ingot-workspace");
 
         let provisioned = provision_authoring_workspace(
             &repo,
@@ -314,8 +313,7 @@ mod tests {
     async fn provision_authoring_workspace_reuses_existing_worktree() {
         let repo = temp_git_repo("ingot-workspace");
         let expected_head = git_output(&repo, &["rev-parse", "HEAD"]);
-        let workspace_path =
-            unique_temp_path("ingot-workspace");
+        let workspace_path = unique_temp_path("ingot-workspace");
 
         provision_authoring_workspace(
             &repo,

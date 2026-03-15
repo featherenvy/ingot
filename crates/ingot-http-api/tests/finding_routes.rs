@@ -1,10 +1,10 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use ingot_domain::job::{ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind};
+use ingot_domain::job::{
+    ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
+};
 use ingot_domain::workspace::WorkspaceKind;
-use ingot_store_sqlite::Database;
 use tower::ServiceExt;
-use uuid::Uuid;
 
 mod common;
 use common::*;
@@ -13,10 +13,7 @@ use common::*;
 async fn triaging_final_integrated_finding_enters_pending_approval() {
     let repo = temp_git_repo("ingot-http-api");
     let head = git_output(&repo, &["rev-parse", "HEAD"]);
-    let db_path =
-        std::env::temp_dir().join(format!("ingot-http-api-triage-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-triage").await;
 
     let project_id = "prj_11111111111111111111111111111111";
     let item_id = "itm_11111111111111111111111111111111";
@@ -193,10 +190,7 @@ async fn triaging_final_integrated_finding_enters_pending_approval() {
 async fn backlog_triage_rejects_self_linked_item() {
     let repo = temp_git_repo("ingot-http-api");
     let head = git_output(&repo, &["rev-parse", "HEAD"]);
-    let db_path =
-        std::env::temp_dir().join(format!("ingot-http-api-backlog-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-backlog").await;
 
     let project_id = "prj_22222222222222222222222222222222";
     let item_id = "itm_22222222222222222222222222222222";
@@ -319,10 +313,7 @@ async fn backlog_triage_rejects_self_linked_item() {
 async fn retriaging_backlog_created_item_clears_origin_backlink() {
     let repo = temp_git_repo("ingot-http-api");
     let head = git_output(&repo, &["rev-parse", "HEAD"]);
-    let db_path =
-        std::env::temp_dir().join(format!("ingot-http-api-retriage-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-retriage").await;
 
     let project_id = "prj_33333333333333333333333333333333";
     let item_id = "itm_33333333333333333333333333333333";

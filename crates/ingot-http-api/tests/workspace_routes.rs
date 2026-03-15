@@ -5,7 +5,6 @@ use axum::http::{Request, StatusCode};
 use ingot_domain::ids::ProjectId;
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
 use ingot_http_api::build_router_with_project_locks_and_state_root;
-use ingot_store_sqlite::Database;
 use ingot_usecases::ProjectLocks;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -39,9 +38,7 @@ async fn reset_workspace_route_restores_authoring_workspace_head() {
     );
     write_file(&workspace_path.join("tracked.txt"), "changed");
 
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000044".to_string();
     let workspace_id = "wrk_00000000000000000000000000000044".to_string();
 
@@ -109,9 +106,7 @@ async fn remove_workspace_route_deletes_abandoned_workspace_ref_and_path() {
         Uuid::now_v7()
     ));
 
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000043".to_string();
     let workspace_id = "wrk_00000000000000000000000000000043".to_string();
     let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");

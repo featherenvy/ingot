@@ -1,7 +1,9 @@
-use super::items::{append_activity, build_superseding_revision, hydrate_convergence_validity, load_item_detail};
-use super::*;
+use super::items::{
+    append_activity, build_superseding_revision, hydrate_convergence_validity, load_item_detail,
+};
 use super::support::*;
 use super::types::*;
+use super::*;
 
 #[derive(Clone)]
 pub(super) struct HttpConvergencePort {
@@ -522,33 +524,22 @@ pub(super) async fn reject_item_approval(
     Ok(Json(detail))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::Arc;
 
     use chrono::Utc;
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
     use ingot_domain::item::ApprovalState;
-    use ingot_domain::project::Project;
-    use ingot_git::GitJobCompletionPort;
-    use ingot_git::project_repo::project_repo_paths;
-    use ingot_store_sqlite::Database;
-    use ingot_test_support::fixtures::{DEFAULT_TEST_TIMESTAMP, ItemBuilder, RevisionBuilder};
+    use ingot_test_support::fixtures::{ItemBuilder, RevisionBuilder};
     use ingot_test_support::git::{
         git_output as support_git_output, temp_git_repo as support_temp_git_repo,
     };
-    use ingot_usecases::{CompleteJobService, ProjectLocks, UseCaseError};
+    use ingot_usecases::UseCaseError;
     use ingot_usecases::convergence::ConvergenceCommandPort;
-    use uuid::Uuid;
 
-    use crate::router::AppState;
-
-    use std::path::Path as FsPath;
-
-    const TS: &str = DEFAULT_TEST_TIMESTAMP;
+    use super::super::test_helpers::test_app_state;
 
     fn temp_git_repo() -> PathBuf {
         support_temp_git_repo("ingot-http-api")
@@ -556,46 +547,6 @@ mod tests {
 
     fn git_output(path: &PathBuf, args: &[&str]) -> String {
         support_git_output(path, args)
-    }
-
-    fn test_project(path: PathBuf) -> Project {
-        Project {
-            id: ProjectId::from_uuid(Uuid::nil()),
-            name: "Test".into(),
-            path: path.display().to_string(),
-            default_branch: "main".into(),
-            color: "#000000".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    async fn test_app_state() -> AppState {
-        let db_path =
-            std::env::temp_dir().join(format!("ingot-http-api-test-{}.db", Uuid::now_v7()));
-        let db = Database::connect(&db_path).await.expect("connect db");
-        db.migrate().await.expect("migrate db");
-        let state_root =
-            std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
-        let resolver_state_root = state_root.clone();
-        AppState {
-            db: db.clone(),
-            complete_job_service: CompleteJobService::with_repo_path_resolver(
-                db,
-                GitJobCompletionPort,
-                ProjectLocks::default(),
-                Arc::new(move |project: &Project| {
-                    project_repo_paths(
-                        resolver_state_root.as_path(),
-                        project.id,
-                        FsPath::new(&project.path),
-                    )
-                    .mirror_git_dir
-                }),
-            ),
-            project_locks: ProjectLocks::default(),
-            state_root,
-        }
     }
 
     #[tokio::test]
@@ -668,5 +619,4 @@ mod tests {
 
         assert!(matches!(error, UseCaseError::ItemNotFound));
     }
-
 }

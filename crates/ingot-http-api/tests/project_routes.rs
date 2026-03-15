@@ -2,9 +2,7 @@ use std::fs;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
-use ingot_store_sqlite::Database;
 use tower::ServiceExt;
-use uuid::Uuid;
 
 mod common;
 use common::*;
@@ -12,9 +10,7 @@ use common::*;
 #[tokio::test]
 async fn create_project_route_registers_repo_and_exposes_project_config() {
     let repo = temp_git_repo("ingot-http-api");
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
 
     fs::create_dir_all(repo.join(".ingot")).expect("create config dir");
     write_file(
@@ -71,8 +67,7 @@ async fn create_project_route_registers_repo_and_exposes_project_config() {
     let config_body = to_bytes(config_response.into_body(), usize::MAX)
         .await
         .expect("read config body");
-    let config_json: serde_json::Value =
-        serde_json::from_slice(&config_body).expect("config json");
+    let config_json: serde_json::Value = serde_json::from_slice(&config_body).expect("config json");
 
     assert_eq!(
         config_json["defaults"]["approval_policy"].as_str(),
@@ -104,9 +99,7 @@ async fn create_project_route_registers_repo_and_exposes_project_config() {
 #[tokio::test]
 async fn project_activity_route_lists_recorded_activity() {
     let repo = temp_git_repo("ingot-http-api");
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let app = test_router(db.clone());
 
     let response = app
@@ -181,9 +174,7 @@ async fn project_activity_route_lists_recorded_activity() {
 #[tokio::test]
 async fn update_and_delete_project_routes_mutate_registered_project() {
     let repo = temp_git_repo("ingot-http-api");
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let app = test_router(db.clone());
 
     let create_response = app
@@ -207,8 +198,7 @@ async fn update_and_delete_project_routes_mutate_registered_project() {
     let create_body = to_bytes(create_response.into_body(), usize::MAX)
         .await
         .expect("read create body");
-    let create_json: serde_json::Value =
-        serde_json::from_slice(&create_body).expect("create json");
+    let create_json: serde_json::Value = serde_json::from_slice(&create_body).expect("create json");
     let project_id = create_json["id"].as_str().expect("project id");
 
     let update_response = app
@@ -234,8 +224,7 @@ async fn update_and_delete_project_routes_mutate_registered_project() {
     let update_body = to_bytes(update_response.into_body(), usize::MAX)
         .await
         .expect("read update body");
-    let update_json: serde_json::Value =
-        serde_json::from_slice(&update_body).expect("update json");
+    let update_json: serde_json::Value = serde_json::from_slice(&update_body).expect("update json");
     assert_eq!(update_json["name"].as_str(), Some("Renamed"));
     assert_eq!(update_json["color"].as_str(), Some("#abcdef"));
 

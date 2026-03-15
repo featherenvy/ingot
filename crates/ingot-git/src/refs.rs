@@ -528,5 +528,4 @@ mod tests {
         assert!(output.status.success(), "commit-tree failed");
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
-
 }

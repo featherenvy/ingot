@@ -1,3 +1,8 @@
+#![allow(dead_code, unused_imports)]
+
+// Shared route-test helpers are compiled into multiple test binaries, and each binary
+// intentionally uses only a subset of them.
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -6,15 +11,16 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use ingot_domain::ids::{JobId, WorkspaceId};
 use ingot_domain::job::{
-    ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass,
-    OutputArtifactKind, PhaseKind,
+    ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
+    PhaseKind,
 };
 use ingot_domain::workspace::WorkspaceKind;
 use ingot_store_sqlite::Database;
-use ingot_usecases::ProjectLocks;
 pub use ingot_test_support::fixtures::{DEFAULT_TEST_TIMESTAMP, parse_timestamp};
 pub use ingot_test_support::git::{git_output, run_git as git, temp_git_repo, write_file};
+pub use ingot_test_support::reports::clean_validation_report;
 pub use ingot_test_support::sqlite::migrated_test_db;
+use ingot_usecases::ProjectLocks;
 use uuid::Uuid;
 
 pub const TS: &str = DEFAULT_TEST_TIMESTAMP;
@@ -170,15 +176,11 @@ pub async fn insert_test_job_row(db: &Database, row: TestJobInsert<'_>) {
         step_id: row.step_id.into(),
         semantic_attempt_no: row.semantic_attempt_no,
         retry_no: row.retry_no,
-        supersedes_job_id: row
-            .supersedes_job_id
-            .map(parse_id::<JobId>),
+        supersedes_job_id: row.supersedes_job_id.map(parse_id::<JobId>),
         status: row.status,
         outcome_class: row.outcome_class,
         phase_kind: row.phase_kind,
-        workspace_id: row
-            .workspace_id
-            .map(parse_id::<WorkspaceId>),
+        workspace_id: row.workspace_id.map(parse_id::<WorkspaceId>),
         workspace_kind: row.workspace_kind,
         execution_permission: row.execution_permission,
         context_policy: row.context_policy,

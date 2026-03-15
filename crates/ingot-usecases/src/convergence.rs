@@ -9,8 +9,14 @@ use ingot_domain::ids::{ActivityId, ConvergenceId, ItemId, ProjectId};
 use ingot_domain::item::ApprovalState;
 use ingot_domain::job::Job;
 use ingot_domain::ports::ConvergenceQueuePrepareContext;
+use ingot_domain::ports::{
+    ActivityRepository, ConvergenceQueueRepository, ConvergenceRepository, ItemRepository,
+    WorkspaceRepository,
+};
 use ingot_domain::project::Project;
+use ingot_domain::revision::ApprovalPolicy;
 use ingot_domain::revision::ItemRevision;
+use ingot_domain::workspace::WorkspaceStatus;
 use ingot_workflow::Evaluator;
 
 use crate::UseCaseError;
@@ -434,6 +440,124 @@ where
     }
 }
 
+/// Promote queued convergence queue entries to head when no head exists for their lane.
+/// Pure DB operation.
+pub async fn promote_queue_heads<CQ, A>(
+    queue_repo: &CQ,
+    activity_repo: &A,
+    project_id: ProjectId,
+) -> Result<bool, UseCaseError>
+where
+    CQ: ConvergenceQueueRepository,
+    A: ActivityRepository,
+{
+    let entries = queue_repo.list_active_by_project(project_id).await?;
+    let mut lanes_with_heads = std::collections::HashSet::new();
+    for entry in &entries {
+        if entry.status == ConvergenceQueueEntryStatus::Head {
+            lanes_with_heads.insert(entry.target_ref.clone());
+        }
+    }
+
+    let mut promoted = false;
+    for entry in entries {
+        if entry.status != ConvergenceQueueEntryStatus::Queued
+            || lanes_with_heads.contains(&entry.target_ref)
+        {
+            continue;
+        }
+
+        let mut entry = entry;
+        entry.status = ConvergenceQueueEntryStatus::Head;
+        entry.head_acquired_at = Some(Utc::now());
+        entry.updated_at = Utc::now();
+        queue_repo.update(&entry).await?;
+        activity_repo
+            .append(&Activity {
+                id: ActivityId::new(),
+                project_id,
+                event_type: ActivityEventType::ConvergenceLaneAcquired,
+                entity_type: "queue_entry".into(),
+                entity_id: entry.id.to_string(),
+                payload: serde_json::json!({ "item_id": entry.item_id, "target_ref": entry.target_ref }),
+                created_at: Utc::now(),
+            })
+            .await?;
+        lanes_with_heads.insert(entry.target_ref);
+        promoted = true;
+    }
+
+    Ok(promoted)
+}
+
+/// Invalidate a prepared convergence whose target ref has moved.
+/// Pure DB: marks convergence as failed, sets integration workspace to Stale,
+/// resets approval state if not already granted, appends activity.
+/// Returns true if a convergence was invalidated.
+pub async fn invalidate_prepared_convergence<C, W, IR, A>(
+    convergence_repo: &C,
+    workspace_repo: &W,
+    item_repo: &IR,
+    activity_repo: &A,
+    item: &mut ingot_domain::item::Item,
+    revision: &ItemRevision,
+    convergences: &[Convergence],
+) -> Result<bool, UseCaseError>
+where
+    C: ConvergenceRepository,
+    W: WorkspaceRepository,
+    IR: ItemRepository,
+    A: ActivityRepository,
+{
+    let mut convergence = match convergences
+        .iter()
+        .find(|convergence| {
+            convergence.item_revision_id == revision.id
+                && convergence.status == ConvergenceStatus::Prepared
+        })
+        .cloned()
+    {
+        Some(c) => c,
+        None => return Ok(false),
+    };
+
+    convergence.status = ConvergenceStatus::Failed;
+    convergence.conflict_summary = Some("target_ref_moved".into());
+    convergence.completed_at = Some(Utc::now());
+    convergence_repo.update(&convergence).await?;
+
+    if let Some(workspace_id) = convergence.integration_workspace_id {
+        let mut workspace = workspace_repo.get(workspace_id).await?;
+        workspace.status = WorkspaceStatus::Stale;
+        workspace.current_job_id = None;
+        workspace.updated_at = Utc::now();
+        workspace_repo.update(&workspace).await?;
+    }
+
+    if item.approval_state != ApprovalState::Granted {
+        item.approval_state = match revision.approval_policy {
+            ApprovalPolicy::Required => ApprovalState::NotRequested,
+            ApprovalPolicy::NotRequired => ApprovalState::NotRequired,
+        };
+    }
+    item.updated_at = Utc::now();
+    item_repo.update(item).await?;
+
+    activity_repo
+        .append(&Activity {
+            id: ActivityId::new(),
+            project_id: convergence.project_id,
+            event_type: ActivityEventType::ConvergenceFailed,
+            entity_type: "convergence".into(),
+            entity_id: convergence.id.to_string(),
+            payload: serde_json::json!({ "item_id": item.id, "reason": "target_ref_moved" }),
+            created_at: Utc::now(),
+        })
+        .await?;
+
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use std::future::ready;
@@ -552,13 +676,10 @@ mod tests {
         ) -> impl Future<Output = Result<ConvergenceApprovalContext, UseCaseError>> + Send {
             let nil = Uuid::nil();
             ready(Ok(ConvergenceApprovalContext {
-                item: ItemBuilder::new(
-                    ProjectId::from_uuid(nil),
-                    ItemRevisionId::from_uuid(nil),
-                )
-                .id(ItemId::from_uuid(nil))
-                .approval_state(ApprovalState::Pending)
-                .build(),
+                item: ItemBuilder::new(ProjectId::from_uuid(nil), ItemRevisionId::from_uuid(nil))
+                    .id(ItemId::from_uuid(nil))
+                    .approval_state(ApprovalState::Pending)
+                    .build(),
                 has_active_job: false,
                 has_active_convergence: false,
                 prepared_convergence_id: Some(ConvergenceId::from_uuid(Uuid::nil())),
@@ -596,13 +717,10 @@ mod tests {
         ) -> impl Future<Output = Result<RejectApprovalContext, UseCaseError>> + Send {
             let nil = Uuid::nil();
             ready(Ok(RejectApprovalContext {
-                item: ItemBuilder::new(
-                    ProjectId::from_uuid(nil),
-                    ItemRevisionId::from_uuid(nil),
-                )
-                .id(ItemId::from_uuid(nil))
-                .approval_state(ApprovalState::Granted)
-                .build(),
+                item: ItemBuilder::new(ProjectId::from_uuid(nil), ItemRevisionId::from_uuid(nil))
+                    .id(ItemId::from_uuid(nil))
+                    .approval_state(ApprovalState::Granted)
+                    .build(),
                 has_active_job: false,
                 has_active_convergence: false,
             }))

@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use ingot_domain::ids;
 use ingot_domain::item::{
-    ApprovalState, Classification, DoneReason, EscalationState, Item, LifecycleState, OriginKind,
-    ParkingState, Priority, ResolutionSource,
+    ApprovalState, Classification, DoneReason, EscalationReason, EscalationState, Item,
+    LifecycleState, OriginKind, ParkingState, Priority, ResolutionSource,
 };
 use uuid::Uuid;
 
@@ -20,6 +20,7 @@ pub struct ItemBuilder {
     resolution_source: Option<ResolutionSource>,
     approval_state: ApprovalState,
     escalation_state: EscalationState,
+    escalation_reason: Option<EscalationReason>,
     origin_kind: OriginKind,
     priority: Priority,
     created_at: DateTime<Utc>,
@@ -30,8 +31,11 @@ pub struct ItemBuilder {
 impl ItemBuilder {
     pub fn nil() -> Self {
         let nil = Uuid::nil();
-        Self::new(ids::ProjectId::from_uuid(nil), ids::ItemRevisionId::from_uuid(nil))
-            .id(ids::ItemId::from_uuid(nil))
+        Self::new(
+            ids::ProjectId::from_uuid(nil),
+            ids::ItemRevisionId::from_uuid(nil),
+        )
+        .id(ids::ItemId::from_uuid(nil))
     }
 
     pub fn new(project_id: ids::ProjectId, current_revision_id: ids::ItemRevisionId) -> Self {
@@ -48,6 +52,7 @@ impl ItemBuilder {
             resolution_source: None,
             approval_state: ApprovalState::NotRequested,
             escalation_state: EscalationState::None,
+            escalation_reason: None,
             origin_kind: OriginKind::Manual,
             priority: Priority::Major,
             created_at: now,
@@ -63,6 +68,16 @@ impl ItemBuilder {
 
     pub fn approval_state(mut self, approval_state: ApprovalState) -> Self {
         self.approval_state = approval_state;
+        self
+    }
+
+    pub fn escalation_state(mut self, escalation_state: EscalationState) -> Self {
+        self.escalation_state = escalation_state;
+        self
+    }
+
+    pub fn escalation_reason(mut self, escalation_reason: EscalationReason) -> Self {
+        self.escalation_reason = Some(escalation_reason);
         self
     }
 
@@ -104,7 +119,7 @@ impl ItemBuilder {
             resolution_source: self.resolution_source,
             approval_state: self.approval_state,
             escalation_state: self.escalation_state,
-            escalation_reason: None,
+            escalation_reason: self.escalation_reason,
             current_revision_id: self.current_revision_id,
             origin_kind: self.origin_kind,
             origin_finding_id: None,

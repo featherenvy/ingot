@@ -1,6 +1,6 @@
 use super::items::append_activity;
-use super::*;
 use super::support::*;
+use super::*;
 
 pub(super) async fn reset_workspace_route(
     State(state): State<AppState>,
@@ -133,7 +133,7 @@ pub(super) async fn abandon_workspace_route(
         .project_locks
         .acquire_project_mutation(project_id)
         .await;
-    let mut workspace = state
+    let workspace = state
         .db
         .get_workspace(workspace_id)
         .await
@@ -145,14 +145,7 @@ pub(super) async fn abandon_workspace_route(
         });
     }
     ensure_workspace_not_busy(&workspace)?;
-    workspace.status = WorkspaceStatus::Abandoned;
-    workspace.current_job_id = None;
-    workspace.updated_at = Utc::now();
-    state
-        .db
-        .update_workspace(&workspace)
-        .await
-        .map_err(repo_to_internal)?;
+    let workspace = ingot_usecases::workspace::abandon_workspace(&state.db, &workspace).await?;
     Ok(Json(workspace))
 }
 
@@ -172,7 +165,7 @@ pub(super) async fn remove_workspace_route(
         .project_locks
         .acquire_project_mutation(project_id)
         .await;
-    let mut workspace = state
+    let workspace = state
         .db
         .get_workspace(workspace_id)
         .await
@@ -184,14 +177,12 @@ pub(super) async fn remove_workspace_route(
         });
     }
     ensure_workspace_not_busy(&workspace)?;
-    workspace.status = WorkspaceStatus::Removing;
-    workspace.updated_at = Utc::now();
-    state
-        .db
-        .update_workspace(&workspace)
-        .await
-        .map_err(repo_to_internal)?;
 
+    // Phase 1: mark as Removing (DB)
+    let workspace =
+        ingot_usecases::workspace::plan_workspace_removal(&state.db, &workspace).await?;
+
+    // Phase 2: filesystem cleanup (infrastructure)
     if PathBuf::from(&workspace.path).exists() {
         remove_workspace(paths.mirror_git_dir.as_path(), FsPath::new(&workspace.path))
             .await
@@ -226,14 +217,14 @@ pub(super) async fn remove_workspace_route(
                 .await
                 .map_err(repo_to_internal)?;
             append_activity(
-            &state,
-            project_id,
-            ActivityEventType::GitOperationPlanned,
-            "git_operation",
-            operation.id,
-            serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
-        )
-        .await?;
+                &state,
+                project_id,
+                ActivityEventType::GitOperationPlanned,
+                "git_operation",
+                operation.id,
+                serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
+            )
+            .await?;
             delete_ref(paths.mirror_git_dir.as_path(), workspace_ref)
                 .await
                 .map_err(git_to_internal)?;
@@ -247,14 +238,8 @@ pub(super) async fn remove_workspace_route(
         }
     }
 
-    workspace.status = WorkspaceStatus::Abandoned;
-    workspace.current_job_id = None;
-    workspace.updated_at = Utc::now();
-    state
-        .db
-        .update_workspace(&workspace)
-        .await
-        .map_err(repo_to_internal)?;
+    // Phase 3: finalize to Abandoned (DB)
+    let workspace =
+        ingot_usecases::workspace::finalize_workspace_removal(&state.db, &workspace).await?;
     Ok(Json(workspace))
 }
-

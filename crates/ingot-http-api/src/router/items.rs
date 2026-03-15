@@ -1,7 +1,7 @@
-use super::jobs::auto_dispatch_projected_review_job_locked;
-use super::*;
+use super::dispatch::auto_dispatch_projected_review_job_locked;
 use super::support::*;
 use super::types::*;
+use super::*;
 
 pub(super) async fn create_item(
     State(state): State<AppState>,
@@ -668,7 +668,9 @@ pub(super) async fn read_optional_text(path: PathBuf) -> Result<Option<String>, 
     }
 }
 
-pub(super) async fn read_optional_json(path: PathBuf) -> Result<Option<serde_json::Value>, ApiError> {
+pub(super) async fn read_optional_json(
+    path: PathBuf,
+) -> Result<Option<serde_json::Value>, ApiError> {
     let Some(contents) = read_optional_text(path).await? else {
         return Ok(None);
     };
@@ -880,7 +882,8 @@ pub(super) fn ensure_item_open_idle(item: &Item) -> Result<(), ApiError> {
 }
 
 #[derive(Default)]
-pub(super) struct RevisionLaneTeardown {
+#[allow(dead_code)]
+pub(crate) struct RevisionLaneTeardown {
     pub(super) cancelled_job_ids: Vec<String>,
     pub(super) cancelled_convergence_ids: Vec<String>,
     pub(super) cancelled_queue_entry_ids: Vec<String>,
@@ -1516,71 +1519,51 @@ pub(crate) fn load_effective_config(project: Option<&Project>) -> Result<IngotCo
     })
 }
 
-pub(super) fn current_authoring_head_for_revision(jobs: &[Job], revision: &ItemRevision) -> Option<String> {
-    jobs.iter()
-        .filter(|job| job.item_revision_id == revision.id)
-        .filter(|job| job.status == JobStatus::Completed)
-        .filter(|job| job.output_artifact_kind == ingot_domain::job::OutputArtifactKind::Commit)
-        .filter_map(|job| {
-            job.output_commit_oid
-                .as_ref()
-                .map(|commit_oid| ((job.ended_at, job.created_at), commit_oid.clone()))
-        })
-        .max_by_key(|(sort_key, _)| *sort_key)
-        .map(|(_, commit_oid)| commit_oid)
-        .or_else(|| revision.seed_commit_oid.clone())
-}
-
 pub(super) async fn current_authoring_head_for_revision_with_workspace(
     state: &AppState,
     revision: &ItemRevision,
     jobs: &[Job],
 ) -> Result<Option<String>, ApiError> {
-    if let Some(commit_oid) = current_authoring_head_for_revision(jobs, revision) {
-        return Ok(Some(commit_oid));
-    }
-
-    Ok(state
+    let workspace = state
         .db
         .find_authoring_workspace_for_revision(revision.id)
         .await
-        .map_err(repo_to_internal)?
-        .and_then(|workspace| workspace.head_commit_oid))
+        .map_err(repo_to_internal)?;
+    Ok(
+        ingot_usecases::dispatch::current_authoring_head_for_revision_with_workspace(
+            revision,
+            jobs,
+            workspace.as_ref(),
+        ),
+    )
 }
 
 pub(super) async fn effective_authoring_base_commit_oid(
     state: &AppState,
     revision: &ItemRevision,
 ) -> Result<Option<String>, ApiError> {
-    if let Some(seed_commit_oid) = revision.seed_commit_oid.clone() {
-        return Ok(Some(seed_commit_oid));
-    }
-
-    Ok(state
+    let workspace = state
         .db
         .find_authoring_workspace_for_revision(revision.id)
         .await
-        .map_err(repo_to_internal)?
-        .and_then(|workspace| workspace.base_commit_oid))
+        .map_err(repo_to_internal)?;
+    Ok(ingot_usecases::dispatch::effective_authoring_base_commit_oid(revision, workspace.as_ref()))
 }
-
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
+    use super::compute_target_head_valid;
     use chrono::Utc;
-    use ingot_domain::convergence::{Convergence, ConvergenceStatus, ConvergenceStrategy};
-    use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId, WorkspaceId};
-    use ingot_test_support::fixtures::DEFAULT_TEST_TIMESTAMP;
+    use ingot_domain::convergence::Convergence;
+    use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
+    use ingot_test_support::fixtures::ConvergenceBuilder;
     use ingot_test_support::git::{
         git_output as support_git_output, run_git as support_git,
         temp_git_repo as support_temp_git_repo, write_file as support_write_file,
     };
-    use super::compute_target_head_valid;
     use uuid::Uuid;
-
-    const TS: &str = DEFAULT_TEST_TIMESTAMP;
 
     fn temp_git_repo() -> PathBuf {
         support_temp_git_repo("ingot-http-api")
@@ -1599,25 +1582,14 @@ mod tests {
     }
 
     fn test_prepared_convergence() -> Convergence {
-        Convergence {
-            id: ConvergenceId::from_uuid(Uuid::now_v7()),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            item_id: ItemId::from_uuid(Uuid::nil()),
-            item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            source_workspace_id: WorkspaceId::from_uuid(Uuid::now_v7()),
-            integration_workspace_id: Some(WorkspaceId::from_uuid(Uuid::now_v7())),
-            source_head_commit_oid: "head".into(),
-            target_ref: "refs/heads/main".into(),
-            strategy: ConvergenceStrategy::RebaseThenFastForward,
-            status: ConvergenceStatus::Prepared,
-            input_target_commit_oid: Some("base".into()),
-            prepared_commit_oid: Some("prepared".into()),
-            final_target_commit_oid: None,
-            target_head_valid: Some(true),
-            conflict_summary: None,
-            created_at: Utc::now(),
-            completed_at: None,
-        }
+        ConvergenceBuilder::new(
+            ProjectId::from_uuid(Uuid::nil()),
+            ItemId::from_uuid(Uuid::nil()),
+            ItemRevisionId::from_uuid(Uuid::nil()),
+        )
+        .target_head_valid(true)
+        .created_at(Utc::now())
+        .build()
     }
 
     #[tokio::test]
@@ -1642,5 +1614,4 @@ mod tests {
             .expect("compute stale validity");
         assert_eq!(stale, Some(false));
     }
-
 }

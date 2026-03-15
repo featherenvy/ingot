@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { AlertTriangleIcon, ChevronDownIcon } from 'lucide-react'
 import { useMemo } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
 import { approveItem, dispatchItemJob, prepareConvergence, rejectApproval, triageFinding } from '../api/client'
 import { agentsQuery, itemDetailQuery, queryKeys } from '../api/queries'
 import {
-  AcceptanceCriteriaSection,
   ActivityTimeline,
   ConvergencesTable,
   DiagnosticsSection,
@@ -16,10 +16,12 @@ import {
   RevisionContextPanel,
   WorkflowStepper,
 } from '../components/item-detail'
-import { PageHeader } from '../components/PageHeader'
 import { PageQueryError } from '../components/PageQueryError'
 import { ItemDetailSkeleton } from '../components/PageSkeletons'
-import { SectionNav } from '../components/SectionNav'
+import { Prose } from '../components/Prose'
+import { type SectionIndicator, SectionNav } from '../components/SectionNav'
+import { StatusBadge } from '../components/StatusBadge'
+import { Badge } from '../components/ui/badge'
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -28,6 +30,7 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from '../components/ui/breadcrumb'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../components/ui/collapsible'
 import { useRequiredItemId, useRequiredProjectId } from '../hooks/useRequiredRouteParam'
 import { useSectionObserver } from '../hooks/useSectionObserver'
 import { getQueuedJobBlocker } from '../jobBlockers'
@@ -38,6 +41,7 @@ type DetailSection = {
   id: string
   label: string
   count: number
+  indicator?: SectionIndicator
 }
 
 export default function ItemDetailPage(): React.JSX.Element {
@@ -125,10 +129,29 @@ export default function ItemDetailPage(): React.JSX.Element {
 
   const sections: DetailSection[] = useMemo(() => {
     if (!detail) return []
+
+    const hasActiveJob = detail.jobs.some((j) => ['queued', 'assigned', 'running'].includes(j.status))
+    const hasFailedJob = detail.jobs.some((j) => ['failed', 'cancelled', 'expired'].includes(j.status))
+    const hasUntriagedFinding = detail.findings.some(
+      (f) => f.triage_state === 'untriaged' || f.triage_state === 'needs_investigation',
+    )
+    const hasProblematicConvergence = detail.convergences.some(
+      (c) => c.status === 'conflicted' || c.status === 'failed',
+    )
+    const hasRunningConvergence = detail.convergences.some((c) => c.status === 'running')
+
+    const jobIndicator: SectionIndicator = hasActiveJob ? 'active' : hasFailedJob ? 'error' : null
+    const findingIndicator: SectionIndicator = hasUntriagedFinding ? 'warning' : null
+    const convergenceIndicator: SectionIndicator = hasRunningConvergence
+      ? 'active'
+      : hasProblematicConvergence
+        ? 'error'
+        : null
+
     return [
-      { id: 'jobs', label: 'Jobs', count: detail.jobs.length },
-      { id: 'findings', label: 'Findings', count: detail.findings.length },
-      { id: 'convergences', label: 'Convergences', count: detail.convergences.length },
+      { id: 'jobs', label: 'Jobs', count: detail.jobs.length, indicator: jobIndicator },
+      { id: 'findings', label: 'Findings', count: detail.findings.length, indicator: findingIndicator },
+      { id: 'convergences', label: 'Convergences', count: detail.convergences.length, indicator: convergenceIndicator },
       { id: 'revision-context', label: 'Revision Context', count: detail.revision_context_summary ? 1 : 0 },
       { id: 'diagnostics', label: 'Diagnostics', count: detail.diagnostics.length },
     ].filter((s) => s.count > 0)
@@ -153,7 +176,7 @@ export default function ItemDetailPage(): React.JSX.Element {
   } = detail
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <Breadcrumb>
         <BreadcrumbList>
           <BreadcrumbItem>
@@ -168,11 +191,57 @@ export default function ItemDetailPage(): React.JSX.Element {
         </BreadcrumbList>
       </Breadcrumb>
 
-      <PageHeader
-        title={current_revision.title}
-        description={current_revision.description}
-        descriptionClassName="max-w-3xl"
-      />
+      {/* ─── Header: title, description, inline status ─── */}
+      <div className="space-y-3">
+        <h2 className="text-2xl font-semibold tracking-tight">{current_revision.title}</h2>
+        {current_revision.description && (
+          <div className="max-w-3xl text-muted-foreground">
+            <Prose content={current_revision.description} />
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusBadge status={evaluation.board_status} />
+          <Badge variant="secondary">{item.priority}</Badge>
+          {item.approval_state !== 'not_required' && item.approval_state !== 'not_requested' && (
+            <StatusBadge status={item.approval_state} />
+          )}
+          {item.parking_state === 'deferred' && <StatusBadge status="deferred" />}
+          <span className="text-xs text-muted-foreground">
+            rev {current_revision.revision_no} · <code>{current_revision.target_ref}</code>
+          </span>
+        </div>
+        {item.escalation_state === 'operator_required' && (
+          <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-sm text-destructive">
+            <AlertTriangleIcon className="size-4 shrink-0" />
+            <span className="font-medium">Escalated</span>
+            {item.escalation_reason && (
+              <span className="text-destructive/80">{item.escalation_reason.replace(/_/g, ' ')}</span>
+            )}
+          </div>
+        )}
+        {evaluation.attention_badges.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {evaluation.attention_badges.map((badge) => (
+              <Badge key={badge} variant="destructive">
+                {badge.replace(/_/g, ' ')}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ─── Acceptance criteria (collapsed by default) ─── */}
+      <Collapsible>
+        <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold tracking-tight text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground">
+          <ChevronDownIcon className="size-4 shrink-0 transition-transform duration-200 group-data-[state=closed]:-rotate-90" />
+          Acceptance Criteria
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div className="max-h-64 overflow-y-auto px-3 pt-1 pb-2">
+            <Prose content={current_revision.acceptance_criteria} />
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
 
       <WorkflowStepper currentStepId={evaluation.current_step_id} />
 
@@ -201,8 +270,19 @@ export default function ItemDetailPage(): React.JSX.Element {
         queue={detail.queue}
         agentsLoading={isAgentAvailabilityLoading}
       />
-      <OverviewPanels item={item} evaluation={evaluation} revision={current_revision} />
-      <AcceptanceCriteriaSection acceptanceCriteria={current_revision.acceptance_criteria} />
+
+      {/* ─── State details (collapsed by default) ─── */}
+      <Collapsible>
+        <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold tracking-tight text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground">
+          <ChevronDownIcon className="size-4 shrink-0 transition-transform duration-200 group-data-[state=closed]:-rotate-90" />
+          State Details
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div className="pt-2">
+            <OverviewPanels item={item} evaluation={evaluation} revision={current_revision} />
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
 
       {hasActivity > 0 && (
         <ActivityTimeline jobs={detail.jobs} findings={findings} convergences={detail.convergences} />
@@ -218,6 +298,7 @@ export default function ItemDetailPage(): React.JSX.Element {
             jobs={detail.jobs}
             activeJobId={activeJob?.id ?? null}
             retryableJobIds={retryableJobIds}
+            findings={findings}
             onSuccess={refresh}
           />
         </div>
@@ -226,6 +307,7 @@ export default function ItemDetailPage(): React.JSX.Element {
         <div id="findings">
           <FindingsTable
             findings={findings}
+            jobs={detail.jobs}
             pendingFindingId={triageMutation.isPending ? (triageMutation.variables?.findingId ?? null) : null}
             onTriage={(findingId, payload) =>
               triageMutation.mutate({

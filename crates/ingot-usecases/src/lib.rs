@@ -1,11 +1,15 @@
 pub mod convergence;
+pub mod dispatch;
 pub mod error;
 pub mod finding;
 pub mod item;
 pub mod job;
+pub mod job_lifecycle;
 pub mod locking;
 pub mod reconciliation;
 pub mod revision_context;
+pub mod teardown;
+pub mod workspace;
 
 pub use convergence::ConvergenceService;
 pub use error::UseCaseError;

@@ -1,6 +1,8 @@
 use std::future::Future;
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
+
 use crate::activity::Activity;
 use crate::agent::Agent;
 use crate::convergence::Convergence;
@@ -8,9 +10,8 @@ use crate::convergence_queue::ConvergenceQueueEntry;
 use crate::finding::Finding;
 use crate::git_operation::GitOperation;
 use crate::ids::*;
-use crate::item::Item;
-use crate::job::Job;
-use crate::job::OutcomeClass;
+use crate::item::{EscalationReason, Item};
+use crate::job::{Job, JobStatus, OutcomeClass};
 use crate::project::Project;
 use crate::revision::ItemRevision;
 use crate::revision_context::RevisionContext;
@@ -43,6 +44,11 @@ pub trait ItemRepository: Send + Sync {
     fn get(&self, id: ItemId) -> impl Future<Output = Result<Item, RepositoryError>> + Send;
     fn create(&self, item: &Item) -> impl Future<Output = Result<(), RepositoryError>> + Send;
     fn update(&self, item: &Item) -> impl Future<Output = Result<(), RepositoryError>> + Send;
+    fn create_with_revision(
+        &self,
+        item: &Item,
+        revision: &ItemRevision,
+    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
 }
 
 pub trait RevisionRepository: Send + Sync {
@@ -87,6 +93,31 @@ pub trait JobRepository: Send + Sync {
         &self,
         revision_id: ItemRevisionId,
     ) -> impl Future<Output = Result<Option<Job>, RepositoryError>> + Send;
+    fn list_by_item(
+        &self,
+        item_id: ItemId,
+    ) -> impl Future<Output = Result<Vec<Job>, RepositoryError>> + Send;
+    fn list_queued(
+        &self,
+        limit: u32,
+    ) -> impl Future<Output = Result<Vec<Job>, RepositoryError>> + Send;
+    fn list_active(&self) -> impl Future<Output = Result<Vec<Job>, RepositoryError>> + Send;
+    fn start_execution(
+        &self,
+        params: StartJobExecutionParams,
+    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
+    fn heartbeat_execution(
+        &self,
+        job_id: JobId,
+        item_id: ItemId,
+        revision_id: ItemRevisionId,
+        lease_owner_id: &str,
+        lease_expires_at: DateTime<Utc>,
+    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
+    fn finish_non_success(
+        &self,
+        params: FinishJobNonSuccessParams,
+    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
 }
 
 pub trait WorkspaceRepository: Send + Sync {
@@ -110,6 +141,10 @@ pub trait WorkspaceRepository: Send + Sync {
         &self,
         revision_id: ItemRevisionId,
     ) -> impl Future<Output = Result<Option<Workspace>, RepositoryError>> + Send;
+    fn list_by_item(
+        &self,
+        item_id: ItemId,
+    ) -> impl Future<Output = Result<Vec<Workspace>, RepositoryError>> + Send;
 }
 
 pub trait ConvergenceRepository: Send + Sync {
@@ -137,6 +172,12 @@ pub trait ConvergenceRepository: Send + Sync {
         &self,
         revision_id: ItemRevisionId,
     ) -> impl Future<Output = Result<Option<Convergence>, RepositoryError>> + Send;
+    fn list_by_item(
+        &self,
+        item_id: ItemId,
+    ) -> impl Future<Output = Result<Vec<Convergence>, RepositoryError>> + Send;
+    fn list_active(&self)
+    -> impl Future<Output = Result<Vec<Convergence>, RepositoryError>> + Send;
 }
 
 pub trait FindingRepository: Send + Sync {
@@ -154,6 +195,20 @@ pub trait FindingRepository: Send + Sync {
         job_id: JobId,
         source_finding_key: &str,
     ) -> impl Future<Output = Result<Option<Finding>, RepositoryError>> + Send;
+    fn triage(&self, finding: &Finding)
+    -> impl Future<Output = Result<(), RepositoryError>> + Send;
+    fn triage_with_origin_detached(
+        &self,
+        finding: &Finding,
+        detached_item_id: Option<ItemId>,
+    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
+    fn link_backlog(
+        &self,
+        finding: &Finding,
+        linked_item: &Item,
+        linked_revision: &ItemRevision,
+        detached_item_id: Option<ItemId>,
+    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
 }
 
 pub trait GitOperationRepository: Send + Sync {
@@ -182,6 +237,74 @@ pub trait ActivityRepository: Send + Sync {
         offset: u32,
     ) -> impl Future<Output = Result<Vec<Activity>, RepositoryError>> + Send;
 }
+
+pub trait ConvergenceQueueRepository: Send + Sync {
+    fn list_by_item(
+        &self,
+        item_id: ItemId,
+    ) -> impl Future<Output = Result<Vec<ConvergenceQueueEntry>, RepositoryError>> + Send;
+    fn get(
+        &self,
+        id: ConvergenceQueueEntryId,
+    ) -> impl Future<Output = Result<ConvergenceQueueEntry, RepositoryError>> + Send;
+    fn find_active_for_revision(
+        &self,
+        revision_id: ItemRevisionId,
+    ) -> impl Future<Output = Result<Option<ConvergenceQueueEntry>, RepositoryError>> + Send;
+    fn find_head(
+        &self,
+        project_id: ProjectId,
+        target_ref: &str,
+    ) -> impl Future<Output = Result<Option<ConvergenceQueueEntry>, RepositoryError>> + Send;
+    fn find_next_queued(
+        &self,
+        project_id: ProjectId,
+        target_ref: &str,
+    ) -> impl Future<Output = Result<Option<ConvergenceQueueEntry>, RepositoryError>> + Send;
+    fn list_active_by_project(
+        &self,
+        project_id: ProjectId,
+    ) -> impl Future<Output = Result<Vec<ConvergenceQueueEntry>, RepositoryError>> + Send;
+    fn list_active_for_lane(
+        &self,
+        project_id: ProjectId,
+        target_ref: &str,
+    ) -> impl Future<Output = Result<Vec<ConvergenceQueueEntry>, RepositoryError>> + Send;
+    fn create(
+        &self,
+        entry: &ConvergenceQueueEntry,
+    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
+    fn update(
+        &self,
+        entry: &ConvergenceQueueEntry,
+    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
+}
+
+// --- Job execution parameter types (owned, no lifetimes) ---
+
+pub struct StartJobExecutionParams {
+    pub job_id: JobId,
+    pub item_id: ItemId,
+    pub expected_item_revision_id: ItemRevisionId,
+    pub workspace_id: Option<WorkspaceId>,
+    pub agent_id: Option<AgentId>,
+    pub lease_owner_id: String,
+    pub process_pid: Option<u32>,
+    pub lease_expires_at: DateTime<Utc>,
+}
+
+pub struct FinishJobNonSuccessParams {
+    pub job_id: JobId,
+    pub item_id: ItemId,
+    pub expected_item_revision_id: ItemRevisionId,
+    pub status: JobStatus,
+    pub outcome_class: Option<OutcomeClass>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub escalation_reason: Option<EscalationReason>,
+}
+
+// --- Job completion types ---
 
 #[derive(Debug, Clone)]
 pub struct JobCompletionContext {
@@ -237,6 +360,8 @@ pub trait JobCompletionRepository: Send + Sync {
         mutation: JobCompletionMutation,
     ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
 }
+
+// --- Convergence service ports ---
 
 #[derive(Debug, Clone)]
 pub struct ConvergenceQueuePrepareContext {

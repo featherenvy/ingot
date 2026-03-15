@@ -5,14 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ingot_agent_runtime::{AgentRunner, DispatcherConfig, JobDispatcher};
-use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
+use ingot_domain::agent::{Agent, AgentCapability};
 use ingot_domain::job::{JobStatus, OutcomeClass};
-use ingot_domain::revision::ItemRevision;
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
-use ingot_store_sqlite::Database;
+use ingot_test_support::git::unique_temp_path;
 use ingot_usecases::ProjectLocks;
-use uuid::Uuid;
 
 mod common;
 use common::*;
@@ -32,17 +30,14 @@ async fn tick_executes_a_queued_authoring_job_and_creates_a_commit() {
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
 
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        ..test_item(h.project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        template_map_snapshot: serde_json::json!({ "author_initial": "author-initial" }),
-        ..test_revision(item_id, &seed_commit)
-    };
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
+        .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
@@ -83,48 +78,33 @@ async fn tick_executes_a_review_job_and_persists_structured_report() {
     git_sync(&repo, &["commit", "-m", "next"]);
     let head_commit = head_oid(&repo).await.expect("head oid");
 
-    let db_path = std::env::temp_dir().join(format!("ingot-runtime-review-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
-    let state_root =
-        std::env::temp_dir().join(format!("ingot-runtime-review-state-{}", Uuid::now_v7()));
+    let db = migrated_test_db("ingot-runtime-review").await;
+    let state_root = unique_temp_path("ingot-runtime-review-state");
 
     let project = ProjectBuilder::new(&repo).build();
     db.create_project(&project).await.expect("create project");
 
-    let agent = Agent {
-        id: ingot_domain::ids::AgentId::new(),
-        slug: "codex-review".into(),
-        name: "Codex".into(),
-        adapter_kind: AdapterKind::Codex,
-        provider: "openai".into(),
-        model: "gpt-5-codex".into(),
-        cli_path: "codex".into(),
-        capabilities: vec![
+    let agent = AgentBuilder::new(
+        "codex-review",
+        vec![
             AgentCapability::ReadOnlyJobs,
             AgentCapability::StructuredOutput,
         ],
-        health_check: Some("ok".into()),
-        status: AgentStatus::Available,
-    };
+    )
+    .build();
     db.create_agent(&agent).await.expect("create agent");
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
 
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        ..test_item(project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        template_map_snapshot: serde_json::json!({ "review_candidate_initial": "review-candidate" }),
-        seed_commit_oid: Some(base_commit.clone()),
-        seed_target_commit_oid: Some(base_commit.clone()),
-        ..test_revision(item_id, &base_commit)
-    };
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&base_commit)
+        .template_map_snapshot(serde_json::json!({ "review_candidate_initial": "review-candidate" }))
+        .build();
     db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
@@ -193,9 +173,7 @@ async fn tick_times_out_long_running_job_and_marks_it_failed() {
         }
     }
 
-    let mut config = DispatcherConfig::new(
-        std::env::temp_dir().join(format!("ingot-runtime-timeout-state-{}", Uuid::now_v7())),
-    );
+    let mut config = DispatcherConfig::new(unique_temp_path("ingot-runtime-timeout-state"));
     config.job_timeout = Duration::from_millis(50);
     config.heartbeat_interval = Duration::from_millis(10);
     let h = TestHarness::with_config(Arc::new(SlowRunner), Some(config)).await;
@@ -205,17 +183,14 @@ async fn tick_times_out_long_running_job_and_marks_it_failed() {
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
 
-    let item = ingot_domain::item::Item {
-        id: item_id,
-        current_revision_id: revision_id,
-        ..test_item(h.project.id, revision_id)
-    };
-    let revision = ItemRevision {
-        id: revision_id,
-        item_id,
-        template_map_snapshot: serde_json::json!({ "author_initial": "author-initial" }),
-        ..test_revision(item_id, &seed_commit)
-    };
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
+        .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
@@ -239,49 +214,34 @@ async fn tick_runs_healthy_queued_job_even_when_another_project_is_broken() {
     let h = TestHarness::new(Arc::new(FakeRunner)).await;
 
     // Register agent with all capabilities
-    let agent = Agent {
-        id: ingot_domain::ids::AgentId::new(),
-        slug: "codex".into(),
-        name: "Codex".into(),
-        adapter_kind: AdapterKind::Codex,
-        provider: "openai".into(),
-        model: "gpt-5-codex".into(),
-        cli_path: "codex".into(),
-        capabilities: vec![
+    let agent = AgentBuilder::new(
+        "codex",
+        vec![
             AgentCapability::MutatingJobs,
             AgentCapability::ReadOnlyJobs,
             AgentCapability::StructuredOutput,
         ],
-        health_check: Some("ok".into()),
-        status: AgentStatus::Available,
-    };
+    )
+    .build();
     h.db.create_agent(&agent).await.expect("create agent");
 
     // Create a broken project with missing path
-    let broken_project = ProjectBuilder::new(
-        std::env::temp_dir().join(format!("ingot-missing-project-{}", Uuid::now_v7())),
-    )
-    .name("broken")
-    .build();
+    let broken_project = ProjectBuilder::new(unique_temp_path("ingot-missing-project"))
+        .name("broken")
+        .build();
     h.db.create_project(&broken_project)
         .await
         .expect("create broken project");
 
     let broken_item_id = ingot_domain::ids::ItemId::new();
     let broken_revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let broken_item = ingot_domain::item::Item {
-        id: broken_item_id,
-        project_id: broken_project.id,
-        current_revision_id: broken_revision_id,
-        ..test_item(broken_project.id, broken_revision_id)
-    };
-    let broken_revision = ItemRevision {
-        id: broken_revision_id,
-        item_id: broken_item_id,
-        seed_commit_oid: Some("missing-seed".into()),
-        seed_target_commit_oid: Some("missing-seed".into()),
-        ..test_revision(broken_item_id, "missing-seed")
-    };
+    let broken_item = ItemBuilder::new(broken_project.id, broken_revision_id)
+        .id(broken_item_id)
+        .build();
+    let broken_revision = RevisionBuilder::new(broken_item_id)
+        .id(broken_revision_id)
+        .explicit_seed("missing-seed")
+        .build();
     h.db.create_item_with_revision(&broken_item, &broken_revision)
         .await
         .expect("create broken item");
@@ -291,16 +251,13 @@ async fn tick_runs_healthy_queued_job_even_when_another_project_is_broken() {
     let healthy_revision_id = ingot_domain::ids::ItemRevisionId::new();
     let healthy_seed_commit = head_oid(&h.repo_path).await.expect("healthy seed head");
 
-    let healthy_item = ingot_domain::item::Item {
-        id: healthy_item_id,
-        current_revision_id: healthy_revision_id,
-        ..test_item(h.project.id, healthy_revision_id)
-    };
-    let healthy_revision = ItemRevision {
-        id: healthy_revision_id,
-        item_id: healthy_item_id,
-        ..test_revision(healthy_item_id, &healthy_seed_commit)
-    };
+    let healthy_item = ItemBuilder::new(h.project.id, healthy_revision_id)
+        .id(healthy_item_id)
+        .build();
+    let healthy_revision = RevisionBuilder::new(healthy_item_id)
+        .id(healthy_revision_id)
+        .explicit_seed(&healthy_seed_commit)
+        .build();
     h.db.create_item_with_revision(&healthy_item, &healthy_revision)
         .await
         .expect("create healthy item");

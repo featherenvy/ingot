@@ -303,6 +303,7 @@ pub(super) fn repo_to_job_failure(error: RepositoryError) -> ApiError {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn repo_to_job_expiration(error: RepositoryError) -> ApiError {
     match error {
         RepositoryError::Conflict(message) if message == "job_revision_stale" => {
@@ -426,5 +427,4 @@ mod tests {
                 if message == "job expiration does not match the current item revision"
         ));
     }
-
 }

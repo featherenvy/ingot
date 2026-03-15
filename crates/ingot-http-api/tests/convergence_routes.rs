@@ -1,11 +1,10 @@
-
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
-use ingot_domain::job::{ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind};
+use ingot_domain::job::{
+    ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
+};
 use ingot_domain::workspace::WorkspaceKind;
-use ingot_store_sqlite::Database;
 use tower::ServiceExt;
-use uuid::Uuid;
 
 mod common;
 use common::*;
@@ -28,9 +27,7 @@ async fn prepare_convergence_route_queues_lane_head_for_async_prepare() {
     );
     git(&repo, &["reset", "--hard", &base_commit_oid]);
 
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000099".to_string();
     let item_id = "itm_00000000000000000000000000000099".to_string();
     let revision_id = "rev_00000000000000000000000000000099".to_string();
@@ -151,12 +148,7 @@ async fn prepare_convergence_route_queues_lane_head_for_async_prepare() {
             output_artifact_kind: OutputArtifactKind::ValidationReport,
             job_input: TestJobInput::CandidateSubject(&base_commit_oid, &source_commit_oid),
             result_schema_version: Some("validation_report:v1"),
-            result_payload: Some(serde_json::json!({
-                "outcome": "clean",
-                "summary": "validation clean",
-                "checks": [],
-                "findings": []
-            })),
+            result_payload: Some(clean_validation_report("validation clean")),
             created_at: "2026-03-12T00:06:00Z",
             ended_at: Some("2026-03-12T00:07:00Z"),
             ..TestJobInsert::new(
@@ -193,13 +185,12 @@ async fn prepare_convergence_route_queues_lane_head_for_async_prepare() {
     assert_eq!(json["queue"]["state"].as_str(), Some("head"));
     assert_eq!(json["queue"]["position"].as_i64(), Some(1));
     assert_eq!(json["convergences"].as_array().map(Vec::len), Some(0));
-    let queue_state: (String,) = sqlx::query_as(
-        "SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?",
-    )
-    .bind(&revision_id)
-    .fetch_one(&db.pool)
-    .await
-    .expect("queue state");
+    let queue_state: (String,) =
+        sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
+            .bind(&revision_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("queue state");
     assert_eq!(queue_state.0, "head");
 }
 
@@ -221,9 +212,7 @@ async fn approve_route_grants_lane_head_without_finalizing_synchronously() {
     );
     git(&repo, &["reset", "--hard", &base_commit_oid]);
 
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000088".to_string();
     let item_id = "itm_00000000000000000000000000000088".to_string();
     let revision_id = "rev_00000000000000000000000000000088".to_string();
@@ -383,9 +372,7 @@ async fn prepare_convergence_route_only_queues_even_when_future_prepare_would_co
     git(&repo, &["add", "tracked.txt"]);
     git(&repo, &["commit", "-m", "target commit"]);
 
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000042".to_string();
     let item_id = "itm_00000000000000000000000000000042".to_string();
     let revision_id = "rev_00000000000000000000000000000042".to_string();
@@ -506,12 +493,7 @@ async fn prepare_convergence_route_only_queues_even_when_future_prepare_would_co
             output_artifact_kind: OutputArtifactKind::ValidationReport,
             job_input: TestJobInput::CandidateSubject(&base_commit_oid, &source_commit_oid),
             result_schema_version: Some("validation_report:v1"),
-            result_payload: Some(serde_json::json!({
-                "outcome": "clean",
-                "summary": "validation clean",
-                "checks": [],
-                "findings": []
-            })),
+            result_payload: Some(clean_validation_report("validation clean")),
             created_at: "2026-03-12T00:06:00Z",
             ended_at: Some("2026-03-12T00:07:00Z"),
             ..TestJobInsert::new(
@@ -560,9 +542,7 @@ async fn reject_approval_route_cancels_prepared_convergence_and_creates_supersed
     let candidate_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
     git(&repo, &["reset", "--hard", &base_commit_oid]);
 
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000077".to_string();
     let item_id = "itm_00000000000000000000000000000077".to_string();
     let revision_id = "rev_00000000000000000000000000000077".to_string();
@@ -789,9 +769,7 @@ async fn reject_approval_route_cancels_prepared_convergence_and_creates_supersed
 async fn reject_route_allows_granted_without_prepared_convergence() {
     let repo = temp_git_repo("ingot-http-api");
     let head = git_output(&repo, &["rev-parse", "HEAD"]);
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000060".to_string();
     let item_id = "itm_00000000000000000000000000000060".to_string();
     let revision_id = "rev_00000000000000000000000000000060".to_string();
@@ -869,13 +847,12 @@ async fn reject_route_allows_granted_without_prepared_convergence() {
         .expect("reject response");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let queue_state: (String,) = sqlx::query_as(
-        "SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?",
-    )
-    .bind(&revision_id)
-    .fetch_one(&db.pool)
-    .await
-    .expect("queue state");
+    let queue_state: (String,) =
+        sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
+            .bind(&revision_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("queue state");
     assert_eq!(queue_state.0, "cancelled");
 
     let revision_count: i64 =

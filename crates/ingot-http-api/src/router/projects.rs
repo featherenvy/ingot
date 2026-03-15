@@ -1,7 +1,7 @@
 use super::items::load_effective_config;
-use super::*;
 use super::support::*;
 use super::types::*;
+use super::*;
 
 pub(super) async fn list_project_activity(
     State(state): State<AppState>,
@@ -44,7 +44,9 @@ pub(super) async fn list_project_workspaces(
     Ok(Json(workspaces))
 }
 
-pub(super) async fn list_projects(State(state): State<AppState>) -> Result<Json<Vec<Project>>, ApiError> {
+pub(super) async fn list_projects(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Project>>, ApiError> {
     let projects = state.db.list_projects().await.map_err(repo_to_internal)?;
     Ok(Json(projects))
 }
@@ -169,4 +171,3 @@ pub(super) async fn list_project_jobs(
         .map_err(repo_to_internal)?;
     Ok(Json(jobs))
 }
-

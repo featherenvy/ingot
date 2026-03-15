@@ -25,8 +25,7 @@ pub struct RevisionBuilder {
 impl RevisionBuilder {
     pub fn nil() -> Self {
         let nil = Uuid::nil();
-        Self::new(ids::ItemId::from_uuid(nil))
-            .id(ids::ItemRevisionId::from_uuid(nil))
+        Self::new(ids::ItemId::from_uuid(nil)).id(ids::ItemRevisionId::from_uuid(nil))
     }
 
     pub fn new(item_id: ids::ItemId) -> Self {
@@ -66,6 +65,11 @@ impl RevisionBuilder {
         let commit_oid = commit_oid.into();
         self.seed_commit_oid = Some(commit_oid.clone());
         self.seed_target_commit_oid = Some(commit_oid);
+        self
+    }
+
+    pub fn template_map_snapshot(mut self, template_map_snapshot: serde_json::Value) -> Self {
+        self.template_map_snapshot = template_map_snapshot;
         self
     }
 

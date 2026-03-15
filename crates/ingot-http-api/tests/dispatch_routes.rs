@@ -3,12 +3,13 @@ use std::path::PathBuf;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use ingot_domain::ids::ProjectId;
-use ingot_domain::job::{ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind};
+use ingot_domain::job::{
+    ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
+};
 use ingot_domain::workspace::WorkspaceKind;
 use ingot_git::commands::resolve_ref_oid;
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
 use ingot_http_api::build_router_with_project_locks_and_state_root;
-use ingot_store_sqlite::Database;
 use ingot_usecases::ProjectLocks;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -20,9 +21,7 @@ use common::*;
 async fn dispatch_item_job_route_creates_queued_author_initial_job_and_workspace() {
     let repo = temp_git_repo("ingot-http-api");
     let seed_head = git_output(&repo, &["rev-parse", "HEAD"]);
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
 
     let project_id = "prj_00000000000000000000000000000031".to_string();
     let item_id = "itm_00000000000000000000000000000031".to_string();
@@ -117,8 +116,7 @@ async fn dispatch_item_job_route_creates_queued_author_initial_job_and_workspace
     let detail_body = to_bytes(detail_response.into_body(), usize::MAX)
         .await
         .expect("read detail body");
-    let detail_json: serde_json::Value =
-        serde_json::from_slice(&detail_body).expect("detail json");
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).expect("detail json");
 
     assert_eq!(
         detail_json["evaluation"]["current_step_id"].as_str(),
@@ -159,16 +157,13 @@ async fn dispatch_item_job_route_creates_queued_author_initial_job_and_workspace
 async fn dispatch_item_job_route_binds_implicit_author_initial_from_target_head() {
     let repo = temp_git_repo("ingot-http-api");
     let target_head = git_output(&repo, &["rev-parse", "HEAD"]);
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
 
     let project_id = "prj_00000000000000000000000000000091".to_string();
     let item_id = "itm_00000000000000000000000000000091".to_string();
     let revision_id = "rev_00000000000000000000000000000091".to_string();
     let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
-    let state_root =
-        std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
+    let state_root = std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
 
     sqlx::query(
         "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
@@ -260,8 +255,7 @@ async fn dispatch_item_job_route_binds_implicit_author_initial_from_target_head(
     let detail_body = to_bytes(detail_response.into_body(), usize::MAX)
         .await
         .expect("detail body");
-    let detail_json: serde_json::Value =
-        serde_json::from_slice(&detail_body).expect("detail json");
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).expect("detail json");
     assert_eq!(
         detail_json["workspaces"][0]["id"].as_str(),
         Some(workspace_id)
@@ -285,9 +279,7 @@ async fn resume_route_implicit_revision_queues_incremental_review_from_bound_wor
     git(&repo, &["commit", "-m", "authored change"]);
     let authored_head = git_output(&repo, &["rev-parse", "HEAD"]);
 
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000094".to_string();
     let item_id = "itm_00000000000000000000000000000094".to_string();
     let revision_id = "rev_00000000000000000000000000000094".to_string();
@@ -413,17 +405,14 @@ async fn resume_route_implicit_revision_queues_incremental_review_from_bound_wor
 async fn investigate_item_dispatch_creates_and_triage_removes_anchor_ref() {
     let repo = temp_git_repo("ingot-http-api");
     let target_head = git_output(&repo, &["rev-parse", "HEAD"]);
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
 
     let project_id = "prj_00000000000000000000000000000092".to_string();
     let item_id = "itm_00000000000000000000000000000092".to_string();
     let revision_id = "rev_00000000000000000000000000000092".to_string();
     let finding_id = "fnd_00000000000000000000000000000092".to_string();
     let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
-    let state_root =
-        std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
+    let state_root = std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
 
     sqlx::query(
         "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
@@ -566,17 +555,14 @@ async fn investigate_item_dispatch_uses_existing_authoring_workspace_subject() {
     git(&repo, &["commit", "-m", "bound workspace change"]);
     let bound_head = git_output(&repo, &["rev-parse", "HEAD"]);
 
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
 
     let project_id = "prj_00000000000000000000000000000093".to_string();
     let item_id = "itm_00000000000000000000000000000093".to_string();
     let revision_id = "rev_00000000000000000000000000000093".to_string();
     let workspace_id = "wrk_00000000000000000000000000000093".to_string();
     let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
-    let state_root =
-        std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
+    let state_root = std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
     let paths = project_repo_paths(state_root.as_path(), project_uuid, &repo);
     ensure_mirror(&paths).await.expect("ensure mirror");
     git(
@@ -711,9 +697,7 @@ async fn investigate_item_dispatch_uses_existing_authoring_workspace_subject() {
 async fn dispatch_item_job_route_reuses_existing_authoring_workspace_for_revision() {
     let repo = temp_git_repo("ingot-http-api");
     let seed_head = git_output(&repo, &["rev-parse", "HEAD"]);
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
 
     let project_id = "prj_00000000000000000000000000000032".to_string();
     let item_id = "itm_00000000000000000000000000000032".to_string();

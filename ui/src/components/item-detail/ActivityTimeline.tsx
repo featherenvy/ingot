@@ -5,111 +5,258 @@ import {
   ChevronDownIcon,
   GitMergeIcon,
   Loader2Icon,
-  PlayIcon,
   SearchIcon,
   XIcon,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { cn } from '@/lib/utils'
-import type { Convergence, Finding, Job } from '../../types/domain'
+import type { Convergence, Finding, FindingSeverity, Job } from '../../types/domain'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible'
 
-type TimelineEntry = {
+// ── Types ──────────────────────────────────────────────────────
+
+type JobStory = {
+  type: 'job'
   key: string
-  timestamp: string
-  icon: LucideIcon
-  iconClassName: string
-  label: string
-  detail: string
+  sortTimestamp: string
+  job: Job
+  findings: Finding[]
 }
 
-function jobEntries(jobs: Job[]): TimelineEntry[] {
-  const entries: TimelineEntry[] = []
-  for (const job of jobs) {
-    if (job.ended_at) {
-      // Completed job: show a single "started" entry and an "ended" entry
-      entries.push({
-        key: `job-start-${job.id}`,
-        timestamp: job.started_at ?? job.created_at,
-        icon: PlayIcon,
-        iconClassName: 'text-blue-500',
-        label: 'Job started',
-        detail: `${job.step_id} (${job.phase_kind})`,
-      })
-      const failed = job.status === 'failed' || job.status === 'cancelled' || job.status === 'expired'
-      entries.push({
-        key: `job-end-${job.id}`,
-        timestamp: job.ended_at,
-        icon: failed ? XIcon : CheckIcon,
-        iconClassName: failed ? 'text-destructive' : 'text-emerald-500',
-        label: failed ? `Job ${job.status}` : 'Job completed',
-        detail: `${job.step_id}${job.outcome_class ? ` \u2192 ${job.outcome_class}` : ''}`,
-      })
-    } else if (['running', 'assigned'].includes(job.status)) {
-      // In-flight job: show a single "running" entry (not a separate "started" + "running")
-      entries.push({
-        key: `job-running-${job.id}`,
-        timestamp: job.started_at ?? job.created_at,
-        icon: Loader2Icon,
-        iconClassName: 'text-blue-500 animate-spin',
-        label: 'Job running',
-        detail: `${job.step_id} (${job.phase_kind})`,
-      })
-    } else {
-      // Queued or other pre-start state
-      entries.push({
-        key: `job-queued-${job.id}`,
-        timestamp: job.created_at,
-        icon: PlayIcon,
-        iconClassName: 'text-muted-foreground',
-        label: `Job ${job.status}`,
-        detail: `${job.step_id} (${job.phase_kind})`,
-      })
-    }
+type ConvergenceStory = {
+  type: 'convergence'
+  key: string
+  sortTimestamp: string
+  convergence: Convergence
+}
+
+type Story = JobStory | ConvergenceStory
+
+// ── Utilities ──────────────────────────────────────────────────
+
+function formatStepLabel(stepId: string): string {
+  return stepId.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+function formatDuration(startIso: string | null, endIso: string | null): string {
+  if (!startIso) return ''
+  const start = new Date(startIso).getTime()
+  const end = endIso ? new Date(endIso).getTime() : Date.now()
+  const secs = Math.floor((end - start) / 1000)
+  if (secs < 60) return `${secs}s`
+  const mins = Math.floor(secs / 60)
+  const remSecs = secs % 60
+  if (mins < 60) return `${mins}m ${remSecs}s`
+  const hrs = Math.floor(mins / 60)
+  const remMins = mins % 60
+  return `${hrs}h ${remMins}m`
+}
+
+function formatTimestamp(iso: string): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const time = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+  return `${date} ${time}`
+}
+
+function summarizeFindings(findings: Finding[]): string {
+  if (findings.length === 0) return ''
+  const bySeverity = new Map<FindingSeverity, number>()
+  for (const f of findings) {
+    bySeverity.set(f.severity, (bySeverity.get(f.severity) ?? 0) + 1)
   }
-  return entries
+  const parts: string[] = []
+  for (const sev of ['critical', 'high', 'medium', 'low'] as FindingSeverity[]) {
+    const count = bySeverity.get(sev)
+    if (count) parts.push(`${count} ${sev}`)
+  }
+  return `${findings.length} finding${findings.length !== 1 ? 's' : ''} (${parts.join(', ')})`
 }
 
-function findingEntries(findings: Finding[]): TimelineEntry[] {
-  return findings.map((f) => ({
-    key: `finding-${f.id}`,
-    timestamp: f.created_at,
-    icon: f.severity === 'critical' || f.severity === 'high' ? AlertTriangleIcon : SearchIcon,
-    iconClassName: f.severity === 'critical' || f.severity === 'high' ? 'text-destructive' : 'text-amber-500',
-    label: `Finding: ${f.severity}`,
-    detail: f.summary,
-  }))
-}
+// ── Story builders ─────────────────────────────────────────────
 
-function convergenceEntries(convergences: Convergence[]): TimelineEntry[] {
-  return convergences.map((c) => {
-    const failed = c.status === 'failed' || c.status === 'conflicted' || c.status === 'cancelled'
-    return {
-      key: `convergence-${c.id}`,
-      timestamp: '', // convergences don't have timestamps — will sort to end
-      icon: failed ? AlertTriangleIcon : GitMergeIcon,
-      iconClassName: failed
-        ? 'text-destructive'
-        : c.status === 'finalized'
-          ? 'text-emerald-500'
-          : 'text-muted-foreground',
-      label: `Convergence ${c.status}`,
-      detail: c.status === 'finalized' ? 'Merged to target' : c.id,
-    }
+function buildStories(jobs: Job[], findings: Finding[], convergences: Convergence[]): Story[] {
+  // Index findings by source job
+  const findingsByJob = new Map<string, Finding[]>()
+  for (const f of findings) {
+    const list = findingsByJob.get(f.source_job_id) ?? []
+    list.push(f)
+    findingsByJob.set(f.source_job_id, list)
+  }
+
+  const stories: Story[] = []
+
+  // Job stories
+  for (const job of jobs) {
+    const jobFindings = findingsByJob.get(job.id) ?? []
+    const sortTimestamp = job.ended_at ?? job.started_at ?? job.created_at
+    stories.push({
+      type: 'job',
+      key: `job-${job.id}`,
+      sortTimestamp,
+      job,
+      findings: jobFindings,
+    })
+  }
+
+  // Convergence stories
+  for (const c of convergences) {
+    stories.push({
+      type: 'convergence',
+      key: `conv-${c.id}`,
+      sortTimestamp: '', // no timestamp on convergences — sort to end
+      convergence: c,
+    })
+  }
+
+  // Sort newest first
+  stories.sort((a, b) => {
+    if (!a.sortTimestamp) return 1
+    if (!b.sortTimestamp) return -1
+    return b.sortTimestamp.localeCompare(a.sortTimestamp)
   })
+
+  return stories
 }
 
-function formatTime(iso: string): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+// ── Story icon logic ───────────────────────────────────────────
+
+function jobIcon(job: Job): { icon: LucideIcon; className: string } {
+  if (['running', 'assigned'].includes(job.status)) {
+    return { icon: Loader2Icon, className: 'text-blue-500 animate-spin' }
+  }
+  if (job.status === 'queued') {
+    return { icon: Loader2Icon, className: 'text-muted-foreground' }
+  }
+  if (['failed', 'cancelled', 'expired'].includes(job.status)) {
+    return { icon: XIcon, className: 'text-destructive' }
+  }
+  if (job.outcome_class === 'findings') {
+    return { icon: SearchIcon, className: 'text-amber-500' }
+  }
+  if (job.outcome_class === 'clean') {
+    return { icon: CheckIcon, className: 'text-emerald-500' }
+  }
+  if (job.outcome_class === 'protocol_violation') {
+    return { icon: AlertTriangleIcon, className: 'text-destructive' }
+  }
+  return { icon: CheckIcon, className: 'text-muted-foreground' }
 }
 
-function formatDate(iso: string): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+function convergenceIcon(c: Convergence): { icon: LucideIcon; className: string } {
+  if (c.status === 'conflicted' || c.status === 'failed' || c.status === 'cancelled') {
+    return { icon: AlertTriangleIcon, className: 'text-destructive' }
+  }
+  if (c.status === 'finalized') {
+    return { icon: GitMergeIcon, className: 'text-emerald-500' }
+  }
+  if (c.status === 'running') {
+    return { icon: Loader2Icon, className: 'text-blue-500 animate-spin' }
+  }
+  return { icon: GitMergeIcon, className: 'text-muted-foreground' }
 }
+
+// ── Job outcome label ──────────────────────────────────────────
+
+function jobOutcomeLabel(job: Job): { text: string; className: string } {
+  if (['running', 'assigned'].includes(job.status)) {
+    return { text: 'running', className: 'text-blue-600 dark:text-blue-400' }
+  }
+  if (job.status === 'queued') {
+    return { text: 'queued', className: 'text-muted-foreground' }
+  }
+  if (['failed', 'cancelled', 'expired'].includes(job.status)) {
+    return { text: job.status, className: 'text-destructive' }
+  }
+  if (job.outcome_class === 'clean') {
+    return { text: 'clean', className: 'text-emerald-600 dark:text-emerald-400' }
+  }
+  if (job.outcome_class === 'findings') {
+    return { text: 'findings', className: 'text-amber-600 dark:text-amber-400' }
+  }
+  if (job.outcome_class) {
+    return { text: job.outcome_class.replace(/_/g, ' '), className: 'text-destructive' }
+  }
+  return { text: 'completed', className: 'text-muted-foreground' }
+}
+
+// ── Render ─────────────────────────────────────────────────────
+
+function JobStoryEntry({ story }: { story: JobStory }) {
+  const { job, findings } = story
+  const { icon: Icon, className: iconCls } = jobIcon(job)
+  const outcome = jobOutcomeLabel(job)
+  const duration = formatDuration(job.started_at, job.ended_at)
+  const ts = job.ended_at ?? job.started_at ?? job.created_at
+
+  return (
+    <div className="group/entry relative pb-5 last:pb-0">
+      {/* Timeline dot */}
+      <div className="absolute -left-[1.625rem] top-0.5 flex size-5 items-center justify-center rounded-full bg-background ring-2 ring-border/60">
+        <Icon className={cn('size-3', iconCls)} />
+      </div>
+
+      <div className="space-y-0.5">
+        {/* Primary line: step label + outcome + timestamp */}
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+          <span className="text-sm font-medium">{formatStepLabel(job.step_id)}</span>
+          <span className={cn('text-xs font-medium', outcome.className)}>{outcome.text}</span>
+          <span className="ml-auto flex shrink-0 items-baseline gap-2 font-mono text-[11px] tabular-nums text-muted-foreground/70">
+            {duration && <span>{duration}</span>}
+            {ts && <span>{formatTimestamp(ts)}</span>}
+          </span>
+        </div>
+
+        {/* Finding summary */}
+        {findings.length > 0 && (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <SearchIcon className="size-3 text-amber-500" />
+            <span>{summarizeFindings(findings)}</span>
+          </div>
+        )}
+
+        {/* Error message for failed jobs */}
+        {job.error_message && (
+          <p className="max-w-lg truncate text-xs text-destructive/80" title={job.error_message}>
+            {job.error_message}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ConvergenceStoryEntry({ story }: { story: ConvergenceStory }) {
+  const { convergence: c } = story
+  const { icon: Icon, className: iconCls } = convergenceIcon(c)
+
+  return (
+    <div className="group/entry relative pb-5 last:pb-0">
+      <div className="absolute -left-[1.625rem] top-0.5 flex size-5 items-center justify-center rounded-full bg-background ring-2 ring-border/60">
+        <Icon className={cn('size-3', iconCls)} />
+      </div>
+      <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+        <span className="text-sm font-medium">Convergence</span>
+        <span
+          className={cn(
+            'text-xs font-medium',
+            c.status === 'finalized'
+              ? 'text-emerald-600 dark:text-emerald-400'
+              : c.status === 'conflicted' || c.status === 'failed'
+                ? 'text-destructive'
+                : 'text-muted-foreground',
+          )}
+        >
+          {c.status}
+        </span>
+        {c.status === 'finalized' && <span className="text-xs text-muted-foreground">merged to target</span>}
+      </div>
+    </div>
+  )
+}
+
+// ── Main component ─────────────────────────────────────────────
 
 export function ActivityTimeline({
   jobs,
@@ -122,17 +269,9 @@ export function ActivityTimeline({
 }) {
   const [open, setOpen] = useState(false)
 
-  const entries = useMemo(
-    () =>
-      [...jobEntries(jobs), ...findingEntries(findings), ...convergenceEntries(convergences)].sort((a, b) => {
-        if (!a.timestamp) return 1
-        if (!b.timestamp) return -1
-        return a.timestamp.localeCompare(b.timestamp)
-      }),
-    [jobs, findings, convergences],
-  )
+  const stories = useMemo(() => buildStories(jobs, findings, convergences), [jobs, findings, convergences])
 
-  if (entries.length === 0) return null
+  if (stories.length === 0) return null
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
@@ -140,31 +279,18 @@ export function ActivityTimeline({
         <ChevronDownIcon className="size-4 shrink-0 transition-transform duration-200 group-data-[state=closed]:-rotate-90" />
         Activity
         <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-muted px-1.5 text-[11px] font-medium tabular-nums text-muted-foreground">
-          {entries.length}
+          {stories.length}
         </span>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="relative ml-5 border-l border-border/60 pl-5 pt-1">
-          {entries.map((entry) => {
-            const Icon = entry.icon
-            return (
-              <div key={entry.key} className="group/entry relative pb-4 last:pb-0">
-                {/* Timeline dot */}
-                <div className="absolute -left-[1.625rem] top-0.5 flex size-5 items-center justify-center rounded-full bg-background ring-2 ring-border/60">
-                  <Icon className={cn('size-3', entry.iconClassName)} />
-                </div>
-                <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-                  <span className="text-sm font-medium">{entry.label}</span>
-                  <span className="truncate font-mono text-xs text-muted-foreground">{entry.detail}</span>
-                  {entry.timestamp && (
-                    <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground/70">
-                      {formatDate(entry.timestamp)} {formatTime(entry.timestamp)}
-                    </span>
-                  )}
-                </div>
-              </div>
-            )
-          })}
+        <div className="relative ml-5 border-l border-border/60 pl-5 pt-2">
+          {stories.map((story) =>
+            story.type === 'job' ? (
+              <JobStoryEntry key={story.key} story={story} />
+            ) : (
+              <ConvergenceStoryEntry key={story.key} story={story} />
+            ),
+          )}
         </div>
       </CollapsibleContent>
     </Collapsible>

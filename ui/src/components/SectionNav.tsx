@@ -1,10 +1,14 @@
+import { Loader2Icon } from 'lucide-react'
 import { useCallback } from 'react'
 import { cn } from '@/lib/utils'
 
-type Section = {
+export type SectionIndicator = 'active' | 'warning' | 'error' | null
+
+export type Section = {
   id: string
   label: string
   count: number
+  indicator?: SectionIndicator
 }
 
 /** Root header is h-12 (48px). SectionNav sits below it. */
@@ -40,10 +44,16 @@ export function SectionNav({ sections, activeSectionId }: { sections: Section[];
               {s.label}
               <span
                 className={cn(
-                  'inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-medium tabular-nums',
+                  'inline-flex h-5 min-w-5 items-center justify-center gap-1 rounded-full px-1.5 text-[11px] font-medium tabular-nums',
                   isActive ? 'bg-foreground text-background' : 'bg-muted text-muted-foreground',
+                  !isActive && s.indicator === 'warning' && 'bg-amber-500/15 text-amber-700 dark:text-amber-400',
+                  !isActive && s.indicator === 'error' && 'bg-destructive/10 text-destructive',
+                  !isActive && s.indicator === 'active' && 'bg-blue-500/15 text-blue-700 dark:text-blue-400',
                 )}
               >
+                {s.indicator === 'active' && !isActive && <Loader2Icon className="size-3 animate-spin" />}
+                {s.indicator === 'warning' && !isActive && <span className="size-1.5 rounded-full bg-amber-500" />}
+                {s.indicator === 'error' && !isActive && <span className="size-1.5 rounded-full bg-destructive" />}
                 {s.count}
               </span>
               {isActive && <span className="absolute inset-x-1 -bottom-1 h-0.5 rounded-full bg-foreground" />}

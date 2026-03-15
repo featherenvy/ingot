@@ -22,9 +22,7 @@ use ingot_domain::ids::{GitOperationId, WorkspaceId};
 use ingot_domain::item::{
     ApprovalState, DoneReason, EscalationReason, EscalationState, LifecycleState, ResolutionSource,
 };
-use ingot_domain::job::{
-    ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
-};
+use ingot_domain::job::{ExecutionPermission, Job, JobStatus, OutcomeClass, OutputArtifactKind};
 use ingot_domain::ports::{JobCompletionMutation, ProjectMutationLockPort, RepositoryError};
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
@@ -55,7 +53,7 @@ use ingot_usecases::{
     CompleteJobCommand, CompleteJobService, ConvergenceService, ProjectLocks,
     ReconciliationService, rebuild_revision_context,
 };
-use ingot_workflow::{ClosureRelevance, Evaluator, step};
+use ingot_workflow::{Evaluator, step};
 use ingot_workspace::{
     WorkspaceError, ensure_authoring_workspace_state, provision_integration_workspace,
     provision_review_workspace, remove_workspace,
@@ -508,6 +506,7 @@ impl JobDispatcher {
         .await
         .map_err(usecase_to_runtime_error)?
         {
+            self.recover_projected_review_jobs().await?;
             return Ok(true);
         }
 
@@ -583,40 +582,9 @@ impl JobDispatcher {
         &self,
         project_id: ingot_domain::ids::ProjectId,
     ) -> Result<(), RuntimeError> {
-        let entries = self
-            .db
-            .list_active_queue_entries_by_project(project_id)
-            .await?;
-        let mut lanes_with_heads = std::collections::HashSet::new();
-        for entry in &entries {
-            if entry.status == ConvergenceQueueEntryStatus::Head {
-                lanes_with_heads.insert(entry.target_ref.clone());
-            }
-        }
-
-        for entry in entries {
-            if entry.status != ConvergenceQueueEntryStatus::Queued
-                || lanes_with_heads.contains(&entry.target_ref)
-            {
-                continue;
-            }
-
-            let mut promoted = entry;
-            promoted.status = ConvergenceQueueEntryStatus::Head;
-            promoted.head_acquired_at = Some(Utc::now());
-            promoted.updated_at = Utc::now();
-            self.db.update_queue_entry(&promoted).await?;
-            self.append_activity(
-                project_id,
-                ActivityEventType::ConvergenceLaneAcquired,
-                "queue_entry",
-                promoted.id.to_string(),
-                serde_json::json!({ "item_id": promoted.item_id, "target_ref": promoted.target_ref }),
-            )
-            .await?;
-            lanes_with_heads.insert(promoted.target_ref);
-        }
-
+        ingot_usecases::convergence::promote_queue_heads(&self.db, &self.db, project_id)
+            .await
+            .map_err(|e| RuntimeError::InvalidState(e.to_string()))?;
         Ok(())
     }
 
@@ -1153,7 +1121,7 @@ impl JobDispatcher {
                 expected_item_revision_id: job.item_revision_id,
                 status: JobStatus::Expired,
                 outcome_class: Some(OutcomeClass::TransientFailure),
-                error_code: Some("heartbeat_expired"),
+                error_code: Some("heartbeat_expired".into()),
                 error_message: None,
                 escalation_reason: None,
             })
@@ -1347,7 +1315,7 @@ impl JobDispatcher {
                 expected_item_revision_id: prepared.job.item_revision_id,
                 workspace_id: Some(prepared.workspace.id),
                 agent_id: Some(prepared.agent.id),
-                lease_owner_id: &self.lease_owner_id,
+                lease_owner_id: self.lease_owner_id.clone(),
                 process_pid: None,
                 lease_expires_at,
             })
@@ -2157,44 +2125,21 @@ impl JobDispatcher {
             return Ok(());
         }
 
-        let mut convergence = convergences
-            .into_iter()
-            .find(|convergence| {
-                convergence.item_revision_id == revision.id
-                    && convergence.status == ConvergenceStatus::Prepared
-            })
-            .ok_or_else(|| RuntimeError::InvalidState("prepared convergence missing".into()))?;
-        convergence.status = ConvergenceStatus::Failed;
-        convergence.conflict_summary = Some("target_ref_moved".into());
-        convergence.completed_at = Some(Utc::now());
-        self.db.update_convergence(&convergence).await?;
-
-        if let Some(workspace_id) = convergence.integration_workspace_id {
-            let mut workspace = self.db.get_workspace(workspace_id).await?;
-            workspace.status = WorkspaceStatus::Stale;
-            workspace.current_job_id = None;
-            workspace.updated_at = Utc::now();
-            self.db.update_workspace(&workspace).await?;
-        }
-
-        if item.approval_state != ApprovalState::Granted {
-            item.approval_state = match revision.approval_policy {
-                ingot_domain::revision::ApprovalPolicy::Required => ApprovalState::NotRequested,
-                ingot_domain::revision::ApprovalPolicy::NotRequired => ApprovalState::NotRequired,
-            };
-        }
-        item.updated_at = Utc::now();
-        self.db.update_item(&item).await?;
-        self.append_activity(
-            project_id,
-            ActivityEventType::ConvergenceFailed,
-            "convergence",
-            convergence.id.to_string(),
-            serde_json::json!({ "item_id": item.id, "reason": "target_ref_moved" }),
+        let invalidated = ingot_usecases::convergence::invalidate_prepared_convergence(
+            &self.db,
+            &self.db,
+            &self.db,
+            &self.db,
+            &mut item,
+            &revision,
+            &convergences,
         )
-        .await?;
+        .await
+        .map_err(|e| RuntimeError::InvalidState(e.to_string()))?;
 
-        info!(item_id = %item.id, convergence_id = %convergence.id, "invalidated stale prepared convergence");
+        if invalidated {
+            info!(item_id = %item.id, "invalidated stale prepared convergence");
+        }
         Ok(())
     }
 
@@ -2951,63 +2896,29 @@ impl JobDispatcher {
         let convergences = self
             .hydrate_convergences(project, self.db.list_convergences_by_item(item.id).await?)
             .await?;
-        let evaluation =
-            Evaluator::new().evaluate(&item, &revision, &jobs, &findings, &convergences);
-        let Some(step_id) = evaluation.dispatchable_step_id.as_deref() else {
-            return Ok(false);
-        };
 
-        if !step::is_closure_relevant_review_step(step_id) {
-            return Ok(false);
-        }
-
-        let mut job = dispatch_job(
+        let result = ingot_usecases::dispatch::auto_dispatch_review(
+            &self.db,
+            &self.db,
+            &self.db,
+            project,
             &item,
             &revision,
             &jobs,
             &findings,
             &convergences,
-            DispatchJobCommand {
-                step_id: Some(step_id.to_string()),
-            },
         )
+        .await
         .map_err(|error| {
-            RuntimeError::InvalidState(format!("failed to auto-dispatch review {step_id}: {error}"))
+            RuntimeError::InvalidState(format!("failed to auto-dispatch review: {error}"))
         })?;
-        let mut base_commit_oid = job.job_input.base_commit_oid().map(ToOwned::to_owned);
-        let mut head_commit_oid = job.job_input.head_commit_oid().map(ToOwned::to_owned);
-        if should_fill_candidate_subject_from_workspace(&job.step_id) {
-            if base_commit_oid.is_none() {
-                base_commit_oid = self.effective_authoring_base_commit_oid(&revision).await?;
-            }
-            if head_commit_oid.is_none() {
-                head_commit_oid = self
-                    .current_authoring_head_for_revision_with_workspace(&revision, &jobs)
-                    .await?;
-            }
-            if let (Some(base_commit_oid), Some(head_commit_oid)) =
-                (base_commit_oid.clone(), head_commit_oid.clone())
-            {
-                job.job_input = JobInput::candidate_subject(base_commit_oid, head_commit_oid);
-            } else {
-                return Err(RuntimeError::InvalidState(format!(
-                    "incomplete candidate subject for auto-dispatched review {}",
-                    job.step_id
-                )));
-            }
-        }
-        self.db.create_job(&job).await?;
-        self.append_activity(
-            project.id,
-            ActivityEventType::JobDispatched,
-            "job",
-            job.id.to_string(),
-            serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
-        )
-        .await?;
-        info!(job_id = %job.id, step_id = %job.step_id, item_id = %item.id, "auto-dispatched review");
 
-        Ok(true)
+        if let Some(job) = result {
+            info!(job_id = %job.id, step_id = %job.step_id, item_id = %item.id, "auto-dispatched review");
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     async fn fail_run(
@@ -3028,6 +2939,7 @@ impl JobDispatcher {
         };
         let escalation_reason = failure_escalation_reason(&prepared.job, outcome_class);
 
+        let error_message_log = error_message.as_deref().unwrap_or("").to_string();
         self.db
             .finish_job_non_success(FinishJobNonSuccessParams {
                 job_id: prepared.job.id,
@@ -3035,8 +2947,8 @@ impl JobDispatcher {
                 expected_item_revision_id: prepared.job.item_revision_id,
                 status,
                 outcome_class: Some(outcome_class),
-                error_code: Some(error_code),
-                error_message: error_message.as_deref(),
+                error_code: Some(error_code.into()),
+                error_message,
                 escalation_reason,
             })
             .await?;
@@ -3069,7 +2981,7 @@ impl JobDispatcher {
             job_id = %prepared.job.id,
             outcome_class = ?outcome_class,
             error_code,
-            error_message = error_message.as_deref().unwrap_or(""),
+            error_message = %error_message_log,
             "job failed"
         );
 
@@ -3313,30 +3225,33 @@ impl JobDispatcher {
         revision: &ItemRevision,
         jobs: &[Job],
     ) -> Result<Option<String>, RuntimeError> {
-        if let Some(commit_oid) = current_authoring_head_for_revision(jobs, revision) {
-            return Ok(Some(commit_oid));
-        }
-
-        Ok(self
+        let workspace = self
             .db
             .find_authoring_workspace_for_revision(revision.id)
-            .await?
-            .and_then(|workspace| workspace.head_commit_oid))
+            .await?;
+        Ok(
+            ingot_usecases::dispatch::current_authoring_head_for_revision_with_workspace(
+                revision,
+                jobs,
+                workspace.as_ref(),
+            ),
+        )
     }
 
     async fn effective_authoring_base_commit_oid(
         &self,
         revision: &ItemRevision,
     ) -> Result<Option<String>, RuntimeError> {
-        if let Some(seed_commit_oid) = revision.seed_commit_oid.clone() {
-            return Ok(Some(seed_commit_oid));
-        }
-
-        Ok(self
+        let workspace = self
             .db
             .find_authoring_workspace_for_revision(revision.id)
-            .await?
-            .and_then(|workspace| workspace.base_commit_oid))
+            .await?;
+        Ok(
+            ingot_usecases::dispatch::effective_authoring_base_commit_oid(
+                revision,
+                workspace.as_ref(),
+            ),
+        )
     }
 
     fn complete_job_service(
@@ -3687,35 +3602,6 @@ fn non_empty_message(message: &str) -> Option<String> {
     }
 }
 
-fn current_authoring_head_for_revision(jobs: &[Job], revision: &ItemRevision) -> Option<String> {
-    jobs.iter()
-        .filter(|job| job.item_revision_id == revision.id)
-        .filter(|job| job.status == JobStatus::Completed)
-        .filter(|job| job.output_artifact_kind == OutputArtifactKind::Commit)
-        .filter_map(|job| {
-            job.output_commit_oid
-                .as_ref()
-                .map(|commit_oid| ((job.ended_at, job.created_at), commit_oid.clone()))
-        })
-        .max_by_key(|(sort_key, _)| *sort_key)
-        .map(|(_, commit_oid)| commit_oid)
-        .or_else(|| revision.seed_commit_oid.clone())
-}
-
-fn should_fill_candidate_subject_from_workspace(step_id: &str) -> bool {
-    matches!(
-        step_id,
-        step::REVIEW_INCREMENTAL_INITIAL
-            | step::REVIEW_CANDIDATE_INITIAL
-            | step::REVIEW_CANDIDATE_REPAIR
-            | step::VALIDATE_CANDIDATE_INITIAL
-            | step::VALIDATE_CANDIDATE_REPAIR
-            | step::REVIEW_AFTER_INTEGRATION_REPAIR
-            | step::VALIDATE_AFTER_INTEGRATION_REPAIR
-            | step::INVESTIGATE_ITEM
-    )
-}
-
 fn outcome_class_name(outcome_class: OutcomeClass) -> &'static str {
     match outcome_class {
         OutcomeClass::Clean => "clean",
@@ -3734,31 +3620,15 @@ fn template_digest(template: &str) -> String {
 }
 
 fn failure_escalation_reason(job: &Job, outcome_class: OutcomeClass) -> Option<EscalationReason> {
-    if !is_closure_relevant_job(job) {
-        return None;
-    }
-
-    match outcome_class {
-        OutcomeClass::TerminalFailure => Some(EscalationReason::StepFailed),
-        OutcomeClass::ProtocolViolation => Some(EscalationReason::ProtocolViolation),
-        OutcomeClass::Clean
-        | OutcomeClass::Findings
-        | OutcomeClass::TransientFailure
-        | OutcomeClass::Cancelled => None,
-    }
+    ingot_usecases::dispatch::failure_escalation_reason(job, outcome_class)
 }
 
 fn should_clear_item_escalation_on_success(item: &ingot_domain::item::Item, job: &Job) -> bool {
-    item.escalation_state == EscalationState::OperatorRequired
-        && job.retry_no > 0
-        && is_closure_relevant_job(job)
+    ingot_usecases::dispatch::should_clear_item_escalation_on_success(item, job)
 }
 
 fn is_closure_relevant_job(job: &Job) -> bool {
-    matches!(
-        step::find_step(&job.step_id).map(|step| step.closure_relevance),
-        Some(ClosureRelevance::ClosureRelevant)
-    )
+    ingot_usecases::dispatch::is_closure_relevant_job(job)
 }
 
 #[cfg(test)]

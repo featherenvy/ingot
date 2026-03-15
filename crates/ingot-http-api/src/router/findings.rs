@@ -1,8 +1,8 @@
+use super::dispatch::{auto_dispatch_projected_review_job_locked, maybe_cleanup_investigation_ref};
 use super::items::append_activity;
-use super::jobs::{auto_dispatch_projected_review_job_locked, maybe_cleanup_investigation_ref};
-use super::*;
 use super::support::*;
 use super::types::*;
+use super::*;
 
 pub(super) async fn get_finding(
     State(state): State<AppState>,
@@ -454,93 +454,36 @@ pub(super) async fn ensure_finding_subject_reachable(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::Arc;
 
     use chrono::Utc;
-    use ingot_domain::finding::{Finding, FindingSeverity, FindingSubjectKind, FindingTriageState};
-    use ingot_domain::ids::{FindingId, ItemId, ItemRevisionId, JobId, ProjectId};
-    use ingot_domain::project::Project;
-    use ingot_git::GitJobCompletionPort;
-    use ingot_git::project_repo::project_repo_paths;
-    use ingot_store_sqlite::Database;
+    use ingot_domain::finding::FindingSubjectKind;
+    use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId};
+    use ingot_test_support::fixtures::FindingBuilder;
     use ingot_test_support::git::temp_git_repo as support_temp_git_repo;
-    use ingot_usecases::{CompleteJobService, ProjectLocks, UseCaseError};
+    use ingot_usecases::UseCaseError;
     use uuid::Uuid;
 
     use crate::error::ApiError;
-    use crate::router::AppState;
 
-    use std::path::Path as FsPath;
-
-    fn test_project(path: PathBuf) -> Project {
-        Project {
-            id: ProjectId::from_uuid(Uuid::nil()),
-            name: "Test".into(),
-            path: path.display().to_string(),
-            default_branch: "main".into(),
-            color: "#000000".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    async fn test_app_state() -> AppState {
-        let db_path =
-            std::env::temp_dir().join(format!("ingot-http-api-test-{}.db", Uuid::now_v7()));
-        let db = Database::connect(&db_path).await.expect("connect db");
-        db.migrate().await.expect("migrate db");
-        let state_root =
-            std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
-        let resolver_state_root = state_root.clone();
-        AppState {
-            db: db.clone(),
-            complete_job_service: CompleteJobService::with_repo_path_resolver(
-                db,
-                GitJobCompletionPort,
-                ProjectLocks::default(),
-                Arc::new(move |project: &Project| {
-                    project_repo_paths(
-                        resolver_state_root.as_path(),
-                        project.id,
-                        FsPath::new(&project.path),
-                    )
-                    .mirror_git_dir
-                }),
-            ),
-            project_locks: ProjectLocks::default(),
-            state_root,
-        }
-    }
+    use super::super::test_helpers::{test_app_state, test_project};
 
     fn test_finding() -> Finding {
-        Finding {
-            id: FindingId::new(),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            source_item_id: ItemId::from_uuid(Uuid::nil()),
-            source_item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            source_job_id: JobId::from_uuid(Uuid::nil()),
-            source_step_id: "investigate_item".into(),
-            source_report_schema_version: "finding_report:v1".into(),
-            source_finding_key: "finding-1".into(),
-            source_subject_kind: FindingSubjectKind::Candidate,
-            source_subject_base_commit_oid: None,
-            source_subject_head_commit_oid: "head".into(),
-            code: "BUG001".into(),
-            severity: FindingSeverity::High,
-            summary: "summary".into(),
-            paths: vec!["src/lib.rs".into()],
-            evidence: serde_json::json!(["evidence"]),
-            triage_state: FindingTriageState::Untriaged,
-            linked_item_id: None,
-            triage_note: None,
-            created_at: Utc::now(),
-            triaged_at: None,
-        }
+        FindingBuilder::new(
+            ProjectId::from_uuid(Uuid::nil()),
+            ItemId::from_uuid(Uuid::nil()),
+            ItemRevisionId::from_uuid(Uuid::nil()),
+            JobId::from_uuid(Uuid::nil()),
+        )
+        .source_step_id("investigate_item")
+        .source_report_schema_version("finding_report:v1")
+        .source_finding_key("finding-1")
+        .source_subject_base_commit_oid(None::<String>)
+        .created_at(Utc::now())
+        .build()
     }
 
     fn temp_git_repo() -> PathBuf {
@@ -597,5 +540,4 @@ mod tests {
             Err(ApiError::UseCase(UseCaseError::Internal(_)))
         ));
     }
-
 }

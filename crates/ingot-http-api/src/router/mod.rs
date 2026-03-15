@@ -1,21 +1,23 @@
 mod agents;
 mod convergence;
+mod dispatch;
 mod findings;
 mod items;
 mod jobs;
 mod projects;
 pub(super) mod support;
+#[cfg(test)]
+mod test_helpers;
 pub(super) mod types;
 mod workspaces;
 
-pub(crate) use items::{append_activity, load_effective_config};
-pub(crate) use support::{
-    ensure_git_valid_target_ref, git_to_internal, parse_config_approval_policy,
-    repo_to_internal, repo_to_project_mutation, resolve_default_branch,
-};
 use items::RevisionLaneTeardown;
-use jobs::refresh_revision_context_for_job;
+pub(crate) use items::{append_activity, load_effective_config};
 use support::*;
+pub(crate) use support::{
+    ensure_git_valid_target_ref, git_to_internal, parse_config_approval_policy, repo_to_internal,
+    repo_to_project_mutation, resolve_default_branch,
+};
 
 use std::path::Path as FsPath;
 use std::path::PathBuf;
@@ -48,18 +50,15 @@ use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
 use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
 use ingot_git::GitJobCompletionPort;
 use ingot_git::commands::{
-    delete_ref, git, is_commit_reachable_from_any_ref,
-    resolve_ref_oid, update_ref,
+    delete_ref, git, is_commit_reachable_from_any_ref, resolve_ref_oid, update_ref,
 };
 use ingot_git::commit::{
     ConvergenceCommitTrailers, abort_cherry_pick, cherry_pick_no_commit, commit_message,
     create_daemon_convergence_commit, list_commits_oldest_first, working_tree_has_changes,
 };
 use ingot_git::diff::changed_paths_between;
-use ingot_git::project_repo::{
-    CheckoutSyncStatus, checkout_sync_status, project_repo_paths,
-};
-use ingot_store_sqlite::{Database, FinishJobNonSuccessParams, StartJobExecutionParams};
+use ingot_git::project_repo::{CheckoutSyncStatus, checkout_sync_status, project_repo_paths};
+use ingot_store_sqlite::{Database, StartJobExecutionParams};
 use ingot_usecases::convergence::{
     ConvergenceCommandPort, ConvergenceService, ConvergenceSystemActionPort,
 };
@@ -73,13 +72,12 @@ use ingot_usecases::item::{
 };
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job, retry_job};
 use ingot_usecases::{
-    CompleteJobCommand, CompleteJobService, ProjectLocks, UseCaseError,
-    rebuild_revision_context,
+    CompleteJobCommand, CompleteJobService, ProjectLocks, UseCaseError, rebuild_revision_context,
 };
 use ingot_workflow::{Evaluation, Evaluator, step};
 use ingot_workspace::{
-    ensure_authoring_workspace_state, provision_integration_workspace,
-    provision_review_workspace, remove_workspace,
+    ensure_authoring_workspace_state, provision_integration_workspace, provision_review_workspace,
+    remove_workspace,
 };
 use tracing::warn;
 
@@ -135,35 +133,107 @@ pub fn build_router_with_project_locks_and_state_root(
         .route("/api/health", get(health))
         .route("/api/config", get(get_global_config))
         // Project routes
-        .route("/api/projects", get(projects::list_projects).post(projects::create_project))
+        .route(
+            "/api/projects",
+            get(projects::list_projects).post(projects::create_project),
+        )
         .route("/api/demo-project", post(crate::demo::create_demo_project))
-        .route("/api/projects/{project_id}/activity", get(projects::list_project_activity))
-        .route("/api/projects/{project_id}/workspaces", get(projects::list_project_workspaces))
-        .route("/api/projects/{project_id}", put(projects::update_project).delete(projects::delete_project))
-        .route("/api/projects/{project_id}/config", get(projects::get_project_config))
-        .route("/api/projects/{project_id}/jobs", get(projects::list_project_jobs))
+        .route(
+            "/api/projects/{project_id}/activity",
+            get(projects::list_project_activity),
+        )
+        .route(
+            "/api/projects/{project_id}/workspaces",
+            get(projects::list_project_workspaces),
+        )
+        .route(
+            "/api/projects/{project_id}",
+            put(projects::update_project).delete(projects::delete_project),
+        )
+        .route(
+            "/api/projects/{project_id}/config",
+            get(projects::get_project_config),
+        )
+        .route(
+            "/api/projects/{project_id}/jobs",
+            get(projects::list_project_jobs),
+        )
         // Workspace routes
-        .route("/api/projects/{project_id}/workspaces/{workspace_id}/reset", post(workspaces::reset_workspace_route))
-        .route("/api/projects/{project_id}/workspaces/{workspace_id}/abandon", post(workspaces::abandon_workspace_route))
-        .route("/api/projects/{project_id}/workspaces/{workspace_id}/remove", post(workspaces::remove_workspace_route))
+        .route(
+            "/api/projects/{project_id}/workspaces/{workspace_id}/reset",
+            post(workspaces::reset_workspace_route),
+        )
+        .route(
+            "/api/projects/{project_id}/workspaces/{workspace_id}/abandon",
+            post(workspaces::abandon_workspace_route),
+        )
+        .route(
+            "/api/projects/{project_id}/workspaces/{workspace_id}/remove",
+            post(workspaces::remove_workspace_route),
+        )
         // Agent routes
-        .route("/api/agents", get(agents::list_agents).post(agents::create_agent))
-        .route("/api/agents/{agent_id}", put(agents::update_agent).delete(agents::delete_agent))
-        .route("/api/agents/{agent_id}/reprobe", post(agents::reprobe_agent))
+        .route(
+            "/api/agents",
+            get(agents::list_agents).post(agents::create_agent),
+        )
+        .route(
+            "/api/agents/{agent_id}",
+            put(agents::update_agent).delete(agents::delete_agent),
+        )
+        .route(
+            "/api/agents/{agent_id}/reprobe",
+            post(agents::reprobe_agent),
+        )
         // Item routes
-        .route("/api/projects/{project_id}/items", get(items::list_items).post(items::create_item))
-        .route("/api/projects/{project_id}/items/{item_id}", get(items::get_item).patch(items::update_item))
-        .route("/api/projects/{project_id}/items/{item_id}/revise", post(items::revise_item))
-        .route("/api/projects/{project_id}/items/{item_id}/defer", post(items::defer_item))
-        .route("/api/projects/{project_id}/items/{item_id}/resume", post(items::resume_item))
-        .route("/api/projects/{project_id}/items/{item_id}/dismiss", post(items::dismiss_item))
-        .route("/api/projects/{project_id}/items/{item_id}/invalidate", post(items::invalidate_item))
-        .route("/api/projects/{project_id}/items/{item_id}/reopen", post(items::reopen_item))
-        .route("/api/projects/{project_id}/items/{item_id}/findings", get(items::list_item_findings))
+        .route(
+            "/api/projects/{project_id}/items",
+            get(items::list_items).post(items::create_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}",
+            get(items::get_item).patch(items::update_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/revise",
+            post(items::revise_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/defer",
+            post(items::defer_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/resume",
+            post(items::resume_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/dismiss",
+            post(items::dismiss_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/invalidate",
+            post(items::invalidate_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/reopen",
+            post(items::reopen_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/findings",
+            get(items::list_item_findings),
+        )
         // Job routes
-        .route("/api/projects/{project_id}/items/{item_id}/jobs", post(jobs::dispatch_item_job))
-        .route("/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/retry", post(jobs::retry_item_job))
-        .route("/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/cancel", post(jobs::cancel_item_job))
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/jobs",
+            post(dispatch::dispatch_item_job),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/retry",
+            post(dispatch::retry_item_job),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/cancel",
+            post(jobs::cancel_item_job),
+        )
         .route("/api/jobs/{job_id}/assign", post(jobs::assign_job))
         .route("/api/jobs/{job_id}/start", post(jobs::start_job))
         .route("/api/jobs/{job_id}/heartbeat", post(jobs::heartbeat_job))
@@ -173,13 +243,31 @@ pub fn build_router_with_project_locks_and_state_root(
         .route("/api/jobs/{job_id}/expire", post(jobs::expire_job))
         // Finding routes
         .route("/api/findings/{finding_id}", get(findings::get_finding))
-        .route("/api/findings/{finding_id}/triage", post(findings::triage_item_finding))
-        .route("/api/findings/{finding_id}/promote", post(findings::promote_item_from_finding))
-        .route("/api/findings/{finding_id}/dismiss", post(findings::dismiss_item_finding))
+        .route(
+            "/api/findings/{finding_id}/triage",
+            post(findings::triage_item_finding),
+        )
+        .route(
+            "/api/findings/{finding_id}/promote",
+            post(findings::promote_item_from_finding),
+        )
+        .route(
+            "/api/findings/{finding_id}/dismiss",
+            post(findings::dismiss_item_finding),
+        )
         // Convergence routes
-        .route("/api/projects/{project_id}/items/{item_id}/convergence/prepare", post(convergence::prepare_item_convergence))
-        .route("/api/projects/{project_id}/items/{item_id}/approval/approve", post(convergence::approve_item))
-        .route("/api/projects/{project_id}/items/{item_id}/approval/reject", post(convergence::reject_item_approval))
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/convergence/prepare",
+            post(convergence::prepare_item_convergence),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/approval/approve",
+            post(convergence::approve_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/approval/reject",
+            post(convergence::reject_item_approval),
+        )
         .with_state(state)
 }
 
@@ -191,209 +279,66 @@ pub(super) async fn get_global_config() -> Result<Json<IngotConfig>, ApiError> {
     Ok(Json(load_effective_config(None)?))
 }
 
-
 pub(super) async fn teardown_revision_lane_state(
     state: &AppState,
     project: &Project,
     item_id: ItemId,
     revision: &ItemRevision,
 ) -> Result<RevisionLaneTeardown, ApiError> {
-    let mut teardown = RevisionLaneTeardown::default();
     let paths = refresh_project_mirror(state, project).await?;
+    let mirror_git_dir = paths.mirror_git_dir.as_path();
 
-    for job in state
-        .db
-        .list_jobs_by_item(item_id)
-        .await
-        .map_err(repo_to_internal)?
-        .into_iter()
-        .filter(|job| job.item_revision_id == revision.id && job.status.is_active())
-    {
-        state
+    let uc_result = ingot_usecases::teardown::teardown_revision_lane(
+        &state.db, &state.db, &state.db, &state.db, &state.db, &state.db, project.id, item_id,
+        revision,
+    )
+    .await?;
+
+    let item = state.db.get_item(item_id).await.map_err(repo_to_item)?;
+    jobs::refresh_revision_context_for_job_like(state, &item, revision, mirror_git_dir).await?;
+
+    // Perform filesystem cleanup for integration workspaces
+    for workspace_id in &uc_result.integration_workspace_ids {
+        let workspace = state
             .db
-            .finish_job_non_success(FinishJobNonSuccessParams {
-                job_id: job.id,
-                item_id,
-                expected_item_revision_id: revision.id,
-                status: JobStatus::Cancelled,
-                outcome_class: Some(OutcomeClass::Cancelled),
-                error_code: Some("item_mutation_cancelled"),
-                error_message: None,
-                escalation_reason: None,
-            })
-            .await
-            .map_err(repo_to_job_failure)?;
-        teardown.cancelled_job_ids.push(job.id.to_string());
-
-        if let Some(workspace_id) = job.workspace_id {
-            let mut workspace = state
-                .db
-                .get_workspace(workspace_id)
-                .await
-                .map_err(repo_to_internal)?;
-            workspace.current_job_id = None;
-            if workspace.status == ingot_domain::workspace::WorkspaceStatus::Busy {
-                workspace.status = ingot_domain::workspace::WorkspaceStatus::Ready;
-            }
-            workspace.updated_at = Utc::now();
-            state
-                .db
-                .update_workspace(&workspace)
-                .await
-                .map_err(repo_to_internal)?;
-        }
-
-        refresh_revision_context_for_job(state, job.id).await?;
-        append_activity(
-            state,
-            project.id,
-            ActivityEventType::JobCancelled,
-            "job",
-            job.id,
-            serde_json::json!({ "item_id": item_id, "reason": "item_mutation_cancelled" }),
-        )
-        .await?;
-    }
-
-    for mut convergence in state
-        .db
-        .list_convergences_by_item(item_id)
-        .await
-        .map_err(repo_to_internal)?
-        .into_iter()
-        .filter(|convergence| {
-            convergence.item_revision_id == revision.id
-                && matches!(
-                    convergence.status,
-                    ingot_domain::convergence::ConvergenceStatus::Queued
-                        | ingot_domain::convergence::ConvergenceStatus::Running
-                        | ingot_domain::convergence::ConvergenceStatus::Prepared
-                )
-        })
-    {
-        convergence.status = ingot_domain::convergence::ConvergenceStatus::Cancelled;
-        convergence.completed_at = Some(Utc::now());
-        state
-            .db
-            .update_convergence(&convergence)
+            .get_workspace(*workspace_id)
             .await
             .map_err(repo_to_internal)?;
-        teardown
-            .cancelled_convergence_ids
-            .push(convergence.id.to_string());
-
-        if let Some(workspace_id) = convergence.integration_workspace_id {
-            let workspace = state
-                .db
-                .get_workspace(workspace_id)
-                .await
-                .map_err(repo_to_internal)?;
-            if PathBuf::from(&workspace.path).exists() {
-                let _ = ingot_workspace::remove_workspace(
-                    paths.mirror_git_dir.as_path(),
-                    FsPath::new(&workspace.path),
-                )
+        if PathBuf::from(&workspace.path).exists() {
+            let _ = ingot_workspace::remove_workspace(mirror_git_dir, FsPath::new(&workspace.path))
                 .await;
-            }
-            if workspace.status != ingot_domain::workspace::WorkspaceStatus::Abandoned {
-                let mut abandoned_workspace = workspace;
-                abandoned_workspace.status = ingot_domain::workspace::WorkspaceStatus::Abandoned;
-                abandoned_workspace.current_job_id = None;
-                abandoned_workspace.updated_at = Utc::now();
-                state
-                    .db
-                    .update_workspace(&abandoned_workspace)
-                    .await
-                    .map_err(repo_to_internal)?;
-            }
         }
     }
 
-    if let Some(mut queue_entry) = state
-        .db
-        .find_active_queue_entry_for_revision(revision.id)
-        .await
-        .map_err(repo_to_internal)?
-    {
-        queue_entry.status = ConvergenceQueueEntryStatus::Cancelled;
-        queue_entry.released_at = Some(Utc::now());
-        queue_entry.updated_at = Utc::now();
-        state
-            .db
-            .update_queue_entry(&queue_entry)
-            .await
-            .map_err(repo_to_internal)?;
-        teardown
+    // Map to the existing RevisionLaneTeardown type for backward compat with callers
+    Ok(RevisionLaneTeardown {
+        cancelled_job_ids: uc_result
+            .cancelled_job_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        cancelled_convergence_ids: uc_result
+            .cancelled_convergence_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        cancelled_queue_entry_ids: uc_result
             .cancelled_queue_entry_ids
-            .push(queue_entry.id.to_string());
-    }
-
-    if teardown.has_cancelled_convergence() {
-        for mut operation in state
-            .db
-            .list_unresolved_git_operations()
-            .await
-            .map_err(repo_to_internal)?
-            .into_iter()
-            .filter(|operation| {
-                operation.project_id == project.id
-                    && operation.entity_type == GitEntityType::Convergence
-                    && teardown
-                        .cancelled_convergence_ids
-                        .iter()
-                        .any(|convergence_id| convergence_id == &operation.entity_id)
-                    && matches!(
-                        operation.operation_kind,
-                        OperationKind::PrepareConvergenceCommit | OperationKind::FinalizeTargetRef
-                    )
-            })
-        {
-            match operation.operation_kind {
-                OperationKind::PrepareConvergenceCommit => {
-                    operation.status = GitOperationStatus::Reconciled;
-                    operation.completed_at = Some(Utc::now());
-                    state
-                        .db
-                        .update_git_operation(&operation)
-                        .await
-                        .map_err(repo_to_internal)?;
-                    append_activity(
-                        state,
-                        project.id,
-                        ActivityEventType::GitOperationReconciled,
-                        "git_operation",
-                        operation.id,
-                        serde_json::json!({ "operation_kind": operation.operation_kind }),
-                    )
-                    .await?;
-                    teardown
-                        .reconciled_prepare_operation_ids
-                        .push(operation.id.to_string());
-                }
-                OperationKind::FinalizeTargetRef => {
-                    operation.status = GitOperationStatus::Failed;
-                    operation.completed_at = Some(Utc::now());
-                    state
-                        .db
-                        .update_git_operation(&operation)
-                        .await
-                        .map_err(repo_to_internal)?;
-                    teardown
-                        .failed_finalize_operation_ids
-                        .push(operation.id.to_string());
-                }
-                OperationKind::CreateJobCommit
-                | OperationKind::CreateInvestigationRef
-                | OperationKind::ResetWorkspace
-                | OperationKind::RemoveWorkspaceRef
-                | OperationKind::RemoveInvestigationRef => {}
-            }
-        }
-    }
-
-    Ok(teardown)
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        reconciled_prepare_operation_ids: uc_result
+            .reconciled_git_operation_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        failed_finalize_operation_ids: uc_result
+            .failed_git_operation_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    })
 }
-
 
 #[cfg(not(test))]
 pub(super) fn default_state_root() -> PathBuf {
@@ -405,4 +350,3 @@ pub(super) fn default_state_root() -> PathBuf {
 fn default_state_root() -> PathBuf {
     std::env::temp_dir().join(format!("ingot-http-api-state-{}", uuid::Uuid::now_v7()))
 }
-

@@ -1,8 +1,10 @@
-use super::*;
 use super::support::*;
 use super::types::*;
+use super::*;
 
-pub(super) async fn list_agents(State(state): State<AppState>) -> Result<Json<Vec<Agent>>, ApiError> {
+pub(super) async fn list_agents(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Agent>>, ApiError> {
     let agents = state.db.list_agents().await.map_err(repo_to_internal)?;
     Ok(Json(agents))
 }
@@ -120,4 +122,3 @@ pub(super) async fn reprobe_agent(
 
     Ok(Json(agent))
 }
-

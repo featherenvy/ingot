@@ -19,6 +19,7 @@ pub struct WorkspaceBuilder {
     head_commit_oid: Option<String>,
     retention_policy: RetentionPolicy,
     status: WorkspaceStatus,
+    current_job_id: Option<ids::JobId>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -41,6 +42,7 @@ impl WorkspaceBuilder {
             head_commit_oid: None,
             retention_policy: RetentionPolicy::Persistent,
             status: WorkspaceStatus::Ready,
+            current_job_id: None,
             created_at: now,
             updated_at: now,
         }
@@ -76,6 +78,26 @@ impl WorkspaceBuilder {
         self
     }
 
+    pub fn retention_policy(mut self, retention_policy: RetentionPolicy) -> Self {
+        self.retention_policy = retention_policy;
+        self
+    }
+
+    pub fn no_target_ref(mut self) -> Self {
+        self.target_ref = None;
+        self
+    }
+
+    pub fn no_workspace_ref(mut self) -> Self {
+        self.workspace_ref = None;
+        self
+    }
+
+    pub fn current_job_id(mut self, job_id: ids::JobId) -> Self {
+        self.current_job_id = Some(job_id);
+        self
+    }
+
     pub fn status(mut self, status: WorkspaceStatus) -> Self {
         self.status = status;
         self
@@ -102,7 +124,7 @@ impl WorkspaceBuilder {
             head_commit_oid: self.head_commit_oid,
             retention_policy: self.retention_policy,
             status: self.status,
-            current_job_id: None,
+            current_job_id: self.current_job_id,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }

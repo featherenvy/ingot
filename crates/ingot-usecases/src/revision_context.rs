@@ -37,72 +37,6 @@ pub fn rebuild_revision_context(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use chrono::Utc;
-    use ingot_domain::ids::{ItemId, ItemRevisionId};
-    use ingot_domain::item::{
-        ApprovalState, Classification, EscalationState, Item, LifecycleState, OriginKind,
-        ParkingState, Priority,
-    };
-    use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
-    use serde_json::json;
-    use uuid::Uuid;
-
-    use super::rebuild_revision_context;
-
-    #[test]
-    fn revision_context_keeps_unbound_authoring_head_null() {
-        let item_id = ItemId::from_uuid(Uuid::nil());
-        let revision_id = ItemRevisionId::from_uuid(Uuid::nil());
-        let now = Utc::now();
-        let item = Item {
-            id: item_id,
-            project_id: ingot_domain::ids::ProjectId::from_uuid(Uuid::nil()),
-            classification: Classification::Change,
-            workflow_version: "delivery:v1".into(),
-            lifecycle_state: LifecycleState::Open,
-            parking_state: ParkingState::Active,
-            done_reason: None,
-            resolution_source: None,
-            approval_state: ApprovalState::NotRequested,
-            escalation_state: EscalationState::None,
-            escalation_reason: None,
-            current_revision_id: revision_id,
-            origin_kind: OriginKind::Manual,
-            origin_finding_id: None,
-            priority: Priority::Major,
-            labels: vec![],
-            operator_notes: None,
-            created_at: now,
-            updated_at: now,
-            closed_at: None,
-        };
-        let revision = ItemRevision {
-            id: revision_id,
-            item_id,
-            revision_no: 1,
-            title: "Title".into(),
-            description: "Desc".into(),
-            acceptance_criteria: "AC".into(),
-            target_ref: "refs/heads/main".into(),
-            approval_policy: ApprovalPolicy::Required,
-            policy_snapshot: json!({}),
-            template_map_snapshot: json!({}),
-            seed_commit_oid: None,
-            seed_target_commit_oid: Some("target".into()),
-            supersedes_revision_id: None,
-            created_at: now,
-        };
-
-        let context = rebuild_revision_context(&item, &revision, &[], None, vec![], None, now);
-        assert_eq!(
-            context.payload["authoring_head_commit_oid"],
-            serde_json::Value::Null
-        );
-    }
-}
-
 fn latest_summary(jobs: &[Job], phase_kind: PhaseKind) -> Option<RevisionContextResultSummary> {
     structured_result_jobs(jobs)
         .filter(|job| job.phase_kind == phase_kind)
@@ -176,4 +110,70 @@ fn outcome_name(outcome: ingot_domain::job::OutcomeClass) -> &'static str {
 fn excerpt_operator_notes(notes: &str) -> String {
     const MAX_CHARS: usize = 500;
     notes.chars().take(MAX_CHARS).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use ingot_domain::ids::{ItemId, ItemRevisionId};
+    use ingot_domain::item::{
+        ApprovalState, Classification, EscalationState, Item, LifecycleState, OriginKind,
+        ParkingState, Priority,
+    };
+    use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::rebuild_revision_context;
+
+    #[test]
+    fn revision_context_keeps_unbound_authoring_head_null() {
+        let item_id = ItemId::from_uuid(Uuid::nil());
+        let revision_id = ItemRevisionId::from_uuid(Uuid::nil());
+        let now = Utc::now();
+        let item = Item {
+            id: item_id,
+            project_id: ingot_domain::ids::ProjectId::from_uuid(Uuid::nil()),
+            classification: Classification::Change,
+            workflow_version: "delivery:v1".into(),
+            lifecycle_state: LifecycleState::Open,
+            parking_state: ParkingState::Active,
+            done_reason: None,
+            resolution_source: None,
+            approval_state: ApprovalState::NotRequested,
+            escalation_state: EscalationState::None,
+            escalation_reason: None,
+            current_revision_id: revision_id,
+            origin_kind: OriginKind::Manual,
+            origin_finding_id: None,
+            priority: Priority::Major,
+            labels: vec![],
+            operator_notes: None,
+            created_at: now,
+            updated_at: now,
+            closed_at: None,
+        };
+        let revision = ItemRevision {
+            id: revision_id,
+            item_id,
+            revision_no: 1,
+            title: "Title".into(),
+            description: "Desc".into(),
+            acceptance_criteria: "AC".into(),
+            target_ref: "refs/heads/main".into(),
+            approval_policy: ApprovalPolicy::Required,
+            policy_snapshot: json!({}),
+            template_map_snapshot: json!({}),
+            seed_commit_oid: None,
+            seed_target_commit_oid: Some("target".into()),
+            supersedes_revision_id: None,
+            created_at: now,
+        };
+
+        let context = rebuild_revision_context(&item, &revision, &[], None, vec![], None, now);
+        assert_eq!(
+            context.payload["authoring_head_commit_oid"],
+            serde_json::Value::Null
+        );
+    }
 }

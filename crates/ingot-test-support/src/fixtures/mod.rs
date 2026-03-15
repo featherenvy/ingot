@@ -1,5 +1,8 @@
+mod agent;
 mod convergence;
+mod convergence_queue_entry;
 mod finding;
+mod git_operation;
 mod item;
 mod job;
 mod project;
@@ -7,8 +10,11 @@ mod revision;
 mod timestamps;
 mod workspace;
 
+pub use agent::AgentBuilder;
 pub use convergence::ConvergenceBuilder;
+pub use convergence_queue_entry::ConvergenceQueueEntryBuilder;
 pub use finding::FindingBuilder;
+pub use git_operation::GitOperationBuilder;
 pub use item::ItemBuilder;
 pub use job::JobBuilder;
 pub use project::ProjectBuilder;

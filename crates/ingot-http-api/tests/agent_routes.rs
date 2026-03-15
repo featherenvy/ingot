@@ -1,17 +1,13 @@
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
-use ingot_store_sqlite::Database;
 use tower::ServiceExt;
-use uuid::Uuid;
 
 mod common;
 use common::*;
 
 #[tokio::test]
 async fn create_agent_route_probes_cli_and_lists_agents() {
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let app = test_router(db.clone());
     let fake_codex = fake_codex_probe_script();
 
@@ -69,9 +65,7 @@ async fn create_agent_route_probes_cli_and_lists_agents() {
 
 #[tokio::test]
 async fn update_reprobe_and_delete_agent_routes_mutate_bootstrap_state() {
-    let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
-    let db = Database::connect(&db_path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
+    let db = migrated_test_db("ingot-http-api-db").await;
     let app = test_router(db.clone());
     let fake_codex = fake_codex_probe_script();
 
@@ -99,8 +93,7 @@ async fn update_reprobe_and_delete_agent_routes_mutate_bootstrap_state() {
     let create_body = to_bytes(create_response.into_body(), usize::MAX)
         .await
         .expect("read create body");
-    let create_json: serde_json::Value =
-        serde_json::from_slice(&create_body).expect("create json");
+    let create_json: serde_json::Value = serde_json::from_slice(&create_body).expect("create json");
     let agent_id = create_json["id"].as_str().expect("agent id");
 
     let update_response = app
@@ -126,8 +119,7 @@ async fn update_reprobe_and_delete_agent_routes_mutate_bootstrap_state() {
     let update_body = to_bytes(update_response.into_body(), usize::MAX)
         .await
         .expect("read update body");
-    let update_json: serde_json::Value =
-        serde_json::from_slice(&update_body).expect("update json");
+    let update_json: serde_json::Value = serde_json::from_slice(&update_body).expect("update json");
     assert_eq!(update_json["slug"].as_str(), Some("codex-primary"));
     assert_eq!(update_json["model"].as_str(), Some("gpt-5"));
 

@@ -1,0 +1,783 @@
+use chrono::Utc;
+use ingot_domain::activity::{Activity, ActivityEventType};
+use ingot_domain::convergence::ConvergenceStatus;
+use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
+use ingot_domain::git_operation::{GitEntityType, GitOperationStatus, OperationKind};
+use ingot_domain::ids::{
+    ActivityId, ConvergenceId, ConvergenceQueueEntryId, GitOperationId, ItemId, JobId, ProjectId,
+    WorkspaceId,
+};
+use ingot_domain::job::{JobStatus, OutcomeClass};
+use ingot_domain::ports::{
+    ActivityRepository, ConvergenceQueueRepository, ConvergenceRepository,
+    FinishJobNonSuccessParams, GitOperationRepository, JobRepository, WorkspaceRepository,
+};
+use ingot_domain::revision::ItemRevision;
+use ingot_domain::workspace::WorkspaceStatus;
+
+use crate::UseCaseError;
+use crate::job_lifecycle::map_finish_non_success_error;
+
+/// Result of tearing down a revision lane's active state.
+/// Callers use this to decide what infrastructure side effects to perform
+/// (e.g., filesystem removal, git ref cleanup).
+#[derive(Default, Debug, Clone)]
+pub struct RevisionLaneTeardownResult {
+    pub cancelled_job_ids: Vec<JobId>,
+    pub cancelled_job_workspace_ids: Vec<WorkspaceId>,
+    pub cancelled_convergence_ids: Vec<ConvergenceId>,
+    pub integration_workspace_ids: Vec<WorkspaceId>,
+    pub cancelled_queue_entry_ids: Vec<ConvergenceQueueEntryId>,
+    pub reconciled_git_operation_ids: Vec<GitOperationId>,
+    pub failed_git_operation_ids: Vec<GitOperationId>,
+}
+
+impl RevisionLaneTeardownResult {
+    pub fn has_cancelled_convergence(&self) -> bool {
+        !self.cancelled_convergence_ids.is_empty()
+    }
+
+    pub fn has_cancelled_queue_entry(&self) -> bool {
+        !self.cancelled_queue_entry_ids.is_empty()
+    }
+
+    pub fn first_cancelled_convergence_id(&self) -> Option<ConvergenceId> {
+        self.cancelled_convergence_ids.first().copied()
+    }
+
+    pub fn first_cancelled_queue_entry_id(&self) -> Option<ConvergenceQueueEntryId> {
+        self.cancelled_queue_entry_ids.first().copied()
+    }
+}
+
+/// Tear down all active state for a revision lane. Pure DB mutations only.
+///
+/// Cancels active jobs, convergences, queue entries, and reconciles git operations.
+/// Does NOT perform filesystem cleanup or refresh_revision_context — callers do that.
+#[allow(clippy::too_many_arguments)]
+pub async fn teardown_revision_lane<J, C, CQ, W, GO, A>(
+    job_repo: &J,
+    convergence_repo: &C,
+    queue_repo: &CQ,
+    workspace_repo: &W,
+    git_op_repo: &GO,
+    activity_repo: &A,
+    project_id: ProjectId,
+    item_id: ItemId,
+    revision: &ItemRevision,
+) -> Result<RevisionLaneTeardownResult, UseCaseError>
+where
+    J: JobRepository,
+    C: ConvergenceRepository,
+    CQ: ConvergenceQueueRepository,
+    W: WorkspaceRepository,
+    GO: GitOperationRepository,
+    A: ActivityRepository,
+{
+    let mut result = RevisionLaneTeardownResult::default();
+
+    // 1. Cancel active jobs for this revision
+    for job in job_repo
+        .list_by_item(item_id)
+        .await?
+        .into_iter()
+        .filter(|job| job.item_revision_id == revision.id && job.status.is_active())
+    {
+        job_repo
+            .finish_non_success(FinishJobNonSuccessParams {
+                job_id: job.id,
+                item_id,
+                expected_item_revision_id: revision.id,
+                status: JobStatus::Cancelled,
+                outcome_class: Some(OutcomeClass::Cancelled),
+                error_code: Some("item_mutation_cancelled".into()),
+                error_message: None,
+                escalation_reason: None,
+            })
+            .await
+            .map_err(|error| {
+                map_finish_non_success_error(
+                    error,
+                    "job failure does not match the current item revision",
+                )
+            })?;
+        result.cancelled_job_ids.push(job.id);
+
+        if let Some(workspace_id) = job.workspace_id {
+            let mut workspace = workspace_repo.get(workspace_id).await?;
+            workspace.current_job_id = None;
+            if workspace.status == WorkspaceStatus::Busy {
+                workspace.status = WorkspaceStatus::Ready;
+            }
+            workspace.updated_at = Utc::now();
+            workspace_repo.update(&workspace).await?;
+            result.cancelled_job_workspace_ids.push(workspace_id);
+        }
+
+        activity_repo
+            .append(&Activity {
+                id: ActivityId::new(),
+                project_id,
+                event_type: ActivityEventType::JobCancelled,
+                entity_type: "job".into(),
+                entity_id: job.id.to_string(),
+                payload: serde_json::json!({ "item_id": item_id, "reason": "item_mutation_cancelled" }),
+                created_at: Utc::now(),
+            })
+            .await?;
+    }
+
+    // 2. Cancel active convergences for this revision
+    for mut convergence in convergence_repo
+        .list_by_item(item_id)
+        .await?
+        .into_iter()
+        .filter(|convergence| {
+            convergence.item_revision_id == revision.id
+                && matches!(
+                    convergence.status,
+                    ConvergenceStatus::Queued
+                        | ConvergenceStatus::Running
+                        | ConvergenceStatus::Prepared
+                )
+        })
+    {
+        convergence.status = ConvergenceStatus::Cancelled;
+        convergence.completed_at = Some(Utc::now());
+        convergence_repo.update(&convergence).await?;
+        result.cancelled_convergence_ids.push(convergence.id);
+
+        if let Some(workspace_id) = convergence.integration_workspace_id {
+            let workspace = workspace_repo.get(workspace_id).await?;
+            if workspace.status != WorkspaceStatus::Abandoned {
+                let mut abandoned_workspace = workspace;
+                abandoned_workspace.status = WorkspaceStatus::Abandoned;
+                abandoned_workspace.current_job_id = None;
+                abandoned_workspace.updated_at = Utc::now();
+                workspace_repo.update(&abandoned_workspace).await?;
+            }
+            result.integration_workspace_ids.push(workspace_id);
+        }
+    }
+
+    // 3. Cancel active queue entry for this revision
+    if let Some(mut queue_entry) = queue_repo.find_active_for_revision(revision.id).await? {
+        queue_entry.status = ConvergenceQueueEntryStatus::Cancelled;
+        queue_entry.released_at = Some(Utc::now());
+        queue_entry.updated_at = Utc::now();
+        queue_repo.update(&queue_entry).await?;
+        result.cancelled_queue_entry_ids.push(queue_entry.id);
+    }
+
+    // 4. Reconcile/fail unresolved git operations for cancelled convergences
+    if result.has_cancelled_convergence() {
+        let cancelled_ids: Vec<String> = result
+            .cancelled_convergence_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+
+        for mut operation in git_op_repo
+            .find_unresolved()
+            .await?
+            .into_iter()
+            .filter(|operation| {
+                operation.project_id == project_id
+                    && operation.entity_type == GitEntityType::Convergence
+                    && cancelled_ids.iter().any(|id| id == &operation.entity_id)
+                    && matches!(
+                        operation.operation_kind,
+                        OperationKind::PrepareConvergenceCommit | OperationKind::FinalizeTargetRef
+                    )
+            })
+        {
+            match operation.operation_kind {
+                OperationKind::PrepareConvergenceCommit => {
+                    operation.status = GitOperationStatus::Reconciled;
+                    operation.completed_at = Some(Utc::now());
+                    git_op_repo.update(&operation).await?;
+                    activity_repo
+                        .append(&Activity {
+                            id: ActivityId::new(),
+                            project_id,
+                            event_type: ActivityEventType::GitOperationReconciled,
+                            entity_type: "git_operation".into(),
+                            entity_id: operation.id.to_string(),
+                            payload: serde_json::json!({ "operation_kind": operation.operation_kind }),
+                            created_at: Utc::now(),
+                        })
+                        .await?;
+                    result.reconciled_git_operation_ids.push(operation.id);
+                }
+                OperationKind::FinalizeTargetRef => {
+                    operation.status = GitOperationStatus::Failed;
+                    operation.completed_at = Some(Utc::now());
+                    git_op_repo.update(&operation).await?;
+                    result.failed_git_operation_ids.push(operation.id);
+                }
+                OperationKind::CreateJobCommit
+                | OperationKind::CreateInvestigationRef
+                | OperationKind::ResetWorkspace
+                | OperationKind::RemoveWorkspaceRef
+                | OperationKind::RemoveInvestigationRef => {}
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use chrono::Utc;
+    use ingot_domain::activity::Activity;
+    use ingot_domain::convergence::Convergence;
+    use ingot_domain::convergence_queue::ConvergenceQueueEntry;
+    use ingot_domain::git_operation::GitOperation;
+    use ingot_domain::ids::{
+        ConvergenceId, ConvergenceQueueEntryId, ItemId, ItemRevisionId, JobId, ProjectId,
+        WorkspaceId,
+    };
+    use ingot_domain::job::{Job, JobStatus};
+    use ingot_domain::ports::{RepositoryError, StartJobExecutionParams};
+    use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
+    use ingot_test_support::fixtures::{JobBuilder, RevisionBuilder, WorkspaceBuilder};
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn teardown_maps_job_not_active_conflict() {
+        let revision = test_revision();
+        let job_repo = FakeJobRepository::with_jobs_and_error(
+            vec![test_active_job(revision.id, None)],
+            RepositoryError::Conflict("job_not_active".into()),
+        );
+
+        let result = teardown_revision_lane(
+            &job_repo,
+            &FakeConvergenceRepository::default(),
+            &FakeQueueRepository::default(),
+            &FakeWorkspaceRepository::default(),
+            &FakeGitOperationRepository::default(),
+            &FakeActivityRepository::default(),
+            ProjectId::from_uuid(Uuid::nil()),
+            revision.item_id,
+            &revision,
+        )
+        .await;
+
+        assert!(matches!(result, Err(UseCaseError::JobNotActive)));
+    }
+
+    #[tokio::test]
+    async fn teardown_maps_revision_stale_conflict() {
+        let revision = test_revision();
+        let job_repo = FakeJobRepository::with_jobs_and_error(
+            vec![test_active_job(revision.id, None)],
+            RepositoryError::Conflict("job_revision_stale".into()),
+        );
+
+        let result = teardown_revision_lane(
+            &job_repo,
+            &FakeConvergenceRepository::default(),
+            &FakeQueueRepository::default(),
+            &FakeWorkspaceRepository::default(),
+            &FakeGitOperationRepository::default(),
+            &FakeActivityRepository::default(),
+            ProjectId::from_uuid(Uuid::nil()),
+            revision.item_id,
+            &revision,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(UseCaseError::ProtocolViolation(message))
+                if message == "job failure does not match the current item revision"
+        ));
+    }
+
+    #[tokio::test]
+    async fn teardown_cancels_active_jobs_for_revision() {
+        let revision = test_revision();
+        let workspace = test_workspace();
+        let job = test_active_job(revision.id, Some(workspace.id));
+        let job_repo = FakeJobRepository::with_jobs(vec![job.clone()]);
+        let workspace_repo = FakeWorkspaceRepository::with_workspace(workspace);
+
+        let result = teardown_revision_lane(
+            &job_repo,
+            &FakeConvergenceRepository::default(),
+            &FakeQueueRepository::default(),
+            &workspace_repo,
+            &FakeGitOperationRepository::default(),
+            &FakeActivityRepository::default(),
+            job.project_id,
+            job.item_id,
+            &revision,
+        )
+        .await
+        .expect("teardown should succeed");
+
+        assert_eq!(result.cancelled_job_ids, vec![job.id]);
+        assert_eq!(
+            result.cancelled_job_workspace_ids,
+            vec![WorkspaceId::from_uuid(Uuid::nil())]
+        );
+
+        let updated_workspace = workspace_repo.last_updated().expect("updated workspace");
+        assert_eq!(updated_workspace.current_job_id, None);
+        assert_eq!(updated_workspace.status, WorkspaceStatus::Ready);
+    }
+
+    fn test_revision() -> ItemRevision {
+        RevisionBuilder::new(ItemId::from_uuid(Uuid::nil()))
+            .id(ItemRevisionId::from_uuid(Uuid::nil()))
+            .build()
+    }
+
+    fn test_active_job(revision_id: ItemRevisionId, workspace_id: Option<WorkspaceId>) -> Job {
+        let nil = Uuid::nil();
+        let mut builder = JobBuilder::new(
+            ProjectId::from_uuid(nil),
+            ItemId::from_uuid(nil),
+            revision_id,
+            "author_initial",
+        )
+        .id(JobId::from_uuid(nil))
+        .status(JobStatus::Running);
+        if let Some(workspace_id) = workspace_id {
+            builder = builder.workspace_id(workspace_id);
+        }
+        builder.build()
+    }
+
+    fn test_workspace() -> Workspace {
+        let nil = Uuid::nil();
+        let job_id = JobId::from_uuid(nil);
+        let mut workspace =
+            WorkspaceBuilder::new(ProjectId::from_uuid(nil), WorkspaceKind::Authoring)
+                .id(WorkspaceId::from_uuid(nil))
+                .status(WorkspaceStatus::Busy)
+                .build();
+        workspace.current_job_id = Some(job_id);
+        workspace
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeJobRepository {
+        state: Arc<Mutex<FakeJobRepositoryState>>,
+    }
+
+    #[derive(Default)]
+    struct FakeJobRepositoryState {
+        jobs: Vec<Job>,
+        finish_error: Option<RepositoryError>,
+    }
+
+    impl FakeJobRepository {
+        fn with_jobs(jobs: Vec<Job>) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(FakeJobRepositoryState {
+                    jobs,
+                    finish_error: None,
+                })),
+            }
+        }
+
+        fn with_jobs_and_error(jobs: Vec<Job>, finish_error: RepositoryError) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(FakeJobRepositoryState {
+                    jobs,
+                    finish_error: Some(finish_error),
+                })),
+            }
+        }
+    }
+
+    impl JobRepository for FakeJobRepository {
+        fn list_by_project(
+            &self,
+            _project_id: ProjectId,
+        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn list_by_revision(
+            &self,
+            _revision_id: ItemRevisionId,
+        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn get(
+            &self,
+            _id: JobId,
+        ) -> impl std::future::Future<Output = Result<Job, RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn create(
+            &self,
+            _job: &Job,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn update(
+            &self,
+            _job: &Job,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn find_active_for_revision(
+            &self,
+            _revision_id: ItemRevisionId,
+        ) -> impl std::future::Future<Output = Result<Option<Job>, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+
+        fn list_by_item(
+            &self,
+            _item_id: ItemId,
+        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
+            let jobs = self.state.lock().expect("job state lock").jobs.clone();
+            async move { Ok(jobs) }
+        }
+
+        fn list_queued(
+            &self,
+            _limit: u32,
+        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn list_active(
+            &self,
+        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn start_execution(
+            &self,
+            _params: StartJobExecutionParams,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn heartbeat_execution(
+            &self,
+            _job_id: JobId,
+            _item_id: ItemId,
+            _revision_id: ItemRevisionId,
+            _lease_owner_id: &str,
+            _lease_expires_at: chrono::DateTime<Utc>,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn finish_non_success(
+            &self,
+            _params: FinishJobNonSuccessParams,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            let state = self.state.clone();
+            async move {
+                let mut state = state.lock().expect("job state lock");
+                if let Some(error) = state.finish_error.take() {
+                    return Err(error);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeConvergenceRepository;
+
+    impl ConvergenceRepository for FakeConvergenceRepository {
+        fn list_by_revision(
+            &self,
+            _revision_id: ItemRevisionId,
+        ) -> impl std::future::Future<Output = Result<Vec<Convergence>, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+
+        fn get(
+            &self,
+            _id: ConvergenceId,
+        ) -> impl std::future::Future<Output = Result<Convergence, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+
+        fn create(
+            &self,
+            _convergence: &Convergence,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn update(
+            &self,
+            _convergence: &Convergence,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            async { Ok(()) }
+        }
+
+        fn find_active_for_revision(
+            &self,
+            _revision_id: ItemRevisionId,
+        ) -> impl std::future::Future<Output = Result<Option<Convergence>, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+
+        fn find_prepared_for_revision(
+            &self,
+            _revision_id: ItemRevisionId,
+        ) -> impl std::future::Future<Output = Result<Option<Convergence>, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+
+        fn list_by_item(
+            &self,
+            _item_id: ItemId,
+        ) -> impl std::future::Future<Output = Result<Vec<Convergence>, RepositoryError>> + Send
+        {
+            async { Ok(vec![]) }
+        }
+
+        fn list_active(
+            &self,
+        ) -> impl std::future::Future<Output = Result<Vec<Convergence>, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeQueueRepository;
+
+    impl ConvergenceQueueRepository for FakeQueueRepository {
+        fn list_by_item(
+            &self,
+            _item_id: ItemId,
+        ) -> impl std::future::Future<Output = Result<Vec<ConvergenceQueueEntry>, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+
+        fn get(
+            &self,
+            _id: ConvergenceQueueEntryId,
+        ) -> impl std::future::Future<Output = Result<ConvergenceQueueEntry, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+
+        fn find_active_for_revision(
+            &self,
+            _revision_id: ItemRevisionId,
+        ) -> impl std::future::Future<
+            Output = Result<Option<ConvergenceQueueEntry>, RepositoryError>,
+        > + Send {
+            async { Ok(None) }
+        }
+
+        fn find_head(
+            &self,
+            _project_id: ProjectId,
+            _target_ref: &str,
+        ) -> impl std::future::Future<
+            Output = Result<Option<ConvergenceQueueEntry>, RepositoryError>,
+        > + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn find_next_queued(
+            &self,
+            _project_id: ProjectId,
+            _target_ref: &str,
+        ) -> impl std::future::Future<
+            Output = Result<Option<ConvergenceQueueEntry>, RepositoryError>,
+        > + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn create(
+            &self,
+            _entry: &ConvergenceQueueEntry,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn list_active_by_project(
+            &self,
+            _project_id: ProjectId,
+        ) -> impl std::future::Future<Output = Result<Vec<ConvergenceQueueEntry>, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+
+        fn list_active_for_lane(
+            &self,
+            _project_id: ProjectId,
+            _target_ref: &str,
+        ) -> impl std::future::Future<Output = Result<Vec<ConvergenceQueueEntry>, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+
+        fn update(
+            &self,
+            _entry: &ConvergenceQueueEntry,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            async { Ok(()) }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeWorkspaceRepository {
+        state: Arc<Mutex<FakeWorkspaceRepositoryState>>,
+    }
+
+    #[derive(Default)]
+    struct FakeWorkspaceRepositoryState {
+        workspace: Option<Workspace>,
+        updated: Option<Workspace>,
+    }
+
+    impl FakeWorkspaceRepository {
+        fn with_workspace(workspace: Workspace) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(FakeWorkspaceRepositoryState {
+                    workspace: Some(workspace),
+                    updated: None,
+                })),
+            }
+        }
+
+        fn last_updated(&self) -> Option<Workspace> {
+            self.state
+                .lock()
+                .expect("workspace state lock")
+                .updated
+                .clone()
+        }
+    }
+
+    impl WorkspaceRepository for FakeWorkspaceRepository {
+        fn list_by_project(
+            &self,
+            _project_id: ProjectId,
+        ) -> impl std::future::Future<Output = Result<Vec<Workspace>, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+
+        fn get(
+            &self,
+            _id: WorkspaceId,
+        ) -> impl std::future::Future<Output = Result<Workspace, RepositoryError>> + Send {
+            let workspace = self
+                .state
+                .lock()
+                .expect("workspace state lock")
+                .workspace
+                .clone();
+            async move { workspace.ok_or(RepositoryError::NotFound) }
+        }
+
+        fn create(
+            &self,
+            _workspace: &Workspace,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn update(
+            &self,
+            workspace: &Workspace,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            let state = self.state.clone();
+            let workspace = workspace.clone();
+            async move {
+                let mut state = state.lock().expect("workspace state lock");
+                state.updated = Some(workspace.clone());
+                state.workspace = Some(workspace);
+                Ok(())
+            }
+        }
+
+        fn find_authoring_for_revision(
+            &self,
+            _revision_id: ItemRevisionId,
+        ) -> impl std::future::Future<Output = Result<Option<Workspace>, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+
+        fn list_by_item(
+            &self,
+            _item_id: ItemId,
+        ) -> impl std::future::Future<Output = Result<Vec<Workspace>, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeGitOperationRepository;
+
+    impl GitOperationRepository for FakeGitOperationRepository {
+        fn create(
+            &self,
+            _operation: &GitOperation,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            async { unreachable!("unused in test") }
+        }
+
+        fn update(
+            &self,
+            _operation: &GitOperation,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            async { Ok(()) }
+        }
+
+        fn find_unresolved(
+            &self,
+        ) -> impl std::future::Future<Output = Result<Vec<GitOperation>, RepositoryError>> + Send
+        {
+            async { Ok(vec![]) }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeActivityRepository;
+
+    impl ActivityRepository for FakeActivityRepository {
+        fn append(
+            &self,
+            _activity: &Activity,
+        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+            async { Ok(()) }
+        }
+
+        fn list_by_project(
+            &self,
+            _project_id: ProjectId,
+            _limit: u32,
+            _offset: u32,
+        ) -> impl std::future::Future<Output = Result<Vec<Activity>, RepositoryError>> + Send
+        {
+            async { unreachable!("unused in test") }
+        }
+    }
+}
