@@ -302,8 +302,8 @@ pub(super) async fn find_detached_origin_item_id(
         .await
         .map_err(repo_to_internal)?;
 
-    if linked_item.origin_kind == OriginKind::PromotedFinding
-        && linked_item.origin_finding_id == Some(finding.id)
+    if linked_item.origin.is_promoted_finding()
+        && linked_item.origin.finding_id() == Some(finding.id)
     {
         Ok(Some(linked_item.id))
     } else {

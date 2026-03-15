@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ingot_agent_runtime::AgentRunner;
 use ingot_domain::agent::Agent;
-use ingot_domain::item::EscalationState;
+use ingot_domain::item::Escalation;
 use ingot_domain::job::{JobInput, JobStatus, OutcomeClass, OutputArtifactKind};
 use ingot_git::commands::head_oid;
 
@@ -59,14 +59,12 @@ async fn runtime_terminal_failure_escalates_closure_relevant_item() {
     assert!(h.dispatcher.tick().await.expect("tick should run"));
 
     let updated_item = h.db.get_item(item_id).await.expect("item");
-    assert_eq!(
-        updated_item.escalation_state,
-        EscalationState::OperatorRequired
-    );
-    assert_eq!(
-        updated_item.escalation_reason,
-        Some(EscalationReason::StepFailed)
-    );
+    assert!(matches!(
+        updated_item.escalation,
+        Escalation::OperatorRequired {
+            reason: EscalationReason::StepFailed
+        }
+    ));
 }
 
 #[tokio::test]
@@ -80,8 +78,7 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
-        .escalation_state(EscalationState::OperatorRequired)
-        .escalation_reason(EscalationReason::StepFailed)
+        .escalated(EscalationReason::StepFailed)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
@@ -124,8 +121,7 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
     assert!(h.dispatcher.tick().await.expect("tick should run"));
 
     let updated_item = h.db.get_item(item_id).await.expect("item");
-    assert_eq!(updated_item.escalation_state, EscalationState::None);
-    assert_eq!(updated_item.escalation_reason, None);
+    assert!(!updated_item.escalation.is_escalated());
 
     let jobs = h.db.list_jobs_by_item(item_id).await.expect("jobs");
     let evaluation = Evaluator::new().evaluate(&updated_item, &revision, &jobs, &[], &[]);

@@ -5,7 +5,7 @@ use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::finding::{Finding, FindingSeverity, FindingSubjectKind, FindingTriageState};
 use ingot_domain::ids::{FindingId, ItemId, ItemRevisionId};
 use ingot_domain::item::{
-    ApprovalState, Classification, EscalationState, Item, LifecycleState, OriginKind, ParkingState,
+    ApprovalState, Classification, Escalation, Item, Lifecycle, Origin, ParkingState,
 };
 use ingot_domain::job::{Job, OutcomeClass};
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
@@ -346,25 +346,22 @@ pub fn backlog_finding(
         project_id: source_item.project_id,
         classification: Classification::Bug,
         workflow_version: source_item.workflow_version.clone(),
-        lifecycle_state: LifecycleState::Open,
+        lifecycle: Lifecycle::Open,
         parking_state: ParkingState::Active,
-        done_reason: None,
-        resolution_source: None,
         approval_state: match approval_policy {
             ApprovalPolicy::Required => ApprovalState::NotRequested,
             ApprovalPolicy::NotRequired => ApprovalState::NotRequired,
         },
-        escalation_state: EscalationState::None,
-        escalation_reason: None,
+        escalation: Escalation::None,
         current_revision_id: revision_id,
-        origin_kind: OriginKind::PromotedFinding,
-        origin_finding_id: Some(finding.id),
+        origin: Origin::PromotedFinding {
+            finding_id: finding.id,
+        },
         priority: source_item.priority,
         labels: vec![],
         operator_notes: None,
         created_at,
         updated_at: created_at,
-        closed_at: None,
     };
 
     let linked_revision = ItemRevision {
@@ -604,7 +601,6 @@ mod tests {
     use chrono::Utc;
     use ingot_domain::finding::{FindingSubjectKind, FindingTriageState};
     use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId};
-    use ingot_domain::item::OriginKind;
     use ingot_domain::job::{
         Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
     };
@@ -669,8 +665,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(linked_item.origin_kind, OriginKind::PromotedFinding);
-        assert_eq!(linked_item.origin_finding_id, Some(finding.id));
+        assert!(linked_item.origin.is_promoted_finding());
+        assert_eq!(linked_item.origin.finding_id(), Some(finding.id));
         assert_eq!(linked_revision.item_id, linked_item.id);
         assert_eq!(triaged_finding.linked_item_id, Some(linked_item.id));
         assert_eq!(triaged_finding.triage_state, FindingTriageState::Backlog);

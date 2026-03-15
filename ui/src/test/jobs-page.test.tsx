@@ -41,7 +41,7 @@ describe('JobsPage', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders started timestamps in a readable format', async () => {
+  it('renders job step labels and duration', async () => {
     const agents: Agent[] = []
     const jobs: Job[] = [
       {
@@ -69,16 +69,20 @@ describe('JobsPage', () => {
       if (url.endsWith('/api/projects/prj_1/jobs')) {
         return Promise.resolve(jsonResponse(jobs))
       }
+      if (url.endsWith('/api/projects/prj_1/items')) {
+        return Promise.resolve(jsonResponse([]))
+      }
       throw new Error(`Unexpected fetch: ${url}`)
     })
 
     renderPage()
 
-    const formattedTime = await screen.findByText('Mar 11, 2026, 12:01 AM UTC')
-    expect(formattedTime.tagName).toBe('TIME')
-    expect(formattedTime).toHaveAttribute('datetime', '2026-03-11T00:01:00Z')
-    expect(formattedTime).not.toHaveAttribute('title')
-    expect(screen.queryByText('2026-03-11T00:01:00Z')).not.toBeInTheDocument()
+    // Step label is formatted from step_id
+    expect(await screen.findByText('Author Initial')).toBeInTheDocument()
+    // Duration is rendered (1 minute between start and end)
+    expect(screen.getByText('1m 0s')).toBeInTheDocument()
+    // Phase kind is shown
+    expect(screen.getByText('author')).toBeInTheDocument()
   })
 
   it('renders a destructive alert when the jobs query fails', async () => {
@@ -89,6 +93,9 @@ describe('JobsPage', () => {
       }
       if (url.endsWith('/api/projects/prj_1/jobs')) {
         return Promise.reject(new Error('network down'))
+      }
+      if (url.endsWith('/api/projects/prj_1/items')) {
+        return Promise.resolve(jsonResponse([]))
       }
       throw new Error(`Unexpected fetch: ${url}`)
     })

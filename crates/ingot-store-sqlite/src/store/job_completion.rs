@@ -1,6 +1,5 @@
 use chrono::Utc;
 use ingot_domain::ids::JobId;
-use ingot_domain::item::EscalationState;
 use ingot_domain::job::JobStatus;
 use ingot_domain::ports::{
     CompletedJobCompletion, JobCompletionContext, JobCompletionMutation, JobCompletionRepository,
@@ -154,7 +153,7 @@ impl Database {
                  WHERE id = ?
                    AND current_revision_id = ?",
             )
-            .bind(encode_enum(&EscalationState::None)?)
+            .bind("none")
             .bind(Utc::now())
             .bind(mutation.item_id.to_string())
             .bind(mutation.expected_item_revision_id.to_string())
@@ -270,7 +269,7 @@ mod tests {
     use ingot_domain::convergence::{Convergence, ConvergenceStatus};
     use ingot_domain::finding::FindingTriageState;
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId, WorkspaceId};
-    use ingot_domain::item::{ApprovalState, Classification, Item, OriginKind};
+    use ingot_domain::item::{ApprovalState, Classification, Item, Origin};
     use ingot_domain::job::{
         ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass,
         OutputArtifactKind, PhaseKind,
@@ -341,8 +340,7 @@ mod tests {
             .id(item_id)
             .build();
         item.classification = Classification::Bug;
-        item.origin_kind = OriginKind::PromotedFinding;
-        item.origin_finding_id = Some(finding_id);
+        item.origin = Origin::PromotedFinding { finding_id };
 
         (item, revision)
             .persist(db)

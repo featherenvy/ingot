@@ -249,10 +249,9 @@ pub(super) async fn complete_job(
         serde_json::json!({ "item_id": job.item_id, "outcome": job.outcome_class }),
     )
     .await?;
-    if prior_item.escalation_state == ingot_domain::item::EscalationState::OperatorRequired
+    if prior_item.escalation.is_escalated()
         && item.current_revision_id == job.item_revision_id
-        && item.escalation_state == ingot_domain::item::EscalationState::None
-        && item.escalation_reason.is_none()
+        && !item.escalation.is_escalated()
     {
         append_activity(
             &state,

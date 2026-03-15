@@ -9,6 +9,7 @@ import {
   XIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { formatDuration, formatRelativeTime, formatStepLabel } from '../../lib/format'
 import { shortId } from '../../lib/git'
 import type { Finding, Job, OutcomeClass } from '../../types/domain'
 import { StatusBadge } from '../StatusBadge'
@@ -18,36 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible'
 import { JobActions } from './JobActions'
 
-// ── Utilities ──────────────────────────────────────────────────
-
-function formatStepLabel(stepId: string): string {
-  return stepId.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-}
-
-function formatDuration(startIso: string | null, endIso: string | null): string {
-  if (!startIso) return '\u2014'
-  const start = new Date(startIso).getTime()
-  const end = endIso ? new Date(endIso).getTime() : Date.now()
-  const secs = Math.floor((end - start) / 1000)
-  if (secs < 60) return `${secs}s`
-  const mins = Math.floor(secs / 60)
-  const remSecs = secs % 60
-  if (mins < 60) return `${mins}m ${remSecs}s`
-  const hrs = Math.floor(mins / 60)
-  const remMins = mins % 60
-  return `${hrs}h ${remMins}m`
-}
-
-function formatRelativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime()
-  const mins = Math.floor(diff / 60000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
-}
+// ── Constants ──────────────────────────────────────────────────
 
 const OUTCOME_CONFIG: Record<OutcomeClass, { icon: typeof CheckIcon; iconClassName: string; label: string }> = {
   clean: { icon: CheckIcon, iconClassName: 'text-emerald-500', label: 'Clean' },

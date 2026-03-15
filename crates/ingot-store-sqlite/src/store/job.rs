@@ -1,6 +1,5 @@
 use chrono::Utc;
 use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId};
-use ingot_domain::item::EscalationState;
 use ingot_domain::job::{Job, JobInput};
 use ingot_domain::ports::{
     FinishJobNonSuccessParams, JobRepository, RepositoryError, StartJobExecutionParams,
@@ -464,7 +463,7 @@ impl Database {
                  WHERE id = ?
                    AND current_revision_id = ?",
             )
-            .bind(encode_enum(&EscalationState::OperatorRequired)?)
+            .bind("operator_required")
             .bind(encode_enum(&escalation_reason)?)
             .bind(Utc::now())
             .bind(item_id.to_string())
@@ -784,9 +783,6 @@ mod tests {
 
         assert_eq!(next_revision.id, persisted_item.current_revision_id);
         assert_eq!(persisted_job.status, JobStatus::Running);
-        assert_eq!(
-            persisted_item.escalation_state,
-            ingot_domain::item::EscalationState::None
-        );
+        assert!(!persisted_item.escalation.is_escalated());
     }
 }

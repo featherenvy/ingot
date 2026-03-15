@@ -14,20 +14,15 @@ function makeItemDetail(): ItemDetail {
       workflow_version: 'delivery:v1',
       lifecycle_state: 'open',
       parking_state: 'active',
-      done_reason: null,
-      resolution_source: null,
       approval_state: 'not_requested',
       escalation_state: 'none',
-      escalation_reason: null,
       current_revision_id: 'rev_1',
       origin_kind: 'manual',
-      origin_finding_id: null,
       priority: 'major',
       labels: [],
       operator_notes: null,
       created_at: '2026-03-11T00:00:00Z',
       updated_at: '2026-03-11T00:00:00Z',
-      closed_at: null,
     },
     current_revision: {
       id: 'rev_1',
@@ -442,7 +437,8 @@ describe('ItemDetailPage', () => {
     expect(screen.getByText('Missing regression coverage')).toBeInTheDocument()
     expect(screen.getByText('validate_initial:clean')).toBeInTheDocument()
     expect(screen.getByText('detail diagnostic')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Copy acceptance criteria' })).toBeInTheDocument()
+    // Acceptance criteria collapsible trigger
+    expect(screen.getByText('Acceptance Criteria')).toBeInTheDocument()
   })
 
   it('keeps triage controls visible for already-triaged findings so operators can revise them', async () => {
@@ -486,9 +482,11 @@ describe('ItemDetailPage', () => {
 
     renderPage()
 
-    expect(await screen.findByDisplayValue('wont_fix')).toBeInTheDocument()
-    expect(screen.getByDisplayValue('accepted')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Apply' })).toBeInTheDocument()
+    // Already-triaged findings show triage state indicator and a change button
+    expect(await screen.findByText('Need a decision')).toBeInTheDocument()
+    expect(screen.getByText("Won't fix")).toBeInTheDocument()
+    expect(screen.getByText('Note: accepted')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Change triage' })).toBeInTheDocument()
   })
 
   it('throws before fetching when a required route param is missing', () => {

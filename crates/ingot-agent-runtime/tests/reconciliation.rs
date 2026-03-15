@@ -7,7 +7,7 @@ use ingot_domain::convergence::ConvergenceStatus;
 use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
 use ingot_domain::git_operation::{GitEntityType, GitOperationStatus, OperationKind};
 use ingot_domain::item::{
-    ApprovalState, DoneReason, EscalationReason, LifecycleState, ResolutionSource,
+    ApprovalState, DoneReason, Escalation, EscalationReason, ResolutionSource,
 };
 use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
@@ -334,11 +334,14 @@ async fn reconcile_startup_marks_finalized_target_ref_git_operation_reconciled()
     );
 
     let updated_item = db.get_item(item.id).await.expect("item");
-    assert_eq!(updated_item.lifecycle_state, LifecycleState::Done);
-    assert_eq!(updated_item.done_reason, Some(DoneReason::Completed));
+    assert!(updated_item.lifecycle.is_done());
+    assert_eq!(
+        updated_item.lifecycle.done_reason(),
+        Some(DoneReason::Completed)
+    );
     assert_eq!(updated_item.approval_state, ApprovalState::Approved);
     assert_eq!(
-        updated_item.resolution_source,
+        updated_item.lifecycle.resolution_source(),
         Some(ResolutionSource::ApprovalCommand)
     );
 
@@ -480,7 +483,7 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
         .expect("list unresolved");
     assert!(unresolved.is_empty(), "finalize op should reconcile");
     let updated_item = db.get_item(item.id).await.expect("item");
-    assert_eq!(updated_item.lifecycle_state, LifecycleState::Done);
+    assert!(updated_item.lifecycle.is_done());
     let queue_entries = db
         .list_queue_entries_by_item(item.id)
         .await
@@ -625,11 +628,13 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
         "blocked finalize should stay unresolved"
     );
     let updated_item = db.get_item(item.id).await.expect("item");
-    assert_eq!(updated_item.lifecycle_state, LifecycleState::Open);
-    assert_eq!(
-        updated_item.escalation_reason,
-        Some(EscalationReason::CheckoutSyncBlocked)
-    );
+    assert!(updated_item.lifecycle.is_open());
+    assert!(matches!(
+        updated_item.escalation,
+        Escalation::OperatorRequired {
+            reason: EscalationReason::CheckoutSyncBlocked
+        }
+    ));
     let updated_convergence = db
         .get_convergence(convergence.id)
         .await
@@ -1313,10 +1318,7 @@ async fn reconcile_startup_removes_abandoned_review_workspace_when_safe() {
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let item = ItemBuilder::new(project.id, revision_id)
         .id(item_id)
-        .lifecycle_state(LifecycleState::Done)
-        .done_reason(DoneReason::Completed)
-        .resolution_source(ResolutionSource::ManualCommand)
-        .closed_at(created_at)
+        .done(DoneReason::Completed, ResolutionSource::ManualCommand)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
@@ -1394,10 +1396,7 @@ async fn reconcile_startup_removes_abandoned_authoring_workspace_when_item_is_do
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let item = ItemBuilder::new(project.id, revision_id)
         .id(item_id)
-        .lifecycle_state(LifecycleState::Done)
-        .done_reason(DoneReason::Completed)
-        .resolution_source(ResolutionSource::ManualCommand)
-        .closed_at(created_at)
+        .done(DoneReason::Completed, ResolutionSource::ManualCommand)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
@@ -1464,10 +1463,7 @@ async fn reconcile_startup_retains_abandoned_authoring_workspace_with_untriaged_
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let item = ItemBuilder::new(project.id, revision_id)
         .id(item_id)
-        .lifecycle_state(LifecycleState::Done)
-        .done_reason(DoneReason::Dismissed)
-        .resolution_source(ResolutionSource::ManualCommand)
-        .closed_at(created_at)
+        .done(DoneReason::Dismissed, ResolutionSource::ManualCommand)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
@@ -1574,10 +1570,7 @@ async fn reconcile_startup_retains_abandoned_integration_workspace_with_untriage
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let item = ItemBuilder::new(project.id, revision_id)
         .id(item_id)
-        .lifecycle_state(LifecycleState::Done)
-        .done_reason(DoneReason::Completed)
-        .resolution_source(ResolutionSource::ManualCommand)
-        .closed_at(created_at)
+        .done(DoneReason::Completed, ResolutionSource::ManualCommand)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)

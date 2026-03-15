@@ -50,6 +50,19 @@ export type PhaseStatus =
   | 'new'
   | 'unknown'
 
+export type AttentionBadge = 'escalated' | 'deferred'
+export type AllowedAction =
+  | 'dispatch'
+  | 'cancel_job'
+  | 'approval_approve'
+  | 'approval_reject'
+  | 'prepare_convergence'
+  | 'resume'
+  | 'revise'
+  | 'dismiss'
+  | 'invalidate'
+  | 'defer'
+
 export type WorkspaceKind = 'authoring' | 'review' | 'integration'
 export type WorkspaceStatus =
   | 'provisioning'
@@ -154,20 +167,20 @@ export interface Item {
   workflow_version: string
   lifecycle_state: LifecycleState
   parking_state: ParkingState
-  done_reason: DoneReason | null
-  resolution_source: ResolutionSource | null
+  done_reason?: DoneReason
+  resolution_source?: ResolutionSource
   approval_state: ApprovalState
   escalation_state: EscalationState
-  escalation_reason: EscalationReason | null
+  escalation_reason?: EscalationReason
   current_revision_id: string
   origin_kind: OriginKind
-  origin_finding_id: string | null
+  origin_finding_id?: string
   priority: Priority
   labels: string[]
   operator_notes: string | null
   created_at: string
   updated_at: string
-  closed_at: string | null
+  closed_at?: string
 }
 
 export interface ItemRevision {
@@ -186,14 +199,14 @@ export interface ItemRevision {
 
 export interface Evaluation {
   board_status: BoardStatus
-  attention_badges: string[]
+  attention_badges: AttentionBadge[]
   current_step_id: string | null
   current_phase_kind: PhaseKind | null
   phase_status: PhaseStatus | null
   next_recommended_action: string
   dispatchable_step_id: string | null
   auxiliary_dispatchable_step_ids: string[]
-  allowed_actions: string[]
+  allowed_actions: AllowedAction[]
   terminal_readiness: boolean
   diagnostics: string[]
 }

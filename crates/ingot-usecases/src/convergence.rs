@@ -17,7 +17,7 @@ use ingot_domain::project::Project;
 use ingot_domain::revision::ApprovalPolicy;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::workspace::WorkspaceStatus;
-use ingot_workflow::Evaluator;
+use ingot_workflow::{Evaluator, RecommendedAction};
 
 use crate::UseCaseError;
 
@@ -188,7 +188,7 @@ where
             &context.convergences,
         );
         if context.active_queue_entry.is_none()
-            && evaluation.next_recommended_action != "prepare_convergence"
+            && evaluation.next_recommended_action != RecommendedAction::PrepareConvergence
         {
             return Err(UseCaseError::ConvergenceNotPreparable);
         }
@@ -345,8 +345,7 @@ where
         context.item.current_revision_id = next_revision.id;
         context.item.approval_state =
             crate::item::approval_state_for_policy(next_revision.approval_policy);
-        context.item.escalation_state = ingot_domain::item::EscalationState::None;
-        context.item.escalation_reason = None;
+        context.item.escalation = ingot_domain::item::Escalation::None;
         context.item.updated_at = Utc::now();
         self.port
             .apply_rejected_approval(&context.item, next_revision)
@@ -376,7 +375,9 @@ where
                     &state.convergences,
                 );
 
-                if evaluation.next_recommended_action == "invalidate_prepared_convergence" {
+                if evaluation.next_recommended_action
+                    == RecommendedAction::InvalidatePreparedConvergence
+                {
                     self.port
                         .invalidate_prepared_convergence(project_state.project.id, state.item_id)
                         .await?;
@@ -391,7 +392,8 @@ where
                 if let Some(queue_entry) = state.queue_entry.as_ref() {
                     let should_prepare_queue_head = queue_entry.status
                         == ConvergenceQueueEntryStatus::Head
-                        && (evaluation.next_recommended_action == "prepare_convergence"
+                        && (evaluation.next_recommended_action
+                            == RecommendedAction::PrepareConvergence
                             || (state.item.approval_state == ApprovalState::Granted
                                 && prepared_convergence.is_none()));
 
@@ -412,7 +414,7 @@ where
                             || (state.revision.approval_policy
                                 == ingot_domain::revision::ApprovalPolicy::NotRequired
                                 && evaluation.next_recommended_action
-                                    == "finalize_prepared_convergence"));
+                                    == RecommendedAction::FinalizePreparedConvergence));
 
                     if should_finalize
                         && self

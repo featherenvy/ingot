@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ingot_agent_runtime::{DispatcherConfig, JobDispatcher};
-use ingot_domain::item::{ApprovalState, EscalationReason, EscalationState, ResolutionSource};
+use ingot_domain::item::{ApprovalState, Escalation, EscalationReason, ResolutionSource};
 use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
     PhaseKind,
@@ -18,13 +18,12 @@ use ingot_domain::activity::ActivityEventType;
 use ingot_domain::convergence::ConvergenceStatus;
 use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
 use ingot_domain::git_operation::{GitEntityType, GitOperationStatus, OperationKind};
-use ingot_domain::item::LifecycleState;
 use ingot_test_support::fixtures::{
     GitOperationBuilder, JobBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
 };
 use ingot_test_support::git::unique_temp_path;
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
-use ingot_workflow::{Evaluator, step};
+use ingot_workflow::{Evaluator, RecommendedAction, step};
 
 #[tokio::test]
 async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
@@ -156,9 +155,9 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
     assert!(dispatcher.tick().await.expect("tick should finalize"));
 
     let updated_item = db.get_item(item.id).await.expect("updated item");
-    assert_eq!(updated_item.lifecycle_state, LifecycleState::Done);
+    assert!(updated_item.lifecycle.is_done());
     assert_eq!(
-        updated_item.resolution_source,
+        updated_item.lifecycle.resolution_source(),
         Some(ResolutionSource::SystemCommand)
     );
     let updated_convergence = db
@@ -332,7 +331,7 @@ async fn tick_auto_finalizes_granted_prepared_convergence_even_when_commit_exist
         .expect("convergence");
     assert_eq!(updated_convergence.status, ConvergenceStatus::Finalized);
     let updated_item = db.get_item(item.id).await.expect("item");
-    assert_eq!(updated_item.lifecycle_state, LifecycleState::Done);
+    assert!(updated_item.lifecycle.is_done());
     assert_eq!(updated_item.approval_state, ApprovalState::Approved);
     let queue_entries = db
         .list_queue_entries_by_item(item.id)
@@ -568,7 +567,7 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
         .expect("convergence");
     assert_eq!(updated_convergence.status, ConvergenceStatus::Finalized);
     let updated_item = db.get_item(item.id).await.expect("item");
-    assert_eq!(updated_item.lifecycle_state, LifecycleState::Done);
+    assert!(updated_item.lifecycle.is_done());
     let queue_entries = db
         .list_queue_entries_by_item(item.id)
         .await
@@ -1011,14 +1010,12 @@ async fn fail_prepare_convergence_attempt_marks_non_conflict_failures_as_step_fa
         .expect("fail prepare attempt");
 
     let updated_item = h.db.get_item(item.id).await.expect("item");
-    assert_eq!(
-        updated_item.escalation_state,
-        EscalationState::OperatorRequired
-    );
-    assert_eq!(
-        updated_item.escalation_reason,
-        Some(EscalationReason::StepFailed)
-    );
+    assert!(matches!(
+        updated_item.escalation,
+        Escalation::OperatorRequired {
+            reason: EscalationReason::StepFailed
+        }
+    ));
     let activity =
         h.db.list_activity_by_project(h.project.id, 20, 0)
             .await
@@ -1132,5 +1129,8 @@ async fn candidate_repair_loop_advances_to_prepare_convergence() {
 
     let jobs = h.db.list_jobs_by_item(item.id).await.expect("jobs");
     let evaluation = Evaluator::new().evaluate(&item, &revision, &jobs, &[], &[]);
-    assert_eq!(evaluation.next_recommended_action, "prepare_convergence");
+    assert_eq!(
+        evaluation.next_recommended_action,
+        RecommendedAction::PrepareConvergence
+    );
 }

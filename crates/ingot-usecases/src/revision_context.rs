@@ -117,8 +117,7 @@ mod tests {
     use chrono::Utc;
     use ingot_domain::ids::{ItemId, ItemRevisionId};
     use ingot_domain::item::{
-        ApprovalState, Classification, EscalationState, Item, LifecycleState, OriginKind,
-        ParkingState, Priority,
+        ApprovalState, Classification, Escalation, Item, Lifecycle, Origin, ParkingState, Priority,
     };
     use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
     use serde_json::json;
@@ -136,22 +135,17 @@ mod tests {
             project_id: ingot_domain::ids::ProjectId::from_uuid(Uuid::nil()),
             classification: Classification::Change,
             workflow_version: "delivery:v1".into(),
-            lifecycle_state: LifecycleState::Open,
+            lifecycle: Lifecycle::Open,
             parking_state: ParkingState::Active,
-            done_reason: None,
-            resolution_source: None,
             approval_state: ApprovalState::NotRequested,
-            escalation_state: EscalationState::None,
-            escalation_reason: None,
+            escalation: Escalation::None,
             current_revision_id: revision_id,
-            origin_kind: OriginKind::Manual,
-            origin_finding_id: None,
+            origin: Origin::Manual,
             priority: Priority::Major,
             labels: vec![],
             operator_notes: None,
             created_at: now,
             updated_at: now,
-            closed_at: None,
         };
         let revision = ItemRevision {
             id: revision_id,

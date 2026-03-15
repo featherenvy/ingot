@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use ingot_domain::item::{
-    ApprovalState, Classification, EscalationState, Item, LifecycleState, OriginKind, ParkingState,
-    Priority,
+    ApprovalState, Classification, Escalation, Item, Lifecycle, Origin, ParkingState, Priority,
 };
 use ingot_domain::project::Project;
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
@@ -58,22 +57,17 @@ pub fn create_manual_item(
         project_id: project.id,
         classification,
         workflow_version: DELIVERY_WORKFLOW_VERSION.into(),
-        lifecycle_state: LifecycleState::Open,
+        lifecycle: Lifecycle::Open,
         parking_state: ParkingState::Active,
-        done_reason: None,
-        resolution_source: None,
         approval_state,
-        escalation_state: EscalationState::None,
-        escalation_reason: None,
+        escalation: Escalation::None,
         current_revision_id: revision_id,
-        origin_kind: OriginKind::Manual,
-        origin_finding_id: None,
+        origin: Origin::Manual,
         priority,
         labels,
         operator_notes,
         created_at,
         updated_at: created_at,
-        closed_at: None,
     };
 
     let revision = ItemRevision {

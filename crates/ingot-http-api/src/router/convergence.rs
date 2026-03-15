@@ -487,8 +487,7 @@ pub(super) async fn reject_item_approval(
     let next_revision =
         build_superseding_revision(&state, &project, &item, &current_revision, &jobs, request)
             .await?;
-    let cleared_escalation =
-        item.escalation_state == ingot_domain::item::EscalationState::OperatorRequired;
+    let cleared_escalation = item.escalation.is_escalated();
     let teardown = ConvergenceService::new(HttpConvergencePort {
         state: state.clone(),
     })

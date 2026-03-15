@@ -12,13 +12,6 @@ pub enum Classification {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LifecycleState {
-    Open,
-    Done,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ParkingState {
     Active,
     Deferred,
@@ -52,13 +45,6 @@ pub enum ApprovalState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EscalationState {
-    None,
-    OperatorRequired,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum EscalationReason {
     CandidateReworkBudgetExhausted,
     IntegrationReworkBudgetExhausted,
@@ -78,11 +64,176 @@ pub enum Priority {
     Minor,
 }
 
+/// Item lifecycle state. Encodes the TLA+ invariant `DoneImpliesQuiescent`:
+/// a Done item always carries its reason, resolution source, and closure timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OriginKind {
+#[serde(tag = "lifecycle_state", rename_all = "snake_case")]
+pub enum Lifecycle {
+    Open,
+    Done {
+        #[serde(rename = "done_reason")]
+        reason: DoneReason,
+        #[serde(rename = "resolution_source")]
+        source: ResolutionSource,
+        closed_at: DateTime<Utc>,
+    },
+}
+
+impl Lifecycle {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Done { .. } => "done",
+        }
+    }
+
+    pub fn is_open(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    pub fn is_done(self) -> bool {
+        matches!(self, Self::Done { .. })
+    }
+
+    pub fn done_reason(self) -> Option<DoneReason> {
+        match self {
+            Self::Done { reason, .. } => Some(reason),
+            Self::Open => None,
+        }
+    }
+
+    pub fn resolution_source(self) -> Option<ResolutionSource> {
+        match self {
+            Self::Done { source, .. } => Some(source),
+            Self::Open => None,
+        }
+    }
+
+    pub fn closed_at(self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Done { closed_at, .. } => Some(closed_at),
+            Self::Open => None,
+        }
+    }
+}
+
+/// Item escalation state. When escalated, an escalation reason is always present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "escalation_state", rename_all = "snake_case")]
+pub enum Escalation {
+    None,
+    OperatorRequired {
+        #[serde(rename = "escalation_reason")]
+        reason: EscalationReason,
+    },
+}
+
+impl Escalation {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::OperatorRequired { .. } => "operator_required",
+        }
+    }
+
+    pub fn is_escalated(self) -> bool {
+        matches!(self, Self::OperatorRequired { .. })
+    }
+
+    pub fn reason(self) -> Option<EscalationReason> {
+        match self {
+            Self::OperatorRequired { reason } => Some(reason),
+            Self::None => None,
+        }
+    }
+}
+
+/// Item origin. A promoted-finding origin always carries its source finding ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "origin_kind", rename_all = "snake_case")]
+pub enum Origin {
     Manual,
-    PromotedFinding,
+    PromotedFinding {
+        #[serde(rename = "origin_finding_id")]
+        finding_id: FindingId,
+    },
+}
+
+impl Origin {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::PromotedFinding { .. } => "promoted_finding",
+        }
+    }
+
+    pub fn is_promoted_finding(self) -> bool {
+        matches!(self, Self::PromotedFinding { .. })
+    }
+
+    pub fn finding_id(self) -> Option<FindingId> {
+        match self {
+            Self::PromotedFinding { finding_id } => Some(finding_id),
+            Self::Manual => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify as_db_str() matches the serde tag value for each variant.
+    /// Guards against adding a variant to the enum but forgetting to
+    /// update as_db_str() (or vice-versa).
+    fn serde_tag_value<T: Serialize>(value: &T, tag_field: &str) -> String {
+        let json = serde_json::to_value(value).unwrap();
+        json[tag_field].as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn lifecycle_as_db_str_matches_serde_tag() {
+        let open = Lifecycle::Open;
+        assert_eq!(open.as_db_str(), serde_tag_value(&open, "lifecycle_state"));
+
+        let done = Lifecycle::Done {
+            reason: DoneReason::Completed,
+            source: ResolutionSource::ManualCommand,
+            closed_at: Utc::now(),
+        };
+        assert_eq!(done.as_db_str(), serde_tag_value(&done, "lifecycle_state"));
+    }
+
+    #[test]
+    fn escalation_as_db_str_matches_serde_tag() {
+        let none = Escalation::None;
+        assert_eq!(
+            none.as_db_str(),
+            serde_tag_value(&none, "escalation_state")
+        );
+
+        let esc = Escalation::OperatorRequired {
+            reason: EscalationReason::StepFailed,
+        };
+        assert_eq!(
+            esc.as_db_str(),
+            serde_tag_value(&esc, "escalation_state")
+        );
+    }
+
+    #[test]
+    fn origin_as_db_str_matches_serde_tag() {
+        let manual = Origin::Manual;
+        assert_eq!(manual.as_db_str(), serde_tag_value(&manual, "origin_kind"));
+
+        let promoted = Origin::PromotedFinding {
+            finding_id: FindingId::new(),
+        };
+        assert_eq!(
+            promoted.as_db_str(),
+            serde_tag_value(&promoted, "origin_kind")
+        );
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,20 +242,18 @@ pub struct Item {
     pub project_id: ProjectId,
     pub classification: Classification,
     pub workflow_version: String,
-    pub lifecycle_state: LifecycleState,
+    #[serde(flatten)]
+    pub lifecycle: Lifecycle,
     pub parking_state: ParkingState,
-    pub done_reason: Option<DoneReason>,
-    pub resolution_source: Option<ResolutionSource>,
     pub approval_state: ApprovalState,
-    pub escalation_state: EscalationState,
-    pub escalation_reason: Option<EscalationReason>,
+    #[serde(flatten)]
+    pub escalation: Escalation,
     pub current_revision_id: ItemRevisionId,
-    pub origin_kind: OriginKind,
-    pub origin_finding_id: Option<FindingId>,
+    #[serde(flatten)]
+    pub origin: Origin,
     pub priority: Priority,
     pub labels: Vec<String>,
     pub operator_notes: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub closed_at: Option<DateTime<Utc>>,
 }

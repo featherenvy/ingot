@@ -3,7 +3,7 @@ use ingot_domain::activity::{Activity, ActivityEventType};
 use ingot_domain::convergence::Convergence;
 use ingot_domain::finding::Finding;
 use ingot_domain::ids::ActivityId;
-use ingot_domain::item::{EscalationReason, EscalationState, Item};
+use ingot_domain::item::{EscalationReason, Item};
 use ingot_domain::job::{Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind};
 use ingot_domain::ports::{ActivityRepository, JobRepository, WorkspaceRepository};
 use ingot_domain::project::Project;
@@ -117,9 +117,7 @@ pub fn failure_status(outcome_class: OutcomeClass) -> Option<JobStatus> {
 
 /// Returns true if we should clear an item's escalation after a successful retry.
 pub fn should_clear_item_escalation_on_success(item: &Item, job: &Job) -> bool {
-    item.escalation_state == EscalationState::OperatorRequired
-        && job.retry_no > 0
-        && is_closure_relevant_job(job)
+    item.escalation.is_escalated() && job.retry_no > 0 && is_closure_relevant_job(job)
 }
 
 /// Auto-dispatch a closure-relevant review job if the evaluator recommends one.

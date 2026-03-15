@@ -268,11 +268,9 @@ pub(super) async fn revise_item(
         .await
         .map_err(repo_to_internal)?;
     item.current_revision_id = next_revision.id;
-    let cleared_escalation =
-        item.escalation_state == ingot_domain::item::EscalationState::OperatorRequired;
+    let cleared_escalation = item.escalation.is_escalated();
     item.approval_state = approval_state_for_policy(next_revision.approval_policy);
-    item.escalation_state = ingot_domain::item::EscalationState::None;
-    item.escalation_reason = None;
+    item.escalation = Escalation::None;
     item.updated_at = Utc::now();
     state
         .db
@@ -337,8 +335,7 @@ pub(super) async fn defer_item(
     let _ = teardown_revision_lane_state(&state, &project, item.id, &current_revision).await?;
     item.parking_state = ingot_domain::item::ParkingState::Deferred;
     item.approval_state = approval_state_for_policy(current_revision.approval_policy);
-    item.escalation_state = ingot_domain::item::EscalationState::None;
-    item.escalation_reason = None;
+    item.escalation = Escalation::None;
     item.updated_at = Utc::now();
     state
         .db
@@ -462,10 +459,16 @@ pub(super) async fn reopen_item(
     if item.project_id != project_id {
         return Err(UseCaseError::ItemNotFound.into());
     }
-    match item.done_reason {
-        Some(DoneReason::Dismissed | DoneReason::Invalidated) => {}
-        Some(DoneReason::Completed) => return Err(UseCaseError::CompletedItemCannotReopen.into()),
-        None => {
+    match item.lifecycle {
+        Lifecycle::Done {
+            reason: DoneReason::Dismissed | DoneReason::Invalidated,
+            ..
+        } => {}
+        Lifecycle::Done {
+            reason: DoneReason::Completed,
+            ..
+        } => return Err(UseCaseError::CompletedItemCannotReopen.into()),
+        Lifecycle::Open => {
             return Err(ApiError::Conflict {
                 code: "item_not_reopenable",
                 message: "Only dismissed or invalidated items can be reopened".into(),
@@ -490,17 +493,12 @@ pub(super) async fn reopen_item(
         .create_revision(&next_revision)
         .await
         .map_err(repo_to_internal)?;
-    let cleared_escalation =
-        item.escalation_state == ingot_domain::item::EscalationState::OperatorRequired;
+    let cleared_escalation = item.escalation.is_escalated();
     item.current_revision_id = next_revision.id;
-    item.lifecycle_state = LifecycleState::Open;
+    item.lifecycle = Lifecycle::Open;
     item.parking_state = ingot_domain::item::ParkingState::Active;
-    item.done_reason = None;
-    item.resolution_source = None;
-    item.closed_at = None;
     item.approval_state = approval_state_for_policy(next_revision.approval_policy);
-    item.escalation_state = ingot_domain::item::EscalationState::None;
-    item.escalation_reason = None;
+    item.escalation = Escalation::None;
     item.updated_at = Utc::now();
     state
         .db
@@ -717,51 +715,50 @@ pub(super) fn overlay_evaluation_with_queue_state(
             && convergence.status == ingot_domain::convergence::ConvergenceStatus::Prepared
     });
 
-    if queue.state.is_some() && evaluation.next_recommended_action == "prepare_convergence" {
-        evaluation.next_recommended_action = "await_convergence_lane".into();
+    if queue.state.is_some()
+        && evaluation.next_recommended_action == RecommendedAction::PrepareConvergence
+    {
+        evaluation.next_recommended_action = RecommendedAction::AwaitConvergenceLane;
         evaluation.dispatchable_step_id = None;
         evaluation
             .allowed_actions
-            .retain(|action| action != "prepare_convergence");
-        evaluation.phase_status = Some("awaiting_convergence".into());
+            .retain(|action| *action != AllowedAction::PrepareConvergence);
+        evaluation.phase_status = Some(PhaseStatus::AwaitingConvergence);
     }
 
     if queue.state.as_deref() == Some("queued") {
-        evaluation.next_recommended_action = "await_convergence_lane".into();
+        evaluation.next_recommended_action = RecommendedAction::AwaitConvergenceLane;
         evaluation.dispatchable_step_id = None;
         evaluation
             .allowed_actions
-            .retain(|action| action != "prepare_convergence");
-        evaluation.phase_status = Some("awaiting_convergence".into());
+            .retain(|action| *action != AllowedAction::PrepareConvergence);
+        evaluation.phase_status = Some(PhaseStatus::AwaitingConvergence);
     }
 
     if item.approval_state == ApprovalState::Granted && has_prepared_convergence {
         evaluation.next_recommended_action = if queue.checkout_sync_blocked {
-            "resolve_checkout_sync".into()
+            RecommendedAction::ResolveCheckoutSync
         } else {
-            "finalize_prepared_convergence".into()
+            RecommendedAction::FinalizePreparedConvergence
         };
         evaluation.dispatchable_step_id = None;
         evaluation.allowed_actions = vec![];
-        evaluation.phase_status = Some(
-            if queue.checkout_sync_blocked {
-                "awaiting_convergence"
-            } else {
-                "finalization_ready"
-            }
-            .into(),
-        );
+        evaluation.phase_status = Some(if queue.checkout_sync_blocked {
+            PhaseStatus::AwaitingConvergence
+        } else {
+            PhaseStatus::FinalizationReady
+        });
     }
 
     if queue.checkout_sync_blocked
         && revision.approval_policy == ApprovalPolicy::NotRequired
         && has_prepared_convergence
-        && evaluation.next_recommended_action == "finalize_prepared_convergence"
+        && evaluation.next_recommended_action == RecommendedAction::FinalizePreparedConvergence
     {
-        evaluation.next_recommended_action = "resolve_checkout_sync".into();
+        evaluation.next_recommended_action = RecommendedAction::ResolveCheckoutSync;
         evaluation.dispatchable_step_id = None;
         evaluation.allowed_actions = vec![];
-        evaluation.phase_status = Some("awaiting_convergence".into());
+        evaluation.phase_status = Some(PhaseStatus::AwaitingConvergence);
     }
 
     evaluation
@@ -813,7 +810,8 @@ pub(super) async fn load_queue_status(
 
     let should_check_checkout = active_entry.status == ConvergenceQueueEntryStatus::Head
         && (item.approval_state == ApprovalState::Granted
-            || evaluation.next_recommended_action == "finalize_prepared_convergence");
+            || evaluation.next_recommended_action
+                == RecommendedAction::FinalizePreparedConvergence);
     if should_check_checkout {
         match checkout_sync_status(FsPath::new(&project.path), &revision.target_ref)
             .await
@@ -872,7 +870,7 @@ pub(super) async fn ensure_reachable_seed(
 }
 
 pub(super) fn ensure_item_open_idle(item: &Item) -> Result<(), ApiError> {
-    if item.lifecycle_state != LifecycleState::Open {
+    if !item.lifecycle.is_open() {
         return Err(UseCaseError::ItemNotOpen.into());
     }
     if item.parking_state != ingot_domain::item::ParkingState::Active {
@@ -936,13 +934,13 @@ pub(super) async fn finish_item_manually(
         .await
         .map_err(repo_to_internal)?;
     let _ = teardown_revision_lane_state(&state, &project, item.id, &revision).await?;
-    item.lifecycle_state = LifecycleState::Done;
-    item.done_reason = Some(done_reason);
-    item.resolution_source = Some(ResolutionSource::ManualCommand);
-    item.closed_at = Some(Utc::now());
+    item.lifecycle = Lifecycle::Done {
+        reason: done_reason,
+        source: ResolutionSource::ManualCommand,
+        closed_at: Utc::now(),
+    };
     item.approval_state = approval_state_for_policy(revision.approval_policy);
-    item.escalation_state = ingot_domain::item::EscalationState::None;
-    item.escalation_reason = None;
+    item.escalation = Escalation::None;
     item.updated_at = Utc::now();
     state
         .db
@@ -955,7 +953,7 @@ pub(super) async fn finish_item_manually(
         event_type,
         "item",
         item.id,
-        serde_json::json!({ "done_reason": item.done_reason }),
+        serde_json::json!({ "done_reason": item.lifecycle.done_reason() }),
     )
     .await?;
     let detail = load_item_detail(&state, project_id, item.id).await?;
@@ -1263,8 +1261,9 @@ pub(super) async fn prepare_convergence_workspace(
             convergence.completed_at = Some(Utc::now());
             let _ = state.db.update_convergence(&convergence).await;
             let mut escalated_item = item.clone();
-            escalated_item.escalation_state = ingot_domain::item::EscalationState::OperatorRequired;
-            escalated_item.escalation_reason = Some(EscalationReason::ConvergenceConflict);
+            escalated_item.escalation = Escalation::OperatorRequired {
+                reason: EscalationReason::ConvergenceConflict,
+            };
             escalated_item.updated_at = Utc::now();
             let _ = state.db.update_item(&escalated_item).await;
             let _ = append_activity(
@@ -1320,9 +1319,9 @@ pub(super) async fn prepare_convergence_workspace(
                 let _ = state.db.update_convergence(&convergence).await;
 
                 let mut escalated_item = item.clone();
-                escalated_item.escalation_state =
-                    ingot_domain::item::EscalationState::OperatorRequired;
-                escalated_item.escalation_reason = Some(EscalationReason::StepFailed);
+                escalated_item.escalation = Escalation::OperatorRequired {
+                    reason: EscalationReason::StepFailed,
+                };
                 escalated_item.updated_at = Utc::now();
                 let _ = state.db.update_item(&escalated_item).await;
 
@@ -1381,9 +1380,9 @@ pub(super) async fn prepare_convergence_workspace(
                 let _ = state.db.update_convergence(&convergence).await;
 
                 let mut escalated_item = item.clone();
-                escalated_item.escalation_state =
-                    ingot_domain::item::EscalationState::OperatorRequired;
-                escalated_item.escalation_reason = Some(EscalationReason::StepFailed);
+                escalated_item.escalation = Escalation::OperatorRequired {
+                    reason: EscalationReason::StepFailed,
+                };
                 escalated_item.updated_at = Utc::now();
                 let _ = state.db.update_item(&escalated_item).await;
 
@@ -1434,9 +1433,9 @@ pub(super) async fn prepare_convergence_workspace(
                 let _ = state.db.update_convergence(&convergence).await;
 
                 let mut escalated_item = item.clone();
-                escalated_item.escalation_state =
-                    ingot_domain::item::EscalationState::OperatorRequired;
-                escalated_item.escalation_reason = Some(EscalationReason::StepFailed);
+                escalated_item.escalation = Escalation::OperatorRequired {
+                    reason: EscalationReason::StepFailed,
+                };
                 escalated_item.updated_at = Utc::now();
                 let _ = state.db.update_item(&escalated_item).await;
 

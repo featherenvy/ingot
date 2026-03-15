@@ -44,6 +44,12 @@ describe('DashboardPage', () => {
       if (url.endsWith('/api/projects/prj_1/items')) {
         return Promise.reject(new Error('network down'))
       }
+      if (url.endsWith('/api/projects/prj_1/jobs')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
 
       throw new Error(`Unexpected fetch: ${url}`)
     })
@@ -76,20 +82,15 @@ describe('DashboardPage', () => {
                 workflow_version: 'delivery:v1',
                 lifecycle_state: 'open',
                 parking_state: 'active',
-                done_reason: null,
-                resolution_source: null,
                 approval_state: 'not_requested',
                 escalation_state: 'none',
-                escalation_reason: null,
                 current_revision_id: 'rev_1',
                 origin_kind: 'manual',
-                origin_finding_id: null,
                 priority: 'major',
                 labels: [],
                 operator_notes: null,
                 created_at: '2026-03-11T00:00:00Z',
                 updated_at: '2026-03-11T00:00:00Z',
-                closed_at: null,
               },
               title: 'Ship it',
               evaluation: {
@@ -110,6 +111,12 @@ describe('DashboardPage', () => {
         )
       }
 
+      if (url.endsWith('/api/projects/prj_1/jobs')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
       throw new Error(`Unexpected fetch: ${url}`)
     })
 
@@ -121,6 +128,7 @@ describe('DashboardPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
 
     expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument()
-    expect(screen.getByText('item currently in this lane')).toBeInTheDocument()
+    // Lane card shows INBOX description and the count
+    expect(screen.getByText('Awaiting first dispatch')).toBeInTheDocument()
   })
 })

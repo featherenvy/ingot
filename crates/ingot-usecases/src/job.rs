@@ -803,7 +803,7 @@ fn job_input_from_range(
 }
 
 fn ensure_item_dispatchable(item: &Item) -> Result<(), UseCaseError> {
-    if item.lifecycle_state != ingot_domain::item::LifecycleState::Open {
+    if !item.lifecycle.is_open() {
         return Err(UseCaseError::ItemNotOpen);
     }
 
@@ -840,7 +840,7 @@ fn ensure_no_active_execution(
 }
 
 fn should_clear_item_escalation_on_success(item: &Item, job: &Job) -> bool {
-    item.escalation_state == ingot_domain::item::EscalationState::OperatorRequired
+    item.escalation.is_escalated()
         && job.retry_no > 0
         && matches!(
             step::find_step(&job.step_id).map(|contract| contract.closure_relevance),
@@ -1001,7 +1001,7 @@ mod tests {
 
     use chrono::Utc;
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
-    use ingot_domain::item::EscalationState;
+    use ingot_domain::item::Escalation;
     use ingot_domain::job::{
         ContextPolicy, ExecutionPermission, JobStatus, OutputArtifactKind, PhaseKind,
     };
@@ -1589,8 +1589,9 @@ mod tests {
             OutputArtifactKind::ValidationReport,
         ));
         context.job.retry_no = 1;
-        context.item.escalation_state = EscalationState::OperatorRequired;
-        context.item.escalation_reason = Some(ingot_domain::item::EscalationReason::StepFailed);
+        context.item.escalation = Escalation::OperatorRequired {
+            reason: ingot_domain::item::EscalationReason::StepFailed,
+        };
         let repository = FakeRepository::new(context);
         let service = CompleteJobService::new(
             repository.clone(),
@@ -1613,8 +1614,9 @@ mod tests {
             "validate_candidate_initial",
             OutputArtifactKind::ValidationReport,
         ));
-        context.item.escalation_state = EscalationState::OperatorRequired;
-        context.item.escalation_reason = Some(ingot_domain::item::EscalationReason::StepFailed);
+        context.item.escalation = Escalation::OperatorRequired {
+            reason: ingot_domain::item::EscalationReason::StepFailed,
+        };
         let repository = FakeRepository::new(context);
         let service = CompleteJobService::new(
             repository.clone(),
@@ -1841,8 +1843,7 @@ mod tests {
                 state.context.job.result_payload = mutation.result_payload.clone();
                 state.context.job.output_commit_oid = mutation.output_commit_oid.clone();
                 if mutation.clear_item_escalation {
-                    state.context.item.escalation_state = ingot_domain::item::EscalationState::None;
-                    state.context.item.escalation_reason = None;
+                    state.context.item.escalation = ingot_domain::item::Escalation::None;
                 }
                 state.completion_finding_count = mutation.findings.len();
                 Ok(())

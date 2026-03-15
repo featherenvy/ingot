@@ -20,7 +20,7 @@ use ingot_domain::finding::FindingTriageState;
 use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
 use ingot_domain::ids::{GitOperationId, WorkspaceId};
 use ingot_domain::item::{
-    ApprovalState, DoneReason, EscalationReason, EscalationState, LifecycleState, ResolutionSource,
+    ApprovalState, DoneReason, Escalation, EscalationReason, Lifecycle, ResolutionSource,
 };
 use ingot_domain::job::{ExecutionPermission, Job, JobStatus, OutcomeClass, OutputArtifactKind};
 use ingot_domain::ports::{JobCompletionMutation, ProjectMutationLockPort, RepositoryError};
@@ -53,7 +53,7 @@ use ingot_usecases::{
     CompleteJobCommand, CompleteJobService, ConvergenceService, ProjectLocks,
     ReconciliationService, rebuild_revision_context,
 };
-use ingot_workflow::{Evaluator, step};
+use ingot_workflow::{Evaluator, RecommendedAction, step};
 use ingot_workspace::{
     WorkspaceError, ensure_authoring_workspace_state, provision_integration_workspace,
     provision_review_workspace, remove_workspace,
@@ -906,28 +906,28 @@ impl JobDispatcher {
 
         let mut item = self.db.get_item(convergence.item_id).await?;
         if item.current_revision_id == convergence.item_revision_id {
-            if item.lifecycle_state != LifecycleState::Done {
+            if !item.lifecycle.is_done() {
                 let revision = self.db.get_revision(item.current_revision_id).await?;
-                item.lifecycle_state = LifecycleState::Done;
-                item.done_reason = Some(DoneReason::Completed);
-                item.resolution_source = Some(match revision.approval_policy {
-                    ingot_domain::revision::ApprovalPolicy::Required => {
-                        ResolutionSource::ApprovalCommand
-                    }
-                    ingot_domain::revision::ApprovalPolicy::NotRequired => {
-                        ResolutionSource::SystemCommand
-                    }
-                });
+                item.lifecycle = Lifecycle::Done {
+                    reason: DoneReason::Completed,
+                    source: match revision.approval_policy {
+                        ingot_domain::revision::ApprovalPolicy::Required => {
+                            ResolutionSource::ApprovalCommand
+                        }
+                        ingot_domain::revision::ApprovalPolicy::NotRequired => {
+                            ResolutionSource::SystemCommand
+                        }
+                    },
+                    closed_at: Utc::now(),
+                };
                 item.approval_state = match revision.approval_policy {
                     ingot_domain::revision::ApprovalPolicy::Required => ApprovalState::Approved,
                     ingot_domain::revision::ApprovalPolicy::NotRequired => {
                         ApprovalState::NotRequired
                     }
                 };
-                item.closed_at.get_or_insert_with(Utc::now);
             }
-            item.escalation_state = EscalationState::None;
-            item.escalation_reason = None;
+            item.escalation = Escalation::None;
             item.updated_at = Utc::now();
             self.db.update_item(&item).await?;
         }
@@ -1226,7 +1226,7 @@ impl JobDispatcher {
             workspace.kind,
             WorkspaceKind::Authoring | WorkspaceKind::Integration
         ) && item.current_revision_id == revision.id
-            && item.lifecycle_state == LifecycleState::Open
+            && item.lifecycle.is_open()
         {
             return Ok(false);
         }
@@ -1989,7 +1989,8 @@ impl JobDispatcher {
         }
         if item.approval_state != ApprovalState::Granted
             && !(revision.approval_policy == ingot_domain::revision::ApprovalPolicy::NotRequired
-                && evaluation.next_recommended_action == "finalize_prepared_convergence")
+                && evaluation.next_recommended_action
+                    == RecommendedAction::FinalizePreparedConvergence)
         {
             return Ok(());
         }
@@ -2121,7 +2122,7 @@ impl JobDispatcher {
             .await?;
         let evaluation =
             Evaluator::new().evaluate(&item, &revision, &jobs, &findings, &convergences);
-        if evaluation.next_recommended_action != "invalidate_prepared_convergence" {
+        if evaluation.next_recommended_action != RecommendedAction::InvalidatePreparedConvergence {
             return Ok(());
         }
 
@@ -2177,8 +2178,9 @@ impl JobDispatcher {
             ingot_domain::revision::ApprovalPolicy::Required => ApprovalState::NotRequested,
             ingot_domain::revision::ApprovalPolicy::NotRequired => ApprovalState::NotRequired,
         };
-        escalated_item.escalation_state = EscalationState::OperatorRequired;
-        escalated_item.escalation_reason = Some(escalation_reason);
+        escalated_item.escalation = Escalation::OperatorRequired {
+            reason: escalation_reason,
+        };
         escalated_item.updated_at = Utc::now();
         self.db.update_item(&escalated_item).await?;
 
@@ -2608,9 +2610,13 @@ impl JobDispatcher {
         let status = checkout_sync_status(Path::new(&project.path), &revision.target_ref).await?;
         match &status {
             CheckoutSyncStatus::Ready => {
-                if item.escalation_reason == Some(EscalationReason::CheckoutSyncBlocked) {
-                    item.escalation_state = EscalationState::None;
-                    item.escalation_reason = None;
+                if matches!(
+                    item.escalation,
+                    Escalation::OperatorRequired {
+                        reason: EscalationReason::CheckoutSyncBlocked
+                    }
+                ) {
+                    item.escalation = Escalation::None;
                     item.updated_at = Utc::now();
                     self.db.update_item(&item).await?;
                     self.append_activity(
@@ -2632,9 +2638,15 @@ impl JobDispatcher {
                 }
             }
             CheckoutSyncStatus::Blocked { message, .. } => {
-                if item.escalation_reason != Some(EscalationReason::CheckoutSyncBlocked) {
-                    item.escalation_state = EscalationState::OperatorRequired;
-                    item.escalation_reason = Some(EscalationReason::CheckoutSyncBlocked);
+                if !matches!(
+                    item.escalation,
+                    Escalation::OperatorRequired {
+                        reason: EscalationReason::CheckoutSyncBlocked
+                    }
+                ) {
+                    item.escalation = Escalation::OperatorRequired {
+                        reason: EscalationReason::CheckoutSyncBlocked,
+                    };
                     item.updated_at = Utc::now();
                     self.db.update_item(&item).await?;
                     self.append_activity(
@@ -2840,7 +2852,7 @@ impl JobDispatcher {
                 }
             };
             for item in items {
-                if item.lifecycle_state != LifecycleState::Open {
+                if !item.lifecycle.is_open() {
                     continue;
                 }
                 match self
@@ -2992,14 +3004,13 @@ impl JobDispatcher {
         &self,
         prepared: &PreparedRun,
     ) -> Result<(), RuntimeError> {
-        if prepared.item.escalation_state != EscalationState::OperatorRequired {
+        if !prepared.item.escalation.is_escalated() {
             return Ok(());
         }
 
         let item = self.db.get_item(prepared.item.id).await?;
         if item.current_revision_id != prepared.job.item_revision_id
-            || item.escalation_state != EscalationState::None
-            || item.escalation_reason.is_some()
+            || item.escalation.is_escalated()
         {
             return Ok(());
         }

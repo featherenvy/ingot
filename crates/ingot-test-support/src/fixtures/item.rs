@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use ingot_domain::ids;
 use ingot_domain::item::{
-    ApprovalState, Classification, DoneReason, EscalationReason, EscalationState, Item,
-    LifecycleState, OriginKind, ParkingState, Priority, ResolutionSource,
+    ApprovalState, Classification, DoneReason, Escalation, EscalationReason, Item, Lifecycle,
+    Origin, ParkingState, Priority, ResolutionSource,
 };
 use uuid::Uuid;
 
@@ -14,18 +14,14 @@ pub struct ItemBuilder {
     current_revision_id: ids::ItemRevisionId,
     classification: Classification,
     workflow_version: String,
-    lifecycle_state: LifecycleState,
+    lifecycle: Lifecycle,
     parking_state: ParkingState,
-    done_reason: Option<DoneReason>,
-    resolution_source: Option<ResolutionSource>,
     approval_state: ApprovalState,
-    escalation_state: EscalationState,
-    escalation_reason: Option<EscalationReason>,
-    origin_kind: OriginKind,
+    escalation: Escalation,
+    origin: Origin,
     priority: Priority,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-    closed_at: Option<DateTime<Utc>>,
 }
 
 impl ItemBuilder {
@@ -46,18 +42,14 @@ impl ItemBuilder {
             current_revision_id,
             classification: Classification::Change,
             workflow_version: "delivery:v1".into(),
-            lifecycle_state: LifecycleState::Open,
+            lifecycle: Lifecycle::Open,
             parking_state: ParkingState::Active,
-            done_reason: None,
-            resolution_source: None,
             approval_state: ApprovalState::NotRequested,
-            escalation_state: EscalationState::None,
-            escalation_reason: None,
-            origin_kind: OriginKind::Manual,
+            escalation: Escalation::None,
+            origin: Origin::Manual,
             priority: Priority::Major,
             created_at: now,
             updated_at: now,
-            closed_at: None,
         }
     }
 
@@ -71,33 +63,27 @@ impl ItemBuilder {
         self
     }
 
-    pub fn escalation_state(mut self, escalation_state: EscalationState) -> Self {
-        self.escalation_state = escalation_state;
+    pub fn escalation(mut self, escalation: Escalation) -> Self {
+        self.escalation = escalation;
         self
     }
 
-    pub fn escalation_reason(mut self, escalation_reason: EscalationReason) -> Self {
-        self.escalation_reason = Some(escalation_reason);
+    pub fn escalated(mut self, reason: EscalationReason) -> Self {
+        self.escalation = Escalation::OperatorRequired { reason };
         self
     }
 
-    pub fn lifecycle_state(mut self, lifecycle_state: LifecycleState) -> Self {
-        self.lifecycle_state = lifecycle_state;
+    pub fn lifecycle(mut self, lifecycle: Lifecycle) -> Self {
+        self.lifecycle = lifecycle;
         self
     }
 
-    pub fn done_reason(mut self, done_reason: DoneReason) -> Self {
-        self.done_reason = Some(done_reason);
-        self
-    }
-
-    pub fn resolution_source(mut self, resolution_source: ResolutionSource) -> Self {
-        self.resolution_source = Some(resolution_source);
-        self
-    }
-
-    pub fn closed_at(mut self, closed_at: DateTime<Utc>) -> Self {
-        self.closed_at = Some(closed_at);
+    pub fn done(mut self, reason: DoneReason, source: ResolutionSource) -> Self {
+        self.lifecycle = Lifecycle::Done {
+            reason,
+            source,
+            closed_at: self.created_at,
+        };
         self
     }
 
@@ -107,28 +93,28 @@ impl ItemBuilder {
         self
     }
 
+    pub fn origin(mut self, origin: Origin) -> Self {
+        self.origin = origin;
+        self
+    }
+
     pub fn build(self) -> Item {
         Item {
             id: self.id,
             project_id: self.project_id,
             classification: self.classification,
             workflow_version: self.workflow_version,
-            lifecycle_state: self.lifecycle_state,
+            lifecycle: self.lifecycle,
             parking_state: self.parking_state,
-            done_reason: self.done_reason,
-            resolution_source: self.resolution_source,
             approval_state: self.approval_state,
-            escalation_state: self.escalation_state,
-            escalation_reason: self.escalation_reason,
+            escalation: self.escalation,
             current_revision_id: self.current_revision_id,
-            origin_kind: self.origin_kind,
-            origin_finding_id: None,
+            origin: self.origin,
             priority: self.priority,
             labels: vec![],
             operator_notes: None,
             created_at: self.created_at,
             updated_at: self.updated_at,
-            closed_at: self.closed_at,
         }
     }
 }

@@ -103,7 +103,9 @@ async fn tick_executes_a_review_job_and_persists_structured_report() {
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
         .explicit_seed(&base_commit)
-        .template_map_snapshot(serde_json::json!({ "review_candidate_initial": "review-candidate" }))
+        .template_map_snapshot(
+            serde_json::json!({ "review_candidate_initial": "review-candidate" }),
+        )
         .build();
     db.create_item_with_revision(&item, &revision)
         .await

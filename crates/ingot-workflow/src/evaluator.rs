@@ -1,18 +1,130 @@
+use std::fmt;
+
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::finding::{Finding, FindingTriageState};
-use ingot_domain::item::{ApprovalState, EscalationState, Item, LifecycleState, ParkingState};
+use ingot_domain::item::{ApprovalState, Item, ParkingState};
 use ingot_domain::job::{Job, JobStatus, OutcomeClass, PhaseKind};
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
 
 use crate::graph::{TransitionTarget, WorkflowGraph};
 use crate::step::{self, ClosureRelevance};
 
-const ACTION_NONE: &str = "none";
-const ACTION_APPROVAL_APPROVE: &str = "approval_approve";
-const ACTION_OPERATOR_INTERVENTION: &str = "operator_intervention";
-const ACTION_FINALIZE_PREPARED_CONVERGENCE: &str = "finalize_prepared_convergence";
-const ACTION_INVALIDATE_PREPARED_CONVERGENCE: &str = "invalidate_prepared_convergence";
-const ACTION_TRIAGE_FINDINGS: &str = "triage_findings";
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseStatus {
+    New,
+    Done,
+    Running,
+    Idle,
+    Escalated,
+    Deferred,
+    PendingApproval,
+    AwaitingConvergence,
+    Triaging,
+    FinalizationReady,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowedAction {
+    Dispatch,
+    CancelJob,
+    ApprovalApprove,
+    ApprovalReject,
+    PrepareConvergence,
+    Resume,
+    Revise,
+    Dismiss,
+    Invalidate,
+    Defer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionBadge {
+    Escalated,
+    Deferred,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecommendedAction {
+    None,
+    ApprovalApprove,
+    OperatorIntervention,
+    FinalizePreparedConvergence,
+    InvalidatePreparedConvergence,
+    TriageFindings,
+    PrepareConvergence,
+    AwaitConvergenceLane,
+    ResolveCheckoutSync,
+    /// Catch-all: any step ID that doesn't match a named action above.
+    /// `From<String>` routes unrecognized strings here.
+    DispatchStep(String),
+}
+
+impl RecommendedAction {
+    pub fn dispatch(step: &str) -> Self {
+        Self::DispatchStep(step.into())
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Self::None => "none",
+            Self::ApprovalApprove => "approval_approve",
+            Self::OperatorIntervention => "operator_intervention",
+            Self::FinalizePreparedConvergence => "finalize_prepared_convergence",
+            Self::InvalidatePreparedConvergence => "invalidate_prepared_convergence",
+            Self::TriageFindings => "triage_findings",
+            Self::PrepareConvergence => "prepare_convergence",
+            Self::AwaitConvergenceLane => "await_convergence_lane",
+            Self::ResolveCheckoutSync => "resolve_checkout_sync",
+            Self::DispatchStep(step_id) => step_id.as_str(),
+        }
+    }
+}
+
+impl fmt::Display for RecommendedAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<RecommendedAction> for String {
+    fn from(action: RecommendedAction) -> Self {
+        action.as_str().to_owned()
+    }
+}
+
+impl From<String> for RecommendedAction {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "none" => Self::None,
+            "approval_approve" => Self::ApprovalApprove,
+            "operator_intervention" => Self::OperatorIntervention,
+            "finalize_prepared_convergence" => Self::FinalizePreparedConvergence,
+            "invalidate_prepared_convergence" => Self::InvalidatePreparedConvergence,
+            "triage_findings" => Self::TriageFindings,
+            "prepare_convergence" => Self::PrepareConvergence,
+            "await_convergence_lane" => Self::AwaitConvergenceLane,
+            "resolve_checkout_sync" => Self::ResolveCheckoutSync,
+            _ => Self::DispatchStep(s),
+        }
+    }
+}
+
+impl serde::Serialize for RecommendedAction {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RecommendedAction {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::from(s))
+    }
+}
 
 /// Board column for UI rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -28,14 +140,14 @@ pub enum BoardStatus {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Evaluation {
     pub board_status: BoardStatus,
-    pub attention_badges: Vec<String>,
+    pub attention_badges: Vec<AttentionBadge>,
     pub current_step_id: Option<String>,
-    pub current_phase_kind: Option<String>,
-    pub phase_status: Option<String>,
-    pub next_recommended_action: String,
+    pub current_phase_kind: Option<PhaseKind>,
+    pub phase_status: Option<PhaseStatus>,
+    pub next_recommended_action: RecommendedAction,
     pub dispatchable_step_id: Option<String>,
     pub auxiliary_dispatchable_step_ids: Vec<String>,
-    pub allowed_actions: Vec<String>,
+    pub allowed_actions: Vec<AllowedAction>,
     pub terminal_readiness: bool,
     pub diagnostics: Vec<String>,
 }
@@ -43,10 +155,10 @@ pub struct Evaluation {
 #[derive(Debug, Clone)]
 struct IdleProjection {
     current_step_id: Option<String>,
-    phase_status: &'static str,
-    next_recommended_action: String,
+    phase_status: PhaseStatus,
+    next_recommended_action: RecommendedAction,
     dispatchable_step_id: Option<String>,
-    allowed_actions: Vec<String>,
+    allowed_actions: Vec<AllowedAction>,
     terminal_readiness: bool,
 }
 
@@ -81,21 +193,21 @@ impl Evaluator {
         let mut diagnostics = Vec::new();
         let mut attention_badges = Vec::new();
 
-        if item.escalation_state == EscalationState::OperatorRequired {
-            attention_badges.push("escalated".into());
+        if item.escalation.is_escalated() {
+            attention_badges.push(AttentionBadge::Escalated);
         }
         if item.parking_state == ParkingState::Deferred {
-            attention_badges.push("deferred".into());
+            attention_badges.push(AttentionBadge::Deferred);
         }
 
-        if item.lifecycle_state == LifecycleState::Done {
+        if item.lifecycle.is_done() {
             return Evaluation {
                 board_status: BoardStatus::Done,
                 attention_badges,
                 current_step_id: None,
                 current_phase_kind: None,
-                phase_status: Some("done".into()),
-                next_recommended_action: ACTION_NONE.into(),
+                phase_status: Some(PhaseStatus::Done),
+                next_recommended_action: RecommendedAction::None,
                 dispatchable_step_id: None,
                 auxiliary_dispatchable_step_ids: vec![],
                 allowed_actions: vec![],
@@ -161,12 +273,12 @@ impl Evaluator {
                         board_status: BoardStatus::Working,
                         attention_badges: vec![],
                         current_step_id: base.current_step_id,
-                        current_phase_kind: Some(phase_kind_name(job.phase_kind).into()),
-                        phase_status: Some("running".into()),
-                        next_recommended_action: ACTION_NONE.into(),
+                        current_phase_kind: Some(job.phase_kind),
+                        phase_status: Some(PhaseStatus::Running),
+                        next_recommended_action: RecommendedAction::None,
                         dispatchable_step_id: None,
                         auxiliary_dispatchable_step_ids: vec![],
-                        allowed_actions: vec!["cancel_job".into()],
+                        allowed_actions: vec![AllowedAction::CancelJob],
                         terminal_readiness: false,
                         diagnostics,
                     },
@@ -181,12 +293,12 @@ impl Evaluator {
                     board_status: BoardStatus::Working,
                     attention_badges: vec![],
                     current_step_id: Some(job.step_id.clone()),
-                    current_phase_kind: Some(phase_kind_name(job.phase_kind).into()),
-                    phase_status: Some("running".into()),
-                    next_recommended_action: ACTION_NONE.into(),
+                    current_phase_kind: Some(job.phase_kind),
+                    phase_status: Some(PhaseStatus::Running),
+                    next_recommended_action: RecommendedAction::None,
                     dispatchable_step_id: None,
                     auxiliary_dispatchable_step_ids: vec![],
-                    allowed_actions: vec!["cancel_job".into()],
+                    allowed_actions: vec![AllowedAction::CancelJob],
                     terminal_readiness: false,
                     diagnostics,
                 },
@@ -202,9 +314,9 @@ impl Evaluator {
                     board_status: BoardStatus::Working,
                     attention_badges: vec![],
                     current_step_id: Some(step::PREPARE_CONVERGENCE.into()),
-                    current_phase_kind: Some(phase_kind_name(PhaseKind::System).into()),
-                    phase_status: Some("running".into()),
-                    next_recommended_action: ACTION_NONE.into(),
+                    current_phase_kind: Some(PhaseKind::System),
+                    phase_status: Some(PhaseStatus::Running),
+                    next_recommended_action: RecommendedAction::None,
                     dispatchable_step_id: None,
                     auxiliary_dispatchable_step_ids: vec![],
                     allowed_actions: vec![],
@@ -236,7 +348,7 @@ impl Evaluator {
                 attention_badges: vec![],
                 current_step_id: base.current_step_id,
                 current_phase_kind: None,
-                phase_status: Some(base.phase_status.into()),
+                phase_status: Some(base.phase_status),
                 next_recommended_action: base.next_recommended_action,
                 dispatchable_step_id: base.dispatchable_step_id,
                 auxiliary_dispatchable_step_ids,
@@ -258,17 +370,17 @@ impl Evaluator {
     ) -> IdleProjection {
         let current_step_id = current_closure_step_id(latest_closure_job, prepared_convergence);
 
-        if item.escalation_state == EscalationState::OperatorRequired {
+        if item.escalation.is_escalated() {
             return IdleProjection {
                 current_step_id,
-                phase_status: "escalated",
-                next_recommended_action: ACTION_OPERATOR_INTERVENTION.into(),
+                phase_status: PhaseStatus::Escalated,
+                next_recommended_action: RecommendedAction::OperatorIntervention,
                 dispatchable_step_id: None,
                 allowed_actions: vec![
-                    "revise".into(),
-                    "dismiss".into(),
-                    "invalidate".into(),
-                    "defer".into(),
+                    AllowedAction::Revise,
+                    AllowedAction::Dismiss,
+                    AllowedAction::Invalidate,
+                    AllowedAction::Defer,
                 ],
                 terminal_readiness: false,
             };
@@ -280,8 +392,8 @@ impl Evaluator {
         {
             return IdleProjection {
                 current_step_id,
-                phase_status: "idle",
-                next_recommended_action: ACTION_INVALIDATE_PREPARED_CONVERGENCE.into(),
+                phase_status: PhaseStatus::Idle,
+                next_recommended_action: RecommendedAction::InvalidatePreparedConvergence,
                 dispatchable_step_id: None,
                 allowed_actions: vec![],
                 terminal_readiness: false,
@@ -291,10 +403,10 @@ impl Evaluator {
         if item.parking_state == ParkingState::Deferred {
             return IdleProjection {
                 current_step_id,
-                phase_status: "deferred",
-                next_recommended_action: ACTION_NONE.into(),
+                phase_status: PhaseStatus::Deferred,
+                next_recommended_action: RecommendedAction::None,
                 dispatchable_step_id: None,
-                allowed_actions: vec!["resume".into()],
+                allowed_actions: vec![AllowedAction::Resume],
                 terminal_readiness: false,
             };
         }
@@ -309,8 +421,8 @@ impl Evaluator {
 
                 return IdleProjection {
                     current_step_id,
-                    phase_status: "unknown",
-                    next_recommended_action: ACTION_OPERATOR_INTERVENTION.into(),
+                    phase_status: PhaseStatus::Unknown,
+                    next_recommended_action: RecommendedAction::OperatorIntervention,
                     dispatchable_step_id: None,
                     allowed_actions: vec![],
                     terminal_readiness: false,
@@ -322,8 +434,8 @@ impl Evaluator {
                     if item.approval_state == ApprovalState::Granted {
                         return IdleProjection {
                             current_step_id,
-                            phase_status: "awaiting_convergence",
-                            next_recommended_action: step::PREPARE_CONVERGENCE.into(),
+                            phase_status: PhaseStatus::AwaitingConvergence,
+                            next_recommended_action: RecommendedAction::PrepareConvergence,
                             dispatchable_step_id: None,
                             allowed_actions: vec![],
                             terminal_readiness: false,
@@ -334,8 +446,8 @@ impl Evaluator {
                     );
                     return IdleProjection {
                         current_step_id,
-                        phase_status: "unknown",
-                        next_recommended_action: ACTION_OPERATOR_INTERVENTION.into(),
+                        phase_status: PhaseStatus::Unknown,
+                        next_recommended_action: RecommendedAction::OperatorIntervention,
                         dispatchable_step_id: None,
                         allowed_actions: vec![],
                         terminal_readiness: false,
@@ -343,17 +455,20 @@ impl Evaluator {
                 } else if item.approval_state == ApprovalState::Pending {
                     return IdleProjection {
                         current_step_id,
-                        phase_status: "pending_approval",
-                        next_recommended_action: ACTION_APPROVAL_APPROVE.into(),
+                        phase_status: PhaseStatus::PendingApproval,
+                        next_recommended_action: RecommendedAction::ApprovalApprove,
                         dispatchable_step_id: None,
-                        allowed_actions: vec!["approval_approve".into(), "approval_reject".into()],
+                        allowed_actions: vec![
+                            AllowedAction::ApprovalApprove,
+                            AllowedAction::ApprovalReject,
+                        ],
                         terminal_readiness: false,
                     };
                 } else if revision.approval_policy == ApprovalPolicy::NotRequired {
                     return IdleProjection {
                         current_step_id,
-                        phase_status: "finalization_ready",
-                        next_recommended_action: ACTION_FINALIZE_PREPARED_CONVERGENCE.into(),
+                        phase_status: PhaseStatus::FinalizationReady,
+                        next_recommended_action: RecommendedAction::FinalizePreparedConvergence,
                         dispatchable_step_id: None,
                         allowed_actions: vec![],
                         terminal_readiness: true,
@@ -363,8 +478,8 @@ impl Evaluator {
                         .push("validate_integrated clean but approval_state is not pending".into());
                     return IdleProjection {
                         current_step_id,
-                        phase_status: "unknown",
-                        next_recommended_action: ACTION_OPERATOR_INTERVENTION.into(),
+                        phase_status: PhaseStatus::Unknown,
+                        next_recommended_action: RecommendedAction::OperatorIntervention,
                         dispatchable_step_id: None,
                         allowed_actions: vec![],
                         terminal_readiness: false,
@@ -396,8 +511,8 @@ impl Evaluator {
 
                 return IdleProjection {
                     current_step_id,
-                    phase_status: "unknown",
-                    next_recommended_action: ACTION_OPERATOR_INTERVENTION.into(),
+                    phase_status: PhaseStatus::Unknown,
+                    next_recommended_action: RecommendedAction::OperatorIntervention,
                     dispatchable_step_id: None,
                     allowed_actions: vec![],
                     terminal_readiness: false,
@@ -413,7 +528,7 @@ impl Evaluator {
                                 {
                                     return dispatchable_projection(
                                         Some(step::PREPARE_CONVERGENCE.into()),
-                                        "idle",
+                                        PhaseStatus::Idle,
                                         step::VALIDATE_INTEGRATED,
                                     );
                                 }
@@ -424,10 +539,14 @@ impl Evaluator {
                                     {
                                         return IdleProjection {
                                             current_step_id: Some(last_job.step_id.clone()),
-                                            phase_status: "awaiting_convergence",
-                                            next_recommended_action: (*next_step).into(),
+                                            phase_status: PhaseStatus::AwaitingConvergence,
+                                            next_recommended_action: RecommendedAction::from(
+                                                next_step.to_string(),
+                                            ),
                                             dispatchable_step_id: None,
-                                            allowed_actions: vec!["prepare_convergence".into()],
+                                            allowed_actions: vec![
+                                                AllowedAction::PrepareConvergence,
+                                            ],
                                             terminal_readiness: false,
                                         };
                                     }
@@ -435,15 +554,17 @@ impl Evaluator {
 
                                 return dispatchable_projection(
                                     Some(last_job.step_id.clone()),
-                                    "idle",
+                                    PhaseStatus::Idle,
                                     next_step,
                                 );
                             }
                             TransitionTarget::SystemAction(action) => {
                                 return IdleProjection {
                                     current_step_id: Some(last_job.step_id.clone()),
-                                    phase_status: "awaiting_convergence",
-                                    next_recommended_action: (*action).into(),
+                                    phase_status: PhaseStatus::AwaitingConvergence,
+                                    next_recommended_action: RecommendedAction::from(
+                                        action.to_string(),
+                                    ),
                                     dispatchable_step_id: None,
                                     allowed_actions: vec![],
                                     terminal_readiness: false,
@@ -458,8 +579,8 @@ impl Evaluator {
                 OutcomeClass::Cancelled | OutcomeClass::TransientFailure => {
                     return IdleProjection {
                         current_step_id: Some(last_job.step_id.clone()),
-                        phase_status: "idle",
-                        next_recommended_action: ACTION_NONE.into(),
+                        phase_status: PhaseStatus::Idle,
+                        next_recommended_action: RecommendedAction::None,
                         dispatchable_step_id: None,
                         allowed_actions: vec![],
                         terminal_readiness: false,
@@ -478,19 +599,19 @@ impl Evaluator {
         if prepared_convergence.is_some() {
             return dispatchable_projection(
                 Some(step::PREPARE_CONVERGENCE.into()),
-                "idle",
+                PhaseStatus::Idle,
                 step::VALIDATE_INTEGRATED,
             );
         }
 
         if latest_closure_job.is_none() {
-            return dispatchable_projection(None, "new", step::AUTHOR_INITIAL);
+            return dispatchable_projection(None, PhaseStatus::New, step::AUTHOR_INITIAL);
         }
 
         IdleProjection {
             current_step_id,
-            phase_status: "unknown",
-            next_recommended_action: ACTION_OPERATOR_INTERVENTION.into(),
+            phase_status: PhaseStatus::Unknown,
+            next_recommended_action: RecommendedAction::OperatorIntervention,
             dispatchable_step_id: None,
             allowed_actions: vec![],
             terminal_readiness: false,
@@ -501,18 +622,19 @@ impl Evaluator {
         &self,
         item: &Item,
         has_terminal_closure_job: bool,
-        attention_badges: Vec<String>,
+        attention_badges: Vec<AttentionBadge>,
         mut evaluation: Evaluation,
     ) -> Evaluation {
         evaluation.attention_badges = attention_badges;
 
-        evaluation.board_status = if item.lifecycle_state == LifecycleState::Done {
+        evaluation.board_status = if item.lifecycle.is_done() {
             BoardStatus::Done
         } else if item.approval_state == ApprovalState::Pending
-            && evaluation.next_recommended_action != ACTION_INVALIDATE_PREPARED_CONVERGENCE
+            && evaluation.next_recommended_action
+                != RecommendedAction::InvalidatePreparedConvergence
         {
             BoardStatus::Approval
-        } else if evaluation.phase_status.as_deref() == Some("running") || has_terminal_closure_job
+        } else if evaluation.phase_status == Some(PhaseStatus::Running) || has_terminal_closure_job
         {
             BoardStatus::Working
         } else {
@@ -582,8 +704,8 @@ fn triage_projection(
     }) {
         return Some(IdleProjection {
             current_step_id: Some(latest_closure_job.step_id.clone()),
-            phase_status: "triaging",
-            next_recommended_action: ACTION_TRIAGE_FINDINGS.into(),
+            phase_status: PhaseStatus::Triaging,
+            next_recommended_action: RecommendedAction::TriageFindings,
             dispatchable_step_id: None,
             allowed_actions: vec![],
             terminal_readiness: false,
@@ -603,7 +725,7 @@ fn triage_projection(
 fn triaged_findings_repair_projection(latest_closure_job: &Job) -> Option<IdleProjection> {
     graph_target_projection(
         Some(latest_closure_job.step_id.clone()),
-        "idle",
+        PhaseStatus::Idle,
         WorkflowGraph::delivery_v1()
             .next_step(&latest_closure_job.step_id, &OutcomeClass::Findings),
     )
@@ -620,8 +742,8 @@ fn triaged_findings_clean_projection(
             if item.approval_state == ApprovalState::Granted {
                 return Some(IdleProjection {
                     current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
-                    phase_status: "awaiting_convergence",
-                    next_recommended_action: step::PREPARE_CONVERGENCE.into(),
+                    phase_status: PhaseStatus::AwaitingConvergence,
+                    next_recommended_action: RecommendedAction::PrepareConvergence,
                     dispatchable_step_id: None,
                     allowed_actions: vec![],
                     terminal_readiness: false,
@@ -629,8 +751,8 @@ fn triaged_findings_clean_projection(
             }
             return Some(IdleProjection {
                 current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
-                phase_status: "unknown",
-                next_recommended_action: ACTION_OPERATOR_INTERVENTION.into(),
+                phase_status: PhaseStatus::Unknown,
+                next_recommended_action: RecommendedAction::OperatorIntervention,
                 dispatchable_step_id: None,
                 allowed_actions: vec![],
                 terminal_readiness: false,
@@ -641,18 +763,21 @@ fn triaged_findings_clean_projection(
             if item.approval_state == ApprovalState::Pending {
                 return Some(IdleProjection {
                     current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
-                    phase_status: "pending_approval",
-                    next_recommended_action: ACTION_APPROVAL_APPROVE.into(),
+                    phase_status: PhaseStatus::PendingApproval,
+                    next_recommended_action: RecommendedAction::ApprovalApprove,
                     dispatchable_step_id: None,
-                    allowed_actions: vec!["approval_approve".into(), "approval_reject".into()],
+                    allowed_actions: vec![
+                        AllowedAction::ApprovalApprove,
+                        AllowedAction::ApprovalReject,
+                    ],
                     terminal_readiness: false,
                 });
             }
 
             return Some(IdleProjection {
                 current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
-                phase_status: "unknown",
-                next_recommended_action: ACTION_OPERATOR_INTERVENTION.into(),
+                phase_status: PhaseStatus::Unknown,
+                next_recommended_action: RecommendedAction::OperatorIntervention,
                 dispatchable_step_id: None,
                 allowed_actions: vec![],
                 terminal_readiness: false,
@@ -661,8 +786,8 @@ fn triaged_findings_clean_projection(
 
         return Some(IdleProjection {
             current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
-            phase_status: "finalization_ready",
-            next_recommended_action: ACTION_FINALIZE_PREPARED_CONVERGENCE.into(),
+            phase_status: PhaseStatus::FinalizationReady,
+            next_recommended_action: RecommendedAction::FinalizePreparedConvergence,
             dispatchable_step_id: None,
             allowed_actions: vec![],
             terminal_readiness: true,
@@ -671,14 +796,14 @@ fn triaged_findings_clean_projection(
 
     graph_target_projection(
         Some(latest_closure_job.step_id.clone()),
-        "idle",
+        PhaseStatus::Idle,
         WorkflowGraph::delivery_v1().next_step(&latest_closure_job.step_id, &OutcomeClass::Clean),
     )
 }
 
 fn graph_target_projection(
     current_step_id: Option<String>,
-    phase_status: &'static str,
+    phase_status: PhaseStatus,
     target: Option<&TransitionTarget>,
 ) -> Option<IdleProjection> {
     match target? {
@@ -689,8 +814,8 @@ fn graph_target_projection(
         )),
         TransitionTarget::SystemAction(action) => Some(IdleProjection {
             current_step_id,
-            phase_status: "awaiting_convergence",
-            next_recommended_action: (*action).into(),
+            phase_status: PhaseStatus::AwaitingConvergence,
+            next_recommended_action: RecommendedAction::from(action.to_string()),
             dispatchable_step_id: None,
             allowed_actions: vec![],
             terminal_readiness: false,
@@ -701,33 +826,29 @@ fn graph_target_projection(
 
 fn dispatchable_projection(
     current_step_id: Option<String>,
-    phase_status: &'static str,
+    phase_status: PhaseStatus,
     next_step: &'static str,
-) -> IdleProjection {
-    dispatchable_projection_owned(current_step_id, phase_status, next_step.to_string())
-}
-
-fn dispatchable_projection_owned(
-    current_step_id: Option<String>,
-    phase_status: &'static str,
-    next_step: String,
 ) -> IdleProjection {
     IdleProjection {
         current_step_id,
         phase_status,
-        next_recommended_action: next_step.clone(),
-        dispatchable_step_id: Some(next_step),
-        allowed_actions: vec!["dispatch".into()],
+        next_recommended_action: RecommendedAction::dispatch(next_step),
+        dispatchable_step_id: Some(next_step.into()),
+        allowed_actions: vec![AllowedAction::Dispatch],
         terminal_readiness: false,
     }
 }
 
-fn auxiliary_steps(item: &Item, next_action: &str, phase_status: &str) -> Vec<String> {
-    if item.lifecycle_state != LifecycleState::Open
+fn auxiliary_steps(
+    item: &Item,
+    next_action: &RecommendedAction,
+    phase_status: PhaseStatus,
+) -> Vec<String> {
+    if !item.lifecycle.is_open()
         || item.parking_state != ParkingState::Active
         || item.approval_state == ApprovalState::Pending
-        || item.escalation_state == EscalationState::OperatorRequired
-        || !matches!(phase_status, "new" | "idle")
+        || item.escalation.is_escalated()
+        || !matches!(phase_status, PhaseStatus::New | PhaseStatus::Idle)
         || is_daemon_action(next_action)
     {
         return vec![];
@@ -737,24 +858,24 @@ fn auxiliary_steps(item: &Item, next_action: &str, phase_status: &str) -> Vec<St
 }
 
 fn merge_allowed_actions(
-    mut allowed_actions: Vec<String>,
+    mut allowed_actions: Vec<AllowedAction>,
     auxiliary_dispatchable_step_ids: &[String],
-) -> Vec<String> {
+) -> Vec<AllowedAction> {
     if !auxiliary_dispatchable_step_ids.is_empty()
-        && !allowed_actions.iter().any(|action| action == "dispatch")
+        && !allowed_actions.contains(&AllowedAction::Dispatch)
     {
-        allowed_actions.push("dispatch".into());
+        allowed_actions.push(AllowedAction::Dispatch);
     }
 
     allowed_actions
 }
 
-fn is_daemon_action(action: &str) -> bool {
+fn is_daemon_action(action: &RecommendedAction) -> bool {
     matches!(
         action,
-        step::PREPARE_CONVERGENCE
-            | ACTION_FINALIZE_PREPARED_CONVERGENCE
-            | ACTION_INVALIDATE_PREPARED_CONVERGENCE
+        RecommendedAction::PrepareConvergence
+            | RecommendedAction::FinalizePreparedConvergence
+            | RecommendedAction::InvalidatePreparedConvergence
     )
 }
 
@@ -763,16 +884,6 @@ fn is_closure_relevant_step(step_id: &str) -> bool {
         step::find_step(step_id).map(|contract| contract.closure_relevance),
         Some(ClosureRelevance::ClosureRelevant)
     )
-}
-
-fn phase_kind_name(phase_kind: PhaseKind) -> &'static str {
-    match phase_kind {
-        PhaseKind::Author => "author",
-        PhaseKind::Validate => "validate",
-        PhaseKind::Review => "review",
-        PhaseKind::Investigate => "investigate",
-        PhaseKind::System => "system",
-    }
 }
 
 fn outcome_class_name(outcome_class: OutcomeClass) -> &'static str {
@@ -814,7 +925,7 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use super::{BoardStatus, Evaluator};
+    use super::{BoardStatus, Evaluator, PhaseStatus, RecommendedAction};
     use crate::step;
 
     #[test]
@@ -843,11 +954,8 @@ mod tests {
             evaluation.current_step_id.as_deref(),
             Some(step::REVIEW_INCREMENTAL_INITIAL)
         );
-        assert_eq!(
-            evaluation.current_phase_kind.as_deref(),
-            Some("investigate")
-        );
-        assert_eq!(evaluation.phase_status.as_deref(), Some("running"));
+        assert_eq!(evaluation.current_phase_kind, Some(PhaseKind::Investigate));
+        assert_eq!(evaluation.phase_status, Some(PhaseStatus::Running));
         assert_eq!(evaluation.board_status, BoardStatus::Working);
     }
 
@@ -895,7 +1003,7 @@ mod tests {
         );
         assert_eq!(
             evaluation.next_recommended_action,
-            step::REVIEW_INCREMENTAL_INITIAL
+            RecommendedAction::dispatch(step::REVIEW_INCREMENTAL_INITIAL)
         );
     }
 
@@ -919,7 +1027,7 @@ mod tests {
         );
         assert_eq!(
             evaluation.next_recommended_action,
-            step::VALIDATE_CANDIDATE_INITIAL
+            RecommendedAction::dispatch(step::VALIDATE_CANDIDATE_INITIAL)
         );
     }
 
@@ -939,12 +1047,12 @@ mod tests {
 
         assert_eq!(
             evaluation.next_recommended_action,
-            step::PREPARE_CONVERGENCE
+            RecommendedAction::PrepareConvergence
         );
         assert_eq!(evaluation.dispatchable_step_id, None);
         assert_eq!(
-            evaluation.phase_status.as_deref(),
-            Some("awaiting_convergence")
+            evaluation.phase_status,
+            Some(PhaseStatus::AwaitingConvergence)
         );
     }
 
@@ -967,7 +1075,7 @@ mod tests {
 
         assert_eq!(
             evaluation.next_recommended_action,
-            "invalidate_prepared_convergence"
+            RecommendedAction::InvalidatePreparedConvergence
         );
         assert_eq!(evaluation.board_status, BoardStatus::Working);
         assert!(evaluation.allowed_actions.is_empty());
@@ -991,11 +1099,11 @@ mod tests {
 
         assert_eq!(
             evaluation.next_recommended_action,
-            step::PREPARE_CONVERGENCE
+            RecommendedAction::PrepareConvergence
         );
         assert_eq!(
-            evaluation.phase_status.as_deref(),
-            Some("awaiting_convergence")
+            evaluation.phase_status,
+            Some(PhaseStatus::AwaitingConvergence)
         );
         assert_eq!(evaluation.dispatchable_step_id, None);
     }
@@ -1023,7 +1131,7 @@ mod tests {
         );
         assert_eq!(
             evaluation.next_recommended_action,
-            step::REPAIR_AFTER_INTEGRATION
+            RecommendedAction::dispatch(step::REPAIR_AFTER_INTEGRATION)
         );
     }
 
@@ -1043,8 +1151,11 @@ mod tests {
 
         let evaluation = evaluator.evaluate(&item, &revision, &jobs, &findings, &[]);
 
-        assert_eq!(evaluation.phase_status.as_deref(), Some("triaging"));
-        assert_eq!(evaluation.next_recommended_action, "triage_findings");
+        assert_eq!(evaluation.phase_status, Some(PhaseStatus::Triaging));
+        assert_eq!(
+            evaluation.next_recommended_action,
+            RecommendedAction::TriageFindings
+        );
         assert_eq!(evaluation.dispatchable_step_id, None);
     }
 
@@ -1090,7 +1201,7 @@ mod tests {
         );
         assert_eq!(
             evaluation.next_recommended_action,
-            step::REVIEW_INCREMENTAL_AFTER_INTEGRATION_REPAIR
+            RecommendedAction::dispatch(step::REVIEW_INCREMENTAL_AFTER_INTEGRATION_REPAIR)
         );
     }
 
@@ -1109,7 +1220,7 @@ mod tests {
         let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
 
         assert_eq!(evaluation.dispatchable_step_id, None);
-        assert_eq!(evaluation.phase_status.as_deref(), Some("unknown"));
+        assert_eq!(evaluation.phase_status, Some(PhaseStatus::Unknown));
         assert!(
             evaluation
                 .diagnostics
@@ -1133,7 +1244,7 @@ mod tests {
         let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
 
         assert_eq!(evaluation.dispatchable_step_id, None);
-        assert_eq!(evaluation.next_recommended_action, "none");
+        assert_eq!(evaluation.next_recommended_action, RecommendedAction::None);
         assert_eq!(
             evaluation.current_step_id.as_deref(),
             Some(step::VALIDATE_CANDIDATE_INITIAL)
@@ -1155,7 +1266,7 @@ mod tests {
         let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
 
         assert_eq!(evaluation.dispatchable_step_id, None);
-        assert_eq!(evaluation.next_recommended_action, "none");
+        assert_eq!(evaluation.next_recommended_action, RecommendedAction::None);
         assert_eq!(
             evaluation.current_step_id.as_deref(),
             Some(step::VALIDATE_CANDIDATE_INITIAL)

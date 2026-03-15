@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { cn } from '@/lib/utils'
+import { formatDuration, formatStepLabel } from '../../lib/format'
 import type { Convergence, Finding, FindingSeverity, Job } from '../../types/domain'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible'
 
@@ -33,24 +34,6 @@ type ConvergenceStory = {
 type Story = JobStory | ConvergenceStory
 
 // ── Utilities ──────────────────────────────────────────────────
-
-function formatStepLabel(stepId: string): string {
-  return stepId.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-}
-
-function formatDuration(startIso: string | null, endIso: string | null): string {
-  if (!startIso) return ''
-  const start = new Date(startIso).getTime()
-  const end = endIso ? new Date(endIso).getTime() : Date.now()
-  const secs = Math.floor((end - start) / 1000)
-  if (secs < 60) return `${secs}s`
-  const mins = Math.floor(secs / 60)
-  const remSecs = secs % 60
-  if (mins < 60) return `${mins}m ${remSecs}s`
-  const hrs = Math.floor(mins / 60)
-  const remMins = mins % 60
-  return `${hrs}h ${remMins}m`
-}
 
 function formatTimestamp(iso: string): string {
   if (!iso) return ''

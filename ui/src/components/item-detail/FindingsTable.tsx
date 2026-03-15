@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
+import { formatRelativeTime, formatStepLabel } from '../../lib/format'
 import { shortId } from '../../lib/git'
 import type { Finding, FindingSeverity, FindingTriageState, Job } from '../../types/domain'
 import { TooltipValue } from '../TooltipValue'
@@ -121,21 +122,6 @@ function groupFindingsByJob(findings: Finding[], jobs: Job[]): FindingGroup[] {
   }
 
   return groups
-}
-
-function formatStepId(stepId: string): string {
-  return stepId.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-}
-
-function formatRelativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime()
-  const mins = Math.floor(diff / 60000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
 }
 
 // ── Agent Scope Summary ────────────────────────────────────────
@@ -456,7 +442,7 @@ function JobGroupHeader({ group }: { group: FindingGroup }) {
 
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-      <code className="text-sm font-semibold">{formatStepId(group.stepId)}</code>
+      <code className="text-sm font-semibold">{formatStepLabel(group.stepId)}</code>
       {group.job && (
         <TooltipValue content={group.job.id}>
           <code className="text-[11px] text-muted-foreground">{shortId(group.jobId)}</code>

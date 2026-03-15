@@ -40,7 +40,7 @@ use ingot_domain::finding::{Finding, FindingTriageState};
 use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
 use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::item::{
-    ApprovalState, Classification, DoneReason, EscalationReason, Item, LifecycleState, OriginKind,
+    ApprovalState, Classification, DoneReason, Escalation, EscalationReason, Item, Lifecycle,
     Priority, ResolutionSource,
 };
 use ingot_domain::job::{Job, JobStatus, OutcomeClass};
@@ -74,7 +74,7 @@ use ingot_usecases::job::{DispatchJobCommand, dispatch_job, retry_job};
 use ingot_usecases::{
     CompleteJobCommand, CompleteJobService, ProjectLocks, UseCaseError, rebuild_revision_context,
 };
-use ingot_workflow::{Evaluation, Evaluator, step};
+use ingot_workflow::{AllowedAction, Evaluation, Evaluator, PhaseStatus, RecommendedAction, step};
 use ingot_workspace::{
     ensure_authoring_workspace_state, provision_integration_workspace, provision_review_workspace,
     remove_workspace,
