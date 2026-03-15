@@ -143,7 +143,11 @@ pub async fn compare_and_swap_ref(
     Ok(())
 }
 
-pub async fn update_ref(repo_path: &Path, ref_name: &str, new_oid: &str) -> Result<(), GitCommandError> {
+pub async fn update_ref(
+    repo_path: &Path,
+    ref_name: &str,
+    new_oid: &str,
+) -> Result<(), GitCommandError> {
     git(repo_path, &["update-ref", ref_name, new_oid]).await?;
     Ok(())
 }

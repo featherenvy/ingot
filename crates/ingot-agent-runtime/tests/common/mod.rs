@@ -10,21 +10,22 @@ use ingot_agent_protocol::response::AgentResponse;
 use ingot_agent_runtime::{AgentRunner, DispatcherConfig, JobDispatcher};
 use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
 use ingot_domain::ids;
-use ingot_domain::item::{
-    ApprovalState, Classification, EscalationState, LifecycleState, OriginKind, ParkingState,
-    Priority,
-};
-use ingot_domain::job::{
-    ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutputArtifactKind, PhaseKind,
-};
+use ingot_domain::job::{ExecutionPermission, Job, JobInput, OutputArtifactKind, PhaseKind};
 use ingot_domain::project::Project;
-use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
-use ingot_domain::workspace::{
-    RetentionPolicy, Workspace, WorkspaceKind, WorkspaceStatus, WorkspaceStrategy,
-};
+use ingot_domain::revision::ItemRevision;
+use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
-use ingot_git::project_repo::{ensure_mirror, project_repo_paths, ProjectRepoPaths};
+use ingot_git::project_repo::{ProjectRepoPaths, ensure_mirror, project_repo_paths};
 use ingot_store_sqlite::Database;
+pub use ingot_test_support::fixtures::{
+    ConvergenceBuilder, FindingBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
+    WorkspaceBuilder, default_timestamp,
+};
+use ingot_test_support::git::unique_temp_path;
+use ingot_test_support::reports::{
+    clean_review_report, clean_validation_report, findings_review_report,
+};
+pub use ingot_test_support::sqlite::migrated_test_db;
 use ingot_usecases::ProjectLocks;
 use uuid::Uuid;
 
@@ -49,31 +50,17 @@ impl TestHarness {
         runner: Arc<dyn AgentRunner>,
         config: Option<DispatcherConfig>,
     ) -> Self {
-        let repo = temp_git_repo();
-        let db_path =
-            std::env::temp_dir().join(format!("ingot-runtime-{}.db", Uuid::now_v7()));
-        let db = Database::connect(&db_path).await.expect("connect db");
-        db.migrate().await.expect("migrate db");
-        let state_root =
-            std::env::temp_dir().join(format!("ingot-runtime-state-{}", Uuid::now_v7()));
+        let repo = temp_git_repo("ingot-runtime-repo");
+        let db = migrated_test_db("ingot-runtime").await;
+        let state_root = unique_temp_path("ingot-runtime-state");
         let config = config.unwrap_or_else(|| DispatcherConfig::new(state_root.clone()));
-        let dispatcher = JobDispatcher::with_runner(
-            db.clone(),
-            ProjectLocks::default(),
-            config,
-            runner,
-        );
+        let dispatcher =
+            JobDispatcher::with_runner(db.clone(), ProjectLocks::default(), config, runner);
 
-        let created_at = Utc::now();
-        let project = Project {
-            id: ids::ProjectId::new(),
-            name: "repo".into(),
-            path: repo.display().to_string(),
-            default_branch: "main".into(),
-            color: "#000".into(),
-            created_at,
-            updated_at: created_at,
-        };
+        let project = ProjectBuilder::new(&repo)
+            .id(ids::ProjectId::new())
+            .created_at(default_timestamp())
+            .build();
         db.create_project(&project).await.expect("create project");
 
         Self {
@@ -152,50 +139,17 @@ impl TestHarness {
 // Entity builders
 // ---------------------------------------------------------------------------
 
-pub fn test_item(project_id: ids::ProjectId, revision_id: ids::ItemRevisionId) -> ingot_domain::item::Item {
-    let now = Utc::now();
-    ingot_domain::item::Item {
-        id: ids::ItemId::new(),
-        project_id,
-        classification: Classification::Change,
-        workflow_version: "delivery:v1".into(),
-        lifecycle_state: LifecycleState::Open,
-        parking_state: ParkingState::Active,
-        done_reason: None,
-        resolution_source: None,
-        approval_state: ApprovalState::NotRequested,
-        escalation_state: EscalationState::None,
-        escalation_reason: None,
-        current_revision_id: revision_id,
-        origin_kind: OriginKind::Manual,
-        origin_finding_id: None,
-        priority: Priority::Major,
-        labels: vec![],
-        operator_notes: None,
-        created_at: now,
-        updated_at: now,
-        closed_at: None,
-    }
+pub fn test_item(
+    project_id: ids::ProjectId,
+    revision_id: ids::ItemRevisionId,
+) -> ingot_domain::item::Item {
+    ItemBuilder::new(project_id, revision_id).build()
 }
 
 pub fn test_revision(item_id: ids::ItemId, seed_commit: &str) -> ItemRevision {
-    let now = Utc::now();
-    ItemRevision {
-        id: ids::ItemRevisionId::new(),
-        item_id,
-        revision_no: 1,
-        title: "Test item".into(),
-        description: "Test item".into(),
-        acceptance_criteria: "Test item".into(),
-        target_ref: "refs/heads/main".into(),
-        approval_policy: ApprovalPolicy::Required,
-        policy_snapshot: serde_json::json!({}),
-        template_map_snapshot: serde_json::json!({}),
-        seed_commit_oid: Some(seed_commit.into()),
-        seed_target_commit_oid: Some(seed_commit.into()),
-        supersedes_revision_id: None,
-        created_at: now,
-    }
+    RevisionBuilder::new(item_id)
+        .explicit_seed(seed_commit)
+        .build()
 }
 
 pub fn test_authoring_job(
@@ -204,42 +158,14 @@ pub fn test_authoring_job(
     revision_id: ids::ItemRevisionId,
     seed_commit: &str,
 ) -> Job {
-    let now = Utc::now();
-    Job {
-        id: ids::JobId::new(),
-        project_id,
-        item_id,
-        item_revision_id: revision_id,
-        step_id: "author_initial".into(),
-        semantic_attempt_no: 1,
-        retry_no: 0,
-        supersedes_job_id: None,
-        status: JobStatus::Queued,
-        outcome_class: None,
-        phase_kind: PhaseKind::Author,
-        workspace_id: None,
-        workspace_kind: WorkspaceKind::Authoring,
-        execution_permission: ExecutionPermission::MayMutate,
-        context_policy: ContextPolicy::Fresh,
-        phase_template_slug: "author-initial".into(),
-        phase_template_digest: None,
-        prompt_snapshot: None,
-        job_input: JobInput::authoring_head(seed_commit),
-        output_artifact_kind: OutputArtifactKind::Commit,
-        output_commit_oid: None,
-        result_schema_version: None,
-        result_payload: None,
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
-        created_at: now,
-        started_at: None,
-        ended_at: None,
-    }
+    JobBuilder::new(project_id, item_id, revision_id, "author_initial")
+        .phase_kind(PhaseKind::Author)
+        .workspace_kind(WorkspaceKind::Authoring)
+        .execution_permission(ExecutionPermission::MayMutate)
+        .phase_template_slug("author-initial")
+        .job_input(JobInput::authoring_head(seed_commit))
+        .output_artifact_kind(OutputArtifactKind::Commit)
+        .build()
 }
 
 pub fn test_review_job(
@@ -249,42 +175,14 @@ pub fn test_review_job(
     base_commit: &str,
     head_commit: &str,
 ) -> Job {
-    let now = Utc::now();
-    Job {
-        id: ids::JobId::new(),
-        project_id,
-        item_id,
-        item_revision_id: revision_id,
-        step_id: "review_candidate_initial".into(),
-        semantic_attempt_no: 1,
-        retry_no: 0,
-        supersedes_job_id: None,
-        status: JobStatus::Queued,
-        outcome_class: None,
-        phase_kind: PhaseKind::Review,
-        workspace_id: None,
-        workspace_kind: WorkspaceKind::Review,
-        execution_permission: ExecutionPermission::MustNotMutate,
-        context_policy: ContextPolicy::Fresh,
-        phase_template_slug: "review-candidate".into(),
-        phase_template_digest: None,
-        prompt_snapshot: None,
-        job_input: JobInput::candidate_subject(base_commit, head_commit),
-        output_artifact_kind: OutputArtifactKind::ReviewReport,
-        output_commit_oid: None,
-        result_schema_version: None,
-        result_payload: None,
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
-        created_at: now,
-        started_at: None,
-        ended_at: None,
-    }
+    JobBuilder::new(project_id, item_id, revision_id, "review_candidate_initial")
+        .phase_kind(PhaseKind::Review)
+        .workspace_kind(WorkspaceKind::Review)
+        .execution_permission(ExecutionPermission::MustNotMutate)
+        .phase_template_slug("review-candidate")
+        .job_input(JobInput::candidate_subject(base_commit, head_commit))
+        .output_artifact_kind(OutputArtifactKind::ReviewReport)
+        .build()
 }
 
 // ---------------------------------------------------------------------------
@@ -384,51 +282,37 @@ impl AgentRunner for ScriptedLoopRunner {
                     exit_code: 0,
                     stdout: String::new(),
                     stderr: String::new(),
-                    result: Some(serde_json::json!({
-                        "outcome": "findings",
-                        "summary": "initial review found an issue",
-                        "review_subject": {
-                            "base_commit_oid": prompt_value(&request.prompt, "Input base commit").unwrap_or_default(),
-                            "head_commit_oid": prompt_value(&request.prompt, "Input head commit").unwrap_or_default()
-                        },
-                        "overall_risk": "medium",
-                        "findings": [{
+                    result: Some(findings_review_report(
+                        &prompt_value(&request.prompt, "Input base commit").unwrap_or_default(),
+                        &prompt_value(&request.prompt, "Input head commit").unwrap_or_default(),
+                        "initial review found an issue",
+                        "medium",
+                        vec![serde_json::json!({
                             "finding_key": "fix-me",
                             "code": "BUG",
                             "severity": "medium",
                             "summary": "needs repair",
                             "paths": ["feature.txt"],
                             "evidence": ["fix me"]
-                        }]
-                    })),
+                        })],
+                    )),
                 }),
                 Some("review_incremental_repair") | Some("review_candidate_repair") => {
                     Ok(AgentResponse {
                         exit_code: 0,
                         stdout: String::new(),
                         stderr: String::new(),
-                        result: Some(serde_json::json!({
-                            "outcome": "clean",
-                            "summary": "review clean",
-                            "review_subject": {
-                                "base_commit_oid": prompt_value(&request.prompt, "Input base commit").unwrap_or_default(),
-                                "head_commit_oid": prompt_value(&request.prompt, "Input head commit").unwrap_or_default()
-                            },
-                            "overall_risk": "low",
-                            "findings": []
-                        })),
+                        result: Some(clean_review_report(
+                            &prompt_value(&request.prompt, "Input base commit").unwrap_or_default(),
+                            &prompt_value(&request.prompt, "Input head commit").unwrap_or_default(),
+                        )),
                     })
                 }
                 Some("validate_candidate_repair") => Ok(AgentResponse {
                     exit_code: 0,
                     stdout: String::new(),
                     stderr: String::new(),
-                    result: Some(serde_json::json!({
-                        "outcome": "clean",
-                        "summary": "validation clean",
-                        "checks": [],
-                        "findings": []
-                    })),
+                    result: Some(clean_validation_report("validation clean")),
                 }),
                 other => Err(AgentError::ProtocolViolation(format!(
                     "unexpected step in scripted loop runner: {other:?}"
@@ -453,16 +337,10 @@ impl AgentRunner for CleanInitialReviewRunner {
                     exit_code: 0,
                     stdout: String::new(),
                     stderr: String::new(),
-                    result: Some(serde_json::json!({
-                        "outcome": "clean",
-                        "summary": "incremental review clean",
-                        "review_subject": {
-                            "base_commit_oid": prompt_value(&request.prompt, "Input base commit").unwrap_or_default(),
-                            "head_commit_oid": prompt_value(&request.prompt, "Input head commit").unwrap_or_default()
-                        },
-                        "overall_risk": "low",
-                        "findings": []
-                    })),
+                    result: Some(clean_review_report(
+                        &prompt_value(&request.prompt, "Input base commit").unwrap_or_default(),
+                        &prompt_value(&request.prompt, "Input head commit").unwrap_or_default(),
+                    )),
                 }),
                 other => Err(AgentError::ProtocolViolation(format!(
                     "unexpected step in clean initial review runner: {other:?}"
@@ -476,15 +354,8 @@ impl AgentRunner for CleanInitialReviewRunner {
 // Mirror / git helpers
 // ---------------------------------------------------------------------------
 
-pub async fn ensure_test_mirror(
-    state_root: &Path,
-    project: &Project,
-) -> ProjectRepoPaths {
-    let paths = project_repo_paths(
-        state_root,
-        project.id,
-        Path::new(&project.path),
-    );
+pub async fn ensure_test_mirror(state_root: &Path, project: &Project) -> ProjectRepoPaths {
+    let paths = project_repo_paths(state_root, project.id, Path::new(&project.path));
     ensure_mirror(&paths).await.expect("ensure mirror");
     paths
 }
@@ -520,37 +391,7 @@ pub async fn create_mirror_only_commit(
     (worktree_path, commit_oid)
 }
 
-pub fn temp_git_repo() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("ingot-runtime-repo-{}", Uuid::now_v7()));
-    std::fs::create_dir_all(&path).expect("create temp repo dir");
-    git_sync(&path, &["init"]);
-    git_sync(&path, &["branch", "-M", "main"]);
-    git_sync(&path, &["config", "user.name", "Ingot Test"]);
-    git_sync(&path, &["config", "user.email", "ingot@example.com"]);
-    std::fs::write(path.join("tracked.txt"), "initial").expect("write tracked file");
-    git_sync(&path, &["add", "tracked.txt"]);
-    git_sync(&path, &["commit", "-m", "initial"]);
-    path
-}
-
-pub fn git_sync(path: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {:?} failed", args);
-}
-
-pub fn git_output(path: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .expect("run git output");
-    assert!(output.status.success(), "git {:?} failed", args);
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
+pub use ingot_test_support::git::{git_output, run_git as git_sync, temp_git_repo};
 
 pub fn prompt_value(prompt: &str, label: &str) -> Option<String> {
     prompt.lines().find_map(|line| {
@@ -569,28 +410,10 @@ pub fn make_runtime_item(
     item_id: ids::ItemId,
     created_at: DateTime<Utc>,
 ) -> ingot_domain::item::Item {
-    ingot_domain::item::Item {
-        id: item_id,
-        project_id,
-        classification: Classification::Change,
-        workflow_version: "delivery:v1".into(),
-        lifecycle_state: LifecycleState::Open,
-        parking_state: ParkingState::Active,
-        done_reason: None,
-        resolution_source: None,
-        approval_state: ApprovalState::NotRequested,
-        escalation_state: EscalationState::None,
-        escalation_reason: None,
-        current_revision_id: revision_id,
-        origin_kind: OriginKind::Manual,
-        origin_finding_id: None,
-        priority: Priority::Major,
-        labels: vec![],
-        operator_notes: None,
-        created_at,
-        updated_at: created_at,
-        closed_at: None,
-    }
+    ItemBuilder::new(project_id, revision_id)
+        .id(item_id)
+        .created_at(created_at)
+        .build()
 }
 
 pub fn make_runtime_revision(
@@ -599,22 +422,11 @@ pub fn make_runtime_revision(
     seed_commit_oid: &str,
     created_at: DateTime<Utc>,
 ) -> ItemRevision {
-    ItemRevision {
-        id: ids::ItemRevisionId::new(),
-        item_id,
-        revision_no,
-        title: "Runtime".into(),
-        description: "runtime".into(),
-        acceptance_criteria: "runtime".into(),
-        target_ref: "refs/heads/main".into(),
-        approval_policy: ApprovalPolicy::Required,
-        policy_snapshot: serde_json::json!({}),
-        template_map_snapshot: serde_json::json!({}),
-        seed_commit_oid: Some(seed_commit_oid.into()),
-        seed_target_commit_oid: Some(seed_commit_oid.into()),
-        supersedes_revision_id: None,
-        created_at,
-    }
+    RevisionBuilder::new(item_id)
+        .revision_no(revision_no)
+        .explicit_seed(seed_commit_oid)
+        .created_at(created_at)
+        .build()
 }
 
 pub fn make_runtime_workspace(
@@ -625,27 +437,15 @@ pub fn make_runtime_workspace(
     head_commit_oid: &str,
     created_at: DateTime<Utc>,
 ) -> Workspace {
-    Workspace {
-        id: ids::WorkspaceId::new(),
-        project_id,
-        kind,
-        strategy: WorkspaceStrategy::Worktree,
-        path: std::env::temp_dir()
-            .join(format!("ingot-runtime-mixed-workspace-{}", Uuid::now_v7()))
-            .display()
-            .to_string(),
-        created_for_revision_id: revision_id,
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some(format!("refs/ingot/workspaces/{}", Uuid::now_v7().simple())),
-        base_commit_oid: Some(head_commit_oid.into()),
-        head_commit_oid: Some(head_commit_oid.into()),
-        retention_policy: RetentionPolicy::Persistent,
-        status,
-        current_job_id: None,
-        created_at,
-        updated_at: created_at,
+    let mut builder = WorkspaceBuilder::new(project_id, kind)
+        .base_commit_oid(head_commit_oid)
+        .head_commit_oid(head_commit_oid)
+        .status(status)
+        .created_at(created_at);
+    if let Some(revision_id) = revision_id {
+        builder = builder.created_for_revision_id(revision_id);
     }
+    builder.build()
 }
 
 pub fn make_runtime_job(
@@ -657,39 +457,10 @@ pub fn make_runtime_job(
     output_artifact_kind: OutputArtifactKind,
     created_at: DateTime<Utc>,
 ) -> Job {
-    Job {
-        id: ids::JobId::new(),
-        project_id,
-        item_id,
-        item_revision_id: revision_id,
-        step_id: step_id.into(),
-        semantic_attempt_no: 1,
-        retry_no: 0,
-        supersedes_job_id: None,
-        status: JobStatus::Queued,
-        outcome_class: None,
-        phase_kind: PhaseKind::Author,
-        workspace_id: None,
-        workspace_kind,
-        execution_permission: ExecutionPermission::MayMutate,
-        context_policy: ContextPolicy::Fresh,
-        phase_template_slug: "template".into(),
-        phase_template_digest: None,
-        prompt_snapshot: None,
-        job_input: JobInput::authoring_head("seed"),
-        output_artifact_kind,
-        output_commit_oid: None,
-        result_schema_version: None,
-        result_payload: None,
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
-        created_at,
-        started_at: None,
-        ended_at: None,
-    }
+    JobBuilder::new(project_id, item_id, revision_id, step_id)
+        .workspace_kind(workspace_kind)
+        .job_input(JobInput::authoring_head("seed"))
+        .output_artifact_kind(output_artifact_kind)
+        .created_at(created_at)
+        .build()
 }

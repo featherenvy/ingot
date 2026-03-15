@@ -802,21 +802,16 @@ fn job_status_name(job_status: JobStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use ingot_domain::convergence::{Convergence, ConvergenceStatus, ConvergenceStrategy};
-    use ingot_domain::finding::{Finding, FindingSeverity, FindingSubjectKind, FindingTriageState};
-    use ingot_domain::ids::{
-        ConvergenceId, FindingId, ItemId, ItemRevisionId, ProjectId, WorkspaceId,
-    };
-    use ingot_domain::item::{
-        ApprovalState, Classification, EscalationState, Item, LifecycleState, OriginKind,
-        ParkingState, Priority,
-    };
+    use ingot_domain::finding::FindingTriageState;
+    use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
+    use ingot_domain::item::ApprovalState;
     use ingot_domain::job::{
-        ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass,
-        OutputArtifactKind, PhaseKind,
+        Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
     };
-    use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
-    use ingot_domain::workspace::WorkspaceKind;
+    use ingot_domain::revision::ApprovalPolicy;
+    use ingot_test_support::fixtures::{
+        ConvergenceBuilder, FindingBuilder, JobBuilder, RevisionBuilder, nil_item,
+    };
     use uuid::Uuid;
 
     use super::{BoardStatus, Evaluator};
@@ -825,7 +820,7 @@ mod tests {
     #[test]
     fn report_only_jobs_keep_the_closure_position_visible() {
         let evaluator = Evaluator::new();
-        let item = test_item();
+        let item = nil_item();
         let revision = test_revision(ApprovalPolicy::Required);
         let jobs = vec![
             test_job(
@@ -859,7 +854,7 @@ mod tests {
     #[test]
     fn idle_items_expose_investigation_as_auxiliary_dispatch() {
         let evaluator = Evaluator::new();
-        let item = test_item();
+        let item = nil_item();
         let revision = test_revision(ApprovalPolicy::Required);
         let jobs = vec![test_job(
             step::REVIEW_INCREMENTAL_INITIAL,
@@ -883,7 +878,7 @@ mod tests {
     #[test]
     fn clean_authoring_commits_flow_into_incremental_review() {
         let evaluator = Evaluator::new();
-        let item = test_item();
+        let item = nil_item();
         let revision = test_revision(ApprovalPolicy::Required);
         let jobs = vec![test_job(
             step::AUTHOR_INITIAL,
@@ -907,7 +902,7 @@ mod tests {
     #[test]
     fn clean_whole_candidate_review_flows_to_candidate_validation() {
         let evaluator = Evaluator::new();
-        let item = test_item();
+        let item = nil_item();
         let revision = test_revision(ApprovalPolicy::Required);
         let jobs = vec![test_job(
             step::REVIEW_CANDIDATE_INITIAL,
@@ -931,7 +926,7 @@ mod tests {
     #[test]
     fn daemon_only_next_steps_are_not_projected_as_dispatchable_jobs() {
         let evaluator = Evaluator::new();
-        let item = test_item();
+        let item = nil_item();
         let revision = test_revision(ApprovalPolicy::Required);
         let jobs = vec![test_job(
             step::VALIDATE_CANDIDATE_INITIAL,
@@ -956,7 +951,7 @@ mod tests {
     #[test]
     fn stale_prepared_convergences_project_invalidation() {
         let evaluator = Evaluator::new();
-        let mut item = test_item();
+        let mut item = nil_item();
         item.approval_state = ApprovalState::Pending;
 
         let revision = test_revision(ApprovalPolicy::Required);
@@ -981,7 +976,7 @@ mod tests {
     #[test]
     fn granted_without_prepared_convergence_requeues_prepare() {
         let evaluator = Evaluator::new();
-        let mut item = test_item();
+        let mut item = nil_item();
         item.approval_state = ApprovalState::Granted;
 
         let revision = test_revision(ApprovalPolicy::Required);
@@ -1008,7 +1003,7 @@ mod tests {
     #[test]
     fn integrated_validation_findings_follow_graph_to_repair() {
         let evaluator = Evaluator::new();
-        let item = test_item();
+        let item = nil_item();
         let revision = test_revision(ApprovalPolicy::Required);
         let job = test_job(
             step::VALIDATE_INTEGRATED,
@@ -1035,7 +1030,7 @@ mod tests {
     #[test]
     fn untriaged_findings_block_dispatch_in_triage_state() {
         let evaluator = Evaluator::new();
-        let item = test_item();
+        let item = nil_item();
         let revision = test_revision(ApprovalPolicy::Required);
         let job = test_job(
             step::REVIEW_CANDIDATE_INITIAL,
@@ -1056,7 +1051,7 @@ mod tests {
     #[test]
     fn non_blocking_triaged_findings_follow_clean_edge() {
         let evaluator = Evaluator::new();
-        let item = test_item();
+        let item = nil_item();
         let revision = test_revision(ApprovalPolicy::Required);
         let job = test_job(
             step::REVIEW_CANDIDATE_INITIAL,
@@ -1078,7 +1073,7 @@ mod tests {
     #[test]
     fn post_integration_repairs_reenter_incremental_review() {
         let evaluator = Evaluator::new();
-        let item = test_item();
+        let item = nil_item();
         let revision = test_revision(ApprovalPolicy::Required);
         let jobs = vec![test_job(
             step::REPAIR_AFTER_INTEGRATION,
@@ -1102,7 +1097,7 @@ mod tests {
     #[test]
     fn terminal_jobs_without_outcomes_do_not_advance_workflow() {
         let evaluator = Evaluator::new();
-        let item = test_item();
+        let item = nil_item();
         let revision = test_revision(ApprovalPolicy::Required);
         let jobs = vec![test_job(
             step::VALIDATE_CANDIDATE_INITIAL,
@@ -1126,7 +1121,7 @@ mod tests {
     #[test]
     fn cancelled_jobs_do_not_auto_redispatch() {
         let evaluator = Evaluator::new();
-        let item = test_item();
+        let item = nil_item();
         let revision = test_revision(ApprovalPolicy::Required);
         let jobs = vec![test_job(
             step::VALIDATE_CANDIDATE_INITIAL,
@@ -1148,7 +1143,7 @@ mod tests {
     #[test]
     fn transient_failures_do_not_auto_redispatch_without_retry_policy() {
         let evaluator = Evaluator::new();
-        let item = test_item();
+        let item = nil_item();
         let revision = test_revision(ApprovalPolicy::Required);
         let jobs = vec![test_job(
             step::VALIDATE_CANDIDATE_INITIAL,
@@ -1167,48 +1162,12 @@ mod tests {
         );
     }
 
-    fn test_item() -> Item {
-        Item {
-            id: ItemId::from_uuid(Uuid::nil()),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            classification: Classification::Change,
-            workflow_version: "delivery:v1".into(),
-            lifecycle_state: LifecycleState::Open,
-            parking_state: ParkingState::Active,
-            done_reason: None,
-            resolution_source: None,
-            approval_state: ApprovalState::NotRequested,
-            escalation_state: EscalationState::None,
-            escalation_reason: None,
-            current_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            origin_kind: OriginKind::Manual,
-            origin_finding_id: None,
-            priority: Priority::Major,
-            labels: vec![],
-            operator_notes: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            closed_at: None,
-        }
-    }
-
-    fn test_revision(approval_policy: ApprovalPolicy) -> ItemRevision {
-        ItemRevision {
-            id: ItemRevisionId::from_uuid(Uuid::nil()),
-            item_id: ItemId::from_uuid(Uuid::nil()),
-            revision_no: 1,
-            title: "Title".into(),
-            description: "Description".into(),
-            acceptance_criteria: "AC".into(),
-            target_ref: "refs/heads/main".into(),
-            approval_policy,
-            policy_snapshot: serde_json::json!({}),
-            template_map_snapshot: serde_json::json!({}),
-            seed_commit_oid: Some("abc123".into()),
-            seed_target_commit_oid: Some("def456".into()),
-            supersedes_revision_id: None,
-            created_at: Utc::now(),
-        }
+    fn test_revision(approval_policy: ApprovalPolicy) -> ingot_domain::revision::ItemRevision {
+        RevisionBuilder::nil()
+            .approval_policy(approval_policy)
+            .explicit_seed("abc123")
+            .seed_target_commit_oid(Some("def456"))
+            .build()
     }
 
     fn test_job(
@@ -1217,105 +1176,64 @@ mod tests {
         status: JobStatus,
         outcome_class: Option<OutcomeClass>,
     ) -> Job {
-        Job {
-            id: ingot_domain::ids::JobId::from_uuid(Uuid::now_v7()),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            item_id: ItemId::from_uuid(Uuid::nil()),
-            item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            step_id: step_id.into(),
-            semantic_attempt_no: 1,
-            retry_no: 0,
-            supersedes_job_id: None,
-            status,
-            outcome_class,
-            phase_kind,
-            workspace_id: Some(WorkspaceId::from_uuid(Uuid::now_v7())),
-            workspace_kind: WorkspaceKind::Authoring,
-            execution_permission: ExecutionPermission::MustNotMutate,
-            context_policy: ContextPolicy::Fresh,
-            phase_template_slug: "template".into(),
-            phase_template_digest: None,
-            prompt_snapshot: None,
-            job_input: JobInput::candidate_subject("base", "head"),
-            output_artifact_kind: match step_id {
-                step::INVESTIGATE_ITEM => OutputArtifactKind::FindingReport,
-                step::AUTHOR_INITIAL | step::REPAIR_CANDIDATE | step::REPAIR_AFTER_INTEGRATION => {
-                    OutputArtifactKind::Commit
-                }
-                step::VALIDATE_INTEGRATED
-                | step::VALIDATE_CANDIDATE_INITIAL
-                | step::VALIDATE_CANDIDATE_REPAIR
-                | step::VALIDATE_AFTER_INTEGRATION_REPAIR => OutputArtifactKind::ValidationReport,
-                _ => OutputArtifactKind::ReviewReport,
-            },
-            output_commit_oid: None,
-            result_schema_version: None,
-            result_payload: None,
-            agent_id: None,
-            process_pid: None,
-            lease_owner_id: None,
-            heartbeat_at: None,
-            lease_expires_at: None,
-            error_code: None,
-            error_message: None,
-            created_at: Utc::now(),
-            started_at: None,
-            ended_at: Some(Utc::now()),
+        let nil = Uuid::nil();
+        let output_artifact_kind = match step_id {
+            step::INVESTIGATE_ITEM => OutputArtifactKind::FindingReport,
+            step::AUTHOR_INITIAL | step::REPAIR_CANDIDATE | step::REPAIR_AFTER_INTEGRATION => {
+                OutputArtifactKind::Commit
+            }
+            step::VALIDATE_INTEGRATED
+            | step::VALIDATE_CANDIDATE_INITIAL
+            | step::VALIDATE_CANDIDATE_REPAIR
+            | step::VALIDATE_AFTER_INTEGRATION_REPAIR => OutputArtifactKind::ValidationReport,
+            _ => OutputArtifactKind::ReviewReport,
+        };
+        let mut builder = JobBuilder::new(
+            ProjectId::from_uuid(nil),
+            ItemId::from_uuid(nil),
+            ItemRevisionId::from_uuid(nil),
+            step_id,
+        )
+        .status(status)
+        .phase_kind(phase_kind)
+        .execution_permission(ingot_domain::job::ExecutionPermission::MustNotMutate)
+        .job_input(JobInput::candidate_subject("base", "head"))
+        .output_artifact_kind(output_artifact_kind)
+        .ended_at(Utc::now());
+        if let Some(oc) = outcome_class {
+            builder = builder.outcome_class(oc);
         }
+        builder.build()
     }
 
-    fn test_prepared_convergence(target_head_valid: bool) -> Convergence {
-        Convergence {
-            id: ConvergenceId::from_uuid(Uuid::now_v7()),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            item_id: ItemId::from_uuid(Uuid::nil()),
-            item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            source_workspace_id: WorkspaceId::from_uuid(Uuid::now_v7()),
-            integration_workspace_id: Some(WorkspaceId::from_uuid(Uuid::now_v7())),
-            source_head_commit_oid: "head".into(),
-            target_ref: "refs/heads/main".into(),
-            strategy: ConvergenceStrategy::RebaseThenFastForward,
-            status: ConvergenceStatus::Prepared,
-            input_target_commit_oid: Some("base".into()),
-            prepared_commit_oid: Some("prepared".into()),
-            final_target_commit_oid: None,
-            target_head_valid: Some(target_head_valid),
-            conflict_summary: None,
-            created_at: Utc::now(),
-            completed_at: None,
-        }
+    fn test_prepared_convergence(
+        target_head_valid: bool,
+    ) -> ingot_domain::convergence::Convergence {
+        ConvergenceBuilder::new(
+            ProjectId::from_uuid(Uuid::nil()),
+            ItemId::from_uuid(Uuid::nil()),
+            ItemRevisionId::from_uuid(Uuid::nil()),
+        )
+        .target_head_valid(target_head_valid)
+        .build()
     }
 
-    fn test_finding(job: &Job, triage_state: FindingTriageState) -> Finding {
-        Finding {
-            id: FindingId::from_uuid(Uuid::now_v7()),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            source_item_id: ItemId::from_uuid(Uuid::nil()),
-            source_item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            source_job_id: job.id,
-            source_step_id: job.step_id.clone(),
-            source_report_schema_version: "review_report:v1".into(),
-            source_finding_key: "finding-1".into(),
-            source_subject_kind: FindingSubjectKind::Candidate,
-            source_subject_base_commit_oid: Some("base".into()),
-            source_subject_head_commit_oid: "head".into(),
-            code: "BUG001".into(),
-            severity: FindingSeverity::High,
-            summary: "summary".into(),
-            paths: vec!["src/lib.rs".into()],
-            evidence: serde_json::json!(["evidence"]),
-            triage_state,
-            linked_item_id: None,
-            triage_note: match triage_state {
-                FindingTriageState::WontFix => Some("accepted".into()),
-                _ => None,
-            },
-            created_at: Utc::now(),
-            triaged_at: if triage_state == FindingTriageState::Untriaged {
-                None
-            } else {
-                Some(Utc::now())
-            },
+    fn test_finding(job: &Job, triage_state: FindingTriageState) -> ingot_domain::finding::Finding {
+        let mut builder = FindingBuilder::new(
+            ProjectId::from_uuid(Uuid::nil()),
+            ItemId::from_uuid(Uuid::nil()),
+            ItemRevisionId::from_uuid(Uuid::nil()),
+            job.id,
+        )
+        .source_step_id(job.step_id.clone())
+        .source_finding_key("finding-1")
+        .triage_state(triage_state);
+        if triage_state == FindingTriageState::WontFix {
+            builder = builder.triage_note("accepted");
         }
+        if triage_state != FindingTriageState::Untriaged {
+            builder = builder.triaged_at(Utc::now());
+        }
+        builder.build()
     }
 }

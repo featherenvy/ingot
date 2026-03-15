@@ -602,19 +602,15 @@ fn classify_subject(job: &Job, convergences: &[Convergence]) -> FindingSubjectKi
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use ingot_domain::convergence::{Convergence, ConvergenceStatus, ConvergenceStrategy};
-    use ingot_domain::finding::{FindingSeverity, FindingSubjectKind, FindingTriageState};
-    use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
-    use ingot_domain::item::{
-        ApprovalState, Classification, EscalationState, Item, LifecycleState, OriginKind,
-        ParkingState, Priority,
-    };
+    use ingot_domain::finding::{FindingSubjectKind, FindingTriageState};
+    use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId};
+    use ingot_domain::item::OriginKind;
     use ingot_domain::job::{
-        ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass,
-        OutputArtifactKind, PhaseKind,
+        Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
     };
-    use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
-    use ingot_domain::workspace::WorkspaceKind;
+    use ingot_test_support::fixtures::{
+        ConvergenceBuilder, FindingBuilder, JobBuilder, nil_item, nil_revision,
+    };
     use uuid::Uuid;
 
     use crate::UseCaseError;
@@ -626,7 +622,7 @@ mod tests {
 
     #[test]
     fn extraction_marks_integrated_validation_findings_as_integrated() {
-        let item = test_item();
+        let item = nil_item();
         let job = Job {
             result_schema_version: Some("validation_report:v1".into()),
             result_payload: Some(serde_json::json!({
@@ -660,8 +656,8 @@ mod tests {
 
     #[test]
     fn backlog_links_item_and_finding() {
-        let item = test_item();
-        let revision = test_revision();
+        let item = nil_item();
+        let revision = nil_revision();
         let finding = test_finding();
 
         let (linked_item, linked_revision, triaged_finding) = backlog_finding(
@@ -745,7 +741,7 @@ mod tests {
 
     #[test]
     fn validation_reports_require_checks_and_failed_signal_for_findings() {
-        let item = test_item();
+        let item = nil_item();
         let job = Job {
             result_schema_version: Some("validation_report:v1".into()),
             result_payload: Some(serde_json::json!({
@@ -766,7 +762,7 @@ mod tests {
 
     #[test]
     fn review_reports_require_overall_risk() {
-        let item = test_item();
+        let item = nil_item();
         let job = Job {
             result_schema_version: Some("review_report:v1".into()),
             result_payload: Some(serde_json::json!({
@@ -790,7 +786,7 @@ mod tests {
 
     #[test]
     fn validation_reports_reject_duplicate_finding_keys() {
-        let item = test_item();
+        let item = nil_item();
         let job = Job {
             result_schema_version: Some("validation_report:v1".into()),
             result_payload: Some(serde_json::json!({
@@ -832,7 +828,7 @@ mod tests {
 
     #[test]
     fn review_reports_reject_duplicate_finding_keys() {
-        let item = test_item();
+        let item = nil_item();
         let job = Job {
             result_schema_version: Some("review_report:v1".into()),
             result_payload: Some(serde_json::json!({
@@ -874,7 +870,7 @@ mod tests {
 
     #[test]
     fn finding_reports_reject_duplicate_finding_keys() {
-        let item = test_item();
+        let item = nil_item();
         let job = Job {
             result_schema_version: Some("finding_report:v1".into()),
             result_payload: Some(serde_json::json!({
@@ -909,134 +905,49 @@ mod tests {
         assert!(matches!(error, UseCaseError::ProtocolViolation(_)));
     }
 
-    fn test_item() -> Item {
-        Item {
-            id: ItemId::from_uuid(Uuid::nil()),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            classification: Classification::Change,
-            workflow_version: "delivery:v1".into(),
-            lifecycle_state: LifecycleState::Open,
-            parking_state: ParkingState::Active,
-            done_reason: None,
-            resolution_source: None,
-            approval_state: ApprovalState::NotRequested,
-            escalation_state: EscalationState::None,
-            escalation_reason: None,
-            current_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            origin_kind: OriginKind::Manual,
-            origin_finding_id: None,
-            priority: Priority::Major,
-            labels: vec![],
-            operator_notes: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            closed_at: None,
-        }
-    }
-
-    fn test_revision() -> ItemRevision {
-        ItemRevision {
-            id: ItemRevisionId::from_uuid(Uuid::nil()),
-            item_id: ItemId::from_uuid(Uuid::nil()),
-            revision_no: 1,
-            title: "Title".into(),
-            description: "Description".into(),
-            acceptance_criteria: "AC".into(),
-            target_ref: "refs/heads/main".into(),
-            approval_policy: ApprovalPolicy::Required,
-            policy_snapshot: serde_json::json!({}),
-            template_map_snapshot: serde_json::json!({}),
-            seed_commit_oid: Some("seed".into()),
-            seed_target_commit_oid: Some("target".into()),
-            supersedes_revision_id: None,
-            created_at: Utc::now(),
-        }
-    }
-
     fn test_job() -> Job {
-        Job {
-            id: JobId::from_uuid(Uuid::nil()),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            item_id: ItemId::from_uuid(Uuid::nil()),
-            item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            step_id: "investigate_item".into(),
-            semantic_attempt_no: 1,
-            retry_no: 0,
-            supersedes_job_id: None,
-            status: JobStatus::Completed,
-            outcome_class: Some(ingot_domain::job::OutcomeClass::Findings),
-            phase_kind: PhaseKind::Investigate,
-            workspace_id: Some(WorkspaceId::from_uuid(Uuid::now_v7())),
-            workspace_kind: WorkspaceKind::Review,
-            execution_permission: ExecutionPermission::MustNotMutate,
-            context_policy: ContextPolicy::Fresh,
-            phase_template_slug: "investigate-item".into(),
-            phase_template_digest: None,
-            prompt_snapshot: None,
-            job_input: JobInput::candidate_subject("base", "head"),
-            output_artifact_kind: OutputArtifactKind::FindingReport,
-            output_commit_oid: None,
-            result_schema_version: None,
-            result_payload: None,
-            agent_id: None,
-            process_pid: None,
-            lease_owner_id: None,
-            heartbeat_at: None,
-            lease_expires_at: None,
-            error_code: None,
-            error_message: None,
-            created_at: Utc::now(),
-            started_at: None,
-            ended_at: Some(Utc::now()),
-        }
+        let nil = Uuid::nil();
+        JobBuilder::new(
+            ProjectId::from_uuid(nil),
+            ItemId::from_uuid(nil),
+            ItemRevisionId::from_uuid(nil),
+            "investigate_item",
+        )
+        .id(JobId::from_uuid(nil))
+        .status(JobStatus::Completed)
+        .outcome_class(OutcomeClass::Findings)
+        .phase_kind(PhaseKind::Investigate)
+        .workspace_kind(ingot_domain::workspace::WorkspaceKind::Review)
+        .execution_permission(ingot_domain::job::ExecutionPermission::MustNotMutate)
+        .phase_template_slug("investigate-item")
+        .job_input(JobInput::candidate_subject("base", "head"))
+        .output_artifact_kind(OutputArtifactKind::FindingReport)
+        .ended_at(Utc::now())
+        .build()
     }
 
     fn test_finding() -> ingot_domain::finding::Finding {
-        ingot_domain::finding::Finding {
-            id: ingot_domain::ids::FindingId::new(),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            source_item_id: ItemId::from_uuid(Uuid::nil()),
-            source_item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            source_job_id: JobId::from_uuid(Uuid::nil()),
-            source_step_id: "investigate_item".into(),
-            source_report_schema_version: "finding_report:v1".into(),
-            source_finding_key: "f-1".into(),
-            source_subject_kind: FindingSubjectKind::Candidate,
-            source_subject_base_commit_oid: Some("base".into()),
-            source_subject_head_commit_oid: "head".into(),
-            code: "BUG001".into(),
-            severity: FindingSeverity::High,
-            summary: "Summary".into(),
-            paths: vec!["src/lib.rs".into()],
-            evidence: serde_json::json!(["broken"]),
-            triage_state: ingot_domain::finding::FindingTriageState::Untriaged,
-            linked_item_id: None,
-            triage_note: None,
-            created_at: Utc::now(),
-            triaged_at: None,
-        }
+        FindingBuilder::new(
+            ProjectId::from_uuid(Uuid::nil()),
+            ItemId::from_uuid(Uuid::nil()),
+            ItemRevisionId::from_uuid(Uuid::nil()),
+            JobId::from_uuid(Uuid::nil()),
+        )
+        .source_step_id("investigate_item")
+        .summary("Summary")
+        .evidence(serde_json::json!(["broken"]))
+        .build()
     }
 
     #[allow(dead_code)]
-    fn _test_convergence() -> Convergence {
-        Convergence {
-            id: ConvergenceId::from_uuid(Uuid::now_v7()),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            item_id: ItemId::from_uuid(Uuid::nil()),
-            item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            source_workspace_id: WorkspaceId::from_uuid(Uuid::now_v7()),
-            integration_workspace_id: Some(WorkspaceId::from_uuid(Uuid::now_v7())),
-            source_head_commit_oid: "head".into(),
-            target_ref: "refs/heads/main".into(),
-            strategy: ConvergenceStrategy::RebaseThenFastForward,
-            status: ConvergenceStatus::Prepared,
-            input_target_commit_oid: Some("base".into()),
-            prepared_commit_oid: Some("head".into()),
-            final_target_commit_oid: None,
-            target_head_valid: Some(true),
-            conflict_summary: None,
-            created_at: Utc::now(),
-            completed_at: None,
-        }
+    fn _test_convergence() -> ingot_domain::convergence::Convergence {
+        ConvergenceBuilder::new(
+            ProjectId::from_uuid(Uuid::nil()),
+            ItemId::from_uuid(Uuid::nil()),
+            ItemRevisionId::from_uuid(Uuid::nil()),
+        )
+        .prepared_commit_oid("head")
+        .target_head_valid(true)
+        .build()
     }
 }

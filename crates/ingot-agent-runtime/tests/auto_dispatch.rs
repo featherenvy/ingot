@@ -3,8 +3,8 @@ use std::sync::Arc;
 use ingot_agent_runtime::RuntimeError;
 use ingot_domain::ids::WorkspaceId;
 use ingot_domain::job::{
-    ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass,
-    OutputArtifactKind, PhaseKind,
+    ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
+    PhaseKind,
 };
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::workspace::{
@@ -13,8 +13,9 @@ use ingot_domain::workspace::{
 use ingot_git::commands::head_oid;
 use uuid::Uuid;
 
-use super::helpers::*;
-use ingot_domain::finding::{Finding, FindingSeverity, FindingSubjectKind, FindingTriageState};
+mod common;
+use common::*;
+use ingot_domain::finding::{FindingSeverity, FindingTriageState};
 use ingot_git::commands::git;
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
 use ingot_workflow::step;
@@ -72,7 +73,10 @@ async fn authoring_success_auto_dispatches_incremental_review() {
         .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
         .expect("auto-dispatched incremental review job");
     assert_eq!(review_job.status, JobStatus::Queued);
-    assert_eq!(review_job.job_input.base_commit_oid(), Some(seed_commit.as_str()));
+    assert_eq!(
+        review_job.job_input.base_commit_oid(),
+        Some(seed_commit.as_str())
+    );
     assert_eq!(
         review_job.job_input.head_commit_oid(),
         completed_author.output_commit_oid.as_deref()
@@ -142,44 +146,23 @@ async fn implicit_revision_auto_dispatches_incremental_review_from_bound_workspa
         .await
         .expect("create workspace");
 
-    let author_job = Job {
-        id: ingot_domain::ids::JobId::new(),
-        project_id: h.project.id,
-        item_id,
-        item_revision_id: revision_id,
-        step_id: step::AUTHOR_INITIAL.into(),
-        semantic_attempt_no: 1,
-        retry_no: 0,
-        supersedes_job_id: None,
-        status: JobStatus::Completed,
-        outcome_class: Some(OutcomeClass::Clean),
-        phase_kind: PhaseKind::Author,
-        workspace_id: Some(authoring_workspace.id),
-        workspace_kind: WorkspaceKind::Authoring,
-        execution_permission: ExecutionPermission::MayMutate,
-        context_policy: ContextPolicy::Fresh,
-        phase_template_slug: "author-initial".into(),
-        phase_template_digest: None,
-        prompt_snapshot: None,
-        job_input: JobInput::authoring_head(bound_base.clone()),
-        output_artifact_kind: OutputArtifactKind::Commit,
-        output_commit_oid: Some(author_output_commit.clone()),
-        result_schema_version: Some("commit_summary:v1".into()),
-        result_payload: Some(serde_json::json!({
+    let author_job = JobBuilder::new(h.project.id, item_id, revision_id, step::AUTHOR_INITIAL)
+        .status(JobStatus::Completed)
+        .outcome_class(OutcomeClass::Clean)
+        .workspace_id(authoring_workspace.id)
+        .phase_template_slug("author-initial")
+        .job_input(JobInput::authoring_head(bound_base.clone()))
+        .output_artifact_kind(OutputArtifactKind::Commit)
+        .output_commit_oid(author_output_commit.clone())
+        .result_schema_version("commit_summary:v1")
+        .result_payload(serde_json::json!({
             "summary": "implicit review change",
             "validation": null
-        })),
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
-        created_at,
-        started_at: Some(created_at),
-        ended_at: Some(created_at),
-    };
+        }))
+        .created_at(created_at)
+        .started_at(created_at)
+        .ended_at(created_at)
+        .build();
     h.db.create_job(&author_job)
         .await
         .expect("create author job");
@@ -199,7 +182,10 @@ async fn implicit_revision_auto_dispatches_incremental_review_from_bound_workspa
         .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
         .expect("auto-dispatched incremental review job");
     assert_eq!(review_job.status, JobStatus::Queued);
-    assert_eq!(review_job.job_input.base_commit_oid(), Some(bound_base.as_str()));
+    assert_eq!(
+        review_job.job_input.base_commit_oid(),
+        Some(bound_base.as_str())
+    );
     assert_eq!(
         review_job.job_input.head_commit_oid(),
         Some(author_output_commit.as_str())
@@ -229,44 +215,24 @@ async fn auto_dispatch_projected_review_rejects_missing_candidate_subject() {
         .expect("create item");
 
     let created_at = chrono::Utc::now();
-    let completed_incremental_review = Job {
-        id: ingot_domain::ids::JobId::new(),
-        project_id: h.project.id,
-        item_id,
-        item_revision_id: revision_id,
-        step_id: step::REVIEW_INCREMENTAL_INITIAL.into(),
-        semantic_attempt_no: 1,
-        retry_no: 0,
-        supersedes_job_id: None,
-        status: JobStatus::Completed,
-        outcome_class: Some(OutcomeClass::Clean),
-        phase_kind: PhaseKind::Review,
-        workspace_id: None,
-        workspace_kind: WorkspaceKind::Review,
-        execution_permission: ExecutionPermission::MustNotMutate,
-        context_policy: ContextPolicy::ResumeContext,
-        phase_template_slug: "review-incremental".into(),
-        phase_template_digest: None,
-        prompt_snapshot: None,
-        job_input: JobInput::None,
-        output_artifact_kind: OutputArtifactKind::ReviewReport,
-        output_commit_oid: None,
-        result_schema_version: Some("review_report:v1".into()),
-        result_payload: Some(serde_json::json!({
+    let completed_incremental_review = JobBuilder::new(h.project.id, item_id, revision_id, step::REVIEW_INCREMENTAL_INITIAL)
+        .status(JobStatus::Completed)
+        .outcome_class(OutcomeClass::Clean)
+        .phase_kind(PhaseKind::Review)
+        .workspace_kind(WorkspaceKind::Review)
+        .execution_permission(ExecutionPermission::MustNotMutate)
+        .context_policy(ContextPolicy::ResumeContext)
+        .phase_template_slug("review-incremental")
+        .output_artifact_kind(OutputArtifactKind::ReviewReport)
+        .result_schema_version("review_report:v1")
+        .result_payload(serde_json::json!({
             "summary": "clean",
             "findings": []
-        })),
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
-        created_at,
-        started_at: Some(created_at),
-        ended_at: Some(created_at),
-    };
+        }))
+        .created_at(created_at)
+        .started_at(created_at)
+        .ended_at(created_at)
+        .build();
     h.db.create_job(&completed_incremental_review)
         .await
         .expect("create review job");
@@ -346,68 +312,31 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
         .expect("create idle item");
 
     let created_at = chrono::Utc::now();
-    h.db.create_job(&Job {
-        id: ingot_domain::ids::JobId::new(),
-        project_id: h.project.id,
-        item_id: idle_item_id,
-        item_revision_id: idle_revision_id,
-        step_id: step::AUTHOR_INITIAL.into(),
-        semantic_attempt_no: 1,
-        retry_no: 0,
-        supersedes_job_id: None,
-        status: JobStatus::Completed,
-        outcome_class: Some(OutcomeClass::Clean),
-        phase_kind: PhaseKind::Author,
-        workspace_id: None,
-        workspace_kind: WorkspaceKind::Authoring,
-        execution_permission: ExecutionPermission::MayMutate,
-        context_policy: ContextPolicy::Fresh,
-        phase_template_slug: "author-initial".into(),
-        phase_template_digest: None,
-        prompt_snapshot: None,
-        job_input: JobInput::authoring_head(authored_seed.clone()),
-        output_artifact_kind: OutputArtifactKind::Commit,
-        output_commit_oid: Some(authored_head.clone()),
-        result_schema_version: None,
-        result_payload: None,
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
-        created_at,
-        started_at: Some(created_at),
-        ended_at: Some(created_at),
-    })
+    h.db.create_job(&JobBuilder::new(h.project.id, idle_item_id, idle_revision_id, step::AUTHOR_INITIAL)
+        .status(JobStatus::Completed)
+        .outcome_class(OutcomeClass::Clean)
+        .phase_template_slug("author-initial")
+        .job_input(JobInput::authoring_head(authored_seed.clone()))
+        .output_artifact_kind(OutputArtifactKind::Commit)
+        .output_commit_oid(authored_head.clone())
+        .created_at(created_at)
+        .started_at(created_at)
+        .ended_at(created_at)
+        .build())
     .await
     .expect("create idle author job");
 
-    let idle_review_job = Job {
-        id: ingot_domain::ids::JobId::new(),
-        project_id: h.project.id,
-        item_id: idle_item_id,
-        item_revision_id: idle_revision_id,
-        step_id: step::REVIEW_INCREMENTAL_INITIAL.into(),
-        semantic_attempt_no: 1,
-        retry_no: 0,
-        supersedes_job_id: None,
-        status: JobStatus::Completed,
-        outcome_class: Some(OutcomeClass::Findings),
-        phase_kind: PhaseKind::Review,
-        workspace_id: None,
-        workspace_kind: WorkspaceKind::Review,
-        execution_permission: ExecutionPermission::MustNotMutate,
-        context_policy: ContextPolicy::Fresh,
-        phase_template_slug: "review-incremental".into(),
-        phase_template_digest: None,
-        prompt_snapshot: None,
-        job_input: JobInput::candidate_subject(authored_seed.clone(), authored_head.clone()),
-        output_artifact_kind: OutputArtifactKind::ReviewReport,
-        output_commit_oid: None,
-        result_schema_version: Some("review_report:v1".into()),
-        result_payload: Some(serde_json::json!({
+    let idle_review_job = JobBuilder::new(h.project.id, idle_item_id, idle_revision_id, step::REVIEW_INCREMENTAL_INITIAL)
+        .status(JobStatus::Completed)
+        .outcome_class(OutcomeClass::Findings)
+        .phase_kind(PhaseKind::Review)
+        .workspace_kind(WorkspaceKind::Review)
+        .execution_permission(ExecutionPermission::MustNotMutate)
+        .phase_template_slug("review-incremental")
+        .job_input(JobInput::candidate_subject(authored_seed.clone(), authored_head.clone()))
+        .output_artifact_kind(OutputArtifactKind::ReviewReport)
+        .result_schema_version("review_report:v1")
+        .result_payload(serde_json::json!({
             "outcome": "findings",
             "summary": "non-blocking note",
             "review_subject": {
@@ -424,51 +353,29 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
                 "evidence": ["acceptable"]
             }],
             "extensions": null
-        })),
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
-        created_at,
-        started_at: Some(created_at),
-        ended_at: Some(created_at),
-    };
+        }))
+        .created_at(created_at)
+        .started_at(created_at)
+        .ended_at(created_at)
+        .build();
     h.db.create_job(&idle_review_job)
         .await
         .expect("create idle review job");
-    h.db.create_finding(&Finding {
-        id: ingot_domain::ids::FindingId::new(),
-        project_id: h.project.id,
-        source_item_id: idle_item_id,
-        source_item_revision_id: idle_revision_id,
-        source_job_id: idle_review_job.id,
-        source_step_id: step::REVIEW_INCREMENTAL_INITIAL.into(),
-        source_report_schema_version: "review_report:v1".into(),
-        source_finding_key: "note".into(),
-        source_subject_kind: FindingSubjectKind::Candidate,
-        source_subject_base_commit_oid: idle_review_job
-            .job_input
-            .base_commit_oid()
-            .map(ToOwned::to_owned),
-        source_subject_head_commit_oid: idle_review_job
-            .job_input
-            .head_commit_oid()
-            .map(ToOwned::to_owned)
-            .expect("idle review head"),
-        code: "NOTE001".into(),
-        severity: FindingSeverity::Low,
-        summary: "acceptable note".into(),
-        paths: vec!["feature.txt".into()],
-        evidence: serde_json::json!(["acceptable"]),
-        triage_state: FindingTriageState::WontFix,
-        linked_item_id: None,
-        triage_note: Some("accepted for now".into()),
-        created_at,
-        triaged_at: Some(created_at),
-    })
+    h.db.create_finding(&FindingBuilder::new(h.project.id, idle_item_id, idle_revision_id, idle_review_job.id)
+        .source_step_id(step::REVIEW_INCREMENTAL_INITIAL)
+        .source_finding_key("note")
+        .source_subject_base_commit_oid(idle_review_job.job_input.base_commit_oid().map(ToOwned::to_owned))
+        .source_subject_head_commit_oid(idle_review_job.job_input.head_commit_oid().map(ToOwned::to_owned).expect("idle review head"))
+        .code("NOTE001")
+        .severity(FindingSeverity::Low)
+        .summary("acceptable note")
+        .paths(vec!["feature.txt".into()])
+        .evidence(serde_json::json!(["acceptable"]))
+        .triage_state(FindingTriageState::WontFix)
+        .triage_note("accepted for now")
+        .created_at(created_at)
+        .triaged_at(created_at)
+        .build())
     .await
     .expect("create idle finding");
 
@@ -508,7 +415,7 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
 
 #[tokio::test]
 async fn clean_incremental_review_auto_dispatches_candidate_review() {
-    let repo = temp_git_repo();
+    let repo = temp_git_repo("ingot-runtime-repo");
     let seed_commit = head_oid(&repo).await.expect("seed head");
     std::fs::write(repo.join("feature.txt"), "candidate change").expect("write feature");
     git_sync(&repo, &["add", "feature.txt"]);
@@ -534,15 +441,7 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
     );
 
     let created_at = chrono::Utc::now();
-    let project = ingot_domain::project::Project {
-        id: ingot_domain::ids::ProjectId::new(),
-        name: "repo".into(),
-        path: repo.display().to_string(),
-        default_branch: "main".into(),
-        color: "#000".into(),
-        created_at,
-        updated_at: created_at,
-    };
+    let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     db.create_project(&project).await.expect("create project");
 
     let agent = ingot_domain::agent::Agent {
@@ -581,80 +480,30 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
         .expect("create item");
 
     // Completed author job
-    db.create_job(&Job {
-        id: ingot_domain::ids::JobId::new(),
-        project_id: project.id,
-        item_id,
-        item_revision_id: revision_id,
-        step_id: step::AUTHOR_INITIAL.into(),
-        semantic_attempt_no: 1,
-        retry_no: 0,
-        supersedes_job_id: None,
-        status: JobStatus::Completed,
-        outcome_class: Some(OutcomeClass::Clean),
-        phase_kind: PhaseKind::Author,
-        workspace_id: None,
-        workspace_kind: WorkspaceKind::Authoring,
-        execution_permission: ExecutionPermission::MayMutate,
-        context_policy: ContextPolicy::Fresh,
-        phase_template_slug: "author-initial".into(),
-        phase_template_digest: None,
-        prompt_snapshot: None,
-        job_input: JobInput::authoring_head(seed_commit.clone()),
-        output_artifact_kind: OutputArtifactKind::Commit,
-        output_commit_oid: Some(candidate_head.clone()),
-        result_schema_version: None,
-        result_payload: None,
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
-        created_at,
-        started_at: Some(created_at),
-        ended_at: Some(created_at),
-    })
+    db.create_job(&JobBuilder::new(project.id, item_id, revision_id, step::AUTHOR_INITIAL)
+        .status(JobStatus::Completed)
+        .outcome_class(OutcomeClass::Clean)
+        .phase_template_slug("author-initial")
+        .job_input(JobInput::authoring_head(seed_commit.clone()))
+        .output_artifact_kind(OutputArtifactKind::Commit)
+        .output_commit_oid(candidate_head.clone())
+        .created_at(created_at)
+        .started_at(created_at)
+        .ended_at(created_at)
+        .build())
     .await
     .expect("create author job");
 
     // Queued incremental review job
-    db.create_job(&Job {
-        id: ingot_domain::ids::JobId::new(),
-        project_id: project.id,
-        item_id,
-        item_revision_id: revision_id,
-        step_id: step::REVIEW_INCREMENTAL_INITIAL.into(),
-        semantic_attempt_no: 1,
-        retry_no: 0,
-        supersedes_job_id: None,
-        status: JobStatus::Queued,
-        outcome_class: None,
-        phase_kind: PhaseKind::Review,
-        workspace_id: None,
-        workspace_kind: WorkspaceKind::Review,
-        execution_permission: ExecutionPermission::MustNotMutate,
-        context_policy: ContextPolicy::Fresh,
-        phase_template_slug: "review-incremental".into(),
-        phase_template_digest: None,
-        prompt_snapshot: None,
-        job_input: JobInput::candidate_subject(seed_commit.clone(), candidate_head.clone()),
-        output_artifact_kind: OutputArtifactKind::ReviewReport,
-        output_commit_oid: None,
-        result_schema_version: None,
-        result_payload: None,
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
-        created_at,
-        started_at: None,
-        ended_at: None,
-    })
+    db.create_job(&JobBuilder::new(project.id, item_id, revision_id, step::REVIEW_INCREMENTAL_INITIAL)
+        .phase_kind(PhaseKind::Review)
+        .workspace_kind(WorkspaceKind::Review)
+        .execution_permission(ExecutionPermission::MustNotMutate)
+        .phase_template_slug("review-incremental")
+        .job_input(JobInput::candidate_subject(seed_commit.clone(), candidate_head.clone()))
+        .output_artifact_kind(OutputArtifactKind::ReviewReport)
+        .created_at(created_at)
+        .build())
     .await
     .expect("create review job");
 
@@ -712,69 +561,32 @@ async fn idle_item_auto_dispatches_candidate_review_after_nonblocking_incrementa
         .expect("create item");
 
     let created_at = chrono::Utc::now();
-    let author_job = Job {
-        id: ingot_domain::ids::JobId::new(),
-        project_id: h.project.id,
-        item_id,
-        item_revision_id: revision_id,
-        step_id: step::AUTHOR_INITIAL.into(),
-        semantic_attempt_no: 1,
-        retry_no: 0,
-        supersedes_job_id: None,
-        status: JobStatus::Completed,
-        outcome_class: Some(OutcomeClass::Clean),
-        phase_kind: PhaseKind::Author,
-        workspace_id: None,
-        workspace_kind: WorkspaceKind::Authoring,
-        execution_permission: ExecutionPermission::MayMutate,
-        context_policy: ContextPolicy::Fresh,
-        phase_template_slug: "author-initial".into(),
-        phase_template_digest: None,
-        prompt_snapshot: None,
-        job_input: JobInput::authoring_head(seed_commit.clone()),
-        output_artifact_kind: OutputArtifactKind::Commit,
-        output_commit_oid: Some(authored_commit.clone()),
-        result_schema_version: None,
-        result_payload: None,
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
-        created_at,
-        started_at: Some(created_at),
-        ended_at: Some(created_at),
-    };
+    let author_job = JobBuilder::new(h.project.id, item_id, revision_id, step::AUTHOR_INITIAL)
+        .status(JobStatus::Completed)
+        .outcome_class(OutcomeClass::Clean)
+        .phase_template_slug("author-initial")
+        .job_input(JobInput::authoring_head(seed_commit.clone()))
+        .output_artifact_kind(OutputArtifactKind::Commit)
+        .output_commit_oid(authored_commit.clone())
+        .created_at(created_at)
+        .started_at(created_at)
+        .ended_at(created_at)
+        .build();
     h.db.create_job(&author_job)
         .await
         .expect("create author job");
 
-    let review_job = Job {
-        id: ingot_domain::ids::JobId::new(),
-        project_id: h.project.id,
-        item_id,
-        item_revision_id: revision_id,
-        step_id: step::REVIEW_INCREMENTAL_INITIAL.into(),
-        semantic_attempt_no: 1,
-        retry_no: 0,
-        supersedes_job_id: None,
-        status: JobStatus::Completed,
-        outcome_class: Some(OutcomeClass::Findings),
-        phase_kind: PhaseKind::Review,
-        workspace_id: None,
-        workspace_kind: WorkspaceKind::Review,
-        execution_permission: ExecutionPermission::MustNotMutate,
-        context_policy: ContextPolicy::Fresh,
-        phase_template_slug: "review-incremental".into(),
-        phase_template_digest: None,
-        prompt_snapshot: None,
-        job_input: JobInput::candidate_subject(seed_commit.clone(), authored_commit.clone()),
-        output_artifact_kind: OutputArtifactKind::ReviewReport,
-        output_commit_oid: None,
-        result_schema_version: Some("review_report:v1".into()),
-        result_payload: Some(serde_json::json!({
+    let review_job = JobBuilder::new(h.project.id, item_id, revision_id, step::REVIEW_INCREMENTAL_INITIAL)
+        .status(JobStatus::Completed)
+        .outcome_class(OutcomeClass::Findings)
+        .phase_kind(PhaseKind::Review)
+        .workspace_kind(WorkspaceKind::Review)
+        .execution_permission(ExecutionPermission::MustNotMutate)
+        .phase_template_slug("review-incremental")
+        .job_input(JobInput::candidate_subject(seed_commit.clone(), authored_commit.clone()))
+        .output_artifact_kind(OutputArtifactKind::ReviewReport)
+        .result_schema_version("review_report:v1")
+        .result_payload(serde_json::json!({
             "outcome": "findings",
             "summary": "non-blocking note",
             "review_subject": {
@@ -791,52 +603,30 @@ async fn idle_item_auto_dispatches_candidate_review_after_nonblocking_incrementa
                 "evidence": ["acceptable"]
             }],
             "extensions": null
-        })),
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
-        created_at,
-        started_at: Some(created_at),
-        ended_at: Some(created_at),
-    };
+        }))
+        .created_at(created_at)
+        .started_at(created_at)
+        .ended_at(created_at)
+        .build();
     h.db.create_job(&review_job)
         .await
         .expect("create review job");
 
-    h.db.create_finding(&Finding {
-        id: ingot_domain::ids::FindingId::new(),
-        project_id: h.project.id,
-        source_item_id: item_id,
-        source_item_revision_id: revision_id,
-        source_job_id: review_job.id,
-        source_step_id: step::REVIEW_INCREMENTAL_INITIAL.into(),
-        source_report_schema_version: "review_report:v1".into(),
-        source_finding_key: "note".into(),
-        source_subject_kind: FindingSubjectKind::Candidate,
-        source_subject_base_commit_oid: review_job
-            .job_input
-            .base_commit_oid()
-            .map(ToOwned::to_owned),
-        source_subject_head_commit_oid: review_job
-            .job_input
-            .head_commit_oid()
-            .map(ToOwned::to_owned)
-            .expect("review head"),
-        code: "NOTE001".into(),
-        severity: FindingSeverity::Low,
-        summary: "acceptable note".into(),
-        paths: vec!["feature.txt".into()],
-        evidence: serde_json::json!(["acceptable"]),
-        triage_state: FindingTriageState::WontFix,
-        linked_item_id: None,
-        triage_note: Some("accepted for now".into()),
-        created_at,
-        triaged_at: Some(created_at),
-    })
+    h.db.create_finding(&FindingBuilder::new(h.project.id, item_id, revision_id, review_job.id)
+        .source_step_id(step::REVIEW_INCREMENTAL_INITIAL)
+        .source_finding_key("note")
+        .source_subject_base_commit_oid(review_job.job_input.base_commit_oid().map(ToOwned::to_owned))
+        .source_subject_head_commit_oid(review_job.job_input.head_commit_oid().map(ToOwned::to_owned).expect("review head"))
+        .code("NOTE001")
+        .severity(FindingSeverity::Low)
+        .summary("acceptable note")
+        .paths(vec!["feature.txt".into()])
+        .evidence(serde_json::json!(["acceptable"]))
+        .triage_state(FindingTriageState::WontFix)
+        .triage_note("accepted for now")
+        .created_at(created_at)
+        .triaged_at(created_at)
+        .build())
     .await
     .expect("create finding");
 

@@ -25,6 +25,7 @@ sha2 = "0.10"
 ingot-domain = { workspace = true }
 ingot-git = { workspace = true }
 ingot-store-sqlite = { workspace = true }
+ingot-test-support = { workspace = true }
 ingot-usecases = { workspace = true }
 ingot-workflow = { workspace = true }
 ingot-agent-protocol = { workspace = true }

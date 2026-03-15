@@ -13,6 +13,7 @@ members = [
     "crates/ingot-agent-adapters",
     "crates/ingot-agent-runtime",
     "crates/ingot-http-api",
+    "crates/ingot-test-support",
 ]
 
 [workspace.package]
@@ -34,6 +35,7 @@ ingot-agent-protocol = { path = "crates/ingot-agent-protocol" }
 ingot-agent-adapters = { path = "crates/ingot-agent-adapters" }
 ingot-agent-runtime = { path = "crates/ingot-agent-runtime" }
 ingot-http-api = { path = "crates/ingot-http-api" }
+ingot-test-support = { path = "crates/ingot-test-support" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

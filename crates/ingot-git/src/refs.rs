@@ -360,12 +360,18 @@ fn map_git_port_error(error: GitCommandError) -> GitPortError {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::path::PathBuf;
     use std::process::Command as StdCommand;
-    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use ingot_test_support::git::{
+        git_output, run_git as git, temp_git_repo as make_temp_repo, write_file,
+    };
 
     use super::*;
+
+    fn temp_git_repo() -> PathBuf {
+        make_temp_repo("ingot-git-refs")
+    }
 
     #[tokio::test]
     async fn verify_and_hold_target_ref_rejects_concurrent_update_ref_until_released() {
@@ -507,27 +513,6 @@ mod tests {
             .expect("release external hold");
     }
 
-    fn temp_git_repo() -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ingot-git-{}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("unix epoch")
-                .as_nanos(),
-            COUNTER.fetch_add(1, Ordering::SeqCst)
-        ));
-        fs::create_dir_all(&path).expect("create temp repo dir");
-        git(&path, &["init"]);
-        git(&path, &["branch", "-M", "main"]);
-        git(&path, &["config", "user.name", "Ingot Test"]);
-        git(&path, &["config", "user.email", "ingot@example.com"]);
-        write_file(&path.join("tracked.txt"), "initial");
-        git(&path, &["add", "tracked.txt"]);
-        git(&path, &["commit", "-m", "initial"]);
-        path
-    }
-
     fn detached_commit(path: &Path, parent: &str) -> String {
         write_file(&path.join("tracked.txt"), "next");
         git(path, &["add", "tracked.txt"]);
@@ -544,28 +529,4 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    fn git(path: &Path, args: &[&str]) {
-        let status = StdCommand::new("git")
-            .args(args)
-            .current_dir(path)
-            .status()
-            .expect("run git");
-
-        assert!(status.success(), "git {:?} failed", args);
-    }
-
-    fn git_output(path: &Path, args: &[&str]) -> String {
-        let output = StdCommand::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git output");
-
-        assert!(output.status.success(), "git {:?} failed", args);
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
-
-    fn write_file(path: &Path, contents: &str) {
-        fs::write(path, contents).expect("write file");
-    }
 }

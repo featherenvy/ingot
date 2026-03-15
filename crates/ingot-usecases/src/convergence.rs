@@ -441,17 +441,18 @@ mod tests {
 
     use chrono::Utc;
     use ingot_domain::activity::Activity;
-    use ingot_domain::convergence::{Convergence, ConvergenceStatus, ConvergenceStrategy};
+    use ingot_domain::convergence::ConvergenceStatus;
     use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
-    use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId, WorkspaceId};
-    use ingot_domain::item::{
-        ApprovalState, Classification, EscalationState, Item, LifecycleState, OriginKind,
-        ParkingState, Priority,
-    };
+    use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId};
+    use ingot_domain::item::ApprovalState;
     use ingot_domain::job::Job;
     use ingot_domain::ports::ConvergenceQueuePrepareContext;
     use ingot_domain::project::Project;
-    use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
+    use ingot_domain::revision::ItemRevision;
+    use ingot_test_support::fixtures::{
+        ConvergenceBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
+    };
+    use ingot_test_support::git::unique_temp_path;
     use uuid::Uuid;
 
     use super::{
@@ -549,29 +550,15 @@ mod tests {
             _project_id: ProjectId,
             _item_id: ItemId,
         ) -> impl Future<Output = Result<ConvergenceApprovalContext, UseCaseError>> + Send {
+            let nil = Uuid::nil();
             ready(Ok(ConvergenceApprovalContext {
-                item: Item {
-                    id: ItemId::from_uuid(Uuid::nil()),
-                    project_id: ProjectId::from_uuid(Uuid::nil()),
-                    classification: Classification::Change,
-                    workflow_version: "delivery:v1".into(),
-                    lifecycle_state: LifecycleState::Open,
-                    parking_state: ParkingState::Active,
-                    done_reason: None,
-                    resolution_source: None,
-                    approval_state: ApprovalState::Pending,
-                    escalation_state: EscalationState::None,
-                    escalation_reason: None,
-                    current_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-                    origin_kind: OriginKind::Manual,
-                    origin_finding_id: None,
-                    priority: Priority::Major,
-                    labels: vec![],
-                    operator_notes: None,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                    closed_at: None,
-                },
+                item: ItemBuilder::new(
+                    ProjectId::from_uuid(nil),
+                    ItemRevisionId::from_uuid(nil),
+                )
+                .id(ItemId::from_uuid(nil))
+                .approval_state(ApprovalState::Pending)
+                .build(),
                 has_active_job: false,
                 has_active_convergence: false,
                 prepared_convergence_id: Some(ConvergenceId::from_uuid(Uuid::nil())),
@@ -607,29 +594,15 @@ mod tests {
             _project_id: ProjectId,
             _item_id: ItemId,
         ) -> impl Future<Output = Result<RejectApprovalContext, UseCaseError>> + Send {
+            let nil = Uuid::nil();
             ready(Ok(RejectApprovalContext {
-                item: Item {
-                    id: ItemId::from_uuid(Uuid::nil()),
-                    project_id: ProjectId::from_uuid(Uuid::nil()),
-                    classification: Classification::Change,
-                    workflow_version: "delivery:v1".into(),
-                    lifecycle_state: LifecycleState::Open,
-                    parking_state: ParkingState::Active,
-                    done_reason: None,
-                    resolution_source: None,
-                    approval_state: ApprovalState::Granted,
-                    escalation_state: EscalationState::None,
-                    escalation_reason: None,
-                    current_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-                    origin_kind: OriginKind::Manual,
-                    origin_finding_id: None,
-                    priority: Priority::Major,
-                    labels: vec![],
-                    operator_notes: None,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                    closed_at: None,
-                },
+                item: ItemBuilder::new(
+                    ProjectId::from_uuid(nil),
+                    ItemRevisionId::from_uuid(nil),
+                )
+                .id(ItemId::from_uuid(nil))
+                .approval_state(ApprovalState::Granted)
+                .build(),
                 has_active_job: false,
                 has_active_convergence: false,
             }))
@@ -733,53 +706,19 @@ mod tests {
         let project_id = ProjectId::from_uuid(Uuid::nil());
         let item_id = ItemId::from_uuid(Uuid::nil());
         let revision_id = ItemRevisionId::from_uuid(Uuid::nil());
-        let project = Project {
-            id: project_id,
-            name: "repo".into(),
-            path: "/tmp/repo".into(),
-            default_branch: "main".into(),
-            color: "#000".into(),
-            created_at: now,
-            updated_at: now,
-        };
-        let item = Item {
-            id: item_id,
-            project_id,
-            classification: Classification::Change,
-            workflow_version: "delivery:v1".into(),
-            lifecycle_state: LifecycleState::Open,
-            parking_state: ParkingState::Active,
-            done_reason: None,
-            resolution_source: None,
-            approval_state: ApprovalState::NotRequested,
-            escalation_state: EscalationState::None,
-            escalation_reason: None,
-            current_revision_id: revision_id,
-            origin_kind: OriginKind::Manual,
-            origin_finding_id: None,
-            priority: Priority::Major,
-            labels: vec![],
-            operator_notes: None,
-            created_at: now,
-            updated_at: now,
-            closed_at: None,
-        };
-        let revision = ItemRevision {
-            id: revision_id,
-            item_id,
-            revision_no: 1,
-            title: "Title".into(),
-            description: "Desc".into(),
-            acceptance_criteria: "AC".into(),
-            target_ref: "refs/heads/main".into(),
-            approval_policy: ApprovalPolicy::Required,
-            policy_snapshot: serde_json::json!({}),
-            template_map_snapshot: serde_json::json!({}),
-            seed_commit_oid: Some("seed".into()),
-            seed_target_commit_oid: Some("seed".into()),
-            supersedes_revision_id: None,
-            created_at: now,
-        };
+        let project = ProjectBuilder::new(unique_temp_path("ingot-convergence"))
+            .id(project_id)
+            .created_at(now)
+            .build();
+        let item = ItemBuilder::new(project_id, revision_id)
+            .id(item_id)
+            .created_at(now)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .explicit_seed("seed")
+            .created_at(now)
+            .build();
         let port = FakePort::with_queue_prepare_context(ConvergenceQueuePrepareContext {
             project,
             item,
@@ -865,81 +804,34 @@ mod tests {
         let project_id = ProjectId::from_uuid(Uuid::nil());
         let item_id = ItemId::from_uuid(Uuid::nil());
         let revision_id = ItemRevisionId::from_uuid(Uuid::nil());
-        let project = Project {
-            id: project_id,
-            name: "repo".into(),
-            path: "/tmp/repo".into(),
-            default_branch: "main".into(),
-            color: "#000".into(),
-            created_at,
-            updated_at: created_at,
-        };
-        let revision = ItemRevision {
-            id: revision_id,
-            item_id,
-            revision_no: 1,
-            title: "Title".into(),
-            description: "Desc".into(),
-            acceptance_criteria: "AC".into(),
-            target_ref: "refs/heads/main".into(),
-            approval_policy: ApprovalPolicy::Required,
-            policy_snapshot: serde_json::json!({}),
-            template_map_snapshot: serde_json::json!({}),
-            seed_commit_oid: Some("seed".into()),
-            seed_target_commit_oid: Some("seed".into()),
-            supersedes_revision_id: None,
-            created_at,
-        };
+        let project = ProjectBuilder::new(unique_temp_path("ingot-convergence"))
+            .id(project_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .explicit_seed("seed")
+            .created_at(created_at)
+            .build();
         let approval_state = if next_action == "finalize_prepared_convergence" {
             ApprovalState::NotRequired
         } else {
             ApprovalState::NotRequested
         };
-        let item = Item {
-            id: item_id,
-            project_id,
-            classification: Classification::Change,
-            workflow_version: "delivery:v1".into(),
-            lifecycle_state: LifecycleState::Open,
-            parking_state: ParkingState::Active,
-            done_reason: None,
-            resolution_source: None,
-            approval_state,
-            escalation_state: EscalationState::None,
-            escalation_reason: None,
-            current_revision_id: revision_id,
-            origin_kind: OriginKind::Manual,
-            origin_finding_id: None,
-            priority: Priority::Major,
-            labels: vec![],
-            operator_notes: None,
-            created_at,
-            updated_at: created_at,
-            closed_at: None,
-        };
-        let convergence = Convergence {
-            id: ConvergenceId::from_uuid(Uuid::nil()),
-            project_id,
-            item_id,
-            item_revision_id: revision_id,
-            source_workspace_id: WorkspaceId::from_uuid(Uuid::nil()),
-            integration_workspace_id: Some(WorkspaceId::from_uuid(Uuid::nil())),
-            source_head_commit_oid: "head".into(),
-            target_ref: "refs/heads/main".into(),
-            strategy: ConvergenceStrategy::RebaseThenFastForward,
-            status: if next_action == "prepare_convergence" {
+        let item = ItemBuilder::new(project_id, revision_id)
+            .id(item_id)
+            .approval_state(approval_state)
+            .created_at(created_at)
+            .build();
+        let convergence = ConvergenceBuilder::new(project_id, item_id, revision_id)
+            .id(ConvergenceId::from_uuid(Uuid::nil()))
+            .status(if next_action == "prepare_convergence" {
                 ConvergenceStatus::Failed
             } else {
                 ConvergenceStatus::Prepared
-            },
-            input_target_commit_oid: Some("base".into()),
-            prepared_commit_oid: Some("prepared".into()),
-            final_target_commit_oid: None,
-            target_head_valid: Some(next_action != "invalidate_prepared_convergence"),
-            conflict_summary: None,
-            created_at,
-            completed_at: None,
-        };
+            })
+            .target_head_valid(next_action != "invalidate_prepared_convergence")
+            .created_at(created_at)
+            .build();
         let queue_entry = ConvergenceQueueEntry {
             id: ingot_domain::ids::ConvergenceQueueEntryId::from_uuid(Uuid::nil()),
             project_id,
@@ -969,44 +861,29 @@ mod tests {
 
     fn fake_completed_validate_job(next_action: &str) -> Job {
         let created_at = Utc::now();
-        Job {
-            id: ingot_domain::ids::JobId::new(),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            item_id: ItemId::from_uuid(Uuid::nil()),
-            item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            step_id: if next_action == "prepare_convergence" {
-                "validate_candidate_initial".into()
-            } else {
-                "validate_integrated".into()
-            },
-            semantic_attempt_no: 1,
-            retry_no: 0,
-            supersedes_job_id: None,
-            status: ingot_domain::job::JobStatus::Completed,
-            outcome_class: Some(ingot_domain::job::OutcomeClass::Clean),
-            phase_kind: ingot_domain::job::PhaseKind::Validate,
-            workspace_id: None,
-            workspace_kind: ingot_domain::workspace::WorkspaceKind::Integration,
-            execution_permission: ingot_domain::job::ExecutionPermission::MustNotMutate,
-            context_policy: ingot_domain::job::ContextPolicy::ResumeContext,
-            phase_template_slug: "template".into(),
-            phase_template_digest: None,
-            prompt_snapshot: None,
-            job_input: ingot_domain::job::JobInput::None,
-            output_artifact_kind: ingot_domain::job::OutputArtifactKind::ValidationReport,
-            output_commit_oid: None,
-            result_schema_version: None,
-            result_payload: None,
-            agent_id: None,
-            process_pid: None,
-            lease_owner_id: None,
-            heartbeat_at: None,
-            lease_expires_at: None,
-            error_code: None,
-            error_message: None,
-            created_at,
-            started_at: Some(created_at),
-            ended_at: Some(created_at),
-        }
+        let nil = Uuid::nil();
+        let step_id = if next_action == "prepare_convergence" {
+            "validate_candidate_initial"
+        } else {
+            "validate_integrated"
+        };
+        JobBuilder::new(
+            ProjectId::from_uuid(nil),
+            ItemId::from_uuid(nil),
+            ItemRevisionId::from_uuid(nil),
+            step_id,
+        )
+        .status(ingot_domain::job::JobStatus::Completed)
+        .outcome_class(ingot_domain::job::OutcomeClass::Clean)
+        .phase_kind(ingot_domain::job::PhaseKind::Validate)
+        .workspace_kind(ingot_domain::workspace::WorkspaceKind::Integration)
+        .execution_permission(ingot_domain::job::ExecutionPermission::MustNotMutate)
+        .context_policy(ingot_domain::job::ContextPolicy::ResumeContext)
+        .job_input(ingot_domain::job::JobInput::None)
+        .output_artifact_kind(ingot_domain::job::OutputArtifactKind::ValidationReport)
+        .created_at(created_at)
+        .started_at(created_at)
+        .ended_at(created_at)
+        .build()
     }
 }

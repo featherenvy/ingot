@@ -6,11 +6,12 @@ use std::sync::Arc;
 use ingot_agent_runtime::AgentRunner;
 use ingot_domain::agent::Agent;
 use ingot_domain::item::EscalationState;
-use ingot_domain::job::{Job, JobStatus, OutcomeClass};
+use ingot_domain::job::{JobInput, JobStatus, OutcomeClass, OutputArtifactKind};
 use ingot_domain::revision::ItemRevision;
 use ingot_git::commands::head_oid;
 
-use super::helpers::*;
+mod common;
+use common::*;
 
 use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::request::AgentRequest;
@@ -29,8 +30,7 @@ async fn runtime_terminal_failure_escalates_closure_relevant_item() {
             _agent: &'a Agent,
             _request: &'a AgentRequest,
             _working_dir: &'a Path,
-        ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
             Box::pin(async move { Err(AgentError::ProcessError("boom".into())) })
         }
     }
@@ -102,27 +102,33 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
     // Create the failed job
     let failed_job_id = ingot_domain::ids::JobId::new();
     let created_at = chrono::Utc::now();
-    h.db.create_job(&Job {
-        id: failed_job_id,
-        status: JobStatus::Failed,
-        outcome_class: Some(OutcomeClass::TerminalFailure),
-        error_code: Some("step_failed".into()),
-        error_message: Some("first attempt failed".into()),
-        started_at: Some(created_at),
-        ended_at: Some(created_at),
-        ..test_authoring_job(h.project.id, item_id, revision_id, &seed_commit)
-    })
-    .await
-    .expect("create failed job");
+    let failed_job = JobBuilder::new(h.project.id, item_id, revision_id, "author_initial")
+        .id(failed_job_id)
+        .status(JobStatus::Failed)
+        .outcome_class(OutcomeClass::TerminalFailure)
+        .error_code("step_failed")
+        .error_message("first attempt failed")
+        .phase_template_slug("author-initial")
+        .job_input(JobInput::authoring_head(&seed_commit))
+        .output_artifact_kind(OutputArtifactKind::Commit)
+        .started_at(created_at)
+        .ended_at(created_at)
+        .build();
+    h.db.create_job(&failed_job)
+        .await
+        .expect("create failed job");
 
     // Create the retry job
-    h.db.create_job(&Job {
-        supersedes_job_id: Some(failed_job_id),
-        retry_no: 1,
-        ..test_authoring_job(h.project.id, item_id, revision_id, &seed_commit)
-    })
-    .await
-    .expect("create retry job");
+    let retry_job = JobBuilder::new(h.project.id, item_id, revision_id, "author_initial")
+        .supersedes_job_id(failed_job_id)
+        .retry_no(1)
+        .phase_template_slug("author-initial")
+        .job_input(JobInput::authoring_head(&seed_commit))
+        .output_artifact_kind(OutputArtifactKind::Commit)
+        .build();
+    h.db.create_job(&retry_job)
+        .await
+        .expect("create retry job");
 
     assert!(h.dispatcher.tick().await.expect("tick should run"));
 
@@ -139,11 +145,10 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
         .expect("auto-dispatched review job");
     assert_eq!(review_job.status, JobStatus::Queued);
 
-    let activity = h
-        .db
-        .list_activity_by_project(h.project.id, 20, 0)
-        .await
-        .expect("activity");
+    let activity =
+        h.db.list_activity_by_project(h.project.id, 20, 0)
+            .await
+            .expect("activity");
     assert!(activity.iter().any(|entry| {
         entry.event_type == ActivityEventType::ItemEscalationCleared
             && entry.entity_id == item_id.to_string()

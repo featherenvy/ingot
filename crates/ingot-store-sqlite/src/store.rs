@@ -74,22 +74,26 @@ fn decode_job_input(
             .map(JobInput::authoring_head)
             .ok_or_else(|| StoreDecodeError::Json("authoring_head job_input missing head".into())),
         "candidate_subject" => match (base_commit_oid, head_commit_oid) {
-            (Some(base_commit_oid), Some(head_commit_oid)) => {
-                Ok(JobInput::candidate_subject(base_commit_oid, head_commit_oid))
-            }
+            (Some(base_commit_oid), Some(head_commit_oid)) => Ok(JobInput::candidate_subject(
+                base_commit_oid,
+                head_commit_oid,
+            )),
             _ => Err(StoreDecodeError::Json(
                 "candidate_subject job_input missing base or head".into(),
             )),
         },
         "integrated_subject" => match (base_commit_oid, head_commit_oid) {
-            (Some(base_commit_oid), Some(head_commit_oid)) => {
-                Ok(JobInput::integrated_subject(base_commit_oid, head_commit_oid))
-            }
+            (Some(base_commit_oid), Some(head_commit_oid)) => Ok(JobInput::integrated_subject(
+                base_commit_oid,
+                head_commit_oid,
+            )),
             _ => Err(StoreDecodeError::Json(
                 "integrated_subject job_input missing base or head".into(),
             )),
         },
-        _ => Err(StoreDecodeError::Json(format!("unknown job_input_kind: {kind}"))),
+        _ => Err(StoreDecodeError::Json(format!(
+            "unknown job_input_kind: {kind}"
+        ))),
     }
 }
 

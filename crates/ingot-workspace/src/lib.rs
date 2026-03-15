@@ -278,18 +278,15 @@ pub async fn ensure_authoring_workspace_state(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::PathBuf;
-    use std::process::Command;
-
     use super::{provision_authoring_workspace, verify_authoring_workspace};
+    use ingot_test_support::git::{git_output, temp_git_repo, unique_temp_path};
 
     #[tokio::test]
     async fn provision_authoring_workspace_creates_worktree_and_anchor_ref() {
-        let repo = temp_git_repo();
+        let repo = temp_git_repo("ingot-workspace");
         let expected_head = git_output(&repo, &["rev-parse", "HEAD"]);
         let workspace_path =
-            std::env::temp_dir().join(format!("ingot-workspace-{}", uuid::Uuid::now_v7()));
+            unique_temp_path("ingot-workspace");
 
         let provisioned = provision_authoring_workspace(
             &repo,
@@ -315,10 +312,10 @@ mod tests {
 
     #[tokio::test]
     async fn provision_authoring_workspace_reuses_existing_worktree() {
-        let repo = temp_git_repo();
+        let repo = temp_git_repo("ingot-workspace");
         let expected_head = git_output(&repo, &["rev-parse", "HEAD"]);
         let workspace_path =
-            std::env::temp_dir().join(format!("ingot-workspace-{}", uuid::Uuid::now_v7()));
+            unique_temp_path("ingot-workspace");
 
         provision_authoring_workspace(
             &repo,
@@ -346,37 +343,5 @@ mod tests {
         )
         .await
         .expect("workspace should still verify after reprovision");
-    }
-
-    fn temp_git_repo() -> PathBuf {
-        let path = std::env::temp_dir().join(format!("ingot-workspace-{}", uuid::Uuid::now_v7()));
-        fs::create_dir_all(&path).expect("create temp repo dir");
-        git_sync(&path, &["init"]);
-        git_sync(&path, &["branch", "-M", "main"]);
-        git_sync(&path, &["config", "user.name", "Ingot Test"]);
-        git_sync(&path, &["config", "user.email", "ingot@example.com"]);
-        fs::write(path.join("tracked.txt"), "initial").expect("write tracked file");
-        git_sync(&path, &["add", "tracked.txt"]);
-        git_sync(&path, &["commit", "-m", "initial"]);
-        path
-    }
-
-    fn git_sync(path: &PathBuf, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {:?} failed", args);
-    }
-
-    fn git_output(path: &PathBuf, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .output()
-            .expect("run git output");
-        assert!(output.status.success(), "git {:?} failed", args);
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 }

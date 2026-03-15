@@ -7,7 +7,6 @@ use std::time::Duration;
 use ingot_agent_runtime::{AgentRunner, DispatcherConfig, JobDispatcher};
 use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
 use ingot_domain::job::{JobStatus, OutcomeClass};
-use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
@@ -15,7 +14,8 @@ use ingot_store_sqlite::Database;
 use ingot_usecases::ProjectLocks;
 use uuid::Uuid;
 
-use super::helpers::*;
+mod common;
+use common::*;
 
 use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::request::AgentRequest;
@@ -57,12 +57,11 @@ async fn tick_executes_a_queued_authoring_job_and_creates_a_commit() {
     assert_eq!(updated_job.outcome_class, Some(OutcomeClass::Clean));
     assert!(updated_job.output_commit_oid.is_some());
 
-    let workspace = h
-        .db
-        .find_authoring_workspace_for_revision(revision.id)
-        .await
-        .expect("workspace query")
-        .expect("workspace exists");
+    let workspace =
+        h.db.find_authoring_workspace_for_revision(revision.id)
+            .await
+            .expect("workspace query")
+            .expect("workspace exists");
     assert_eq!(workspace.status, WorkspaceStatus::Ready);
     assert_eq!(workspace.current_job_id, None);
     assert_eq!(workspace.head_commit_oid, updated_job.output_commit_oid);
@@ -77,30 +76,20 @@ async fn tick_executes_a_queued_authoring_job_and_creates_a_commit() {
 
 #[tokio::test]
 async fn tick_executes_a_review_job_and_persists_structured_report() {
-    let repo = temp_git_repo();
+    let repo = temp_git_repo("ingot-runtime-repo");
     let base_commit = head_oid(&repo).await.expect("base head");
     std::fs::write(repo.join("tracked.txt"), "next").expect("update tracked file");
     git_sync(&repo, &["add", "tracked.txt"]);
     git_sync(&repo, &["commit", "-m", "next"]);
     let head_commit = head_oid(&repo).await.expect("head oid");
 
-    let db_path =
-        std::env::temp_dir().join(format!("ingot-runtime-review-{}.db", Uuid::now_v7()));
+    let db_path = std::env::temp_dir().join(format!("ingot-runtime-review-{}.db", Uuid::now_v7()));
     let db = Database::connect(&db_path).await.expect("connect db");
     db.migrate().await.expect("migrate db");
     let state_root =
         std::env::temp_dir().join(format!("ingot-runtime-review-state-{}", Uuid::now_v7()));
 
-    let created_at = chrono::Utc::now();
-    let project = Project {
-        id: ingot_domain::ids::ProjectId::new(),
-        name: "repo".into(),
-        path: repo.display().to_string(),
-        default_branch: "main".into(),
-        color: "#000".into(),
-        created_at,
-        updated_at: created_at,
-    };
+    let project = ProjectBuilder::new(&repo).build();
     db.create_project(&project).await.expect("create project");
 
     let agent = Agent {
@@ -191,8 +180,7 @@ async fn tick_times_out_long_running_job_and_marks_it_failed() {
             _agent: &'a Agent,
             _request: &'a AgentRequest,
             _working_dir: &'a Path,
-        ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
             Box::pin(async move {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 Ok(AgentResponse {
@@ -270,19 +258,11 @@ async fn tick_runs_healthy_queued_job_even_when_another_project_is_broken() {
     h.db.create_agent(&agent).await.expect("create agent");
 
     // Create a broken project with missing path
-    let created_at = chrono::Utc::now();
-    let broken_project = Project {
-        id: ingot_domain::ids::ProjectId::new(),
-        name: "broken".into(),
-        path: std::env::temp_dir()
-            .join(format!("ingot-missing-project-{}", Uuid::now_v7()))
-            .display()
-            .to_string(),
-        default_branch: "main".into(),
-        color: "#111".into(),
-        created_at,
-        updated_at: created_at,
-    };
+    let broken_project = ProjectBuilder::new(
+        std::env::temp_dir().join(format!("ingot-missing-project-{}", Uuid::now_v7())),
+    )
+    .name("broken")
+    .build();
     h.db.create_project(&broken_project)
         .await
         .expect("create broken project");
@@ -340,11 +320,10 @@ async fn tick_runs_healthy_queued_job_even_when_another_project_is_broken() {
 
     assert!(h.dispatcher.tick().await.expect("tick should run"));
 
-    let healthy_jobs = h
-        .db
-        .list_jobs_by_item(healthy_item_id)
-        .await
-        .expect("healthy jobs");
+    let healthy_jobs =
+        h.db.list_jobs_by_item(healthy_item_id)
+            .await
+            .expect("healthy jobs");
     let completed_author = healthy_jobs
         .iter()
         .find(|job| job.step_id == step::AUTHOR_INITIAL)

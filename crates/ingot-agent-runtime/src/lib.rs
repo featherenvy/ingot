@@ -1601,9 +1601,7 @@ impl JobDispatcher {
                     .head_commit_oid()
                     .map(ToOwned::to_owned)
                     .ok_or_else(|| {
-                        RuntimeError::InvalidState(
-                            "integration jobs require job_input head".into(),
-                        )
+                        RuntimeError::InvalidState("integration jobs require job_input head".into())
                     })?;
                 let workspace_ref = existing_workspace.workspace_ref.clone().ok_or_else(|| {
                     RuntimeError::InvalidState("integration workspace missing workspace_ref".into())

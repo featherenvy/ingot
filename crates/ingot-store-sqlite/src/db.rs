@@ -30,20 +30,22 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, JobId};
     use ingot_domain::item::{ApprovalState, EscalationReason};
     use ingot_domain::job::{JobStatus, OutcomeClass};
     use ingot_domain::ports::{JobCompletionMutation, PreparedConvergenceGuard, RepositoryError};
+    use ingot_test_support::fixtures::DEFAULT_TEST_TIMESTAMP;
+    use ingot_test_support::sqlite::temp_db_path;
     use uuid::Uuid;
+
+    const TS: &str = DEFAULT_TEST_TIMESTAMP;
 
     use super::Database;
     use crate::FinishJobNonSuccessParams;
 
     #[tokio::test]
     async fn migrate_supports_finding_promotion_relationships() {
-        let db_path = temp_db_path();
+        let db_path = temp_db_path("ingot-store");
         let db = Database::connect(&db_path).await.expect("connect db");
         db.migrate().await.expect("run migrations");
 
@@ -74,10 +76,12 @@ mod tests {
                 NULL,
                 'major',
                 '[]',
-                '2026-03-12T00:00:00Z',
-                '2026-03-12T00:00:00Z'
+                ?,
+                ?
              )",
         )
+        .bind(TS)
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert source item");
@@ -101,9 +105,10 @@ mod tests {
                 'abc',
                 'def',
                 NULL,
-                '2026-03-12T00:00:00Z'
+                ?
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert source revision");
@@ -128,9 +133,10 @@ mod tests {
                 'fresh',
                 'investigate-item',
                 'finding_report',
-                '2026-03-12T00:00:00Z'
+                ?
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert job");
@@ -159,9 +165,10 @@ mod tests {
                 '[]',
                 '[]',
                 'untriaged',
-                '2026-03-12T00:00:00Z'
+                ?
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert finding");
@@ -185,10 +192,12 @@ mod tests {
                 'fnd_00000000000000000000000000000000',
                 'major',
                 '[]',
-                '2026-03-12T00:00:00Z',
-                '2026-03-12T00:00:00Z'
+                ?,
+                ?
              )",
         )
+        .bind(TS)
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert promoted item");
@@ -212,9 +221,10 @@ mod tests {
                 'head',
                 'def',
                 NULL,
-                '2026-03-12T00:00:00Z'
+                ?
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert promoted revision");
@@ -223,9 +233,10 @@ mod tests {
             "UPDATE findings
              SET triage_state = 'backlog',
                  linked_item_id = 'itm_11111111111111111111111111111111',
-                 triaged_at = '2026-03-12T00:00:00Z'
+                 triaged_at = ?
              WHERE id = 'fnd_00000000000000000000000000000000'",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("promote finding");
@@ -251,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_job_rejects_duplicate_terminal_updates() {
-        let db_path = temp_db_path();
+        let db_path = temp_db_path("ingot-store");
         let db = Database::connect(&db_path).await.expect("connect db");
         db.migrate().await.expect("run migrations");
 
@@ -282,10 +293,12 @@ mod tests {
                 NULL,
                 'major',
                 '[]',
-                '2026-03-12T00:00:00Z',
-                '2026-03-12T00:00:00Z'
+                ?,
+                ?
              )",
         )
+        .bind(TS)
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert item");
@@ -309,9 +322,10 @@ mod tests {
                 'abc',
                 'def',
                 NULL,
-                '2026-03-12T00:00:00Z'
+                ?
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert revision");
@@ -336,9 +350,10 @@ mod tests {
                 'fresh',
                 'investigate-item',
                 'finding_report',
-                '2026-03-12T00:00:00Z'
+                ?
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert job");
@@ -387,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_job_rolls_back_when_prepared_convergence_becomes_stale() {
-        let db_path = temp_db_path();
+        let db_path = temp_db_path("ingot-store");
         let db = Database::connect(&db_path).await.expect("connect db");
         db.migrate().await.expect("run migrations");
 
@@ -418,10 +433,12 @@ mod tests {
                 NULL,
                 'major',
                 '[]',
-                '2026-03-12T00:00:00Z',
-                '2026-03-12T00:00:00Z'
+                ?,
+                ?
              )",
         )
+        .bind(TS)
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert item");
@@ -445,9 +462,10 @@ mod tests {
                 'abc',
                 'def',
                 NULL,
-                '2026-03-12T00:00:00Z'
+                ?
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert revision");
@@ -465,10 +483,12 @@ mod tests {
                 'rev_00000000000000000000000000000000',
                 'ephemeral',
                 'ready',
-                '2026-03-12T00:00:00Z',
-                '2026-03-12T00:00:00Z'
+                ?,
+                ?
              )",
         )
+        .bind(TS)
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert workspace");
@@ -496,9 +516,10 @@ mod tests {
                 'integrated_subject',
                 'expected-target',
                 'prepared-head',
-                '2026-03-12T00:00:00Z'
+                ?
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert job");
@@ -523,10 +544,11 @@ mod tests {
                 'prepared-head',
                 NULL,
                 NULL,
-                '2026-03-12T00:00:00Z',
+                ?,
                 NULL
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert convergence");
@@ -585,7 +607,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_job_rolls_back_when_prepared_convergence_target_ref_changes() {
-        let db_path = temp_db_path();
+        let db_path = temp_db_path("ingot-store");
         let db = Database::connect(&db_path).await.expect("connect db");
         db.migrate().await.expect("run migrations");
 
@@ -616,10 +638,12 @@ mod tests {
                 NULL,
                 'major',
                 '[]',
-                '2026-03-12T00:00:00Z',
-                '2026-03-12T00:00:00Z'
+                ?,
+                ?
              )",
         )
+        .bind(TS)
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert item");
@@ -643,9 +667,10 @@ mod tests {
                 'abc',
                 'def',
                 NULL,
-                '2026-03-12T00:00:00Z'
+                ?
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert revision");
@@ -663,10 +688,12 @@ mod tests {
                 'rev_00000000000000000000000000000000',
                 'ephemeral',
                 'ready',
-                '2026-03-12T00:00:00Z',
-                '2026-03-12T00:00:00Z'
+                ?,
+                ?
              )",
         )
+        .bind(TS)
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert workspace");
@@ -694,9 +721,10 @@ mod tests {
                 'integrated_subject',
                 'expected-target',
                 'prepared-head',
-                '2026-03-12T00:00:00Z'
+                ?
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert job");
@@ -721,10 +749,11 @@ mod tests {
                 'prepared-head',
                 NULL,
                 NULL,
-                '2026-03-12T00:00:00Z',
+                ?,
                 NULL
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert convergence");
@@ -783,7 +812,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_job_rolls_back_when_item_revision_changes_before_commit() {
-        let db_path = temp_db_path();
+        let db_path = temp_db_path("ingot-store");
         let db = Database::connect(&db_path).await.expect("connect db");
         db.migrate().await.expect("run migrations");
 
@@ -814,10 +843,12 @@ mod tests {
                 NULL,
                 'major',
                 '[]',
-                '2026-03-12T00:00:00Z',
-                '2026-03-12T00:00:00Z'
+                ?,
+                ?
              )",
         )
+        .bind(TS)
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert item");
@@ -842,7 +873,7 @@ mod tests {
                 'abc',
                 'def',
                 NULL,
-                '2026-03-12T00:00:00Z'
+                ?
              ),
              (
                 'rev_11111111111111111111111111111111',
@@ -861,6 +892,7 @@ mod tests {
                 '2026-03-13T00:00:00Z'
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert revisions");
@@ -885,9 +917,10 @@ mod tests {
                 'fresh',
                 'investigate-item',
                 'finding_report',
-                '2026-03-12T00:00:00Z'
+                ?
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert job");
@@ -928,7 +961,7 @@ mod tests {
 
     #[tokio::test]
     async fn finish_job_non_success_rolls_back_when_item_revision_changes_before_commit() {
-        let db_path = temp_db_path();
+        let db_path = temp_db_path("ingot-store");
         let db = Database::connect(&db_path).await.expect("connect db");
         db.migrate().await.expect("run migrations");
 
@@ -959,10 +992,12 @@ mod tests {
                 NULL,
                 'major',
                 '[]',
-                '2026-03-12T00:00:00Z',
-                '2026-03-12T00:00:00Z'
+                ?,
+                ?
              )",
         )
+        .bind(TS)
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert item");
@@ -987,7 +1022,7 @@ mod tests {
                 'abc',
                 'def',
                 NULL,
-                '2026-03-12T00:00:00Z'
+                ?
              ),
              (
                 'rev_11111111111111111111111111111111',
@@ -1006,6 +1041,7 @@ mod tests {
                 '2026-03-13T00:00:00Z'
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert revisions");
@@ -1030,9 +1066,10 @@ mod tests {
                 'resume_context',
                 'repair-candidate',
                 'commit',
-                '2026-03-12T00:00:00Z'
+                ?
              )",
         )
+        .bind(TS)
         .execute(&db.pool)
         .await
         .expect("insert job");
@@ -1072,7 +1109,4 @@ mod tests {
         assert_eq!(escalation_state, "none");
     }
 
-    fn temp_db_path() -> PathBuf {
-        std::env::temp_dir().join(format!("ingot-store-{}.db", Uuid::now_v7()))
-    }
 }

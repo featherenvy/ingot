@@ -1000,14 +1000,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::Utc;
-    use ingot_domain::convergence::{ConvergenceStatus, ConvergenceStrategy};
-    use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId, WorkspaceId};
-    use ingot_domain::item::{
-        Classification, EscalationState, LifecycleState, OriginKind, ParkingState, Priority,
+    use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
+    use ingot_domain::item::EscalationState;
+    use ingot_domain::job::{
+        ContextPolicy, ExecutionPermission, JobStatus, OutputArtifactKind, PhaseKind,
     };
-    use ingot_domain::job::{ContextPolicy, ExecutionPermission, JobStatus, PhaseKind};
     use ingot_domain::project::Project;
     use ingot_domain::workspace::WorkspaceKind;
+    use ingot_test_support::fixtures::{ConvergenceBuilder, JobBuilder, nil_item, nil_revision};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -1050,8 +1050,8 @@ mod tests {
 
     #[test]
     fn dispatch_after_repair_commit_reenters_incremental_review_before_candidate_review() {
-        let item = test_item();
-        let revision = test_revision();
+        let item = nil_item();
+        let revision = nil_revision();
 
         let mut author_initial = test_job("author_initial", OutputArtifactKind::Commit);
         author_initial.status = JobStatus::Completed;
@@ -1117,8 +1117,8 @@ mod tests {
 
     #[test]
     fn dispatch_after_clean_incremental_repair_advances_to_candidate_review_then_validation() {
-        let item = test_item();
-        let revision = test_revision();
+        let item = nil_item();
+        let revision = nil_revision();
 
         let mut repair_candidate = test_job("repair_candidate", OutputArtifactKind::Commit);
         repair_candidate.status = JobStatus::Completed;
@@ -1684,130 +1684,54 @@ mod tests {
     fn test_context(job: Job) -> JobCompletionContext {
         JobCompletionContext {
             job,
-            item: test_item(),
+            item: nil_item(),
             project: test_project(),
-            revision: test_revision(),
+            revision: nil_revision(),
             convergences: vec![test_prepared_convergence()],
         }
     }
 
     fn test_project() -> Project {
-        Project {
-            id: ProjectId::from_uuid(Uuid::nil()),
-            name: "Test".into(),
-            path: std::env::temp_dir()
-                .join(format!("ingot-usecases-{}", Uuid::now_v7()))
-                .display()
-                .to_string(),
-            default_branch: "main".into(),
-            color: "#000000".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    fn test_item() -> Item {
-        Item {
-            id: ItemId::from_uuid(Uuid::nil()),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            classification: Classification::Change,
-            workflow_version: "delivery:v1".into(),
-            lifecycle_state: LifecycleState::Open,
-            parking_state: ParkingState::Active,
-            done_reason: None,
-            resolution_source: None,
-            approval_state: ApprovalState::NotRequested,
-            escalation_state: EscalationState::None,
-            escalation_reason: None,
-            current_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            origin_kind: OriginKind::Manual,
-            origin_finding_id: None,
-            priority: Priority::Major,
-            labels: vec![],
-            operator_notes: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            closed_at: None,
-        }
-    }
-
-    fn test_revision() -> ItemRevision {
-        ItemRevision {
-            id: ItemRevisionId::from_uuid(Uuid::nil()),
-            item_id: ItemId::from_uuid(Uuid::nil()),
-            revision_no: 1,
-            title: "Title".into(),
-            description: "Description".into(),
-            acceptance_criteria: "AC".into(),
-            target_ref: "refs/heads/main".into(),
-            approval_policy: ApprovalPolicy::Required,
-            policy_snapshot: json!({}),
-            template_map_snapshot: json!({}),
-            seed_commit_oid: Some("seed".into()),
-            seed_target_commit_oid: Some("target".into()),
-            supersedes_revision_id: None,
-            created_at: Utc::now(),
-        }
+        use ingot_test_support::fixtures::ProjectBuilder;
+        use ingot_test_support::git::unique_temp_path;
+        ProjectBuilder::new(unique_temp_path("ingot-usecases"))
+            .id(ProjectId::from_uuid(Uuid::nil()))
+            .name("Test")
+            .build()
     }
 
     fn test_job(step_id: &str, output_artifact_kind: OutputArtifactKind) -> Job {
-        Job {
-            id: JobId::from_uuid(Uuid::nil()),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            item_id: ItemId::from_uuid(Uuid::nil()),
-            item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            step_id: step_id.into(),
-            semantic_attempt_no: 1,
-            retry_no: 0,
-            supersedes_job_id: None,
-            status: JobStatus::Running,
-            outcome_class: Some(OutcomeClass::Clean),
-            phase_kind: PhaseKind::Validate,
-            workspace_id: Some(WorkspaceId::from_uuid(Uuid::now_v7())),
-            workspace_kind: WorkspaceKind::Integration,
-            execution_permission: ExecutionPermission::MustNotMutate,
-            context_policy: ContextPolicy::ResumeContext,
-            phase_template_slug: "validate-integrated".into(),
-            phase_template_digest: None,
-            prompt_snapshot: None,
-            job_input: JobInput::integrated_subject("target", "prepared-head"),
-            output_artifact_kind,
-            output_commit_oid: None,
-            result_schema_version: None,
-            result_payload: None,
-            agent_id: None,
-            process_pid: None,
-            lease_owner_id: None,
-            heartbeat_at: None,
-            lease_expires_at: None,
-            error_code: None,
-            error_message: None,
-            created_at: Utc::now(),
-            started_at: None,
-            ended_at: None,
-        }
+        let nil = Uuid::nil();
+        JobBuilder::new(
+            ProjectId::from_uuid(nil),
+            ItemId::from_uuid(nil),
+            ItemRevisionId::from_uuid(nil),
+            step_id,
+        )
+        .id(JobId::from_uuid(nil))
+        .status(JobStatus::Running)
+        .outcome_class(OutcomeClass::Clean)
+        .phase_kind(PhaseKind::Validate)
+        .workspace_kind(WorkspaceKind::Integration)
+        .execution_permission(ExecutionPermission::MustNotMutate)
+        .context_policy(ContextPolicy::ResumeContext)
+        .phase_template_slug("validate-integrated")
+        .job_input(JobInput::integrated_subject("target", "prepared-head"))
+        .output_artifact_kind(output_artifact_kind)
+        .build()
     }
 
     fn test_prepared_convergence() -> Convergence {
-        Convergence {
-            id: ConvergenceId::from_uuid(Uuid::nil()),
-            project_id: ProjectId::from_uuid(Uuid::nil()),
-            item_id: ItemId::from_uuid(Uuid::nil()),
-            item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-            source_workspace_id: WorkspaceId::from_uuid(Uuid::now_v7()),
-            integration_workspace_id: Some(WorkspaceId::from_uuid(Uuid::now_v7())),
-            source_head_commit_oid: "prepared-head".into(),
-            target_ref: "refs/heads/main".into(),
-            strategy: ConvergenceStrategy::RebaseThenFastForward,
-            status: ConvergenceStatus::Prepared,
-            input_target_commit_oid: Some("target".into()),
-            prepared_commit_oid: Some("prepared-head".into()),
-            final_target_commit_oid: None,
-            target_head_valid: None,
-            conflict_summary: None,
-            created_at: Utc::now(),
-            completed_at: None,
-        }
+        ConvergenceBuilder::new(
+            ProjectId::from_uuid(Uuid::nil()),
+            ItemId::from_uuid(Uuid::nil()),
+            ItemRevisionId::from_uuid(Uuid::nil()),
+        )
+        .id(ingot_domain::ids::ConvergenceId::from_uuid(Uuid::nil()))
+        .source_head_commit_oid("prepared-head")
+        .input_target_commit_oid("target")
+        .prepared_commit_oid("prepared-head")
+        .build()
     }
 
     #[derive(Clone)]

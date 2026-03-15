@@ -24,3 +24,18 @@ tower-http = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+
+[dev-dependencies]
+ingot-domain = { workspace = true }
+ingot-git = { workspace = true }
+ingot-store-sqlite = { workspace = true }
+ingot-test-support = { workspace = true }
+ingot-usecases = { workspace = true }
+ingot-workflow = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+uuid = { workspace = true }

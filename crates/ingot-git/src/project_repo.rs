@@ -196,67 +196,17 @@ async fn git_clone_mirror(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use super::{ensure_mirror, project_repo_paths, sync_checkout_to_commit};
     use crate::commands::{current_head_ref, resolve_ref_oid};
     use ingot_domain::ids::ProjectId;
-
-    fn unique_temp_path(prefix: &str) -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before unix epoch")
-            .as_nanos();
-        let suffix = COUNTER.fetch_add(1, Ordering::SeqCst);
-        std::env::temp_dir().join(format!("{prefix}-{nanos}-{suffix}"))
-    }
-
-    fn git_sync(repo_path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(repo_path)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn git_output(repo_path: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(repo_path)
-            .output()
-            .expect("run git");
-        assert!(output.status.success(), "git {:?} failed", args);
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
-
-    fn temp_git_repo() -> PathBuf {
-        let repo_path = unique_temp_path("ingot-git-project-repo");
-        fs::create_dir_all(&repo_path).expect("create repo dir");
-        git_sync(&repo_path, &["init"]);
-        git_sync(&repo_path, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-        git_sync(&repo_path, &["config", "user.email", "ingot@example.com"]);
-        git_sync(&repo_path, &["config", "user.name", "Ingot Tests"]);
-        fs::write(repo_path.join("tracked.txt"), "base\n").expect("write tracked file");
-        git_sync(&repo_path, &["add", "tracked.txt"]);
-        git_sync(&repo_path, &["commit", "-m", "initial"]);
-        repo_path
-    }
+    use ingot_test_support::git::{
+        git_output, run_git as git_sync, temp_git_repo, unique_temp_path,
+    };
+    use std::fs;
 
     #[tokio::test]
     async fn ensure_mirror_preserves_daemon_refs_while_pruning_checkout_refs() {
-        let checkout_path = temp_git_repo();
+        let checkout_path = temp_git_repo("ingot-git-project-repo");
         let initial_head = git_output(&checkout_path, &["rev-parse", "HEAD"]);
         git_sync(&checkout_path, &["branch", "stale-branch"]);
         git_sync(&checkout_path, &["tag", "stale-tag"]);
@@ -333,7 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_checkout_to_commit_cleans_temporary_ref_when_sync_fails() {
-        let checkout_path = temp_git_repo();
+        let checkout_path = temp_git_repo("ingot-git-project-repo");
         let initial_head = git_output(&checkout_path, &["rev-parse", "HEAD"]);
 
         let state_root = unique_temp_path("ingot-git-project-repo-state");
