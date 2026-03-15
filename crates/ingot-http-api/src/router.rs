@@ -19,9 +19,7 @@ use ingot_domain::convergence::Convergence;
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::{Finding, FindingTriageState};
 use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
-use ingot_domain::ids::{
-    AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId,
-};
+use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::item::{
     ApprovalState, Classification, DoneReason, EscalationReason, Item, LifecycleState, OriginKind,
     Priority, ResolutionSource,
@@ -34,7 +32,8 @@ use ingot_domain::revision_context::RevisionContextSummary;
 use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
 use ingot_git::GitJobCompletionPort;
 use ingot_git::commands::{
-    current_branch_name, delete_ref, git, is_commit_reachable_from_any_ref, resolve_ref_oid,
+    check_ref_format, current_branch_name, delete_ref, git, is_commit_reachable_from_any_ref,
+    resolve_ref_oid, update_ref,
 };
 use ingot_git::commit::{
     ConvergenceCommitTrailers, abort_cherry_pick, cherry_pick_no_commit, commit_message,
@@ -66,6 +65,7 @@ use ingot_workspace::{
     WorkspaceError, ensure_authoring_workspace_state, provision_integration_workspace,
     provision_review_workspace, remove_workspace,
 };
+use tracing::warn;
 
 use crate::error::ApiError;
 
@@ -274,16 +274,14 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                     .iter()
                     .filter(|convergence| convergence.item_revision_id == revision.id)
                     .find(|convergence| {
-                        convergence.status
-                            == ingot_domain::convergence::ConvergenceStatus::Prepared
+                        convergence.status == ingot_domain::convergence::ConvergenceStatus::Prepared
                     })
                     .map(|convergence| convergence.id),
                 prepared_target_valid: convergences
                     .iter()
                     .filter(|convergence| convergence.item_revision_id == revision.id)
                     .find(|convergence| {
-                        convergence.status
-                            == ingot_domain::convergence::ConvergenceStatus::Prepared
+                        convergence.status == ingot_domain::convergence::ConvergenceStatus::Prepared
                     })
                     .and_then(|convergence| convergence.target_head_valid)
                     .unwrap_or(false),
@@ -385,10 +383,9 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 .get_revision(item.current_revision_id)
                 .await
                 .map_err(UseCaseError::Repository)?;
-            let teardown =
-                teardown_revision_lane_state(&state, &project, item.id, &revision)
-                    .await
-                    .map_err(api_to_usecase_error)?;
+            let teardown = teardown_revision_lane_state(&state, &project, item.id, &revision)
+                .await
+                .map_err(api_to_usecase_error)?;
             Ok(ingot_usecases::convergence::RejectApprovalTeardown {
                 has_cancelled_convergence: teardown.has_cancelled_convergence(),
                 has_cancelled_queue_entry: teardown.has_cancelled_queue_entry(),
@@ -427,53 +424,60 @@ impl ConvergenceCommandPort for HttpConvergencePort {
 }
 
 impl ConvergenceSystemActionPort for HttpConvergencePort {
-    fn load_system_action_projects(
+    async fn load_system_action_projects(
         &self,
-    ) -> impl std::future::Future<
-        Output = Result<Vec<ingot_usecases::convergence::SystemActionProjectState>, UseCaseError>,
-    > + Send {
-        async move { Err(UseCaseError::Internal("http convergence port does not load system actions".into())) }
+    ) -> Result<Vec<ingot_usecases::convergence::SystemActionProjectState>, UseCaseError> {
+        Err(UseCaseError::Internal(
+            "http convergence port does not load system actions".into(),
+        ))
     }
 
-    fn promote_queue_heads(
-        &self,
-        _project_id: ProjectId,
-    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
-        async move { Err(UseCaseError::Internal("http convergence port does not promote queue heads".into())) }
+    async fn promote_queue_heads(&self, _project_id: ProjectId) -> Result<(), UseCaseError> {
+        Err(UseCaseError::Internal(
+            "http convergence port does not promote queue heads".into(),
+        ))
     }
 
-    fn prepare_queue_head_convergence(
+    async fn prepare_queue_head_convergence(
         &self,
         _project: &Project,
         _state: &ingot_usecases::convergence::SystemActionItemState,
         _queue_entry: &ConvergenceQueueEntry,
-    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
-        async move { Err(UseCaseError::Internal("http convergence port does not prepare queue heads".into())) }
+    ) -> Result<(), UseCaseError> {
+        Err(UseCaseError::Internal(
+            "http convergence port does not prepare queue heads".into(),
+        ))
     }
 
-    fn invalidate_prepared_convergence(
+    async fn invalidate_prepared_convergence(
         &self,
         _project_id: ProjectId,
         _item_id: ItemId,
-    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
-        async move { Err(UseCaseError::Internal("http convergence port does not invalidate prepared convergence".into())) }
+    ) -> Result<(), UseCaseError> {
+        Err(UseCaseError::Internal(
+            "http convergence port does not invalidate prepared convergence".into(),
+        ))
     }
 
-    fn reconcile_checkout_sync_ready(
+    async fn reconcile_checkout_sync_ready(
         &self,
         _project: &Project,
         _item_id: ItemId,
         _revision: &ItemRevision,
-    ) -> impl std::future::Future<Output = Result<bool, UseCaseError>> + Send {
-        async move { Err(UseCaseError::Internal("http convergence port does not reconcile checkout sync".into())) }
+    ) -> Result<bool, UseCaseError> {
+        Err(UseCaseError::Internal(
+            "http convergence port does not reconcile checkout sync".into(),
+        ))
     }
 
-    fn auto_finalize_prepared_convergence(
+    async fn auto_finalize_prepared_convergence(
         &self,
         _project_id: ProjectId,
         _item_id: ItemId,
-    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
-        async move { Err(UseCaseError::Internal("http convergence port does not auto-finalize convergence".into())) }
+    ) -> Result<(), UseCaseError> {
+        Err(UseCaseError::Internal(
+            "http convergence port does not auto-finalize convergence".into(),
+        ))
     }
 }
 
@@ -1416,6 +1420,7 @@ async fn create_item(
             .as_deref()
             .unwrap_or(project.default_branch.as_str()),
     )?;
+    ensure_git_valid_target_ref(&target_ref).await?;
     let repo_path = paths.mirror_git_dir.as_path();
     let resolved_target_head = resolve_ref_oid(repo_path, &target_ref)
         .await
@@ -1424,9 +1429,9 @@ async fn create_item(
 
     let seed_commit_oid = if let Some(seed_commit_oid) = request.seed_commit_oid {
         ensure_reachable_seed(repo_path, "seed_commit_oid", &seed_commit_oid).await?;
-        seed_commit_oid
+        Some(seed_commit_oid)
     } else {
-        resolved_target_head.clone()
+        None
     };
 
     let seed_target_commit_oid = if let Some(seed_target_commit_oid) =
@@ -1769,7 +1774,7 @@ async fn resume_item(
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
     let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     let item_id = parse_id::<ItemId>(&item_id, "item")?;
-    state
+    let project = state
         .db
         .get_project(project_id)
         .await
@@ -1804,6 +1809,14 @@ async fn resume_item(
         serde_json::json!({}),
     )
     .await?;
+    if let Err(error) = auto_dispatch_projected_review_job_locked(&state, &project, item.id).await {
+        warn!(
+            ?error,
+            project_id = %project_id,
+            item_id = %item.id,
+            "projected review auto-dispatch failed after resume"
+        );
+    }
     let detail = load_item_detail(&state, project_id, item.id).await?;
     Ok(Json(detail))
 }
@@ -2009,14 +2022,66 @@ async fn dispatch_item_job(
         &convergences,
         command,
     )?;
+    let mut precreated_authoring_workspace = None;
+    let pending_investigation_ref = bind_dispatch_subjects_if_needed(
+        &state,
+        &project,
+        &current_revision,
+        &jobs,
+        &mut job,
+        &mut precreated_authoring_workspace,
+    )
+    .await?;
 
-    state.db.create_job(&job).await.map_err(repo_to_internal)?;
+    if let Err(error) = state.db.create_job(&job).await {
+        cleanup_failed_dispatch_side_effects(
+            &state,
+            &project,
+            precreated_authoring_workspace.as_ref(),
+            pending_investigation_ref
+                .as_ref()
+                .map(|pending| pending.ref_name.as_str()),
+        )
+        .await;
+        return Err(repo_to_internal(error));
+    }
+    apply_pending_investigation_ref_or_cleanup(
+        &state,
+        &project,
+        job.id,
+        pending_investigation_ref.as_ref(),
+        precreated_authoring_workspace.as_ref(),
+    )
+    .await?;
 
-    if job.workspace_kind == WorkspaceKind::Authoring {
+    if let Some(workspace) = precreated_authoring_workspace {
+        link_job_to_workspace_or_cleanup(
+            &state,
+            &project,
+            &mut job,
+            workspace,
+            pending_investigation_ref.as_ref(),
+            true,
+        )
+        .await?;
+    } else if job.workspace_kind == WorkspaceKind::Authoring {
+        let had_existing_workspace = state
+            .db
+            .find_authoring_workspace_for_revision(current_revision.id)
+            .await
+            .map_err(repo_to_internal)?
+            .is_some();
         let workspace =
             ensure_authoring_workspace(&state, &project, &current_revision, &job).await?;
-        job.workspace_id = Some(workspace.id);
-        state.db.update_job(&job).await.map_err(repo_to_internal)?;
+        link_job_to_workspace_or_cleanup(
+            &state,
+            &project,
+            &mut job,
+            workspace,
+            pending_investigation_ref.as_ref(),
+            !had_existing_workspace,
+        )
+        .await?;
     }
     append_activity(
         &state,
@@ -2031,7 +2096,364 @@ async fn dispatch_item_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
+fn investigation_ref_name(job_id: JobId) -> String {
+    format!("refs/ingot/investigations/{job_id}")
+}
+
+fn should_fill_candidate_subject_from_workspace(step_id: &str) -> bool {
+    matches!(
+        step_id,
+        step::REVIEW_INCREMENTAL_INITIAL
+            | step::REVIEW_CANDIDATE_INITIAL
+            | step::REVIEW_CANDIDATE_REPAIR
+            | step::VALIDATE_CANDIDATE_INITIAL
+            | step::VALIDATE_CANDIDATE_REPAIR
+            | step::REVIEW_AFTER_INTEGRATION_REPAIR
+            | step::VALIDATE_AFTER_INTEGRATION_REPAIR
+            | step::INVESTIGATE_ITEM
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingInvestigationRef {
+    ref_name: String,
+    commit_oid: String,
+}
+
+async fn bind_dispatch_subjects_if_needed(
+    state: &AppState,
+    project: &Project,
+    revision: &ItemRevision,
+    jobs: &[Job],
+    job: &mut Job,
+    precreated_authoring_workspace: &mut Option<Workspace>,
+) -> Result<Option<PendingInvestigationRef>, ApiError> {
+    let paths = refresh_project_mirror(state, project).await?;
+    let repo_path = paths.mirror_git_dir.as_path();
+
+    if job.workspace_kind == WorkspaceKind::Authoring
+        && job.execution_permission == ingot_domain::job::ExecutionPermission::MayMutate
+        && job.job_input.head_commit_oid().is_none()
+    {
+        let resolved_head = resolve_ref_oid(repo_path, &revision.target_ref)
+            .await
+            .map_err(git_to_internal)?
+            .ok_or_else(|| UseCaseError::TargetRefUnresolved(revision.target_ref.clone()))?;
+        job.job_input = ingot_domain::job::JobInput::authoring_head(resolved_head);
+        let workspace = ensure_authoring_workspace(state, project, revision, job).await?;
+        *precreated_authoring_workspace = Some(workspace);
+        return Ok(None);
+    }
+
+    let mut base_commit_oid = job.job_input.base_commit_oid().map(ToOwned::to_owned);
+    let mut head_commit_oid = job.job_input.head_commit_oid().map(ToOwned::to_owned);
+
+    if should_fill_candidate_subject_from_workspace(&job.step_id) {
+        if base_commit_oid.is_none() {
+            base_commit_oid = effective_authoring_base_commit_oid(state, revision).await?;
+        }
+        if head_commit_oid.is_none() {
+            head_commit_oid =
+                current_authoring_head_for_revision_with_workspace(state, revision, jobs).await?;
+        }
+        if let (Some(base_commit_oid), Some(head_commit_oid)) =
+            (base_commit_oid.clone(), head_commit_oid.clone())
+        {
+            job.job_input =
+                ingot_domain::job::JobInput::candidate_subject(base_commit_oid, head_commit_oid);
+            return Ok(None);
+        }
+    }
+
+    if job.step_id == step::INVESTIGATE_ITEM
+        && (base_commit_oid.is_none() || head_commit_oid.is_none())
+    {
+        if let Some(seed_commit_oid) = revision.seed_commit_oid.clone() {
+            job.job_input = ingot_domain::job::JobInput::candidate_subject(
+                seed_commit_oid.clone(),
+                seed_commit_oid,
+            );
+            return Ok(None);
+        }
+
+        let resolved_head = resolve_ref_oid(repo_path, &revision.target_ref)
+            .await
+            .map_err(git_to_internal)?
+            .ok_or_else(|| UseCaseError::TargetRefUnresolved(revision.target_ref.clone()))?;
+        let ref_name = investigation_ref_name(job.id);
+        job.job_input = ingot_domain::job::JobInput::candidate_subject(
+            resolved_head.clone(),
+            resolved_head.clone(),
+        );
+        return Ok(Some(PendingInvestigationRef {
+            ref_name,
+            commit_oid: resolved_head,
+        }));
+    }
+
+    if should_fill_candidate_subject_from_workspace(&job.step_id)
+        && !(base_commit_oid.is_some() && head_commit_oid.is_some())
+    {
+        return Err(UseCaseError::IllegalStepDispatch(format!(
+            "Incomplete candidate subject for step: {}",
+            job.step_id
+        ))
+        .into());
+    }
+
+    Ok(None)
+}
+
+async fn apply_pending_investigation_ref_or_cleanup(
+    state: &AppState,
+    project: &Project,
+    job_id: JobId,
+    pending_investigation_ref: Option<&PendingInvestigationRef>,
+    precreated_authoring_workspace: Option<&Workspace>,
+) -> Result<(), ApiError> {
+    let Some(pending_investigation_ref) = pending_investigation_ref else {
+        return Ok(());
+    };
+    if let Err(error) = plan_and_apply_investigation_ref(
+        state,
+        project.id,
+        job_id.to_string(),
+        &pending_investigation_ref.ref_name,
+        &pending_investigation_ref.commit_oid,
+    )
+    .await
+    {
+        cleanup_failed_dispatch_side_effects(
+            state,
+            project,
+            precreated_authoring_workspace,
+            Some(&pending_investigation_ref.ref_name),
+        )
+        .await;
+        let _ = sqlx::query("DELETE FROM jobs WHERE id = ?")
+            .bind(job_id.to_string())
+            .execute(&state.db.pool)
+            .await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn link_job_to_workspace_or_cleanup(
+    state: &AppState,
+    project: &Project,
+    job: &mut Job,
+    workspace: Workspace,
+    investigation_ref_name: Option<&PendingInvestigationRef>,
+    cleanup_workspace_on_failure: bool,
+) -> Result<(), ApiError> {
+    job.workspace_id = Some(workspace.id);
+    if let Err(error) = state.db.update_job(job).await {
+        cleanup_failed_dispatch_side_effects(
+            state,
+            project,
+            cleanup_workspace_on_failure.then_some(&workspace),
+            investigation_ref_name.map(|pending| pending.ref_name.as_str()),
+        )
+        .await;
+        let _ = sqlx::query("DELETE FROM jobs WHERE id = ?")
+            .bind(job.id.to_string())
+            .execute(&state.db.pool)
+            .await;
+        return Err(repo_to_internal(error));
+    }
+    Ok(())
+}
+
+async fn cleanup_failed_dispatch_side_effects(
+    state: &AppState,
+    project: &Project,
+    precreated_authoring_workspace: Option<&Workspace>,
+    investigation_ref_name: Option<&str>,
+) {
+    let mirror_paths = refresh_project_mirror(state, project).await.ok();
+
+    if let Some(workspace) = precreated_authoring_workspace {
+        if let Some(paths) = mirror_paths.as_ref() {
+            let _ = ingot_workspace::remove_workspace(
+                paths.mirror_git_dir.as_path(),
+                FsPath::new(&workspace.path),
+            )
+            .await;
+            if let Some(workspace_ref) = workspace.workspace_ref.as_deref() {
+                let _ = delete_ref(paths.mirror_git_dir.as_path(), workspace_ref).await;
+            }
+        }
+        let _ = sqlx::query("DELETE FROM workspaces WHERE id = ?")
+            .bind(workspace.id.to_string())
+            .execute(&state.db.pool)
+            .await;
+    }
+
+    if let Some(ref_name) = investigation_ref_name {
+        if let Some(paths) = mirror_paths.as_ref() {
+            let _ = delete_ref(paths.mirror_git_dir.as_path(), ref_name).await;
+        }
+        let _ = sqlx::query(
+            "DELETE FROM git_operations WHERE operation_kind = 'create_investigation_ref' AND ref_name = ?",
+        )
+        .bind(ref_name)
+        .execute(&state.db.pool)
+        .await;
+    }
+}
+
+async fn plan_and_apply_investigation_ref(
+    state: &AppState,
+    project_id: ProjectId,
+    entity_id: String,
+    ref_name: &str,
+    commit_oid: &str,
+) -> Result<(), ApiError> {
+    let mut operation = GitOperation {
+        id: ingot_domain::ids::GitOperationId::new(),
+        project_id,
+        operation_kind: OperationKind::CreateInvestigationRef,
+        entity_type: GitEntityType::Job,
+        entity_id,
+        workspace_id: None,
+        ref_name: Some(ref_name.into()),
+        expected_old_oid: None,
+        new_oid: Some(commit_oid.into()),
+        commit_oid: Some(commit_oid.into()),
+        status: GitOperationStatus::Planned,
+        metadata: None,
+        created_at: Utc::now(),
+        completed_at: None,
+    };
+    state
+        .db
+        .create_git_operation(&operation)
+        .await
+        .map_err(repo_to_internal)?;
+    append_activity(
+        state,
+        project_id,
+        ActivityEventType::GitOperationPlanned,
+        "git_operation",
+        operation.id,
+        serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
+    )
+    .await?;
+    let project = state
+        .db
+        .get_project(project_id)
+        .await
+        .map_err(repo_to_project)?;
+    let paths = refresh_project_mirror(state, &project).await?;
+    update_ref(paths.mirror_git_dir.as_path(), ref_name, commit_oid)
+        .await
+        .map_err(git_to_internal)?;
+    operation.status = GitOperationStatus::Applied;
+    operation.completed_at = Some(Utc::now());
+    state
+        .db
+        .update_git_operation(&operation)
+        .await
+        .map_err(repo_to_internal)?;
+    Ok(())
+}
+
+async fn maybe_cleanup_investigation_ref(
+    state: &AppState,
+    project_id: ProjectId,
+    finding: &Finding,
+) -> Result<(), ApiError> {
+    if finding.source_step_id != step::INVESTIGATE_ITEM
+        || finding.source_subject_kind != ingot_domain::finding::FindingSubjectKind::Candidate
+    {
+        return Ok(());
+    }
+
+    let remaining_unresolved = state
+        .db
+        .list_findings_by_item(finding.source_item_id)
+        .await
+        .map_err(repo_to_internal)?
+        .into_iter()
+        .any(|candidate| {
+            candidate.source_job_id == finding.source_job_id
+                && candidate.triage_state.is_unresolved()
+        });
+    if remaining_unresolved {
+        return Ok(());
+    }
+
+    let ref_name = investigation_ref_name(finding.source_job_id);
+    let project = state
+        .db
+        .get_project(project_id)
+        .await
+        .map_err(repo_to_project)?;
+    let paths = refresh_project_mirror(state, &project).await?;
+    let existing_oid = resolve_ref_oid(paths.mirror_git_dir.as_path(), &ref_name)
+        .await
+        .map_err(git_to_internal)?;
+    let Some(existing_oid) = existing_oid else {
+        return Ok(());
+    };
+
+    let mut operation = GitOperation {
+        id: ingot_domain::ids::GitOperationId::new(),
+        project_id,
+        operation_kind: OperationKind::RemoveInvestigationRef,
+        entity_type: GitEntityType::Job,
+        entity_id: finding.source_job_id.to_string(),
+        workspace_id: None,
+        ref_name: Some(ref_name.clone()),
+        expected_old_oid: Some(existing_oid),
+        new_oid: None,
+        commit_oid: None,
+        status: GitOperationStatus::Planned,
+        metadata: None,
+        created_at: Utc::now(),
+        completed_at: None,
+    };
+    state
+        .db
+        .create_git_operation(&operation)
+        .await
+        .map_err(repo_to_internal)?;
+    append_activity(
+        state,
+        project_id,
+        ActivityEventType::GitOperationPlanned,
+        "git_operation",
+        operation.id,
+        serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
+    )
+    .await?;
+    delete_ref(paths.mirror_git_dir.as_path(), &ref_name)
+        .await
+        .map_err(git_to_internal)?;
+    operation.status = GitOperationStatus::Applied;
+    operation.completed_at = Some(Utc::now());
+    state
+        .db
+        .update_git_operation(&operation)
+        .await
+        .map_err(repo_to_internal)?;
+    Ok(())
+}
+
 async fn auto_dispatch_projected_review_job(
+    state: &AppState,
+    project: &Project,
+    item_id: ItemId,
+) -> Result<Option<Job>, ApiError> {
+    let _guard = state
+        .project_locks
+        .acquire_project_mutation(project.id)
+        .await;
+    auto_dispatch_projected_review_job_locked(state, project, item_id).await
+}
+
+async fn auto_dispatch_projected_review_job_locked(
     state: &AppState,
     project: &Project,
     item_id: ItemId,
@@ -2070,7 +2492,7 @@ async fn auto_dispatch_projected_review_job(
         return Ok(None);
     }
 
-    let job = dispatch_job(
+    let mut job = dispatch_job(
         &item,
         &current_revision,
         &jobs,
@@ -2080,7 +2502,36 @@ async fn auto_dispatch_projected_review_job(
             step_id: Some(step_id.to_string()),
         },
     )?;
-    state.db.create_job(&job).await.map_err(repo_to_internal)?;
+    let mut precreated_authoring_workspace = None;
+    let pending_investigation_ref = bind_dispatch_subjects_if_needed(
+        state,
+        project,
+        &current_revision,
+        &jobs,
+        &mut job,
+        &mut precreated_authoring_workspace,
+    )
+    .await?;
+    if let Err(error) = state.db.create_job(&job).await {
+        cleanup_failed_dispatch_side_effects(
+            state,
+            project,
+            precreated_authoring_workspace.as_ref(),
+            pending_investigation_ref
+                .as_ref()
+                .map(|pending| pending.ref_name.as_str()),
+        )
+        .await;
+        return Err(repo_to_internal(error));
+    }
+    apply_pending_investigation_ref_or_cleanup(
+        state,
+        project,
+        job.id,
+        pending_investigation_ref.as_ref(),
+        precreated_authoring_workspace.as_ref(),
+    )
+    .await?;
     append_activity(
         state,
         project.id,
@@ -2155,12 +2606,64 @@ async fn retry_item_job(
         &convergences,
         &previous_job,
     )?;
-    state.db.create_job(&job).await.map_err(repo_to_internal)?;
-    if job.workspace_kind == WorkspaceKind::Authoring {
+    let mut precreated_authoring_workspace = None;
+    let pending_investigation_ref = bind_dispatch_subjects_if_needed(
+        &state,
+        &project,
+        &current_revision,
+        &jobs,
+        &mut job,
+        &mut precreated_authoring_workspace,
+    )
+    .await?;
+    if let Err(error) = state.db.create_job(&job).await {
+        cleanup_failed_dispatch_side_effects(
+            &state,
+            &project,
+            precreated_authoring_workspace.as_ref(),
+            pending_investigation_ref
+                .as_ref()
+                .map(|pending| pending.ref_name.as_str()),
+        )
+        .await;
+        return Err(repo_to_internal(error));
+    }
+    apply_pending_investigation_ref_or_cleanup(
+        &state,
+        &project,
+        job.id,
+        pending_investigation_ref.as_ref(),
+        precreated_authoring_workspace.as_ref(),
+    )
+    .await?;
+    if let Some(workspace) = precreated_authoring_workspace {
+        link_job_to_workspace_or_cleanup(
+            &state,
+            &project,
+            &mut job,
+            workspace,
+            pending_investigation_ref.as_ref(),
+            true,
+        )
+        .await?;
+    } else if job.workspace_kind == WorkspaceKind::Authoring {
+        let had_existing_workspace = state
+            .db
+            .find_authoring_workspace_for_revision(current_revision.id)
+            .await
+            .map_err(repo_to_internal)?
+            .is_some();
         let workspace =
             ensure_authoring_workspace(&state, &project, &current_revision, &job).await?;
-        job.workspace_id = Some(workspace.id);
-        state.db.update_job(&job).await.map_err(repo_to_internal)?;
+        link_job_to_workspace_or_cleanup(
+            &state,
+            &project,
+            &mut job,
+            workspace,
+            pending_investigation_ref.as_ref(),
+            !had_existing_workspace,
+        )
+        .await?;
     }
     append_activity(
         &state,
@@ -2773,6 +3276,7 @@ async fn apply_finding_triage(
         &applied.finding,
     )
     .await?;
+    maybe_cleanup_investigation_ref(state, source_item.project_id, &applied.finding).await?;
 
     append_activity(
         state,
@@ -2787,7 +3291,19 @@ async fn apply_finding_triage(
         }),
     )
     .await?;
-    auto_dispatch_projected_review_job(state, &project, source_item.id).await?;
+    if step::is_closure_relevant_review_step(&applied.finding.source_step_id) {
+        if let Err(error) =
+            auto_dispatch_projected_review_job_locked(state, &project, source_item.id).await
+        {
+            warn!(
+                ?error,
+                project_id = %source_item.project_id,
+                item_id = %source_item.id,
+                finding_id = %applied.finding.id,
+                "projected review auto-dispatch failed after finding triage"
+            );
+        }
+    }
 
     Ok(applied)
 }
@@ -3002,6 +3518,15 @@ async fn complete_job(
             serde_json::json!({ "job_id": job.id }),
         )
         .await?;
+    }
+    if let Err(error) = auto_dispatch_projected_review_job(&state, &project, item.id).await {
+        warn!(
+            ?error,
+            project_id = %project.id,
+            item_id = %item.id,
+            job_id = %job.id,
+            "projected review auto-dispatch failed after job completion"
+        );
     }
 
     Ok(Json(CompleteJobResponse {
@@ -3223,18 +3748,24 @@ async fn refresh_revision_context_for_job_like(
         .list_jobs_by_item(item.id)
         .await
         .map_err(repo_to_internal)?;
-    let authoring_head_commit_oid = current_authoring_head_for_revision(&jobs, revision);
-    let changed_paths = changed_paths_between(
-        repo_path,
-        &revision.seed_commit_oid,
-        &authoring_head_commit_oid,
-    )
-    .await
-    .map_err(git_to_internal)?;
+    let authoring_head_commit_oid =
+        current_authoring_head_for_revision_with_workspace(state, revision, &jobs).await?;
+    let authoring_base_commit_oid = effective_authoring_base_commit_oid(state, revision).await?;
+    let changed_paths = if let (Some(base_commit_oid), Some(head_commit_oid)) = (
+        authoring_base_commit_oid.as_deref(),
+        authoring_head_commit_oid.as_deref(),
+    ) {
+        changed_paths_between(repo_path, base_commit_oid, head_commit_oid)
+            .await
+            .map_err(git_to_internal)?
+    } else {
+        Vec::new()
+    };
     let context = rebuild_revision_context(
         item,
         revision,
         &jobs,
+        authoring_head_commit_oid,
         changed_paths,
         jobs.first().map(|job| job.id),
         Utc::now(),
@@ -3739,8 +4270,10 @@ async fn teardown_revision_lane_state(
                         .push(operation.id.to_string());
                 }
                 OperationKind::CreateJobCommit
+                | OperationKind::CreateInvestigationRef
                 | OperationKind::ResetWorkspace
-                | OperationKind::RemoveWorkspaceRef => {}
+                | OperationKind::RemoveWorkspaceRef
+                | OperationKind::RemoveInvestigationRef => {}
             }
         }
     }
@@ -3815,6 +4348,7 @@ async fn build_superseding_revision(
             .as_deref()
             .unwrap_or(current_revision.target_ref.as_str()),
     )?;
+    ensure_git_valid_target_ref(&target_ref).await?;
     let paths = refresh_project_mirror(state, project).await?;
     let repo_path = paths.mirror_git_dir.as_path();
     let derived_target_head = resolve_ref_oid(repo_path, &target_ref)
@@ -3824,9 +4358,11 @@ async fn build_superseding_revision(
 
     let seed_commit_oid = if let Some(seed_commit_oid) = request.seed_commit_oid {
         ensure_reachable_seed(repo_path, "seed_commit_oid", &seed_commit_oid).await?;
-        seed_commit_oid
+        Some(seed_commit_oid)
     } else {
-        current_authoring_head_for_revision(jobs, current_revision)
+        current_authoring_head_for_revision_with_workspace(state, current_revision, jobs)
+            .await?
+            .or_else(|| current_revision.seed_commit_oid.clone())
     };
     let seed_target_commit_oid = if let Some(seed_target_commit_oid) =
         request.seed_target_commit_oid
@@ -4060,8 +4596,15 @@ async fn prepare_convergence_workspace(
     )
     .await?;
 
+    let source_base_commit_oid = effective_authoring_base_commit_oid(state, revision)
+        .await?
+        .ok_or_else(|| {
+            ApiError::UseCase(UseCaseError::Internal(
+                "convergence requires a bound authoring base commit".into(),
+            ))
+        })?;
     let source_commit_oids =
-        list_commits_oldest_first(repo_path, &revision.seed_commit_oid, source_head_commit_oid)
+        list_commits_oldest_first(repo_path, &source_base_commit_oid, source_head_commit_oid)
             .await
             .map_err(git_to_internal)?;
     operation.metadata = Some(serde_json::json!({
@@ -4149,7 +4692,8 @@ async fn prepare_convergence_workspace(
                 let _ = state.db.update_convergence(&convergence).await;
 
                 let mut escalated_item = item.clone();
-                escalated_item.escalation_state = ingot_domain::item::EscalationState::OperatorRequired;
+                escalated_item.escalation_state =
+                    ingot_domain::item::EscalationState::OperatorRequired;
                 escalated_item.escalation_reason = Some(EscalationReason::StepFailed);
                 escalated_item.updated_at = Utc::now();
                 let _ = state.db.update_item(&escalated_item).await;
@@ -4209,7 +4753,8 @@ async fn prepare_convergence_workspace(
                 let _ = state.db.update_convergence(&convergence).await;
 
                 let mut escalated_item = item.clone();
-                escalated_item.escalation_state = ingot_domain::item::EscalationState::OperatorRequired;
+                escalated_item.escalation_state =
+                    ingot_domain::item::EscalationState::OperatorRequired;
                 escalated_item.escalation_reason = Some(EscalationReason::StepFailed);
                 escalated_item.updated_at = Utc::now();
                 let _ = state.db.update_item(&escalated_item).await;
@@ -4245,8 +4790,11 @@ async fn prepare_convergence_workspace(
             }
         };
         if let Some(workspace_ref) = integration_workspace.workspace_ref.as_deref() {
-            if let Err(error) =
-                ingot_git::commands::git(repo_path, &["update-ref", workspace_ref, &next_prepared_tip]).await
+            if let Err(error) = ingot_git::commands::git(
+                repo_path,
+                &["update-ref", workspace_ref, &next_prepared_tip],
+            )
+            .await
             {
                 integration_workspace.status = ingot_domain::workspace::WorkspaceStatus::Error;
                 integration_workspace.updated_at = Utc::now();
@@ -4258,7 +4806,8 @@ async fn prepare_convergence_workspace(
                 let _ = state.db.update_convergence(&convergence).await;
 
                 let mut escalated_item = item.clone();
-                escalated_item.escalation_state = ingot_domain::item::EscalationState::OperatorRequired;
+                escalated_item.escalation_state =
+                    ingot_domain::item::EscalationState::OperatorRequired;
                 escalated_item.escalation_reason = Some(EscalationReason::StepFailed);
                 escalated_item.updated_at = Utc::now();
                 let _ = state.db.update_item(&escalated_item).await;
@@ -4395,6 +4944,16 @@ async fn refresh_project_mirror(
     Ok(paths)
 }
 
+pub(crate) async fn ensure_git_valid_target_ref(target_ref: &str) -> Result<(), ApiError> {
+    match check_ref_format(target_ref)
+        .await
+        .map_err(git_to_internal)?
+    {
+        true => Ok(()),
+        false => Err(UseCaseError::InvalidTargetRef(target_ref.into()).into()),
+    }
+}
+
 pub(crate) fn parse_config_approval_policy(
     config: &IngotConfig,
 ) -> Result<ApprovalPolicy, ApiError> {
@@ -4432,6 +4991,7 @@ pub(crate) async fn resolve_default_branch(
     };
 
     let target_ref = normalize_target_ref(&branch)?;
+    ensure_git_valid_target_ref(&target_ref).await?;
     let resolved = resolve_ref_oid(repo_path, &target_ref)
         .await
         .map_err(|error| ApiError::BadRequest {
@@ -4731,7 +5291,7 @@ fn is_closure_relevant_job(job: &Job) -> bool {
     )
 }
 
-fn current_authoring_head_for_revision(jobs: &[Job], revision: &ItemRevision) -> String {
+fn current_authoring_head_for_revision(jobs: &[Job], revision: &ItemRevision) -> Option<String> {
     jobs.iter()
         .filter(|job| job.item_revision_id == revision.id)
         .filter(|job| job.status == JobStatus::Completed)
@@ -4743,7 +5303,40 @@ fn current_authoring_head_for_revision(jobs: &[Job], revision: &ItemRevision) ->
         })
         .max_by_key(|(sort_key, _)| *sort_key)
         .map(|(_, commit_oid)| commit_oid)
-        .unwrap_or_else(|| revision.seed_commit_oid.clone())
+        .or_else(|| revision.seed_commit_oid.clone())
+}
+
+async fn current_authoring_head_for_revision_with_workspace(
+    state: &AppState,
+    revision: &ItemRevision,
+    jobs: &[Job],
+) -> Result<Option<String>, ApiError> {
+    if let Some(commit_oid) = current_authoring_head_for_revision(jobs, revision) {
+        return Ok(Some(commit_oid));
+    }
+
+    Ok(state
+        .db
+        .find_authoring_workspace_for_revision(revision.id)
+        .await
+        .map_err(repo_to_internal)?
+        .and_then(|workspace| workspace.head_commit_oid))
+}
+
+async fn effective_authoring_base_commit_oid(
+    state: &AppState,
+    revision: &ItemRevision,
+) -> Result<Option<String>, ApiError> {
+    if let Some(seed_commit_oid) = revision.seed_commit_oid.clone() {
+        return Ok(Some(seed_commit_oid));
+    }
+
+    Ok(state
+        .db
+        .find_authoring_workspace_for_revision(revision.id)
+        .await
+        .map_err(repo_to_internal)?
+        .and_then(|workspace| workspace.base_commit_oid))
 }
 
 #[cfg(test)]
@@ -4757,6 +5350,7 @@ mod tests {
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
+    use chrono::DateTime;
     use chrono::Utc;
     use ingot_domain::activity::ActivityEventType;
     use ingot_domain::convergence::{Convergence, ConvergenceStatus, ConvergenceStrategy};
@@ -4768,25 +5362,33 @@ mod tests {
         ConvergenceId, FindingId, GitOperationId, ItemId, ItemRevisionId, JobId, ProjectId,
         WorkspaceId,
     };
-    use ingot_domain::job::{JobStatus, OutcomeClass};
+    use ingot_domain::job::{
+        ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass,
+        OutputArtifactKind, PhaseKind,
+    };
     use ingot_domain::ports::RepositoryError;
     use ingot_domain::project::Project;
+    use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
     use ingot_git::GitJobCompletionPort;
+    use ingot_git::commands::resolve_ref_oid;
     use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
     use ingot_store_sqlite::Database;
     use ingot_usecases::{CompleteJobService, ProjectLocks, UseCaseError};
+    use ingot_workflow::step;
     use tower::ServiceExt;
     use uuid::Uuid;
 
     use crate::error::ApiError;
 
     use super::{
-        AppState, FsPath, build_router, build_router_with_project_locks_and_state_root,
-        HttpConvergencePort, compute_target_head_valid, ensure_finding_subject_reachable,
-        failure_status, parse_id, repo_to_job_expiration, repo_to_job_failure, repo_to_project,
+        AppState, FsPath, HttpConvergencePort, bind_dispatch_subjects_if_needed, build_router,
+        build_router_with_project_locks_and_state_root, cleanup_failed_dispatch_side_effects,
+        compute_target_head_valid, ensure_finding_subject_reachable, failure_status,
+        link_job_to_workspace_or_cleanup, parse_id, repo_to_job_expiration, repo_to_job_failure,
+        repo_to_project,
     };
     use ingot_domain::item::{
-        ApprovalState, Classification, Item, LifecycleState, OriginKind, Priority,
+        ApprovalState, Classification, Item, LifecycleState, OriginKind, ParkingState, Priority,
     };
     use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
     use ingot_usecases::convergence::ConvergenceCommandPort;
@@ -4812,6 +5414,187 @@ mod tests {
             .await
             .expect("compute stale validity");
         assert_eq!(stale, Some(false));
+    }
+
+    fn test_job(step_id: &str, output_artifact_kind: OutputArtifactKind) -> Job {
+        Job {
+            id: JobId::from_uuid(Uuid::now_v7()),
+            project_id: ProjectId::from_uuid(Uuid::nil()),
+            item_id: ItemId::from_uuid(Uuid::nil()),
+            item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
+            step_id: step_id.into(),
+            semantic_attempt_no: 1,
+            retry_no: 0,
+            supersedes_job_id: None,
+            status: JobStatus::Queued,
+            outcome_class: None,
+            phase_kind: PhaseKind::Author,
+            workspace_id: None,
+            workspace_kind: WorkspaceKind::Authoring,
+            execution_permission: ExecutionPermission::MayMutate,
+            context_policy: ContextPolicy::Fresh,
+            phase_template_slug: "author-initial".into(),
+            phase_template_digest: None,
+            prompt_snapshot: None,
+            job_input: ingot_domain::job::JobInput::authoring_head("head"),
+            output_artifact_kind,
+            output_commit_oid: None,
+            result_schema_version: None,
+            result_payload: None,
+            agent_id: None,
+            process_pid: None,
+            lease_owner_id: None,
+            heartbeat_at: None,
+            lease_expires_at: None,
+            error_code: None,
+            error_message: None,
+            created_at: Utc::now(),
+            started_at: None,
+            ended_at: None,
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestJobInput<'a> {
+        None,
+        AuthoringHead(&'a str),
+        CandidateSubject(&'a str, &'a str),
+        IntegratedSubject(&'a str, &'a str),
+    }
+
+    struct TestJobInsert<'a> {
+        id: &'a str,
+        project_id: &'a str,
+        item_id: &'a str,
+        item_revision_id: &'a str,
+        step_id: &'a str,
+        semantic_attempt_no: u32,
+        retry_no: u32,
+        supersedes_job_id: Option<&'a str>,
+        status: JobStatus,
+        outcome_class: Option<OutcomeClass>,
+        phase_kind: PhaseKind,
+        workspace_id: Option<&'a str>,
+        workspace_kind: WorkspaceKind,
+        execution_permission: ExecutionPermission,
+        context_policy: ContextPolicy,
+        phase_template_slug: &'a str,
+        output_artifact_kind: OutputArtifactKind,
+        job_input: TestJobInput<'a>,
+        output_commit_oid: Option<&'a str>,
+        result_schema_version: Option<&'a str>,
+        result_payload: Option<serde_json::Value>,
+        error_code: Option<&'a str>,
+        error_message: Option<&'a str>,
+        created_at: &'a str,
+        started_at: Option<&'a str>,
+        ended_at: Option<&'a str>,
+    }
+
+    impl<'a> TestJobInsert<'a> {
+        fn new(
+            id: &'a str,
+            project_id: &'a str,
+            item_id: &'a str,
+            item_revision_id: &'a str,
+            step_id: &'a str,
+        ) -> Self {
+            Self {
+                id,
+                project_id,
+                item_id,
+                item_revision_id,
+                step_id,
+                semantic_attempt_no: 1,
+                retry_no: 0,
+                supersedes_job_id: None,
+                status: JobStatus::Queued,
+                outcome_class: None,
+                phase_kind: PhaseKind::Author,
+                workspace_id: None,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "template",
+                output_artifact_kind: OutputArtifactKind::None,
+                job_input: TestJobInput::None,
+                output_commit_oid: None,
+                result_schema_version: None,
+                result_payload: None,
+                error_code: None,
+                error_message: None,
+                created_at: "2026-03-12T00:00:00Z",
+                started_at: None,
+                ended_at: None,
+            }
+        }
+    }
+
+    fn parse_test_ts(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .expect("parse timestamp")
+            .with_timezone(&Utc)
+    }
+
+    fn into_test_job_input(input: TestJobInput<'_>) -> JobInput {
+        match input {
+            TestJobInput::None => JobInput::None,
+            TestJobInput::AuthoringHead(head_commit_oid) => JobInput::authoring_head(head_commit_oid),
+            TestJobInput::CandidateSubject(base_commit_oid, head_commit_oid) => {
+                JobInput::candidate_subject(base_commit_oid, head_commit_oid)
+            }
+            TestJobInput::IntegratedSubject(base_commit_oid, head_commit_oid) => {
+                JobInput::integrated_subject(base_commit_oid, head_commit_oid)
+            }
+        }
+    }
+
+    async fn insert_test_job_row(db: &Database, row: TestJobInsert<'_>) {
+        let job = Job {
+            id: parse_id(row.id, "job").expect("parse job id"),
+            project_id: parse_id(row.project_id, "project").expect("parse project id"),
+            item_id: parse_id(row.item_id, "item").expect("parse item id"),
+            item_revision_id: parse_id(row.item_revision_id, "revision")
+                .expect("parse revision id"),
+            step_id: row.step_id.into(),
+            semantic_attempt_no: row.semantic_attempt_no,
+            retry_no: row.retry_no,
+            supersedes_job_id: row
+                .supersedes_job_id
+                .map(|id| parse_id(id, "job"))
+                .transpose()
+                .expect("parse supersedes job id"),
+            status: row.status,
+            outcome_class: row.outcome_class,
+            phase_kind: row.phase_kind,
+            workspace_id: row
+                .workspace_id
+                .map(|id| parse_id(id, "workspace"))
+                .transpose()
+                .expect("parse workspace id"),
+            workspace_kind: row.workspace_kind,
+            execution_permission: row.execution_permission,
+            context_policy: row.context_policy,
+            phase_template_slug: row.phase_template_slug.into(),
+            phase_template_digest: None,
+            prompt_snapshot: None,
+            job_input: into_test_job_input(row.job_input),
+            output_artifact_kind: row.output_artifact_kind,
+            output_commit_oid: row.output_commit_oid.map(ToOwned::to_owned),
+            result_schema_version: row.result_schema_version.map(ToOwned::to_owned),
+            result_payload: row.result_payload,
+            agent_id: None,
+            process_pid: None,
+            lease_owner_id: None,
+            heartbeat_at: None,
+            lease_expires_at: None,
+            error_code: row.error_code.map(ToOwned::to_owned),
+            error_message: row.error_message.map(ToOwned::to_owned),
+            created_at: parse_test_ts(row.created_at),
+            started_at: row.started_at.map(parse_test_ts),
+            ended_at: row.ended_at.map(parse_test_ts),
+        };
+        db.create_job(&job).await.expect("insert test job");
     }
 
     #[tokio::test]
@@ -4899,23 +5682,29 @@ mod tests {
         .execute(&db.pool)
         .await
         .expect("insert revision");
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, outcome_class, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid,
-                created_at, ended_at
-             ) VALUES (?, ?, ?, ?, 'validate_integrated', 1, 0, 'completed', 'findings', 'validate', 'integration', 'must_not_mutate', 'resume_context', 'validate-integrated', 'validation_report', ?, ?, '2026-03-12T00:00:00Z', '2026-03-12T00:01:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: job_id,
+                project_id,
+                item_id,
+                item_revision_id: revision_id,
+                step_id: "validate_integrated",
+                status: JobStatus::Completed,
+                outcome_class: Some(OutcomeClass::Findings),
+                phase_kind: PhaseKind::Validate,
+                workspace_kind: WorkspaceKind::Integration,
+                execution_permission: ExecutionPermission::MustNotMutate,
+                context_policy: ContextPolicy::ResumeContext,
+                phase_template_slug: "validate-integrated",
+                output_artifact_kind: OutputArtifactKind::ValidationReport,
+                job_input: TestJobInput::IntegratedSubject(&head, &head),
+                created_at: "2026-03-12T00:00:00Z",
+                ended_at: Some("2026-03-12T00:01:00Z"),
+                ..TestJobInsert::new(job_id, project_id, item_id, revision_id, "validate_integrated")
+            },
         )
-        .bind(job_id)
-        .bind(project_id)
-        .bind(item_id)
-        .bind(revision_id)
-        .bind(&head)
-        .bind(&head)
-        .execute(&db.pool)
-        .await
-        .expect("insert job");
+        .await;
         sqlx::query(
             "INSERT INTO workspaces (
                 id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
@@ -4995,6 +5784,14 @@ mod tests {
                 .await
                 .expect("load approval state");
         assert_eq!(approval_state, "pending");
+        let queued_review_jobs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE item_id = ? AND phase_kind = 'review' AND status = 'queued'",
+        )
+        .bind(item_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count queued review jobs");
+        assert_eq!(queued_review_jobs, 0);
     }
 
     #[tokio::test]
@@ -5048,23 +5845,29 @@ mod tests {
         .execute(&db.pool)
         .await
         .expect("insert revision");
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, outcome_class, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid,
-                created_at, ended_at
-             ) VALUES (?, ?, ?, ?, 'review_candidate_initial', 1, 0, 'completed', 'findings', 'review', 'review', 'must_not_mutate', 'fresh', 'review-candidate', 'review_report', ?, ?, '2026-03-12T00:00:00Z', '2026-03-12T00:01:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: job_id,
+                project_id,
+                item_id,
+                item_revision_id: revision_id,
+                step_id: "review_candidate_initial",
+                status: JobStatus::Completed,
+                outcome_class: Some(OutcomeClass::Findings),
+                phase_kind: PhaseKind::Review,
+                workspace_kind: WorkspaceKind::Review,
+                execution_permission: ExecutionPermission::MustNotMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "review-candidate",
+                output_artifact_kind: OutputArtifactKind::ReviewReport,
+                job_input: TestJobInput::CandidateSubject(&head, &head),
+                created_at: "2026-03-12T00:00:00Z",
+                ended_at: Some("2026-03-12T00:01:00Z"),
+                ..TestJobInsert::new(job_id, project_id, item_id, revision_id, "review_candidate_initial")
+            },
         )
-        .bind(job_id)
-        .bind(project_id)
-        .bind(item_id)
-        .bind(revision_id)
-        .bind(&head)
-        .bind(&head)
-        .execute(&db.pool)
-        .await
-        .expect("insert job");
+        .await;
         sqlx::query(
             "INSERT INTO findings (
                 id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
@@ -5158,23 +5961,29 @@ mod tests {
         .execute(&db.pool)
         .await
         .expect("insert revision");
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, outcome_class, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid,
-                created_at, ended_at
-             ) VALUES (?, ?, ?, ?, 'review_candidate_initial', 1, 0, 'completed', 'findings', 'review', 'review', 'must_not_mutate', 'fresh', 'review-candidate', 'review_report', ?, ?, '2026-03-12T00:00:00Z', '2026-03-12T00:01:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: job_id,
+                project_id,
+                item_id,
+                item_revision_id: revision_id,
+                step_id: "review_candidate_initial",
+                status: JobStatus::Completed,
+                outcome_class: Some(OutcomeClass::Findings),
+                phase_kind: PhaseKind::Review,
+                workspace_kind: WorkspaceKind::Review,
+                execution_permission: ExecutionPermission::MustNotMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "review-candidate",
+                output_artifact_kind: OutputArtifactKind::ReviewReport,
+                job_input: TestJobInput::CandidateSubject(&head, &head),
+                created_at: "2026-03-12T00:00:00Z",
+                ended_at: Some("2026-03-12T00:01:00Z"),
+                ..TestJobInsert::new(job_id, project_id, item_id, revision_id, "review_candidate_initial")
+            },
         )
-        .bind(job_id)
-        .bind(project_id)
-        .bind(item_id)
-        .bind(revision_id)
-        .bind(&head)
-        .bind(&head)
-        .execute(&db.pool)
-        .await
-        .expect("insert job");
+        .await;
         sqlx::query(
             "INSERT INTO findings (
                 id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
@@ -5326,8 +6135,16 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        state.db.create_project(&project_a).await.expect("project a");
-        state.db.create_project(&project_b).await.expect("project b");
+        state
+            .db
+            .create_project(&project_a)
+            .await
+            .expect("project a");
+        state
+            .db
+            .create_project(&project_b)
+            .await
+            .expect("project b");
 
         let item = Item {
             id: ItemId::new(),
@@ -5362,7 +6179,7 @@ mod tests {
             approval_policy: ApprovalPolicy::Required,
             policy_snapshot: serde_json::json!({}),
             template_map_snapshot: serde_json::json!({}),
-            seed_commit_oid: git_output(&repo_b, &["rev-parse", "HEAD"]),
+            seed_commit_oid: Some(git_output(&repo_b, &["rev-parse", "HEAD"])),
             seed_target_commit_oid: Some(git_output(&repo_b, &["rev-parse", "HEAD"])),
             supersedes_revision_id: None,
             created_at: Utc::now(),
@@ -6048,7 +6865,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_item_route_derives_initial_revision_from_target_head() {
+    async fn create_item_route_derives_initial_revision_with_null_seed_commit() {
         let repo = temp_git_repo();
         let seed_head = git_output(&repo, &["rev-parse", "HEAD"]);
         let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
@@ -6097,7 +6914,11 @@ mod tests {
             Some("refs/heads/main")
         );
         assert_eq!(
-            json["current_revision"]["seed_commit_oid"].as_str(),
+            json["current_revision"]["seed_commit_oid"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            json["current_revision"]["seed_target_commit_oid"].as_str(),
             Some(seed_head.as_str())
         );
         assert_eq!(
@@ -6285,6 +7106,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_route_auto_dispatches_projected_review_job() {
+        let repo = temp_git_repo();
+        let seed_head = git_output(&repo, &["rev-parse", "HEAD"]);
+        write_file(&repo.join("tracked.txt"), "authored change");
+        git(&repo, &["add", "tracked.txt"]);
+        git(&repo, &["commit", "-m", "authored change"]);
+        let authored_head = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        let project_id = "prj_00000000000000000000000000000058".to_string();
+        let item_id = "itm_00000000000000000000000000000058".to_string();
+        let revision_id = "rev_00000000000000000000000000000058".to_string();
+        let author_job_id = "job_00000000000000000000000000000058".to_string();
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'deferred', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(&seed_head)
+        .bind(&seed_head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &author_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "author_initial",
+                status: JobStatus::Completed,
+                outcome_class: Some(OutcomeClass::Clean),
+                phase_kind: PhaseKind::Author,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "author-initial",
+                output_artifact_kind: OutputArtifactKind::Commit,
+                job_input: TestJobInput::AuthoringHead(&seed_head),
+                output_commit_oid: Some(&authored_head),
+                created_at: "2026-03-12T00:00:00Z",
+                started_at: Some("2026-03-12T00:00:00Z"),
+                ended_at: Some("2026-03-12T00:01:00Z"),
+                ..TestJobInsert::new(&author_job_id, &project_id, &item_id, &revision_id, "author_initial")
+            },
+        )
+        .await;
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/items/{item_id}/resume"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("resume route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("resume body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("resume json");
+        assert_eq!(json["item"]["parking_state"].as_str(), Some("active"));
+
+        let queued_review: (String, String, String) = sqlx::query_as(
+            "SELECT step_id, input_base_commit_oid, input_head_commit_oid
+             FROM jobs
+             WHERE item_id = ? AND step_id = 'review_incremental_initial' AND status = 'queued'",
+        )
+        .bind(&item_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("queued review job");
+        assert_eq!(queued_review.0, "review_incremental_initial");
+        assert_eq!(queued_review.1, seed_head);
+        assert_eq!(queued_review.2, authored_head);
+    }
+
+    #[tokio::test]
     async fn defer_route_cancels_lane_head_and_clears_granted() {
         let repo = temp_git_repo();
         let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
@@ -6348,21 +7280,28 @@ mod tests {
         .execute(&db.pool)
         .await
         .expect("insert workspace");
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, phase_kind, workspace_id, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_head_commit_oid, created_at
-             ) VALUES (?, ?, ?, ?, 'author_initial', 1, 0, 'running', 'author', 'wrk_00000000000000000000000000000056', 'authoring', 'may_mutate', 'fresh', 'author-initial', 'commit', ?, '2026-03-12T00:00:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &running_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "author_initial",
+                status: JobStatus::Running,
+                phase_kind: PhaseKind::Author,
+                workspace_id: Some("wrk_00000000000000000000000000000056"),
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "author-initial",
+                output_artifact_kind: OutputArtifactKind::Commit,
+                job_input: TestJobInput::AuthoringHead(&head),
+                created_at: "2026-03-12T00:00:00Z",
+                ..TestJobInsert::new(&running_job_id, &project_id, &item_id, &revision_id, "author_initial")
+            },
         )
-        .bind(&running_job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .bind(&head)
-        .execute(&db.pool)
-        .await
-        .expect("insert running job");
+        .await;
         sqlx::query(
             "INSERT INTO convergence_queue_entries (
                 id, project_id, item_id, item_revision_id, target_ref, status, head_acquired_at,
@@ -6607,21 +7546,28 @@ mod tests {
         .execute(&db.pool)
         .await
         .expect("insert source workspace");
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, phase_kind, workspace_id, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_head_commit_oid, created_at
-             ) VALUES (?, ?, ?, ?, 'author_initial', 1, 0, 'running', 'author', 'wrk_00000000000000000000000000000057', 'authoring', 'may_mutate', 'fresh', 'author-initial', 'commit', ?, '2026-03-12T00:00:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &running_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "author_initial",
+                status: JobStatus::Running,
+                phase_kind: PhaseKind::Author,
+                workspace_id: Some("wrk_00000000000000000000000000000057"),
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "author-initial",
+                output_artifact_kind: OutputArtifactKind::Commit,
+                job_input: TestJobInput::AuthoringHead(&head),
+                created_at: "2026-03-12T00:00:00Z",
+                ..TestJobInsert::new(&running_job_id, &project_id, &item_id, &revision_id, "author_initial")
+            },
         )
-        .bind(&running_job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .bind(&head)
-        .execute(&db.pool)
-        .await
-        .expect("insert running job");
+        .await;
         sqlx::query(
             "INSERT INTO convergences (
                 id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
@@ -7218,7 +8164,11 @@ mod tests {
         assert_eq!(json["status"].as_str(), Some("queued"));
         assert_eq!(json["phase_template_slug"].as_str(), Some("author-initial"));
         assert_eq!(
-            json["input_head_commit_oid"].as_str(),
+            json["job_input"]["kind"].as_str(),
+            Some("authoring_head")
+        );
+        assert_eq!(
+            json["job_input"]["head_commit_oid"].as_str(),
             Some(seed_head.as_str())
         );
         let workspace_id = json["workspace_id"]
@@ -7273,6 +8223,1284 @@ mod tests {
         assert_eq!(
             git_output(&PathBuf::from(workspace_path), &["rev-parse", "HEAD"]),
             seed_head
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_item_job_route_binds_implicit_author_initial_from_target_head() {
+        let repo = temp_git_repo();
+        let target_head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+
+        let project_id = "prj_00000000000000000000000000000091".to_string();
+        let item_id = "itm_00000000000000000000000000000091".to_string();
+        let revision_id = "rev_00000000000000000000000000000091".to_string();
+        let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
+        let state_root =
+            std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{\"author_initial\":\"author-initial\"}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(Option::<String>::None)
+        .bind(&target_head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+
+        let app = build_router_with_project_locks_and_state_root(
+            db.clone(),
+            ProjectLocks::default(),
+            state_root.clone(),
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/items/{item_id}/jobs"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .expect("build dispatch request"),
+            )
+            .await
+            .expect("dispatch route response");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("dispatch json");
+        let workspace_id = json["workspace_id"].as_str().expect("workspace id");
+
+        assert_eq!(json["step_id"].as_str(), Some("author_initial"));
+        assert_eq!(
+            json["job_input"]["kind"].as_str(),
+            Some("authoring_head")
+        );
+        assert_eq!(
+            json["job_input"]["head_commit_oid"].as_str(),
+            Some(target_head.as_str())
+        );
+
+        let paths = project_repo_paths(state_root.as_path(), project_uuid, &repo);
+        ensure_mirror(&paths).await.expect("ensure mirror");
+        let detail_response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/items/{item_id}"))
+                    .body(Body::empty())
+                    .expect("build detail request"),
+            )
+            .await
+            .expect("detail response");
+        let detail_body = to_bytes(detail_response.into_body(), usize::MAX)
+            .await
+            .expect("detail body");
+        let detail_json: serde_json::Value =
+            serde_json::from_slice(&detail_body).expect("detail json");
+        assert_eq!(
+            detail_json["workspaces"][0]["id"].as_str(),
+            Some(workspace_id)
+        );
+        assert_eq!(
+            detail_json["workspaces"][0]["base_commit_oid"].as_str(),
+            Some(target_head.as_str())
+        );
+        assert_eq!(
+            detail_json["workspaces"][0]["head_commit_oid"].as_str(),
+            Some(target_head.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_route_implicit_revision_queues_incremental_review_from_bound_workspace_base() {
+        let repo = temp_git_repo();
+        let bound_base = git_output(&repo, &["rev-parse", "HEAD"]);
+        write_file(&repo.join("tracked.txt"), "authored change");
+        git(&repo, &["add", "tracked.txt"]);
+        git(&repo, &["commit", "-m", "authored change"]);
+        let authored_head = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        let project_id = "prj_00000000000000000000000000000094".to_string();
+        let item_id = "itm_00000000000000000000000000000094".to_string();
+        let revision_id = "rev_00000000000000000000000000000094".to_string();
+        let author_job_id = "job_00000000000000000000000000000094".to_string();
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'deferred', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(Option::<String>::None)
+        .bind(&bound_base)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+        sqlx::query(
+            "INSERT INTO workspaces (
+                id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
+                target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
+                status, current_job_id, created_at, updated_at
+             ) VALUES ('wrk_00000000000000000000000000000094', ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', 'refs/ingot/workspaces/wrk_00000000000000000000000000000094', ?, ?, 'persistent', 'ready', NULL, '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.join("auth-ws").display().to_string())
+        .bind(&revision_id)
+        .bind(&bound_base)
+        .bind(&authored_head)
+        .execute(&db.pool)
+        .await
+        .expect("insert authoring workspace");
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &author_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "author_initial",
+                status: JobStatus::Completed,
+                outcome_class: Some(OutcomeClass::Clean),
+                phase_kind: PhaseKind::Author,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "author-initial",
+                output_artifact_kind: OutputArtifactKind::Commit,
+                job_input: TestJobInput::AuthoringHead(&bound_base),
+                output_commit_oid: Some(&authored_head),
+                created_at: "2026-03-12T00:00:00Z",
+                started_at: Some("2026-03-12T00:00:00Z"),
+                ended_at: Some("2026-03-12T00:01:00Z"),
+                ..TestJobInsert::new(
+                    &author_job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "author_initial",
+                )
+            },
+        )
+        .await;
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{project_id}/items/{item_id}/resume"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("resume route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let queued_review: (String, String, String) = sqlx::query_as(
+            "SELECT step_id, input_base_commit_oid, input_head_commit_oid
+             FROM jobs
+             WHERE item_id = ? AND step_id = 'review_incremental_initial' AND status = 'queued'",
+        )
+        .bind(&item_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("queued review job");
+        assert_eq!(queued_review.0, "review_incremental_initial");
+        assert_eq!(queued_review.1, bound_base);
+        assert_eq!(queued_review.2, authored_head);
+    }
+
+    #[tokio::test]
+    async fn investigate_item_dispatch_creates_and_triage_removes_anchor_ref() {
+        let repo = temp_git_repo();
+        let target_head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+
+        let project_id = "prj_00000000000000000000000000000092".to_string();
+        let item_id = "itm_00000000000000000000000000000092".to_string();
+        let revision_id = "rev_00000000000000000000000000000092".to_string();
+        let finding_id = "fnd_00000000000000000000000000000092".to_string();
+        let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
+        let state_root =
+            std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(Option::<String>::None)
+        .bind(&target_head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+
+        let app = build_router_with_project_locks_and_state_root(
+            db.clone(),
+            ProjectLocks::default(),
+            state_root.clone(),
+        );
+        let dispatch_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/items/{item_id}/jobs"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{\"step_id\":\"investigate_item\"}"))
+                    .expect("build dispatch request"),
+            )
+            .await
+            .expect("dispatch response");
+        assert_eq!(dispatch_response.status(), StatusCode::CREATED);
+        let dispatch_body = to_bytes(dispatch_response.into_body(), usize::MAX)
+            .await
+            .expect("dispatch body");
+        let dispatch_json: serde_json::Value =
+            serde_json::from_slice(&dispatch_body).expect("dispatch json");
+        let job_id = dispatch_json["id"].as_str().expect("job id");
+        assert_eq!(
+            dispatch_json["job_input"]["kind"].as_str(),
+            Some("candidate_subject")
+        );
+        assert_eq!(
+            dispatch_json["job_input"]["base_commit_oid"].as_str(),
+            Some(target_head.as_str())
+        );
+        assert_eq!(
+            dispatch_json["job_input"]["head_commit_oid"].as_str(),
+            Some(target_head.as_str())
+        );
+
+        let paths = project_repo_paths(state_root.as_path(), project_uuid, &repo);
+        ensure_mirror(&paths).await.expect("ensure mirror");
+        let investigation_ref = format!("refs/ingot/investigations/{job_id}");
+        assert_eq!(
+            resolve_ref_oid(paths.mirror_git_dir.as_path(), &investigation_ref)
+                .await
+                .expect("resolve investigation ref")
+                .as_deref(),
+            Some(target_head.as_str())
+        );
+
+        sqlx::query(
+            "INSERT INTO findings (
+                id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
+                source_report_schema_version, source_finding_key, source_subject_kind,
+                source_subject_base_commit_oid, source_subject_head_commit_oid, code, severity,
+                summary, paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
+             ) VALUES (?, ?, ?, ?, ?, 'investigate_item', 'finding_report:v1', 'finding-1', 'candidate', ?, ?, 'BUG001', 'medium', 'summary', '[]', '[]', 'untriaged', NULL, NULL, '2026-03-12T00:00:00Z', NULL)",
+        )
+        .bind(&finding_id)
+        .bind(&project_id)
+        .bind(&item_id)
+        .bind(&revision_id)
+        .bind(job_id)
+        .bind(&target_head)
+        .bind(&target_head)
+        .execute(&db.pool)
+        .await
+        .expect("insert finding");
+
+        let triage_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/findings/{finding_id}/triage"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        "{\"triage_state\":\"dismissed_invalid\",\"triage_note\":\"not actionable\"}",
+                    ))
+                    .expect("build triage request"),
+            )
+            .await
+            .expect("triage response");
+        assert_eq!(triage_response.status(), StatusCode::OK);
+        assert_eq!(
+            resolve_ref_oid(paths.mirror_git_dir.as_path(), &investigation_ref)
+                .await
+                .expect("resolve deleted investigation ref"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn investigate_item_dispatch_uses_existing_authoring_workspace_subject() {
+        let repo = temp_git_repo();
+        let bound_base = git_output(&repo, &["rev-parse", "HEAD"]);
+        write_file(&repo.join("tracked.txt"), "bound workspace change");
+        git(&repo, &["add", "tracked.txt"]);
+        git(&repo, &["commit", "-m", "bound workspace change"]);
+        let bound_head = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+
+        let project_id = "prj_00000000000000000000000000000093".to_string();
+        let item_id = "itm_00000000000000000000000000000093".to_string();
+        let revision_id = "rev_00000000000000000000000000000093".to_string();
+        let workspace_id = "wrk_00000000000000000000000000000093".to_string();
+        let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
+        let state_root =
+            std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
+        let paths = project_repo_paths(state_root.as_path(), project_uuid, &repo);
+        ensure_mirror(&paths).await.expect("ensure mirror");
+        git(
+            &paths.mirror_git_dir,
+            &[
+                "update-ref",
+                &format!("refs/ingot/workspaces/{workspace_id}"),
+                &bound_head,
+            ],
+        );
+        let workspace_path = state_root.join("bound-workspace");
+        git(
+            &paths.mirror_git_dir,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                workspace_path.to_str().expect("workspace path"),
+                &format!("refs/ingot/workspaces/{workspace_id}"),
+            ],
+        );
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(Option::<String>::None)
+        .bind(&bound_base)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+        sqlx::query(
+            "INSERT INTO workspaces (
+                id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
+                target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
+                status, current_job_id, created_at, updated_at
+             ) VALUES (?, ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', ?, ?, ?, 'persistent', 'ready', NULL, '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&workspace_id)
+        .bind(&project_id)
+        .bind(workspace_path.display().to_string())
+        .bind(&revision_id)
+        .bind(format!("refs/ingot/workspaces/{workspace_id}"))
+        .bind(&bound_base)
+        .bind(&bound_head)
+        .execute(&db.pool)
+        .await
+        .expect("insert workspace");
+
+        let app = build_router_with_project_locks_and_state_root(
+            db.clone(),
+            ProjectLocks::default(),
+            state_root.clone(),
+        );
+        let dispatch_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{project_id}/items/{item_id}/jobs"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{\"step_id\":\"investigate_item\"}"))
+                    .expect("build dispatch request"),
+            )
+            .await
+            .expect("dispatch response");
+        assert_eq!(dispatch_response.status(), StatusCode::CREATED);
+        let dispatch_body = to_bytes(dispatch_response.into_body(), usize::MAX)
+            .await
+            .expect("dispatch body");
+        let dispatch_json: serde_json::Value =
+            serde_json::from_slice(&dispatch_body).expect("dispatch json");
+        let job_id = dispatch_json["id"].as_str().expect("job id");
+
+        assert_eq!(
+            dispatch_json["job_input"]["kind"].as_str(),
+            Some("candidate_subject")
+        );
+        assert_eq!(
+            dispatch_json["job_input"]["base_commit_oid"].as_str(),
+            Some(bound_base.as_str())
+        );
+        assert_eq!(
+            dispatch_json["job_input"]["head_commit_oid"].as_str(),
+            Some(bound_head.as_str())
+        );
+        assert_eq!(
+            resolve_ref_oid(
+                paths.mirror_git_dir.as_path(),
+                &format!("refs/ingot/investigations/{job_id}")
+            )
+            .await
+            .expect("resolve no investigation ref"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_dispatch_subjects_if_needed_does_not_persist_investigation_ref_before_job_creation()
+     {
+        let repo = temp_git_repo();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let state = test_app_state().await;
+        let project = test_project(repo.clone());
+        state
+            .db
+            .create_project(&project)
+            .await
+            .expect("create project");
+
+        let revision = ItemRevision {
+            id: ItemRevisionId::from_uuid(Uuid::now_v7()),
+            item_id: ItemId::from_uuid(Uuid::now_v7()),
+            revision_no: 1,
+            title: "Title".into(),
+            description: "Desc".into(),
+            acceptance_criteria: "AC".into(),
+            target_ref: "refs/heads/main".into(),
+            approval_policy: ApprovalPolicy::Required,
+            policy_snapshot: serde_json::json!({}),
+            template_map_snapshot: serde_json::json!({}),
+            seed_commit_oid: None,
+            seed_target_commit_oid: Some(head.clone()),
+            supersedes_revision_id: None,
+            created_at: Utc::now(),
+        };
+        let mut job = test_job(step::INVESTIGATE_ITEM, OutputArtifactKind::FindingReport);
+        job.project_id = project.id;
+        job.item_revision_id = revision.id;
+        job.workspace_kind = WorkspaceKind::Review;
+        job.execution_permission = ExecutionPermission::MustNotMutate;
+        job.phase_kind = PhaseKind::Investigate;
+        job.job_input = ingot_domain::job::JobInput::None;
+
+        let mut precreated_authoring_workspace = None;
+        let pending_investigation_ref = bind_dispatch_subjects_if_needed(
+            &state,
+            &project,
+            &revision,
+            &[],
+            &mut job,
+            &mut precreated_authoring_workspace,
+        )
+        .await
+        .expect("bind dispatch subjects");
+
+        let pending_investigation_ref =
+            pending_investigation_ref.expect("expected pending investigation ref");
+        assert!(precreated_authoring_workspace.is_none());
+        assert_eq!(job.job_input.base_commit_oid(), Some(head.as_str()));
+        assert_eq!(job.job_input.head_commit_oid(), Some(head.as_str()));
+
+        let paths = project_repo_paths(state.state_root.as_path(), project.id, &repo);
+        ensure_mirror(&paths).await.expect("ensure mirror");
+        assert_eq!(
+            resolve_ref_oid(
+                paths.mirror_git_dir.as_path(),
+                &pending_investigation_ref.ref_name
+            )
+            .await
+            .expect("resolve investigation ref"),
+            None
+        );
+        let operation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM git_operations WHERE operation_kind = 'create_investigation_ref' AND ref_name = ?",
+        )
+        .bind(&pending_investigation_ref.ref_name)
+        .fetch_one(&state.db.pool)
+        .await
+        .expect("git operation count");
+        assert_eq!(operation_count, 0);
+    }
+
+    #[tokio::test]
+    async fn bind_dispatch_subjects_if_needed_falls_back_when_workspace_subject_is_partial() {
+        let repo = temp_git_repo();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let state = test_app_state().await;
+        let project = test_project(repo.clone());
+        state
+            .db
+            .create_project(&project)
+            .await
+            .expect("create project");
+
+        let item = Item {
+            id: ItemId::from_uuid(Uuid::now_v7()),
+            project_id: project.id,
+            classification: Classification::Change,
+            workflow_version: "delivery:v1".into(),
+            lifecycle_state: LifecycleState::Open,
+            parking_state: ParkingState::Active,
+            done_reason: None,
+            resolution_source: None,
+            approval_state: ApprovalState::NotRequested,
+            escalation_state: ingot_domain::item::EscalationState::None,
+            escalation_reason: None,
+            current_revision_id: ItemRevisionId::from_uuid(Uuid::now_v7()),
+            origin_kind: OriginKind::Manual,
+            origin_finding_id: None,
+            priority: Priority::Major,
+            labels: vec![],
+            operator_notes: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            closed_at: None,
+        };
+        let revision = ItemRevision {
+            id: item.current_revision_id,
+            item_id: item.id,
+            revision_no: 1,
+            title: "Title".into(),
+            description: "Desc".into(),
+            acceptance_criteria: "AC".into(),
+            target_ref: "refs/heads/main".into(),
+            approval_policy: ApprovalPolicy::Required,
+            policy_snapshot: serde_json::json!({}),
+            template_map_snapshot: serde_json::json!({}),
+            seed_commit_oid: None,
+            seed_target_commit_oid: Some(head.clone()),
+            supersedes_revision_id: None,
+            created_at: Utc::now(),
+        };
+        state
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item with revision");
+        let partial_workspace = Workspace {
+            id: WorkspaceId::from_uuid(Uuid::now_v7()),
+            project_id: project.id,
+            kind: WorkspaceKind::Authoring,
+            strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
+            path: state
+                .state_root
+                .join(format!("partial-workspace-{}", Uuid::now_v7()))
+                .display()
+                .to_string(),
+            created_for_revision_id: Some(revision.id),
+            parent_workspace_id: None,
+            target_ref: Some("refs/heads/main".into()),
+            workspace_ref: Some(format!(
+                "refs/ingot/workspaces/{}",
+                WorkspaceId::from_uuid(Uuid::now_v7())
+            )),
+            base_commit_oid: Some(head.clone()),
+            head_commit_oid: None,
+            retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
+            status: WorkspaceStatus::Ready,
+            current_job_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state
+            .db
+            .create_workspace(&partial_workspace)
+            .await
+            .expect("create partial workspace");
+
+        let mut job = test_job(step::INVESTIGATE_ITEM, OutputArtifactKind::FindingReport);
+        job.project_id = project.id;
+        job.item_revision_id = revision.id;
+        job.workspace_kind = WorkspaceKind::Review;
+        job.execution_permission = ExecutionPermission::MustNotMutate;
+        job.phase_kind = PhaseKind::Investigate;
+        job.job_input = ingot_domain::job::JobInput::None;
+
+        let mut precreated_authoring_workspace = None;
+        let pending_investigation_ref = bind_dispatch_subjects_if_needed(
+            &state,
+            &project,
+            &revision,
+            &[],
+            &mut job,
+            &mut precreated_authoring_workspace,
+        )
+        .await
+        .expect("bind dispatch subjects");
+
+        let pending_investigation_ref =
+            pending_investigation_ref.expect("expected pending investigation ref");
+        assert!(precreated_authoring_workspace.is_none());
+        assert_eq!(job.job_input.base_commit_oid(), Some(head.as_str()));
+        assert_eq!(job.job_input.head_commit_oid(), Some(head.as_str()));
+
+        let paths = project_repo_paths(state.state_root.as_path(), project.id, &repo);
+        ensure_mirror(&paths).await.expect("ensure mirror");
+        assert_eq!(
+            resolve_ref_oid(
+                paths.mirror_git_dir.as_path(),
+                &pending_investigation_ref.ref_name
+            )
+            .await
+            .expect("resolve investigation ref"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_dispatch_subjects_if_needed_rejects_partial_review_subject() {
+        let repo = temp_git_repo();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let state = test_app_state().await;
+        let project = test_project(repo.clone());
+        state
+            .db
+            .create_project(&project)
+            .await
+            .expect("create project");
+
+        let item = Item {
+            id: ItemId::from_uuid(Uuid::now_v7()),
+            project_id: project.id,
+            classification: Classification::Change,
+            workflow_version: "delivery:v1".into(),
+            lifecycle_state: LifecycleState::Open,
+            parking_state: ParkingState::Active,
+            done_reason: None,
+            resolution_source: None,
+            approval_state: ApprovalState::NotRequested,
+            escalation_state: ingot_domain::item::EscalationState::None,
+            escalation_reason: None,
+            current_revision_id: ItemRevisionId::from_uuid(Uuid::now_v7()),
+            origin_kind: OriginKind::Manual,
+            origin_finding_id: None,
+            priority: Priority::Major,
+            labels: vec![],
+            operator_notes: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            closed_at: None,
+        };
+        let revision = ItemRevision {
+            id: item.current_revision_id,
+            item_id: item.id,
+            revision_no: 1,
+            title: "Title".into(),
+            description: "Desc".into(),
+            acceptance_criteria: "AC".into(),
+            target_ref: "refs/heads/main".into(),
+            approval_policy: ApprovalPolicy::Required,
+            policy_snapshot: serde_json::json!({}),
+            template_map_snapshot: serde_json::json!({}),
+            seed_commit_oid: None,
+            seed_target_commit_oid: Some(head.clone()),
+            supersedes_revision_id: None,
+            created_at: Utc::now(),
+        };
+        state
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item with revision");
+        let partial_workspace = Workspace {
+            id: WorkspaceId::from_uuid(Uuid::now_v7()),
+            project_id: project.id,
+            kind: WorkspaceKind::Authoring,
+            strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
+            path: state
+                .state_root
+                .join(format!("partial-review-workspace-{}", Uuid::now_v7()))
+                .display()
+                .to_string(),
+            created_for_revision_id: Some(revision.id),
+            parent_workspace_id: None,
+            target_ref: Some("refs/heads/main".into()),
+            workspace_ref: Some(format!(
+                "refs/ingot/workspaces/{}",
+                WorkspaceId::from_uuid(Uuid::now_v7())
+            )),
+            base_commit_oid: Some(head.clone()),
+            head_commit_oid: None,
+            retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
+            status: WorkspaceStatus::Ready,
+            current_job_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state
+            .db
+            .create_workspace(&partial_workspace)
+            .await
+            .expect("create partial workspace");
+
+        let mut job = test_job(
+            step::REVIEW_INCREMENTAL_INITIAL,
+            OutputArtifactKind::ReviewReport,
+        );
+        job.project_id = project.id;
+        job.item_revision_id = revision.id;
+        job.workspace_kind = WorkspaceKind::Review;
+        job.execution_permission = ExecutionPermission::MustNotMutate;
+        job.phase_kind = PhaseKind::Review;
+        job.job_input = ingot_domain::job::JobInput::None;
+
+        let mut precreated_authoring_workspace = None;
+        let result = bind_dispatch_subjects_if_needed(
+            &state,
+            &project,
+            &revision,
+            &[],
+            &mut job,
+            &mut precreated_authoring_workspace,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(ApiError::UseCase(UseCaseError::IllegalStepDispatch(message)))
+                if message.contains("Incomplete candidate subject")
+        ));
+    }
+
+    #[tokio::test]
+    async fn bind_dispatch_subjects_if_needed_rejects_review_subject_when_both_commits_are_missing()
+    {
+        let repo = temp_git_repo();
+        let state = test_app_state().await;
+        let project = test_project(repo.clone());
+        state
+            .db
+            .create_project(&project)
+            .await
+            .expect("create project");
+
+        let item = Item {
+            id: ItemId::from_uuid(Uuid::now_v7()),
+            project_id: project.id,
+            classification: Classification::Change,
+            workflow_version: "delivery:v1".into(),
+            lifecycle_state: LifecycleState::Open,
+            parking_state: ParkingState::Active,
+            done_reason: None,
+            resolution_source: None,
+            approval_state: ApprovalState::NotRequested,
+            escalation_state: ingot_domain::item::EscalationState::None,
+            escalation_reason: None,
+            current_revision_id: ItemRevisionId::from_uuid(Uuid::now_v7()),
+            origin_kind: OriginKind::Manual,
+            origin_finding_id: None,
+            priority: Priority::Major,
+            labels: vec![],
+            operator_notes: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            closed_at: None,
+        };
+        let revision = ItemRevision {
+            id: item.current_revision_id,
+            item_id: item.id,
+            revision_no: 1,
+            title: "Title".into(),
+            description: "Desc".into(),
+            acceptance_criteria: "AC".into(),
+            target_ref: "refs/heads/main".into(),
+            approval_policy: ApprovalPolicy::Required,
+            policy_snapshot: serde_json::json!({}),
+            template_map_snapshot: serde_json::json!({}),
+            seed_commit_oid: None,
+            seed_target_commit_oid: None,
+            supersedes_revision_id: None,
+            created_at: Utc::now(),
+        };
+        state
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item with revision");
+
+        let mut job = test_job(
+            step::REVIEW_CANDIDATE_INITIAL,
+            OutputArtifactKind::ReviewReport,
+        );
+        job.project_id = project.id;
+        job.item_revision_id = revision.id;
+        job.workspace_kind = WorkspaceKind::Review;
+        job.execution_permission = ExecutionPermission::MustNotMutate;
+        job.phase_kind = PhaseKind::Review;
+        job.job_input = ingot_domain::job::JobInput::None;
+
+        let mut precreated_authoring_workspace = None;
+        let result = bind_dispatch_subjects_if_needed(
+            &state,
+            &project,
+            &revision,
+            &[],
+            &mut job,
+            &mut precreated_authoring_workspace,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(ApiError::UseCase(UseCaseError::IllegalStepDispatch(message)))
+                if message.contains("Incomplete candidate subject")
+        ));
+    }
+
+    #[tokio::test]
+    async fn cleanup_failed_dispatch_side_effects_removes_workspace_and_investigation_ref() {
+        let repo = temp_git_repo();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let state = test_app_state().await;
+        let project = test_project(repo.clone());
+        state
+            .db
+            .create_project(&project)
+            .await
+            .expect("create project");
+
+        let paths = project_repo_paths(state.state_root.as_path(), project.id, &repo);
+        ensure_mirror(&paths).await.expect("ensure mirror");
+
+        let workspace_id = WorkspaceId::from_uuid(Uuid::now_v7());
+        let workspace_ref = format!("refs/ingot/workspaces/{workspace_id}");
+        git(
+            &paths.mirror_git_dir,
+            &["update-ref", &workspace_ref, &head],
+        );
+        let workspace_path = state
+            .state_root
+            .join(format!("cleanup-workspace-{}", Uuid::now_v7()));
+        git(
+            &paths.mirror_git_dir,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                workspace_path.to_str().expect("workspace path"),
+                &workspace_ref,
+            ],
+        );
+        let workspace = Workspace {
+            id: workspace_id,
+            project_id: project.id,
+            kind: WorkspaceKind::Authoring,
+            strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
+            path: workspace_path.display().to_string(),
+            created_for_revision_id: None,
+            parent_workspace_id: None,
+            target_ref: Some("refs/heads/main".into()),
+            workspace_ref: Some(workspace_ref.clone()),
+            base_commit_oid: Some(head.clone()),
+            head_commit_oid: Some(head.clone()),
+            retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
+            status: WorkspaceStatus::Ready,
+            current_job_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state
+            .db
+            .create_workspace(&workspace)
+            .await
+            .expect("create workspace row");
+
+        let investigation_ref = format!(
+            "refs/ingot/investigations/{}",
+            JobId::from_uuid(Uuid::now_v7())
+        );
+        git(
+            &paths.mirror_git_dir,
+            &["update-ref", &investigation_ref, &head],
+        );
+        state
+            .db
+            .create_git_operation(&GitOperation {
+                id: GitOperationId::new(),
+                project_id: project.id,
+                operation_kind: OperationKind::CreateInvestigationRef,
+                entity_type: GitEntityType::Job,
+                entity_id: JobId::from_uuid(Uuid::now_v7()).to_string(),
+                workspace_id: None,
+                ref_name: Some(investigation_ref.clone()),
+                expected_old_oid: None,
+                new_oid: Some(head.clone()),
+                commit_oid: Some(head.clone()),
+                status: GitOperationStatus::Applied,
+                metadata: None,
+                created_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+            })
+            .await
+            .expect("create git operation");
+
+        cleanup_failed_dispatch_side_effects(
+            &state,
+            &project,
+            Some(&workspace),
+            Some(&investigation_ref),
+        )
+        .await;
+
+        assert!(!workspace_path.exists(), "workspace path removed");
+        assert_eq!(
+            resolve_ref_oid(paths.mirror_git_dir.as_path(), &workspace_ref)
+                .await
+                .expect("resolve workspace ref"),
+            None
+        );
+        assert_eq!(
+            resolve_ref_oid(paths.mirror_git_dir.as_path(), &investigation_ref)
+                .await
+                .expect("resolve investigation ref"),
+            None
+        );
+        let workspace_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM workspaces WHERE id = ?")
+                .bind(workspace.id.to_string())
+                .fetch_one(&state.db.pool)
+                .await
+                .expect("workspace count");
+        assert_eq!(workspace_count, 0);
+        let op_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM git_operations WHERE operation_kind = 'create_investigation_ref' AND ref_name = ?",
+        )
+        .bind(&investigation_ref)
+        .fetch_one(&state.db.pool)
+        .await
+        .expect("operation count");
+        assert_eq!(op_count, 0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_failed_dispatch_side_effects_deletes_db_rows_when_mirror_refresh_fails() {
+        let state = test_app_state().await;
+        let missing_repo = state
+            .state_root
+            .join(format!("missing-repo-{}", Uuid::now_v7()));
+        let project = test_project(missing_repo);
+        state
+            .db
+            .create_project(&project)
+            .await
+            .expect("create project");
+
+        let workspace = Workspace {
+            id: WorkspaceId::from_uuid(Uuid::now_v7()),
+            project_id: project.id,
+            kind: WorkspaceKind::Authoring,
+            strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
+            path: state
+                .state_root
+                .join(format!("orphaned-workspace-{}", Uuid::now_v7()))
+                .display()
+                .to_string(),
+            created_for_revision_id: None,
+            parent_workspace_id: None,
+            target_ref: Some("refs/heads/main".into()),
+            workspace_ref: Some(format!(
+                "refs/ingot/workspaces/{}",
+                WorkspaceId::from_uuid(Uuid::now_v7())
+            )),
+            base_commit_oid: Some("deadbeef".repeat(5)),
+            head_commit_oid: Some("deadbeef".repeat(5)),
+            retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
+            status: WorkspaceStatus::Ready,
+            current_job_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state
+            .db
+            .create_workspace(&workspace)
+            .await
+            .expect("create workspace row");
+
+        let investigation_ref = format!(
+            "refs/ingot/investigations/{}",
+            JobId::from_uuid(Uuid::now_v7())
+        );
+        state
+            .db
+            .create_git_operation(&GitOperation {
+                id: GitOperationId::new(),
+                project_id: project.id,
+                operation_kind: OperationKind::CreateInvestigationRef,
+                entity_type: GitEntityType::Job,
+                entity_id: JobId::from_uuid(Uuid::now_v7()).to_string(),
+                workspace_id: None,
+                ref_name: Some(investigation_ref.clone()),
+                expected_old_oid: None,
+                new_oid: Some("deadbeef".repeat(5)),
+                commit_oid: Some("deadbeef".repeat(5)),
+                status: GitOperationStatus::Applied,
+                metadata: None,
+                created_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+            })
+            .await
+            .expect("create git operation");
+
+        cleanup_failed_dispatch_side_effects(
+            &state,
+            &project,
+            Some(&workspace),
+            Some(&investigation_ref),
+        )
+        .await;
+
+        let workspace_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM workspaces WHERE id = ?")
+                .bind(workspace.id.to_string())
+                .fetch_one(&state.db.pool)
+                .await
+                .expect("workspace count");
+        assert_eq!(workspace_count, 0);
+        let op_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM git_operations WHERE operation_kind = 'create_investigation_ref' AND ref_name = ?",
+        )
+        .bind(&investigation_ref)
+        .fetch_one(&state.db.pool)
+        .await
+        .expect("operation count");
+        assert_eq!(op_count, 0);
+    }
+
+    #[tokio::test]
+    async fn link_job_to_workspace_or_cleanup_deletes_job_row_on_update_failure() {
+        let repo = temp_git_repo();
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let state = test_app_state().await;
+        let project = test_project(repo.clone());
+        state
+            .db
+            .create_project(&project)
+            .await
+            .expect("create project");
+
+        let paths = project_repo_paths(state.state_root.as_path(), project.id, &repo);
+        ensure_mirror(&paths).await.expect("ensure mirror");
+        let item_id = ItemId::from_uuid(Uuid::now_v7());
+        let revision_id = ItemRevisionId::from_uuid(Uuid::now_v7());
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(item_id.to_string())
+        .bind(project.id.to_string())
+        .bind(revision_id.to_string())
+        .execute(&state.db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(revision_id.to_string())
+        .bind(item_id.to_string())
+        .bind(Some(head.clone()))
+        .bind(Some(head.clone()))
+        .execute(&state.db.pool)
+        .await
+        .expect("insert revision");
+        let workspace_id = WorkspaceId::from_uuid(Uuid::now_v7());
+        let workspace_ref = format!("refs/ingot/workspaces/{workspace_id}");
+        git(
+            &paths.mirror_git_dir,
+            &["update-ref", &workspace_ref, &head],
+        );
+        let workspace_path = state
+            .state_root
+            .join(format!("link-job-workspace-{}", Uuid::now_v7()));
+        git(
+            &paths.mirror_git_dir,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                workspace_path.to_str().expect("workspace path"),
+                &workspace_ref,
+            ],
+        );
+        let workspace = Workspace {
+            id: workspace_id,
+            project_id: project.id,
+            kind: WorkspaceKind::Authoring,
+            strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
+            path: workspace_path.display().to_string(),
+            created_for_revision_id: None,
+            parent_workspace_id: None,
+            target_ref: Some("refs/heads/main".into()),
+            workspace_ref: Some(workspace_ref.clone()),
+            base_commit_oid: Some(head.clone()),
+            head_commit_oid: Some(head.clone()),
+            retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
+            status: WorkspaceStatus::Ready,
+            current_job_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state
+            .db
+            .create_workspace(&workspace)
+            .await
+            .expect("create workspace row");
+
+        let mut job = test_job("author_initial", OutputArtifactKind::Commit);
+        job.project_id = project.id;
+        job.item_id = item_id;
+        job.item_revision_id = revision_id;
+        state.db.create_job(&job).await.expect("create job row");
+        sqlx::query("DELETE FROM jobs WHERE id = ?")
+            .bind(job.id.to_string())
+            .execute(&state.db.pool)
+            .await
+            .expect("delete job row");
+
+        let result = link_job_to_workspace_or_cleanup(
+            &state,
+            &project,
+            &mut job,
+            workspace.clone(),
+            None,
+            true,
+        )
+        .await;
+        assert!(result.is_err(), "update failure should propagate");
+        let workspace_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM workspaces WHERE id = ?")
+                .bind(workspace.id.to_string())
+                .fetch_one(&state.db.pool)
+                .await
+                .expect("workspace count");
+        assert_eq!(workspace_count, 0);
+        let job_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE id = ?")
+            .bind(job.id.to_string())
+            .fetch_one(&state.db.pool)
+            .await
+            .expect("job count");
+        assert_eq!(job_count, 0);
+        assert_eq!(
+            resolve_ref_oid(paths.mirror_git_dir.as_path(), &workspace_ref)
+                .await
+                .expect("resolve workspace ref"),
+            None
         );
     }
 
@@ -7461,46 +9689,74 @@ mod tests {
         .await
         .expect("insert source workspace");
 
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, outcome_class, phase_kind, workspace_id, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, output_commit_oid, created_at, ended_at
-             ) VALUES (?, ?, ?, ?, 'author_initial', 1, 0, 'completed', 'clean', 'author', ?, 'authoring', 'may_mutate', 'fresh', 'author-initial', 'commit', ?, '2026-03-12T00:00:00Z', '2026-03-12T00:05:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &author_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "author_initial",
+                status: JobStatus::Completed,
+                outcome_class: Some(OutcomeClass::Clean),
+                phase_kind: PhaseKind::Author,
+                workspace_id: Some(&workspace_id),
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "author-initial",
+                output_artifact_kind: OutputArtifactKind::Commit,
+                job_input: TestJobInput::None,
+                output_commit_oid: Some(&source_commit_oid),
+                created_at: "2026-03-12T00:00:00Z",
+                ended_at: Some("2026-03-12T00:05:00Z"),
+                ..TestJobInsert::new(
+                    &author_job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "author_initial",
+                )
+            },
         )
-        .bind(&author_job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .bind(&workspace_id)
-        .bind(&source_commit_oid)
-        .execute(&db.pool)
-        .await
-        .expect("insert author job");
+        .await;
 
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, outcome_class, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid,
-                result_schema_version, result_payload, created_at, ended_at
-             ) VALUES (?, ?, ?, ?, 'validate_candidate_initial', 1, 0, 'completed', 'clean', 'validate', 'authoring', 'must_not_mutate', 'resume_context', 'validate-candidate', 'validation_report', ?, ?, 'validation_report:v1', ?, '2026-03-12T00:06:00Z', '2026-03-12T00:07:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &validate_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "validate_candidate_initial",
+                status: JobStatus::Completed,
+                outcome_class: Some(OutcomeClass::Clean),
+                phase_kind: PhaseKind::Validate,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MustNotMutate,
+                context_policy: ContextPolicy::ResumeContext,
+                phase_template_slug: "validate-candidate",
+                output_artifact_kind: OutputArtifactKind::ValidationReport,
+                job_input: TestJobInput::CandidateSubject(&base_commit_oid, &source_commit_oid),
+                result_schema_version: Some("validation_report:v1"),
+                result_payload: Some(serde_json::json!({
+                    "outcome": "clean",
+                    "summary": "validation clean",
+                    "checks": [],
+                    "findings": []
+                })),
+                created_at: "2026-03-12T00:06:00Z",
+                ended_at: Some("2026-03-12T00:07:00Z"),
+                ..TestJobInsert::new(
+                    &validate_job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "validate_candidate_initial",
+                )
+            },
         )
-        .bind(&validate_job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .bind(&base_commit_oid)
-        .bind(&source_commit_oid)
-        .bind(serde_json::json!({
-            "outcome": "clean",
-            "summary": "validation clean",
-            "checks": [],
-            "findings": []
-        }).to_string())
-        .execute(&db.pool)
-        .await
-        .expect("insert validate job");
+        .await;
 
         let app = build_router(db.clone());
         let response = app
@@ -7770,46 +10026,74 @@ mod tests {
         .await
         .expect("insert source workspace");
 
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, outcome_class, phase_kind, workspace_id, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, output_commit_oid, created_at, ended_at
-             ) VALUES (?, ?, ?, ?, 'author_initial', 1, 0, 'completed', 'clean', 'author', ?, 'authoring', 'may_mutate', 'fresh', 'author-initial', 'commit', ?, '2026-03-12T00:00:00Z', '2026-03-12T00:05:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &author_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "author_initial",
+                status: JobStatus::Completed,
+                outcome_class: Some(OutcomeClass::Clean),
+                phase_kind: PhaseKind::Author,
+                workspace_id: Some(&workspace_id),
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "author-initial",
+                output_artifact_kind: OutputArtifactKind::Commit,
+                job_input: TestJobInput::None,
+                output_commit_oid: Some(&source_commit_oid),
+                created_at: "2026-03-12T00:00:00Z",
+                ended_at: Some("2026-03-12T00:05:00Z"),
+                ..TestJobInsert::new(
+                    &author_job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "author_initial",
+                )
+            },
         )
-        .bind(&author_job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .bind(&workspace_id)
-        .bind(&source_commit_oid)
-        .execute(&db.pool)
-        .await
-        .expect("insert author job");
+        .await;
 
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, outcome_class, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid,
-                result_schema_version, result_payload, created_at, ended_at
-             ) VALUES (?, ?, ?, ?, 'validate_candidate_initial', 1, 0, 'completed', 'clean', 'validate', 'authoring', 'must_not_mutate', 'resume_context', 'validate-candidate', 'validation_report', ?, ?, 'validation_report:v1', ?, '2026-03-12T00:06:00Z', '2026-03-12T00:07:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &validate_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "validate_candidate_initial",
+                status: JobStatus::Completed,
+                outcome_class: Some(OutcomeClass::Clean),
+                phase_kind: PhaseKind::Validate,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MustNotMutate,
+                context_policy: ContextPolicy::ResumeContext,
+                phase_template_slug: "validate-candidate",
+                output_artifact_kind: OutputArtifactKind::ValidationReport,
+                job_input: TestJobInput::CandidateSubject(&base_commit_oid, &source_commit_oid),
+                result_schema_version: Some("validation_report:v1"),
+                result_payload: Some(serde_json::json!({
+                    "outcome": "clean",
+                    "summary": "validation clean",
+                    "checks": [],
+                    "findings": []
+                })),
+                created_at: "2026-03-12T00:06:00Z",
+                ended_at: Some("2026-03-12T00:07:00Z"),
+                ..TestJobInsert::new(
+                    &validate_job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "validate_candidate_initial",
+                )
+            },
         )
-        .bind(&validate_job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .bind(&base_commit_oid)
-        .bind(&source_commit_oid)
-        .bind(serde_json::json!({
-            "outcome": "clean",
-            "summary": "validation clean",
-            "checks": [],
-            "findings": []
-        }).to_string())
-        .execute(&db.pool)
-        .await
-        .expect("insert validate job");
+        .await;
 
         let app = build_router(db.clone());
         let response = app
@@ -7912,21 +10196,36 @@ mod tests {
         .await
         .expect("insert integration workspace");
 
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, outcome_class, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, output_commit_oid, created_at, ended_at
-             ) VALUES (?, ?, ?, ?, 'author_initial', 1, 0, 'completed', 'clean', 'author', 'authoring', 'may_mutate', 'fresh', 'author-initial', 'commit', ?, '2026-03-12T00:00:00Z', '2026-03-12T00:05:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &author_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "author_initial",
+                status: JobStatus::Completed,
+                outcome_class: Some(OutcomeClass::Clean),
+                phase_kind: PhaseKind::Author,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "author-initial",
+                output_artifact_kind: OutputArtifactKind::Commit,
+                job_input: TestJobInput::None,
+                output_commit_oid: Some(&candidate_commit_oid),
+                created_at: "2026-03-12T00:00:00Z",
+                ended_at: Some("2026-03-12T00:05:00Z"),
+                ..TestJobInsert::new(
+                    &author_job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "author_initial",
+                )
+            },
         )
-        .bind(&author_job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .bind(&candidate_commit_oid)
-        .execute(&db.pool)
-        .await
-        .expect("insert author job");
+        .await;
 
         sqlx::query(
             "INSERT INTO convergences (
@@ -8194,23 +10493,36 @@ mod tests {
         .await
         .expect("insert revision");
 
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, outcome_class, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid,
-                error_code, created_at, ended_at
-             ) VALUES (?, ?, ?, ?, 'validate_candidate_initial', 1, 0, 'failed', 'terminal_failure', 'validate', 'authoring', 'must_not_mutate', 'resume_context', 'validate-candidate', 'validation_report', ?, ?, 'step_failed', '2026-03-12T00:00:00Z', '2026-03-12T00:05:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "validate_candidate_initial",
+                status: JobStatus::Failed,
+                outcome_class: Some(OutcomeClass::TerminalFailure),
+                phase_kind: PhaseKind::Validate,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MustNotMutate,
+                context_policy: ContextPolicy::ResumeContext,
+                phase_template_slug: "validate-candidate",
+                output_artifact_kind: OutputArtifactKind::ValidationReport,
+                job_input: TestJobInput::CandidateSubject(&base_commit_oid, &base_commit_oid),
+                error_code: Some("step_failed"),
+                created_at: "2026-03-12T00:00:00Z",
+                ended_at: Some("2026-03-12T00:05:00Z"),
+                ..TestJobInsert::new(
+                    &job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "validate_candidate_initial",
+                )
+            },
         )
-        .bind(&job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .bind(&base_commit_oid)
-        .bind(&base_commit_oid)
-        .execute(&db.pool)
-        .await
-        .expect("insert failed job");
+        .await;
 
         let app = build_router(db.clone());
         let response = app
@@ -8236,6 +10548,180 @@ mod tests {
         assert_eq!(json["retry_no"].as_u64(), Some(1));
         assert_eq!(json["supersedes_job_id"].as_str(), Some(job_id.as_str()));
         assert_eq!(json["status"].as_str(), Some("queued"));
+    }
+
+    #[tokio::test]
+    async fn retry_route_implicit_revision_uses_bound_workspace_base_for_candidate_validation() {
+        let repo = temp_git_repo();
+        let bound_base = git_output(&repo, &["rev-parse", "HEAD"]);
+        write_file(&repo.join("tracked.txt"), "authored change");
+        git(&repo, &["add", "tracked.txt"]);
+        git(&repo, &["commit", "-m", "authored change"]);
+        let authored_head = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        let project_id = "prj_00000000000000000000000000000067".to_string();
+        let item_id = "itm_00000000000000000000000000000067".to_string();
+        let revision_id = "rev_00000000000000000000000000000067".to_string();
+        let author_job_id = "job_00000000000000000000000000000067".to_string();
+        let failed_job_id = "job_00000000000000000000000000000068".to_string();
+        let workspace_id = "wrk_00000000000000000000000000000067".to_string();
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, escalation_reason, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'operator_required', 'step_failed', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(Option::<String>::None)
+        .bind(&bound_base)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+
+        sqlx::query(
+            "INSERT INTO workspaces (
+                id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
+                target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
+                status, current_job_id, created_at, updated_at
+             ) VALUES (?, ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', ?, ?, ?, 'persistent', 'ready', NULL, '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&workspace_id)
+        .bind(&project_id)
+        .bind(repo.join("retry-implicit-workspace").display().to_string())
+        .bind(&revision_id)
+        .bind(format!("refs/ingot/workspaces/{workspace_id}"))
+        .bind(&bound_base)
+        .bind(&authored_head)
+        .execute(&db.pool)
+        .await
+        .expect("insert authoring workspace");
+
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &author_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "author_initial",
+                status: JobStatus::Completed,
+                outcome_class: Some(OutcomeClass::Clean),
+                phase_kind: PhaseKind::Author,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "author-initial",
+                output_artifact_kind: OutputArtifactKind::Commit,
+                job_input: TestJobInput::AuthoringHead(&bound_base),
+                output_commit_oid: Some(&authored_head),
+                created_at: "2026-03-12T00:00:00Z",
+                started_at: Some("2026-03-12T00:00:00Z"),
+                ended_at: Some("2026-03-12T00:01:00Z"),
+                ..TestJobInsert::new(
+                    &author_job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "author_initial",
+                )
+            },
+        )
+        .await;
+
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &failed_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "validate_candidate_initial",
+                status: JobStatus::Failed,
+                outcome_class: Some(OutcomeClass::TerminalFailure),
+                phase_kind: PhaseKind::Validate,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MustNotMutate,
+                context_policy: ContextPolicy::ResumeContext,
+                phase_template_slug: "validate-candidate",
+                output_artifact_kind: OutputArtifactKind::ValidationReport,
+                job_input: TestJobInput::CandidateSubject(&bound_base, &authored_head),
+                error_code: Some("step_failed"),
+                created_at: "2026-03-12T00:00:00Z",
+                ended_at: Some("2026-03-12T00:05:00Z"),
+                ..TestJobInsert::new(
+                    &failed_job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "validate_candidate_initial",
+                )
+            },
+        )
+        .await;
+
+        let app = build_router(db.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/projects/{project_id}/items/{item_id}/jobs/{failed_job_id}/retry"
+                    ))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["step_id"].as_str(), Some("validate_candidate_initial"));
+        assert_eq!(json["retry_no"].as_u64(), Some(1));
+        assert_eq!(
+            json["job_input"]["kind"].as_str(),
+            Some("candidate_subject")
+        );
+        assert_eq!(
+            json["job_input"]["base_commit_oid"].as_str(),
+            Some(bound_base.as_str())
+        );
+        assert_eq!(
+            json["job_input"]["head_commit_oid"].as_str(),
+            Some(authored_head.as_str())
+        );
     }
 
     #[tokio::test]
@@ -8309,22 +10795,28 @@ mod tests {
         .await
         .expect("insert workspace");
 
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, phase_kind, workspace_id, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_head_commit_oid, created_at
-             ) VALUES (?, ?, ?, ?, 'author_initial', 1, 0, 'running', 'author', ?, 'authoring', 'may_mutate', 'fresh', 'author-initial', 'commit', ?, '2026-03-12T00:00:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "author_initial",
+                status: JobStatus::Running,
+                phase_kind: PhaseKind::Author,
+                workspace_id: Some(&workspace_id),
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "author-initial",
+                output_artifact_kind: OutputArtifactKind::Commit,
+                job_input: TestJobInput::AuthoringHead(&base_commit_oid),
+                created_at: "2026-03-12T00:00:00Z",
+                ..TestJobInsert::new(&job_id, &project_id, &item_id, &revision_id, "author_initial")
+            },
         )
-        .bind(&job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .bind(&workspace_id)
-        .bind(&base_commit_oid)
-        .execute(&db.pool)
-        .await
-        .expect("insert job");
+        .await;
 
         let app = build_router(db.clone());
         let response = app
@@ -8568,21 +11060,28 @@ mod tests {
         .await
         .expect("insert workspace");
 
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, phase_kind, workspace_id, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_head_commit_oid, created_at
-             ) VALUES (?, ?, ?, 'rev_00000000000000000000000000000000', 'author_initial', 1, 0, 'assigned', 'author', ?, 'authoring', 'may_mutate', 'fresh', 'author-initial', 'commit', ?, '2026-03-12T00:00:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &start_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: "rev_00000000000000000000000000000000",
+                step_id: "author_initial",
+                status: JobStatus::Assigned,
+                phase_kind: PhaseKind::Author,
+                workspace_id: Some(&workspace_id),
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "author-initial",
+                output_artifact_kind: OutputArtifactKind::Commit,
+                job_input: TestJobInput::AuthoringHead(&head_commit_oid),
+                created_at: "2026-03-12T00:00:00Z",
+                ..TestJobInsert::new(&start_job_id, &project_id, &item_id, "rev_00000000000000000000000000000000", "author_initial")
+            },
         )
-        .bind(&start_job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&workspace_id)
-        .bind(&head_commit_oid)
-        .execute(&db.pool)
-        .await
-        .expect("insert assigned job");
+        .await;
 
         let app = build_router(db.clone());
         let response = app
@@ -8626,20 +11125,44 @@ mod tests {
             .await
             .expect("delete seeded job");
 
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &running_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: "rev_00000000000000000000000000000000",
+                step_id: "author_initial",
+                status: JobStatus::Running,
+                phase_kind: PhaseKind::Author,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "author-initial",
+                output_artifact_kind: OutputArtifactKind::Commit,
+                job_input: TestJobInput::AuthoringHead("seed"),
+                created_at: "2026-03-12T00:00:00Z",
+                started_at: Some("2026-03-12T00:00:00Z"),
+                ..TestJobInsert::new(
+                    &running_job_id,
+                    &project_id,
+                    &item_id,
+                    "rev_00000000000000000000000000000000",
+                    "author_initial",
+                )
+            },
+        )
+        .await;
         sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, lease_owner_id, heartbeat_at, lease_expires_at,
-                created_at, started_at
-             ) VALUES (?, ?, ?, 'rev_00000000000000000000000000000000', 'author_initial', 1, 0, 'running', 'author', 'authoring', 'may_mutate', 'fresh', 'author-initial', 'commit', 'ingotd:test', '2026-03-12T00:00:00Z', '2026-03-12T00:01:00Z', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+            "UPDATE jobs
+             SET lease_owner_id = 'ingotd:test', heartbeat_at = '2026-03-12T00:00:00Z',
+                 lease_expires_at = '2026-03-12T00:01:00Z'
+             WHERE id = ?",
         )
         .bind(&running_job_id)
-        .bind(&project_id)
-        .bind(&item_id)
         .execute(&db.pool)
         .await
-        .expect("insert running job");
+        .expect("update running job lease");
 
         let app = build_router(db.clone());
         let response = app
@@ -8738,22 +11261,27 @@ mod tests {
         .await
         .expect("insert workspace");
 
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid, created_at
-             ) VALUES (?, ?, ?, ?, 'validate_integrated', 1, 0, 'running', 'validate', 'integration', 'must_not_mutate', 'resume_context', 'validate-integrated', 'validation_report', ?, ?, '2026-03-12T00:00:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "validate_integrated",
+                status: JobStatus::Running,
+                phase_kind: PhaseKind::Validate,
+                workspace_kind: WorkspaceKind::Integration,
+                execution_permission: ExecutionPermission::MustNotMutate,
+                context_policy: ContextPolicy::ResumeContext,
+                phase_template_slug: "validate-integrated",
+                output_artifact_kind: OutputArtifactKind::ValidationReport,
+                job_input: TestJobInput::IntegratedSubject(&initial_target, &initial_target),
+                created_at: "2026-03-12T00:00:00Z",
+                ..TestJobInsert::new(&job_id, &project_id, &item_id, &revision_id, "validate_integrated")
+            },
         )
-        .bind(&job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .bind(&initial_target)
-        .bind(&initial_target)
-        .execute(&db.pool)
-        .await
-        .expect("insert job");
+        .await;
 
         sqlx::query(
             "INSERT INTO convergences (
@@ -8888,42 +11416,68 @@ mod tests {
         .await
         .expect("insert revision");
 
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, outcome_class, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid,
-                error_code, created_at, started_at, ended_at
-             ) VALUES (?, ?, ?, ?, 'validate_candidate_initial', 1, 0, 'failed', 'terminal_failure', 'validate', 'authoring', 'must_not_mutate', 'resume_context', 'validate-candidate', 'validation_report', ?, ?, 'step_failed', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z', '2026-03-12T00:01:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &failed_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "validate_candidate_initial",
+                status: JobStatus::Failed,
+                outcome_class: Some(OutcomeClass::TerminalFailure),
+                phase_kind: PhaseKind::Validate,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MustNotMutate,
+                context_policy: ContextPolicy::ResumeContext,
+                phase_template_slug: "validate-candidate",
+                output_artifact_kind: OutputArtifactKind::ValidationReport,
+                job_input: TestJobInput::CandidateSubject(&head_commit, &head_commit),
+                error_code: Some("step_failed"),
+                created_at: "2026-03-12T00:00:00Z",
+                started_at: Some("2026-03-12T00:00:00Z"),
+                ended_at: Some("2026-03-12T00:01:00Z"),
+                ..TestJobInsert::new(
+                    &failed_job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "validate_candidate_initial",
+                )
+            },
         )
-        .bind(&failed_job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .bind(&head_commit)
-        .bind(&head_commit)
-        .execute(&db.pool)
-        .await
-        .expect("insert failed job");
+        .await;
 
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                supersedes_job_id, status, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid,
-                created_at, started_at
-             ) VALUES (?, ?, ?, ?, 'validate_candidate_initial', 1, 1, ?, 'running', 'validate', 'authoring', 'must_not_mutate', 'resume_context', 'validate-candidate', 'validation_report', ?, ?, '2026-03-12T00:02:00Z', '2026-03-12T00:02:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &retry_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "validate_candidate_initial",
+                retry_no: 1,
+                supersedes_job_id: Some(&failed_job_id),
+                status: JobStatus::Running,
+                phase_kind: PhaseKind::Validate,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MustNotMutate,
+                context_policy: ContextPolicy::ResumeContext,
+                phase_template_slug: "validate-candidate",
+                output_artifact_kind: OutputArtifactKind::ValidationReport,
+                job_input: TestJobInput::CandidateSubject(&head_commit, &head_commit),
+                created_at: "2026-03-12T00:02:00Z",
+                started_at: Some("2026-03-12T00:02:00Z"),
+                ..TestJobInsert::new(
+                    &retry_job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "validate_candidate_initial",
+                )
+            },
         )
-        .bind(&retry_job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .bind(&failed_job_id)
-        .bind(&head_commit)
-        .bind(&head_commit)
-        .execute(&db.pool)
-        .await
-        .expect("insert retry job");
+        .await;
 
         let app = build_router(db.clone());
         let response = app
@@ -8974,6 +11528,173 @@ mod tests {
             entry.event_type == ActivityEventType::ItemEscalationCleared
                 && entry.entity_id == item_id
         }));
+    }
+
+    #[tokio::test]
+    async fn complete_route_auto_dispatches_candidate_review_after_clean_incremental_review() {
+        let repo = temp_git_repo();
+        let seed_head = git_output(&repo, &["rev-parse", "HEAD"]);
+        write_file(&repo.join("tracked.txt"), "candidate change");
+        git(&repo, &["add", "tracked.txt"]);
+        git(&repo, &["commit", "-m", "candidate change"]);
+        let candidate_head = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        let db_path = std::env::temp_dir().join(format!("ingot-http-api-db-{}.db", Uuid::now_v7()));
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+
+        let project_id = "prj_00000000000000000000000000000073".to_string();
+        let item_id = "itm_00000000000000000000000000000073".to_string();
+        let revision_id = "rev_00000000000000000000000000000073".to_string();
+        let author_job_id = "job_00000000000000000000000000000073".to_string();
+        let review_job_id = "job_00000000000000000000000000000074".to_string();
+
+        sqlx::query(
+            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
+             VALUES (?, 'Test', ?, 'main', '#000', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&project_id)
+        .bind(repo.display().to_string())
+        .execute(&db.pool)
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO items (
+                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
+                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
+                priority, labels, created_at, updated_at
+             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', '2026-03-12T00:00:00Z', '2026-03-12T00:00:00Z')",
+        )
+        .bind(&item_id)
+        .bind(&project_id)
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert item");
+        sqlx::query(
+            "INSERT INTO item_revisions (
+                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+                seed_target_commit_oid, supersedes_revision_id, created_at
+             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, '2026-03-12T00:00:00Z')",
+        )
+        .bind(&revision_id)
+        .bind(&item_id)
+        .bind(&seed_head)
+        .bind(&seed_head)
+        .execute(&db.pool)
+        .await
+        .expect("insert revision");
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &author_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "author_initial",
+                status: JobStatus::Completed,
+                outcome_class: Some(OutcomeClass::Clean),
+                phase_kind: PhaseKind::Author,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MayMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "author-initial",
+                output_artifact_kind: OutputArtifactKind::Commit,
+                job_input: TestJobInput::AuthoringHead(&seed_head),
+                output_commit_oid: Some(&candidate_head),
+                created_at: "2026-03-12T00:00:00Z",
+                started_at: Some("2026-03-12T00:00:00Z"),
+                ended_at: Some("2026-03-12T00:01:00Z"),
+                ..TestJobInsert::new(
+                    &author_job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "author_initial",
+                )
+            },
+        )
+        .await;
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &review_job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "review_incremental_initial",
+                status: JobStatus::Running,
+                phase_kind: PhaseKind::Review,
+                workspace_kind: WorkspaceKind::Review,
+                execution_permission: ExecutionPermission::MustNotMutate,
+                context_policy: ContextPolicy::Fresh,
+                phase_template_slug: "review-incremental",
+                output_artifact_kind: OutputArtifactKind::ReviewReport,
+                job_input: TestJobInput::CandidateSubject(&seed_head, &candidate_head),
+                created_at: "2026-03-12T00:02:00Z",
+                started_at: Some("2026-03-12T00:02:00Z"),
+                ..TestJobInsert::new(
+                    &review_job_id,
+                    &project_id,
+                    &item_id,
+                    &revision_id,
+                    "review_incremental_initial",
+                )
+            },
+        )
+        .await;
+
+        let response = build_router(db.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/jobs/{review_job_id}/complete"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "outcome_class": "clean",
+                            "result_schema_version": "review_report:v1",
+                            "result_payload": {
+                                "outcome": "clean",
+                                "summary": "ok",
+                                "review_subject": {
+                                    "base_commit_oid": seed_head,
+                                    "head_commit_oid": candidate_head
+                                },
+                                "overall_risk": "low",
+                                "findings": [],
+                                "extensions": null
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("complete route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let review_job_status: (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
+            .bind(&review_job_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("review job status");
+        assert_eq!(review_job_status.0, "completed");
+
+        let queued_candidate_review: (String, String, String) = sqlx::query_as(
+            "SELECT step_id, input_base_commit_oid, input_head_commit_oid
+             FROM jobs
+             WHERE item_id = ? AND step_id = 'review_candidate_initial' AND status = 'queued'",
+        )
+        .bind(&item_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("queued candidate review job");
+        assert_eq!(queued_candidate_review.0, "review_candidate_initial");
+        assert_eq!(queued_candidate_review.1, seed_head);
+        assert_eq!(queued_candidate_review.2, candidate_head);
     }
 
     fn temp_git_repo() -> PathBuf {
@@ -9091,20 +11812,27 @@ exit 1
         .await
         .expect("insert revision");
 
-        sqlx::query(
-            "INSERT INTO jobs (
-                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
-                status, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid, created_at
-             ) VALUES (?, ?, ?, ?, 'validate_candidate_initial', 1, 0, 'running', 'validate', 'authoring', 'must_not_mutate', 'resume_context', 'validate-candidate', 'validation_report', 'base', 'head', '2026-03-12T00:00:00Z')",
+        insert_test_job_row(
+            &db,
+            TestJobInsert {
+                id: &job_id,
+                project_id: &project_id,
+                item_id: &item_id,
+                item_revision_id: &revision_id,
+                step_id: "validate_candidate_initial",
+                status: JobStatus::Running,
+                phase_kind: PhaseKind::Validate,
+                workspace_kind: WorkspaceKind::Authoring,
+                execution_permission: ExecutionPermission::MustNotMutate,
+                context_policy: ContextPolicy::ResumeContext,
+                phase_template_slug: "validate-candidate",
+                output_artifact_kind: OutputArtifactKind::ValidationReport,
+                job_input: TestJobInput::CandidateSubject("base", "head"),
+                created_at: "2026-03-12T00:00:00Z",
+                ..TestJobInsert::new(&job_id, &project_id, &item_id, &revision_id, "validate_candidate_initial")
+            },
         )
-        .bind(&job_id)
-        .bind(&project_id)
-        .bind(&item_id)
-        .bind(&revision_id)
-        .execute(&db.pool)
-        .await
-        .expect("insert job");
+        .await;
 
         (repo, db, project_id, item_id, job_id)
     }

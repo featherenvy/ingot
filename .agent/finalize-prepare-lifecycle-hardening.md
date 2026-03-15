@@ -15,6 +15,7 @@ After this change, auto-finalized convergences will stop leaving projects stuck 
 - [x] (2026-03-14 15:07Z) Expanded router teardown and item-mutation coverage so revise, defer, dismiss, and approval rejection terminate current-revision jobs, convergences, queue entries, and matching git operations together.
 - [x] (2026-03-14 15:14Z) Hardened canonical mirror refresh to preserve `refs/ingot/*`, strengthened target-ref validation to reject Git-invalid branch names, and added focused tests in the touched crates.
 - [x] (2026-03-14 15:54Z) Ran `cargo test -p ingot-agent-runtime`, `cargo test -p ingot-http-api`, `cargo test -p ingot-git`, `cargo test -p ingot-usecases`, `cargo fmt --all`, `make test`, `make lint`, and `make ci`.
+- [x] (2026-03-14 21:44Z) Moved exact ref-format validation into `ingot-git`, narrowed `normalize_target_ref()` back to canonicalization, unified the finalize-success tail behind a shared runtime helper, and removed the `project-layout` React `act(...)` warning from direct Vitest and `make ci` output.
 
 ## Surprises & Discoveries
 
@@ -24,8 +25,11 @@ After this change, auto-finalized convergences will stop leaving projects stuck 
 - Observation: the finalize refresh guard is still necessary because startup recovery relies on a locally advanced mirror ref remaining in place while checkout sync is blocked.
   Evidence: the current `refresh_project_mirror()` implementations in both runtime and router still intentionally skip `ensure_mirror()` when an unresolved `FinalizeTargetRef` exists and the mirror directory already exists.
 
-- Observation: the UI Vitest suite still prints React `act(...)` warnings in `src/test/project-layout.test.tsx`, but they are warnings only and do not fail `make ci`.
-  Evidence: the final `make ci` run completed successfully after Vitest emitted the warnings during the two `project-layout` cases.
+- Observation: `git check-ref-format` accepts some names that the earlier manual rule set rejected, including `refs/heads/@` and `refs/heads/-leading-dash`.
+  Evidence: the first `ingot-git` helper test run failed until the invalid-ref expectations were updated to match Git’s actual acceptance set.
+
+- Observation: the stubborn `project-layout` warning was caused by test teardown mutating zustand stores while components were still mounted, not just by unsettled layout queries.
+  Evidence: the warning disappeared only after wrapping the store resets in `act(...)`; pre-seeding query cache data and stubbing the connection/store functions alone was not sufficient.
 
 ## Decision Log
 
@@ -41,9 +45,19 @@ After this change, auto-finalized convergences will stop leaving projects stuck 
   Rationale: the repository already has enough terminal states to model “intentionally abandoned finalize”, “observed successful prepare”, and “cancelled revision work” without schema changes.
   Date/Author: 2026-03-14 / Codex
 
+- Decision: use plain `git check-ref-format` on normalized full refs instead of `git check-ref-format --branch`.
+  Rationale: the repository already normalizes to `refs/heads/...`, and validating the full ref avoids branch-shorthand semantics while making `ingot-git` the exact source of truth for ref acceptance.
+  Date/Author: 2026-03-14 / Codex
+
+- Decision: keep the `project-layout` warning fix local to the test file by preloading query cache data, stubbing the mount-only store callbacks, and wrapping teardown store resets in `act(...)`.
+  Rationale: that removes the noise without changing production code or broadening global test harness behavior.
+  Date/Author: 2026-03-14 / Codex
+
 ## Outcomes & Retrospective
 
-Startup recovery still works, but successful in-process finalize and prepare flows now resolve their git operations instead of leaving projects in stale-mirror mode or leaving cancelled prepared convergences vulnerable to resurrection on restart. Item mutation routes now terminate current-revision work instead of only cancelling prepared convergence state, and branch-name validation catches Git-invalid names before any ref resolution step runs. Validation covered the four directly affected Rust crates plus the repository-wide `make test`, `make lint`, and `make ci` gates.
+Startup recovery still works, successful in-process finalize and prepare flows resolve their git operations instead of leaving projects in stale-mirror mode, and the finalize-success tail is now shared so the startup and auto-finalize paths cannot drift independently. Exact ref validation now lives in `ingot-git`, so item and project ingress paths defer to Git itself instead of mirroring refname rules in `ingot-usecases`. The `project-layout` test no longer prints the React `act(...)` warning in direct Vitest output or during `make ci`.
+
+Validation now covered the direct crate tests, targeted route/runtime regressions, the project-layout Vitest file, and a final successful `make ci` run on the completed workspace.
 
 ## Context and Orientation
 
@@ -53,7 +67,7 @@ The HTTP item mutation routes live in `crates/ingot-http-api/src/router.rs`. Tho
 
 The canonical mirror helper lives in `crates/ingot-git/src/project_repo.rs`. That mirror is a bare Git repository stored under the daemon state root and is the source of truth for daemon-managed worktree refs such as `refs/ingot/workspaces/*`. Refreshing the mirror must keep checkout-owned refs synchronized from the registered checkout without pruning daemon-owned refs.
 
-Target-ref normalization currently lives in `crates/ingot-usecases/src/item.rs`. It converts branch names into `refs/heads/<branch>` and rejects obvious non-branch refs, but its branch-name validation is still much weaker than Git’s own rules.
+Target-ref normalization currently lives in `crates/ingot-usecases/src/item.rs`. After the follow-up hardening, it remains only a canonicalizer from branch names to `refs/heads/<branch>` plus a non-branch namespace guard; exact Git ref acceptance now belongs to `crates/ingot-git/src/commands.rs`.
 
 ## Plan of Work
 
@@ -132,4 +146,4 @@ and it must still return fully qualified `refs/heads/<branch>` strings on succes
 
 Revision note: created this ExecPlan during implementation because the change spans runtime startup reconciliation, router item-mutation semantics, the git mirror helper, and shared target-ref validation.
 
-Revision note: updated this ExecPlan after implementation to record the final runtime, router, mirror, and validation outcomes and the exact commands used to verify the working tree.
+Revision note: updated this ExecPlan after the follow-up hardening pass to record the move to Git-backed exact ref validation, the finalize-helper deduplication, the project-layout warning fix, and the final successful `make ci` run.

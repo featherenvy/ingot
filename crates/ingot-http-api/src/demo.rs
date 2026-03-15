@@ -17,7 +17,7 @@ use ingot_usecases::item::{CreateItemInput, create_manual_item, normalize_target
 
 use crate::error::ApiError;
 use crate::router::{
-    AppState, append_activity, git_to_internal, load_effective_config,
+    AppState, append_activity, ensure_git_valid_target_ref, git_to_internal, load_effective_config,
     parse_config_approval_policy, repo_to_internal, repo_to_project_mutation,
     resolve_default_branch,
 };
@@ -166,6 +166,7 @@ pub async fn create_demo_project(
     let config = load_effective_config(Some(&project))?;
     let configured_approval_policy = parse_config_approval_policy(&config)?;
     let target_ref = normalize_target_ref(&project.default_branch)?;
+    ensure_git_valid_target_ref(&target_ref).await?;
     let repo_path = std::path::Path::new(&project.path);
     let resolved_target_head = resolve_ref_oid(repo_path, &target_ref)
         .await
@@ -193,7 +194,7 @@ pub async fn create_demo_project(
                 approval_policy: configured_approval_policy,
                 candidate_rework_budget: config.defaults.candidate_rework_budget,
                 integration_rework_budget: config.defaults.integration_rework_budget,
-                seed_commit_oid: resolved_target_head.clone(),
+                seed_commit_oid: None,
                 seed_target_commit_oid: Some(resolved_target_head.clone()),
             },
             Utc::now(),

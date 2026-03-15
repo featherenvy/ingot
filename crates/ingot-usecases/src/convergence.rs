@@ -225,7 +225,8 @@ where
             queue_entry
         };
 
-        if queue_entry.status == ConvergenceQueueEntryStatus::Queued && context.lane_head.is_none() {
+        if queue_entry.status == ConvergenceQueueEntryStatus::Queued && context.lane_head.is_none()
+        {
             queue_entry.status = ConvergenceQueueEntryStatus::Head;
             queue_entry.head_acquired_at = Some(Utc::now());
             queue_entry.updated_at = Utc::now();
@@ -336,7 +337,8 @@ where
         }
 
         context.item.current_revision_id = next_revision.id;
-        context.item.approval_state = crate::item::approval_state_for_policy(next_revision.approval_policy);
+        context.item.approval_state =
+            crate::item::approval_state_for_policy(next_revision.approval_policy);
         context.item.escalation_state = ingot_domain::item::EscalationState::None;
         context.item.escalation_reason = None;
         context.item.updated_at = Utc::now();
@@ -355,7 +357,9 @@ where
         let projects = self.port.load_system_action_projects().await?;
 
         for project_state in projects {
-            self.port.promote_queue_heads(project_state.project.id).await?;
+            self.port
+                .promote_queue_heads(project_state.project.id)
+                .await?;
 
             for state in &project_state.items {
                 let evaluation = Evaluator::new().evaluate(
@@ -379,15 +383,19 @@ where
                 });
 
                 if let Some(queue_entry) = state.queue_entry.as_ref() {
-                    let should_prepare_queue_head =
-                        queue_entry.status == ConvergenceQueueEntryStatus::Head
-                            && (evaluation.next_recommended_action == "prepare_convergence"
-                                || (state.item.approval_state == ApprovalState::Granted
-                                    && prepared_convergence.is_none()));
+                    let should_prepare_queue_head = queue_entry.status
+                        == ConvergenceQueueEntryStatus::Head
+                        && (evaluation.next_recommended_action == "prepare_convergence"
+                            || (state.item.approval_state == ApprovalState::Granted
+                                && prepared_convergence.is_none()));
 
                     if should_prepare_queue_head {
                         self.port
-                            .prepare_queue_head_convergence(&project_state.project, state, queue_entry)
+                            .prepare_queue_head_convergence(
+                                &project_state.project,
+                                state,
+                                queue_entry,
+                            )
                             .await?;
                         return Ok(true);
                     }
@@ -490,13 +498,16 @@ mod tests {
             &self,
             _project_id: ProjectId,
             _item_id: ItemId,
-        ) -> impl Future<Output = Result<ConvergenceQueuePrepareContext, UseCaseError>> + Send {
+        ) -> impl Future<Output = Result<ConvergenceQueuePrepareContext, UseCaseError>> + Send
+        {
             ready(
                 self.queue_prepare_context
                     .lock()
                     .expect("queue prepare lock")
                     .clone()
-                    .ok_or(UseCaseError::Internal("missing queue prepare context".into())),
+                    .ok_or(UseCaseError::Internal(
+                        "missing queue prepare context".into(),
+                    )),
             )
         }
 
@@ -642,10 +653,10 @@ mod tests {
             item: &ingot_domain::item::Item,
             next_revision: &ItemRevision,
         ) -> impl Future<Output = Result<(), UseCaseError>> + Send {
-            self.calls.lock().expect("calls lock").push(format!(
-                "reject:{}:{}",
-                item.id, next_revision.id
-            ));
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(format!("reject:{}:{}", item.id, next_revision.id));
             ready(Ok(()))
         }
     }
@@ -653,7 +664,8 @@ mod tests {
     impl ConvergenceSystemActionPort for FakePort {
         fn load_system_action_projects(
             &self,
-        ) -> impl Future<Output = Result<Vec<SystemActionProjectState>, UseCaseError>> + Send {
+        ) -> impl Future<Output = Result<Vec<SystemActionProjectState>, UseCaseError>> + Send
+        {
             ready(Ok(self.projects.lock().expect("projects lock").clone()))
         }
 
@@ -763,7 +775,7 @@ mod tests {
             approval_policy: ApprovalPolicy::Required,
             policy_snapshot: serde_json::json!({}),
             template_map_snapshot: serde_json::json!({}),
-            seed_commit_oid: "seed".into(),
+            seed_commit_oid: Some("seed".into()),
             seed_target_commit_oid: Some("seed".into()),
             supersedes_revision_id: None,
             created_at: now,
@@ -788,7 +800,8 @@ mod tests {
         let calls = port.calls();
         assert!(calls.iter().any(|call| call.starts_with("create_queue:")));
         assert!(
-            calls.iter()
+            calls
+                .iter()
                 .any(|call| call == "activity:ConvergenceQueued")
         );
     }
@@ -798,10 +811,17 @@ mod tests {
         let port = FakePort::with_projects(vec![project_state("invalidate_prepared_convergence")]);
         let service = ConvergenceService::new(port.clone());
 
-        let made_progress = service.tick_system_actions().await.expect("tick system actions");
+        let made_progress = service
+            .tick_system_actions()
+            .await
+            .expect("tick system actions");
 
         assert!(made_progress);
-        assert!(port.calls().iter().any(|call| call.starts_with("invalidate:")));
+        assert!(
+            port.calls()
+                .iter()
+                .any(|call| call.starts_with("invalidate:"))
+        );
     }
 
     #[tokio::test]
@@ -809,7 +829,10 @@ mod tests {
         let port = FakePort::with_projects(vec![project_state("prepare_convergence")]);
         let service = ConvergenceService::new(port.clone());
 
-        let made_progress = service.tick_system_actions().await.expect("tick system actions");
+        let made_progress = service
+            .tick_system_actions()
+            .await
+            .expect("tick system actions");
 
         assert!(made_progress);
         assert!(port.calls().iter().any(|call| call.starts_with("prepare:")));
@@ -824,10 +847,17 @@ mod tests {
         let port = FakePort::with_projects(vec![state]);
         let service = ConvergenceService::new(port.clone());
 
-        let made_progress = service.tick_system_actions().await.expect("tick system actions");
+        let made_progress = service
+            .tick_system_actions()
+            .await
+            .expect("tick system actions");
 
         assert!(made_progress);
-        assert!(port.calls().iter().any(|call| call.starts_with("finalize:")));
+        assert!(
+            port.calls()
+                .iter()
+                .any(|call| call.starts_with("finalize:"))
+        );
     }
 
     fn project_state(next_action: &str) -> SystemActionProjectState {
@@ -855,7 +885,7 @@ mod tests {
             approval_policy: ApprovalPolicy::Required,
             policy_snapshot: serde_json::json!({}),
             template_map_snapshot: serde_json::json!({}),
-            seed_commit_oid: "seed".into(),
+            seed_commit_oid: Some("seed".into()),
             seed_target_commit_oid: Some("seed".into()),
             supersedes_revision_id: None,
             created_at,
@@ -962,8 +992,7 @@ mod tests {
             phase_template_slug: "template".into(),
             phase_template_digest: None,
             prompt_snapshot: None,
-            input_base_commit_oid: None,
-            input_head_commit_oid: None,
+            job_input: ingot_domain::job::JobInput::None,
             output_artifact_kind: ingot_domain::job::OutputArtifactKind::ValidationReport,
             output_commit_oid: None,
             result_schema_version: None,

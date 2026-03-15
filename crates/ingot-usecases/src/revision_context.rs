@@ -10,6 +10,7 @@ pub fn rebuild_revision_context(
     item: &Item,
     revision: &ItemRevision,
     jobs: &[Job],
+    authoring_head_commit_oid: Option<String>,
     changed_paths: Vec<String>,
     updated_from_job_id: Option<ingot_domain::ids::JobId>,
     updated_at: DateTime<Utc>,
@@ -24,7 +25,7 @@ pub fn rebuild_revision_context(
         item_revision_id: revision.id,
         schema_version: "revision_context:v1".into(),
         payload: serde_json::json!({
-            "authoring_head_commit_oid": current_authoring_head(&revision_jobs, revision),
+            "authoring_head_commit_oid": authoring_head_commit_oid,
             "changed_paths": changed_paths,
             "latest_validation": latest_summary(&revision_jobs, PhaseKind::Validate),
             "latest_review": latest_summary(&revision_jobs, PhaseKind::Review),
@@ -33,6 +34,72 @@ pub fn rebuild_revision_context(
         }),
         updated_from_job_id,
         updated_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use ingot_domain::ids::{ItemId, ItemRevisionId};
+    use ingot_domain::item::{
+        ApprovalState, Classification, EscalationState, Item, LifecycleState, OriginKind,
+        ParkingState, Priority,
+    };
+    use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::rebuild_revision_context;
+
+    #[test]
+    fn revision_context_keeps_unbound_authoring_head_null() {
+        let item_id = ItemId::from_uuid(Uuid::nil());
+        let revision_id = ItemRevisionId::from_uuid(Uuid::nil());
+        let now = Utc::now();
+        let item = Item {
+            id: item_id,
+            project_id: ingot_domain::ids::ProjectId::from_uuid(Uuid::nil()),
+            classification: Classification::Change,
+            workflow_version: "delivery:v1".into(),
+            lifecycle_state: LifecycleState::Open,
+            parking_state: ParkingState::Active,
+            done_reason: None,
+            resolution_source: None,
+            approval_state: ApprovalState::NotRequested,
+            escalation_state: EscalationState::None,
+            escalation_reason: None,
+            current_revision_id: revision_id,
+            origin_kind: OriginKind::Manual,
+            origin_finding_id: None,
+            priority: Priority::Major,
+            labels: vec![],
+            operator_notes: None,
+            created_at: now,
+            updated_at: now,
+            closed_at: None,
+        };
+        let revision = ItemRevision {
+            id: revision_id,
+            item_id,
+            revision_no: 1,
+            title: "Title".into(),
+            description: "Desc".into(),
+            acceptance_criteria: "AC".into(),
+            target_ref: "refs/heads/main".into(),
+            approval_policy: ApprovalPolicy::Required,
+            policy_snapshot: json!({}),
+            template_map_snapshot: json!({}),
+            seed_commit_oid: None,
+            seed_target_commit_oid: Some("target".into()),
+            supersedes_revision_id: None,
+            created_at: now,
+        };
+
+        let context = rebuild_revision_context(&item, &revision, &[], None, vec![], None, now);
+        assert_eq!(
+            context.payload["authoring_head_commit_oid"],
+            serde_json::Value::Null
+        );
     }
 }
 
@@ -93,20 +160,6 @@ fn structured_result_jobs(jobs: &[Job]) -> impl Iterator<Item = &Job> {
             && job.result_schema_version.is_some()
             && job.result_payload.is_some()
     })
-}
-
-fn current_authoring_head(jobs: &[Job], revision: &ItemRevision) -> String {
-    jobs.iter()
-        .filter(|job| job.status == JobStatus::Completed)
-        .filter(|job| job.output_artifact_kind == OutputArtifactKind::Commit)
-        .filter_map(|job| {
-            job.output_commit_oid
-                .as_ref()
-                .map(|commit_oid| ((job.ended_at, job.created_at), commit_oid.clone()))
-        })
-        .max_by_key(|(sort_key, _)| *sort_key)
-        .map(|(_, commit_oid)| commit_oid)
-        .unwrap_or_else(|| revision.seed_commit_oid.clone())
 }
 
 fn outcome_name(outcome: ingot_domain::job::OutcomeClass) -> &'static str {

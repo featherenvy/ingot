@@ -12,7 +12,7 @@ use ingot_domain::ids::{
     WorkspaceId,
 };
 use ingot_domain::item::{EscalationReason, EscalationState, Item};
-use ingot_domain::job::{Job, JobStatus, OutcomeClass};
+use ingot_domain::job::{Job, JobInput, JobStatus, OutcomeClass};
 use ingot_domain::ports::{
     CompletedJobCompletion, JobCompletionContext, JobCompletionMutation, JobCompletionRepository,
     RepositoryError,
@@ -36,6 +36,61 @@ enum StoreDecodeError {
     Json(String),
     #[error("invalid id value {value:?}: {message}")]
     Id { value: String, message: String },
+}
+
+fn encode_job_input(job_input: &JobInput) -> (&'static str, Option<&str>, Option<&str>) {
+    match job_input {
+        JobInput::None => ("none", None, None),
+        JobInput::AuthoringHead { head_commit_oid } => {
+            ("authoring_head", None, Some(head_commit_oid.as_str()))
+        }
+        JobInput::CandidateSubject {
+            base_commit_oid,
+            head_commit_oid,
+        } => (
+            "candidate_subject",
+            Some(base_commit_oid.as_str()),
+            Some(head_commit_oid.as_str()),
+        ),
+        JobInput::IntegratedSubject {
+            base_commit_oid,
+            head_commit_oid,
+        } => (
+            "integrated_subject",
+            Some(base_commit_oid.as_str()),
+            Some(head_commit_oid.as_str()),
+        ),
+    }
+}
+
+fn decode_job_input(
+    kind: String,
+    base_commit_oid: Option<String>,
+    head_commit_oid: Option<String>,
+) -> Result<JobInput, StoreDecodeError> {
+    match kind.as_str() {
+        "none" => Ok(JobInput::None),
+        "authoring_head" => head_commit_oid
+            .map(JobInput::authoring_head)
+            .ok_or_else(|| StoreDecodeError::Json("authoring_head job_input missing head".into())),
+        "candidate_subject" => match (base_commit_oid, head_commit_oid) {
+            (Some(base_commit_oid), Some(head_commit_oid)) => {
+                Ok(JobInput::candidate_subject(base_commit_oid, head_commit_oid))
+            }
+            _ => Err(StoreDecodeError::Json(
+                "candidate_subject job_input missing base or head".into(),
+            )),
+        },
+        "integrated_subject" => match (base_commit_oid, head_commit_oid) {
+            (Some(base_commit_oid), Some(head_commit_oid)) => {
+                Ok(JobInput::integrated_subject(base_commit_oid, head_commit_oid))
+            }
+            _ => Err(StoreDecodeError::Json(
+                "integrated_subject job_input missing base or head".into(),
+            )),
+        },
+        _ => Err(StoreDecodeError::Json(format!("unknown job_input_kind: {kind}"))),
+    }
 }
 
 pub struct StartJobExecutionParams<'a> {
@@ -492,7 +547,7 @@ impl Database {
         .bind(encode_enum(&revision.approval_policy)?)
         .bind(serde_json::to_string(&revision.policy_snapshot).map_err(json_err)?)
         .bind(serde_json::to_string(&revision.template_map_snapshot).map_err(json_err)?)
-        .bind(&revision.seed_commit_oid)
+        .bind(revision.seed_commit_oid.as_deref())
         .bind(revision.seed_target_commit_oid.as_deref())
         .bind(revision.supersedes_revision_id.map(|id| id.to_string()))
         .bind(revision.created_at)
@@ -559,7 +614,7 @@ impl Database {
         .bind(encode_enum(&revision.approval_policy)?)
         .bind(serde_json::to_string(&revision.policy_snapshot).map_err(json_err)?)
         .bind(serde_json::to_string(&revision.template_map_snapshot).map_err(json_err)?)
-        .bind(&revision.seed_commit_oid)
+        .bind(revision.seed_commit_oid.as_deref())
         .bind(revision.seed_target_commit_oid.as_deref())
         .bind(revision.supersedes_revision_id.map(|id| id.to_string()))
         .bind(revision.created_at)
@@ -788,16 +843,18 @@ impl Database {
     }
 
     pub async fn create_job(&self, job: &Job) -> Result<(), RepositoryError> {
+        let (job_input_kind, input_base_commit_oid, input_head_commit_oid) =
+            encode_job_input(&job.job_input);
         sqlx::query(
             "INSERT INTO jobs (
                 id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
                 supersedes_job_id, status, outcome_class, phase_kind, workspace_id, workspace_kind,
                 execution_permission, context_policy, phase_template_slug, phase_template_digest,
-                prompt_snapshot, input_base_commit_oid, input_head_commit_oid, output_artifact_kind,
-                output_commit_oid, result_schema_version, result_payload, agent_id, process_pid,
-                lease_owner_id, heartbeat_at, lease_expires_at, error_code, error_message,
-                created_at, started_at, ended_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                prompt_snapshot, job_input_kind, input_base_commit_oid, input_head_commit_oid,
+                output_artifact_kind, output_commit_oid, result_schema_version, result_payload,
+                agent_id, process_pid, lease_owner_id, heartbeat_at, lease_expires_at, error_code,
+                error_message, created_at, started_at, ended_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(job.id.to_string())
         .bind(job.project_id.to_string())
@@ -817,8 +874,9 @@ impl Database {
         .bind(&job.phase_template_slug)
         .bind(job.phase_template_digest.as_deref())
         .bind(job.prompt_snapshot.as_deref())
-        .bind(job.input_base_commit_oid.as_deref())
-        .bind(job.input_head_commit_oid.as_deref())
+        .bind(job_input_kind)
+        .bind(input_base_commit_oid)
+        .bind(input_head_commit_oid)
         .bind(encode_enum(&job.output_artifact_kind)?)
         .bind(job.output_commit_oid.as_deref())
         .bind(job.result_schema_version.as_deref())
@@ -841,16 +899,19 @@ impl Database {
     }
 
     pub async fn update_job(&self, job: &Job) -> Result<(), RepositoryError> {
+        let (job_input_kind, input_base_commit_oid, input_head_commit_oid) =
+            encode_job_input(&job.job_input);
         let result = sqlx::query(
             "UPDATE jobs
              SET step_id = ?, semantic_attempt_no = ?, retry_no = ?, supersedes_job_id = ?, status = ?,
                  outcome_class = ?, phase_kind = ?, workspace_id = ?, workspace_kind = ?,
                  execution_permission = ?, context_policy = ?, phase_template_slug = ?,
-                 phase_template_digest = ?, prompt_snapshot = ?, input_base_commit_oid = ?,
-                 input_head_commit_oid = ?, output_artifact_kind = ?, output_commit_oid = ?,
-                 result_schema_version = ?, result_payload = ?, agent_id = ?, process_pid = ?,
-                 lease_owner_id = ?, heartbeat_at = ?, lease_expires_at = ?, error_code = ?,
-                 error_message = ?, created_at = ?, started_at = ?, ended_at = ?
+                 phase_template_digest = ?, prompt_snapshot = ?, job_input_kind = ?,
+                 input_base_commit_oid = ?, input_head_commit_oid = ?,
+                 output_artifact_kind = ?, output_commit_oid = ?, result_schema_version = ?,
+                 result_payload = ?, agent_id = ?, process_pid = ?, lease_owner_id = ?,
+                 heartbeat_at = ?, lease_expires_at = ?, error_code = ?, error_message = ?,
+                 created_at = ?, started_at = ?, ended_at = ?
              WHERE id = ?",
         )
         .bind(&job.step_id)
@@ -867,8 +928,9 @@ impl Database {
         .bind(&job.phase_template_slug)
         .bind(job.phase_template_digest.as_deref())
         .bind(job.prompt_snapshot.as_deref())
-        .bind(job.input_base_commit_oid.as_deref())
-        .bind(job.input_head_commit_oid.as_deref())
+        .bind(job_input_kind)
+        .bind(input_base_commit_oid)
+        .bind(input_head_commit_oid)
         .bind(encode_enum(&job.output_artifact_kind)?)
         .bind(job.output_commit_oid.as_deref())
         .bind(job.result_schema_version.as_deref())
@@ -2179,8 +2241,12 @@ fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {
         phase_template_slug: row.try_get("phase_template_slug").map_err(db_err)?,
         phase_template_digest: row.try_get("phase_template_digest").map_err(db_err)?,
         prompt_snapshot: row.try_get("prompt_snapshot").map_err(db_err)?,
-        input_base_commit_oid: row.try_get("input_base_commit_oid").map_err(db_err)?,
-        input_head_commit_oid: row.try_get("input_head_commit_oid").map_err(db_err)?,
+        job_input: decode_job_input(
+            row.try_get("job_input_kind").map_err(db_err)?,
+            row.try_get("input_base_commit_oid").map_err(db_err)?,
+            row.try_get("input_head_commit_oid").map_err(db_err)?,
+        )
+        .map_err(|error| RepositoryError::Database(Box::new(error)))?,
         output_artifact_kind: parse_enum(row.try_get("output_artifact_kind").map_err(db_err)?)?,
         output_commit_oid: row.try_get("output_commit_oid").map_err(db_err)?,
         result_schema_version: row.try_get("result_schema_version").map_err(db_err)?,

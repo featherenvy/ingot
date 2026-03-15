@@ -38,7 +38,7 @@ pub enum WorkspaceError {
     Git(#[from] GitCommandError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("authoring jobs require input_head_commit_oid")]
+    #[error("authoring jobs require a job_input head")]
     MissingInputHeadCommitOid,
     #[error("authoring workspace is already busy")]
     Busy,
@@ -201,8 +201,9 @@ pub async fn ensure_authoring_workspace_state(
     now: DateTime<Utc>,
 ) -> Result<Workspace, WorkspaceError> {
     let expected_head_commit_oid = job
-        .input_head_commit_oid
-        .clone()
+        .job_input
+        .head_commit_oid()
+        .map(ToOwned::to_owned)
         .ok_or(WorkspaceError::MissingInputHeadCommitOid)?;
     let workspace_id = existing
         .as_ref()
@@ -232,7 +233,11 @@ pub async fn ensure_authoring_workspace_state(
         workspace.path = provisioned.workspace_path.display().to_string();
         workspace.target_ref = Some(revision.target_ref.clone());
         workspace.workspace_ref = Some(provisioned.workspace_ref);
-        workspace.base_commit_oid = Some(revision.seed_commit_oid.clone());
+        workspace.base_commit_oid = workspace
+            .base_commit_oid
+            .clone()
+            .or_else(|| revision.seed_commit_oid.clone())
+            .or_else(|| job.job_input.head_commit_oid().map(ToOwned::to_owned));
         workspace.head_commit_oid = Some(provisioned.head_commit_oid);
         workspace.status = WorkspaceStatus::Ready;
         workspace.current_job_id = None;
@@ -257,7 +262,10 @@ pub async fn ensure_authoring_workspace_state(
             parent_workspace_id: None,
             target_ref: Some(revision.target_ref.clone()),
             workspace_ref: Some(provisioned.workspace_ref),
-            base_commit_oid: Some(revision.seed_commit_oid.clone()),
+            base_commit_oid: revision
+                .seed_commit_oid
+                .clone()
+                .or_else(|| job.job_input.head_commit_oid().map(ToOwned::to_owned)),
             head_commit_oid: Some(provisioned.head_commit_oid),
             retention_policy: RetentionPolicy::Persistent,
             status: WorkspaceStatus::Ready,

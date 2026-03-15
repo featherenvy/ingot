@@ -124,6 +124,11 @@ describe('domain contract typing', () => {
           outcome_class: 'findings',
           phase_kind: 'investigate',
           workspace_id: null,
+          job_input: {
+            kind: 'candidate_subject',
+            base_commit_oid: 'abc123456789',
+            head_commit_oid: 'abc123456789',
+          },
           created_at: '2026-03-11T00:06:00Z',
           started_at: '2026-03-11T00:06:10Z',
           ended_at: '2026-03-11T00:07:00Z',

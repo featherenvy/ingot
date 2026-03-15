@@ -21,9 +21,9 @@ pub trait ProjectRepository: Send + Sync {
     fn list(&self) -> impl Future<Output = Result<Vec<Project>, RepositoryError>> + Send;
     fn get(&self, id: ProjectId) -> impl Future<Output = Result<Project, RepositoryError>> + Send;
     fn create(&self, project: &Project)
-        -> impl Future<Output = Result<(), RepositoryError>> + Send;
+    -> impl Future<Output = Result<(), RepositoryError>> + Send;
     fn update(&self, project: &Project)
-        -> impl Future<Output = Result<(), RepositoryError>> + Send;
+    -> impl Future<Output = Result<(), RepositoryError>> + Send;
     fn delete(&self, id: ProjectId) -> impl Future<Output = Result<(), RepositoryError>> + Send;
 }
 
@@ -146,9 +146,9 @@ pub trait FindingRepository: Send + Sync {
     ) -> impl Future<Output = Result<Vec<Finding>, RepositoryError>> + Send;
     fn get(&self, id: FindingId) -> impl Future<Output = Result<Finding, RepositoryError>> + Send;
     fn create(&self, finding: &Finding)
-        -> impl Future<Output = Result<(), RepositoryError>> + Send;
+    -> impl Future<Output = Result<(), RepositoryError>> + Send;
     fn update(&self, finding: &Finding)
-        -> impl Future<Output = Result<(), RepositoryError>> + Send;
+    -> impl Future<Output = Result<(), RepositoryError>> + Send;
     fn find_by_source(
         &self,
         job_id: JobId,

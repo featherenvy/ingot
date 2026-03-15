@@ -143,7 +143,84 @@ pub async fn compare_and_swap_ref(
     Ok(())
 }
 
+pub async fn update_ref(repo_path: &Path, ref_name: &str, new_oid: &str) -> Result<(), GitCommandError> {
+    git(repo_path, &["update-ref", ref_name, new_oid]).await?;
+    Ok(())
+}
+
 pub async fn delete_ref(repo_path: &Path, ref_name: &str) -> Result<(), GitCommandError> {
     git(repo_path, &["update-ref", "-d", ref_name]).await?;
     Ok(())
+}
+
+/// Return whether a fully qualified ref name is accepted by Git.
+pub async fn check_ref_format(ref_name: &str) -> Result<bool, GitCommandError> {
+    let output = Command::new("git")
+        .args(["check-ref-format", ref_name])
+        .output()
+        .await?;
+    Ok(output.status.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_ref_format;
+
+    #[tokio::test]
+    async fn check_ref_format_accepts_valid_head_refs() {
+        assert!(
+            check_ref_format("refs/heads/main")
+                .await
+                .expect("check main ref")
+        );
+        assert!(
+            check_ref_format("refs/heads/feature/ref-hardening")
+                .await
+                .expect("check nested ref")
+        );
+        assert!(
+            check_ref_format("refs/heads/release-2026.03")
+                .await
+                .expect("check dotted ref")
+        );
+        assert!(
+            check_ref_format("refs/heads/@")
+                .await
+                .expect("check at-sign ref")
+        );
+        assert!(
+            check_ref_format("refs/heads/-leading-dash")
+                .await
+                .expect("check leading-dash ref")
+        );
+    }
+
+    #[tokio::test]
+    async fn check_ref_format_rejects_git_invalid_head_refs() {
+        for invalid_ref in [
+            "refs/heads/foo..bar",
+            "refs/heads/foo.lock",
+            "refs/heads/bad@{name}",
+            "refs/heads/.hidden",
+            "refs/heads/feature/.hidden",
+            "refs/heads/feature/trailing.",
+            "refs/heads/with space",
+            "refs/heads/line\nbreak",
+            "refs/heads/tab\tname",
+            "refs/heads/with~tilde",
+            "refs/heads/with^caret",
+            "refs/heads/with:colon",
+            "refs/heads/with?question",
+            "refs/heads/with*star",
+            "refs/heads/with[bracket",
+            "refs/heads/with\\backslash",
+        ] {
+            assert!(
+                !check_ref_format(invalid_ref)
+                    .await
+                    .unwrap_or_else(|_| panic!("check invalid ref: {invalid_ref}")),
+                "{invalid_ref} should be rejected by git check-ref-format"
+            );
+        }
+    }
 }

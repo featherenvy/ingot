@@ -25,7 +25,7 @@ pub struct CreateItemInput {
     pub approval_policy: ApprovalPolicy,
     pub candidate_rework_budget: u32,
     pub integration_rework_budget: u32,
-    pub seed_commit_oid: String,
+    pub seed_commit_oid: Option<String>,
     pub seed_target_commit_oid: Option<String>,
 }
 
@@ -147,38 +147,10 @@ pub fn default_template_map_snapshot() -> Value {
 }
 
 fn validate_branch_name(original: &str, branch_name: &str) -> Result<String, UseCaseError> {
-    if branch_name.is_empty()
-        || branch_name == "@"
-        || branch_name.starts_with('-')
-        || branch_name.starts_with('/')
-        || branch_name.ends_with('/')
-        || branch_name.ends_with('.')
-        || branch_name.contains("//")
-        || branch_name.contains("..")
-        || branch_name.contains("@{")
-    {
+    if branch_name.is_empty() {
         return Err(UseCaseError::InvalidTargetRef(original.into()));
     }
-
-    for component in branch_name.split('/') {
-        if component.is_empty()
-            || component.starts_with('.')
-            || component.ends_with(".lock")
-            || component.ends_with('.')
-        {
-            return Err(UseCaseError::InvalidTargetRef(original.into()));
-        }
-    }
-
-    if branch_name.chars().any(is_forbidden_branch_char) {
-        return Err(UseCaseError::InvalidTargetRef(original.into()));
-    }
-
     Ok(branch_name.into())
-}
-
-fn is_forbidden_branch_char(ch: char) -> bool {
-    ch.is_ascii_control() || matches!(ch, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\')
 }
 
 pub fn rework_budgets_from_policy_snapshot(policy_snapshot: &Value) -> Option<(u32, u32)> {
@@ -233,7 +205,7 @@ mod tests {
                 approval_policy: ApprovalPolicy::Required,
                 candidate_rework_budget: 3,
                 integration_rework_budget: 4,
-                seed_commit_oid: "seed".into(),
+                seed_commit_oid: Some("seed".into()),
                 seed_target_commit_oid: Some("target".into()),
             },
             created_at,
@@ -243,7 +215,7 @@ mod tests {
         assert_eq!(revision.item_id, item.id);
         assert_eq!(revision.revision_no, 1);
         assert_eq!(revision.target_ref, "refs/heads/main");
-        assert_eq!(revision.seed_commit_oid, "seed");
+        assert_eq!(revision.seed_commit_oid.as_deref(), Some("seed"));
         assert_eq!(revision.seed_target_commit_oid.as_deref(), Some("target"));
         assert_eq!(revision.policy_snapshot["candidate_rework_budget"], 3);
         assert_eq!(revision.policy_snapshot["integration_rework_budget"], 4);
@@ -302,30 +274,8 @@ mod tests {
     }
 
     #[test]
-    fn normalize_target_ref_rejects_git_invalid_branch_names() {
-        let invalid_refs = [
-            "foo..bar",
-            "foo.lock",
-            "bad@{name}",
-            "@",
-            "-leading-dash",
-            ".hidden",
-            "feature/.hidden",
-            "feature/trailing.",
-            "feature//double-slash",
-            "with space",
-            "with~tilde",
-            "with^caret",
-            "with:colon",
-            "with?question",
-            "with*star",
-            "with[bracket",
-            "with\\backslash",
-            "line\nbreak",
-            "tab\tname",
-        ];
-
-        for invalid_ref in invalid_refs {
+    fn normalize_target_ref_only_rejects_empty_branch_names() {
+        for invalid_ref in ["", "refs/heads/"] {
             let error = normalize_target_ref(invalid_ref)
                 .err()
                 .unwrap_or_else(|| panic!("expected invalid ref: {invalid_ref}"));

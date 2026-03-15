@@ -9,6 +9,8 @@ pub enum OperationKind {
     CreateJobCommit,
     PrepareConvergenceCommit,
     FinalizeTargetRef,
+    CreateInvestigationRef,
+    RemoveInvestigationRef,
     ResetWorkspace,
     RemoveWorkspaceRef,
 }

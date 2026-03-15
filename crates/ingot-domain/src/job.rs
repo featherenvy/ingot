@@ -77,6 +77,114 @@ pub enum OutputArtifactKind {
     None,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum JobInput {
+    None,
+    AuthoringHead {
+        head_commit_oid: String,
+    },
+    CandidateSubject {
+        base_commit_oid: String,
+        head_commit_oid: String,
+    },
+    IntegratedSubject {
+        base_commit_oid: String,
+        head_commit_oid: String,
+    },
+}
+
+impl Default for JobInput {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl JobInput {
+    pub fn none() -> Self {
+        Self::None
+    }
+
+    pub fn authoring_head(head_commit_oid: impl Into<String>) -> Self {
+        Self::AuthoringHead {
+            head_commit_oid: head_commit_oid.into(),
+        }
+    }
+
+    pub fn candidate_subject(
+        base_commit_oid: impl Into<String>,
+        head_commit_oid: impl Into<String>,
+    ) -> Self {
+        Self::CandidateSubject {
+            base_commit_oid: base_commit_oid.into(),
+            head_commit_oid: head_commit_oid.into(),
+        }
+    }
+
+    pub fn integrated_subject(
+        base_commit_oid: impl Into<String>,
+        head_commit_oid: impl Into<String>,
+    ) -> Self {
+        Self::IntegratedSubject {
+            base_commit_oid: base_commit_oid.into(),
+            head_commit_oid: head_commit_oid.into(),
+        }
+    }
+
+    pub fn base_commit_oid(&self) -> Option<&str> {
+        match self {
+            Self::CandidateSubject {
+                base_commit_oid, ..
+            }
+            | Self::IntegratedSubject {
+                base_commit_oid, ..
+            } => Some(base_commit_oid.as_str()),
+            Self::None | Self::AuthoringHead { .. } => None,
+        }
+    }
+
+    pub fn head_commit_oid(&self) -> Option<&str> {
+        match self {
+            Self::AuthoringHead { head_commit_oid }
+            | Self::CandidateSubject {
+                head_commit_oid, ..
+            }
+            | Self::IntegratedSubject {
+                head_commit_oid, ..
+            } => Some(head_commit_oid.as_str()),
+            Self::None => None,
+        }
+    }
+
+    pub fn with_head(self, head_commit_oid: impl Into<String>) -> Self {
+        let head_commit_oid = head_commit_oid.into();
+        match self {
+            Self::None | Self::AuthoringHead { .. } => Self::AuthoringHead { head_commit_oid },
+            Self::CandidateSubject {
+                base_commit_oid, ..
+            } => Self::CandidateSubject {
+                base_commit_oid,
+                head_commit_oid,
+            },
+            Self::IntegratedSubject {
+                base_commit_oid, ..
+            } => Self::IntegratedSubject {
+                base_commit_oid,
+                head_commit_oid,
+            },
+        }
+    }
+
+    pub fn with_candidate_subject(
+        self,
+        base_commit_oid: impl Into<String>,
+        head_commit_oid: impl Into<String>,
+    ) -> Self {
+        let _ = self;
+        Self::candidate_subject(base_commit_oid, head_commit_oid)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: JobId,
@@ -97,8 +205,7 @@ pub struct Job {
     pub phase_template_slug: String,
     pub phase_template_digest: Option<String>,
     pub prompt_snapshot: Option<String>,
-    pub input_base_commit_oid: Option<String>,
-    pub input_head_commit_oid: Option<String>,
+    pub job_input: JobInput,
     pub output_artifact_kind: OutputArtifactKind,
     pub output_commit_oid: Option<String>,
     pub result_schema_version: Option<String>,

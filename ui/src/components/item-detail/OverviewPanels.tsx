@@ -118,7 +118,14 @@ export function OverviewPanels({
               { label: 'No.', value: <span className="font-mono tabular-nums">{revision.revision_no}</span> },
               { label: 'Target ref', value: <code>{revision.target_ref}</code> },
               { label: 'Approval policy', value: <Badge variant="outline">{revision.approval_policy}</Badge> },
-              { label: 'Seed', value: <code>{revision.seed_commit_oid.slice(0, 8)}</code> },
+              {
+                label: 'Seed',
+                value: revision.seed_commit_oid ? (
+                  <code>{revision.seed_commit_oid.slice(0, 8)}</code>
+                ) : (
+                  <span className="text-muted-foreground">Late-bound</span>
+                ),
+              },
             ]}
           />
         </CardContent>

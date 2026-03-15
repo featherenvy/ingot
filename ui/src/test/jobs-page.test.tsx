@@ -54,6 +54,7 @@ describe('JobsPage', () => {
         outcome_class: 'clean',
         phase_kind: 'author',
         workspace_id: 'wrk_1',
+        job_input: { kind: 'authoring_head', head_commit_oid: '0123456789abcdef' },
         created_at: '2026-03-11T00:00:00Z',
         started_at: '2026-03-11T00:01:00Z',
         ended_at: '2026-03-11T00:02:00Z',

@@ -7,7 +7,7 @@ use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::finding::Finding;
 use ingot_domain::ids::JobId;
 use ingot_domain::item::{ApprovalState, Item, ParkingState};
-use ingot_domain::job::{Job, JobStatus, OutcomeClass, OutputArtifactKind};
+use ingot_domain::job::{Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind};
 use ingot_domain::ports::{
     GitPortError, JobCompletionContext, JobCompletionGitPort, JobCompletionMutation,
     JobCompletionRepository, PreparedConvergenceGuard, ProjectMutationLockPort, RepositoryError,
@@ -551,8 +551,7 @@ pub fn dispatch_job(
     }
 
     let template_slug = template_slug_for_step(revision, &step_id, contract.default_template_slug);
-    let (input_base_commit_oid, input_head_commit_oid) =
-        input_commits_for_step(&step_id, revision, jobs, convergences);
+    let job_input = job_input_for_step(&step_id, revision, jobs, convergences);
     let semantic_attempt_no = next_semantic_attempt_no(jobs, item.current_revision_id, &step_id);
 
     Ok(Job {
@@ -574,8 +573,7 @@ pub fn dispatch_job(
         phase_template_slug: template_slug,
         phase_template_digest: None,
         prompt_snapshot: None,
-        input_base_commit_oid,
-        input_head_commit_oid,
+        job_input,
         output_artifact_kind: contract.output_artifact_kind,
         output_commit_oid: None,
         result_schema_version: None,
@@ -645,8 +643,7 @@ pub fn retry_job(
         &previous_job.step_id,
         contract.default_template_slug,
     );
-    let (input_base_commit_oid, input_head_commit_oid) =
-        input_commits_for_step(&previous_job.step_id, revision, jobs, convergences);
+    let job_input = job_input_for_step(&previous_job.step_id, revision, jobs, convergences);
     let retry_no = jobs
         .iter()
         .filter(|job| job.item_revision_id == item.current_revision_id)
@@ -676,8 +673,7 @@ pub fn retry_job(
         phase_template_slug: template_slug,
         phase_template_digest: None,
         prompt_snapshot: None,
-        input_base_commit_oid,
-        input_head_commit_oid,
+        job_input,
         output_artifact_kind: contract.output_artifact_kind,
         output_commit_oid: None,
         result_schema_version: None,
@@ -735,49 +731,74 @@ fn template_slug_for_step(
         .unwrap_or_else(|| step_id.to_string())
 }
 
-fn input_commits_for_step(
+fn job_input_for_step(
     step_id: &str,
     revision: &ItemRevision,
     jobs: &[Job],
     convergences: &[Convergence],
-) -> (Option<String>, Option<String>) {
-    let seed_head = Some(revision.seed_commit_oid.clone());
-    let current_head = Some(current_authoring_head(jobs, revision));
-    let previous_head = Some(previous_authoring_head(jobs, revision));
+) -> JobInput {
+    let seed_head = revision.seed_commit_oid.clone();
+    let current_head = current_authoring_head(jobs, revision);
+    let previous_head = previous_authoring_head(jobs, revision);
     let prepared_convergence = selected_prepared_convergence(revision.id, convergences);
 
     match step_id {
-        step::AUTHOR_INITIAL => (None, seed_head),
-        step::REPAIR_CANDIDATE | step::REPAIR_AFTER_INTEGRATION => (None, current_head),
-        step::REVIEW_INCREMENTAL_INITIAL => (seed_head, current_head),
+        step::AUTHOR_INITIAL => seed_head
+            .map(JobInput::authoring_head)
+            .unwrap_or(JobInput::None),
+        step::REPAIR_CANDIDATE | step::REPAIR_AFTER_INTEGRATION => current_head
+            .map(JobInput::authoring_head)
+            .unwrap_or(JobInput::None),
+        step::REVIEW_INCREMENTAL_INITIAL => job_input_from_range(seed_head, current_head, false),
         step::REVIEW_INCREMENTAL_REPAIR | step::REVIEW_INCREMENTAL_AFTER_INTEGRATION_REPAIR => {
-            (previous_head, current_head)
+            job_input_from_range(previous_head, current_head, false)
         }
         step::REVIEW_CANDIDATE_INITIAL
         | step::REVIEW_CANDIDATE_REPAIR
         | step::VALIDATE_CANDIDATE_INITIAL
         | step::VALIDATE_CANDIDATE_REPAIR
         | step::REVIEW_AFTER_INTEGRATION_REPAIR
-        | step::VALIDATE_AFTER_INTEGRATION_REPAIR => (seed_head, current_head),
+        | step::VALIDATE_AFTER_INTEGRATION_REPAIR => {
+            job_input_from_range(seed_head, current_head, false)
+        }
         step::INVESTIGATE_ITEM => {
             if let Some(prepared_convergence) = prepared_convergence {
-                (
+                job_input_from_range(
                     prepared_convergence.input_target_commit_oid.clone(),
                     prepared_convergence.prepared_commit_oid.clone(),
+                    false,
                 )
             } else {
-                (seed_head, current_head)
+                job_input_from_range(seed_head, current_head, false)
             }
         }
         step::VALIDATE_INTEGRATED => prepared_convergence
             .map(|convergence| {
-                (
+                job_input_from_range(
                     convergence.input_target_commit_oid.clone(),
                     convergence.prepared_commit_oid.clone(),
+                    true,
                 )
             })
-            .unwrap_or((None, None)),
-        _ => (None, None),
+            .unwrap_or(JobInput::None),
+        _ => JobInput::None,
+    }
+}
+
+fn job_input_from_range(
+    base_commit_oid: Option<String>,
+    head_commit_oid: Option<String>,
+    integrated: bool,
+) -> JobInput {
+    match (base_commit_oid, head_commit_oid) {
+        (Some(base_commit_oid), Some(head_commit_oid)) => {
+            if integrated {
+                JobInput::integrated_subject(base_commit_oid, head_commit_oid)
+            } else {
+                JobInput::candidate_subject(base_commit_oid, head_commit_oid)
+            }
+        }
+        _ => JobInput::None,
     }
 }
 
@@ -827,21 +848,21 @@ fn should_clear_item_escalation_on_success(item: &Item, job: &Job) -> bool {
         )
 }
 
-fn current_authoring_head(jobs: &[Job], revision: &ItemRevision) -> String {
+fn current_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<String> {
     successful_commit_oids(jobs, revision)
         .last()
         .cloned()
-        .unwrap_or_else(|| revision.seed_commit_oid.clone())
+        .or_else(|| revision.seed_commit_oid.clone())
 }
 
-fn previous_authoring_head(jobs: &[Job], revision: &ItemRevision) -> String {
+fn previous_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<String> {
     let commit_oids = successful_commit_oids(jobs, revision);
     commit_oids
         .iter()
         .rev()
         .nth(1)
         .cloned()
-        .unwrap_or_else(|| revision.seed_commit_oid.clone())
+        .or_else(|| revision.seed_commit_oid.clone())
 }
 
 fn successful_commit_oids(jobs: &[Job], revision: &ItemRevision) -> Vec<String> {
@@ -1090,8 +1111,8 @@ mod tests {
         .expect("dispatch after repair");
 
         assert_eq!(job.step_id, "review_incremental_repair");
-        assert_eq!(job.input_base_commit_oid.as_deref(), Some("commit-1"));
-        assert_eq!(job.input_head_commit_oid.as_deref(), Some("commit-2"));
+        assert_eq!(job.job_input.base_commit_oid(), Some("commit-1"));
+        assert_eq!(job.job_input.head_commit_oid(), Some("commit-2"));
     }
 
     #[test]
@@ -1176,14 +1197,8 @@ mod tests {
         )
         .expect("dispatch validation");
         assert_eq!(validation_job.step_id, "validate_candidate_repair");
-        assert_eq!(
-            validation_job.input_base_commit_oid.as_deref(),
-            Some("seed")
-        );
-        assert_eq!(
-            validation_job.input_head_commit_oid.as_deref(),
-            Some("commit-2")
-        );
+        assert_eq!(validation_job.job_input.base_commit_oid(), Some("seed"));
+        assert_eq!(validation_job.job_input.head_commit_oid(), Some("commit-2"));
     }
 
     #[tokio::test]
@@ -1728,7 +1743,7 @@ mod tests {
             approval_policy: ApprovalPolicy::Required,
             policy_snapshot: json!({}),
             template_map_snapshot: json!({}),
-            seed_commit_oid: "seed".into(),
+            seed_commit_oid: Some("seed".into()),
             seed_target_commit_oid: Some("target".into()),
             supersedes_revision_id: None,
             created_at: Utc::now(),
@@ -1755,8 +1770,7 @@ mod tests {
             phase_template_slug: "validate-integrated".into(),
             phase_template_digest: None,
             prompt_snapshot: None,
-            input_base_commit_oid: Some("target".into()),
-            input_head_commit_oid: Some("prepared-head".into()),
+            job_input: JobInput::integrated_subject("target", "prepared-head"),
             output_artifact_kind,
             output_commit_oid: None,
             result_schema_version: None,

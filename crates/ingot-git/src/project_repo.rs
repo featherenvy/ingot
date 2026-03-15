@@ -147,14 +147,18 @@ pub async fn sync_checkout_to_commit(
         "refs/ingot/sync-targets/{}",
         target_ref
             .trim_start_matches("refs/")
-            .replace('/', "_")
-            .replace(':', "_")
+            .replace(['/', ':'], "_")
     );
     let fetch_spec = format!("{target_ref}:{sync_ref}");
     let mirror_path = mirror_git_dir.to_string_lossy().into_owned();
     git(
         checkout_path,
-        &["fetch", "--no-tags", mirror_path.as_str(), fetch_spec.as_str()],
+        &[
+            "fetch",
+            "--no-tags",
+            mirror_path.as_str(),
+            fetch_spec.as_str(),
+        ],
     )
     .await?;
     let fetched_oid = resolve_ref_oid(checkout_path, &sync_ref).await?;
@@ -350,9 +354,7 @@ mod tests {
         .await
         .expect_err("sync should fail on fetched oid mismatch");
         assert!(
-            error
-                .to_string()
-                .contains("expected"),
+            error.to_string().contains("expected"),
             "error should describe fetched oid mismatch"
         );
         assert_eq!(

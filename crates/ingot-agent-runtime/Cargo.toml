@@ -20,3 +20,15 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 sha2 = "0.10"
+
+[dev-dependencies]
+ingot-domain = { workspace = true }
+ingot-git = { workspace = true }
+ingot-store-sqlite = { workspace = true }
+ingot-usecases = { workspace = true }
+ingot-workflow = { workspace = true }
+ingot-agent-protocol = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid = { workspace = true }

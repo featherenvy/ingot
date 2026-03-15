@@ -249,7 +249,7 @@ Semantics:
 
 Lifecycle rules:
 
-* authoring workspace: one per revision, seeded from `seed_commit_oid`, reused within the revision
+* authoring workspace: at most one per revision, reused within the revision. If `seed_commit_oid` is non-null, first provisioning uses that commit. Otherwise first provisioning MUST resolve the current `target_ref` head atomically, set the authoring workspace `base_commit_oid` and initial `head_commit_oid` to that commit, and thereby bind the revision's authoring base.
 * review workspace: fresh per review or investigation job, ephemeral by default
 * integration workspace: one per convergence attempt, provisioned from current `target_ref` head
 
@@ -259,7 +259,7 @@ Field nullability and conditional requirements:
 * `parent_workspace_id` is nullable and used only when lineage matters.
 * `target_ref` is required for integration workspaces, optional for authoring workspaces, and null for review workspaces.
 * `workspace_ref` is required for authoring and integration workspaces and null for review workspaces.
-* `base_commit_oid` is required for review workspaces once provisioned, required for integration workspaces once provisioned, and optional for authoring workspaces.
+* `base_commit_oid` is required once provisioned for authoring, review, and integration workspaces.
 * `head_commit_oid` is required once the workspace becomes `ready`.
 * `current_job_id` is null unless the workspace is actively attached to a running job.
 
@@ -327,17 +327,21 @@ Semantics:
 * any change to title, description, acceptance criteria, target ref, approval policy, `seed_commit_oid`, or `seed_target_commit_oid` creates a new revision
 * old revisions remain for audit
 * future jobs for a revision read only that revision's frozen snapshots
-* `seed_commit_oid` is the source baseline from which authoring for the revision proceeds
+* `seed_commit_oid` is an explicit source-baseline override. When non-null, it is the authoring base from revision start.
 * `seed_target_commit_oid` is the target baseline captured at revision creation for audit, target-baseline history across superseding revisions, and downstream promotion defaults
-* `seed_target_commit_oid` does not by itself change the current candidate diff subject, which continues to derive from `seed_commit_oid` and the current authoring head
-* `seed_commit_oid` and `seed_target_commit_oid` MUST remain reachable local commits for as long as the revision is current and may still dispatch jobs
-* explicit or derived seed OIDs MUST be validated as reachable local commits in the project repository at revision-creation time
-* when a default seed depends on the current `target_ref` head, the daemon MUST capture that head atomically with revision creation so later ref movement cannot rewrite the revision baseline
+* if `seed_commit_oid` is null, the revision uses implicit authoring-base binding and has no bound authoring base at revision creation
+* the bound authoring base commit for a revision is `seed_commit_oid` when non-null; otherwise it is the current revision authoring workspace's `base_commit_oid`, captured atomically from the current `target_ref` head when the first authoring workspace is provisioned
+* once bound, the authoring base commit MUST remain stable for the lifetime of the revision; changing it requires a new revision
+* `seed_target_commit_oid` does not by itself change the current candidate diff subject, which continues to derive from the bound authoring base commit and the current authoring head
+* any non-null `seed_commit_oid` and every `seed_target_commit_oid` MUST remain reachable local commits for as long as the revision is current and may still dispatch jobs
+* explicit seed OIDs MUST be validated as reachable local commits in the project repository at revision-creation time
+* when a default depends on the current `target_ref` head at revision creation, currently `seed_target_commit_oid`, the daemon MUST capture that head atomically so later ref movement cannot rewrite that recorded baseline
 * `policy_snapshot` freezes execution policy, including the default repo-context policy and any step-specific repo-context overrides
 * every repo-context policy object stored in `policy_snapshot` MUST conform to `repo_context_policy:v1`
 
 Field nullability and conditional requirements:
 
+* `seed_commit_oid` may be null only when the revision uses implicit authoring-base binding. If null, no candidate review or convergence action may proceed until an authoring workspace is provisioned and its `base_commit_oid` is set. The first mutating authoring dispatch MAY perform that binding atomically, and report-only candidate investigation MAY run before binding under the dedicated rule in 7.6.
 * `supersedes_revision_id` is null for the initial revision and required for later revisions that replace a prior revision.
 
 ### 4.8 RevisionContext
@@ -394,8 +398,7 @@ Required fields:
 * `phase_template_slug`
 * `phase_template_digest`
 * `prompt_snapshot`
-* `input_base_commit_oid`
-* `input_head_commit_oid`
+* `job_input`
 * `output_artifact_kind` with values `commit|review_report|validation_report|finding_report|none`
 * `output_commit_oid`
 * `result_schema_version`
@@ -431,8 +434,10 @@ Field nullability and conditional requirements:
 * `supersedes_job_id` is null on first dispatch of a semantic attempt and required on retries or manual redispatch lineage.
 * `outcome_class` is null until the job reaches a terminal state.
 * `workspace_id` is null while queued and required once the job is assigned.
-* `input_base_commit_oid` is required for review jobs, investigation jobs, `validate_integrated`, and other jobs that evaluate a diff subject; otherwise it may be null.
-* `input_head_commit_oid` is required once execution begins.
+* `job_input.kind=authoring_head` is required for mutating authoring jobs once execution begins.
+* `job_input.kind=candidate_subject` is required for review and investigation jobs over candidate diffs.
+* `job_input.kind=integrated_subject` is required for `validate_integrated` and other jobs that evaluate an integrated diff subject.
+* `job_input.kind=none` is allowed only when the step contract truly has no input subject.
 * `output_commit_oid` is required for successful mutating jobs and null otherwise.
 * `result_schema_version` and `result_payload` are required when the job produces a structured terminal result and null otherwise.
 * `agent_id` is null until the job is assigned to a concrete agent runtime.
@@ -723,7 +728,7 @@ Successful `validate_integrated` does not create another job step. It either ent
 
 If a prepared convergence later becomes stale because `target_ref` moved, the daemon MUST execute the daemon-only `invalidate_prepared_convergence` action before approval or finalization can proceed.
 
-`investigate_item` is an explicit auxiliary report-only step. It MAY be dispatched when an item is open, idle, not pending approval, and the evaluator does not currently project a daemon-only next action. Its completion records `Finding` rows but does not change `current_step_id`, `dispatchable_step_id`, approval state, or closure progress.
+`investigate_item` is an explicit auxiliary report-only step. It MAY be dispatched when an item is open, idle, not pending approval, and the evaluator does not currently project a daemon-only next action, including before the first authoring workspace exists for an implicitly seeded revision. Its completion records `Finding` rows but does not change `current_step_id`, `dispatchable_step_id`, approval state, or closure progress.
 
 Auxiliary report-only transition rule:
 
@@ -907,7 +912,7 @@ Request body:
 2. verify there are no active jobs or active convergence operations
 3. cancel the prepared convergence
 4. create a new revision that supersedes the current one with the same title, description, acceptance criteria, target ref, and approval policy by default
-5. set the new revision's `seed_commit_oid` from explicit input when provided; otherwise derive it from the prior revision's current authoring head, or fall back to the prior revision's `seed_commit_oid` when no authoring workspace exists
+5. set the new revision's `seed_commit_oid` from explicit input when provided; otherwise derive it from the prior revision's current authoring head when one exists; otherwise carry forward the prior revision's explicit `seed_commit_oid` when non-null; otherwise set `seed_commit_oid=null` so the new revision binds its authoring base on first authoring workspace provisioning
 6. set the new revision's `seed_target_commit_oid` from explicit input when provided; otherwise derive it from the current head of the new revision's `target_ref`
 7. capture any default derived from `target_ref` atomically with revision creation
 8. note that rebinding `seed_target_commit_oid` records a new target baseline but does not itself rebase carried-forward work
@@ -956,24 +961,25 @@ Mutability is a job property, not a workspace property:
 
 For a mutating job the daemon MUST:
 
-1. provision or reuse the authoring workspace for the current revision
-2. verify the workspace starts at the expected `workspace_ref` and `input_head_commit_oid`
-3. run the agent with explicit instructions not to commit or alter refs
-4. on successful agent exit, verify no unexpected commits or ref movements occurred
-5. inspect the working tree
-6. fail the job as `terminal_failure` if no valid change set exists
-7. create a `GitOperation` row for `create_job_commit`
-8. stage changes and create exactly one daemon-owned canonical commit
-9. attach required trailers
-10. record that commit as `output_commit_oid`
-11. advance workspace head and workspace ref to that commit
+1. for the first mutating authoring dispatch of a revision with `seed_commit_oid=null` and no existing authoring workspace, atomically resolve the current `target_ref` head, create the authoring workspace, set the workspace `base_commit_oid` plus initial `head_commit_oid` to that commit, and record that same commit as the job's initial `job_input={kind:authoring_head, head_commit_oid=resolved_head}`
+2. otherwise provision or reuse the authoring workspace for the current revision
+3. verify the workspace starts at the expected `workspace_ref` and `job_input.head_commit_oid`
+4. run the agent with explicit instructions not to commit or alter refs
+5. on successful agent exit, verify no unexpected commits or ref movements occurred
+6. inspect the working tree
+7. fail the job as `terminal_failure` if no valid change set exists
+8. create a `GitOperation` row for `create_job_commit`
+9. stage changes and create exactly one daemon-owned canonical commit
+10. attach required trailers
+11. record that commit as `output_commit_oid`
+12. advance workspace head and workspace ref to that commit
 
 ### 7.5 Non-Mutating Job Protocol
 
 For a non-mutating job the daemon MUST:
 
 1. provision the required workspace
-2. record `input_head_commit_oid`
+2. record `job_input`
 3. verify the workspace is clean before execution
 4. run the job
 5. verify the workspace is still clean after execution
@@ -982,23 +988,23 @@ For a non-mutating job the daemon MUST:
 
 ### 7.6 Review Subjects
 
-Review and investigation jobs MUST record both:
+Review and investigation jobs MUST record a typed `job_input` whose `kind` plus commit payload identify an explicit diff subject. A review or investigation result MUST be attributable to that concrete subject.
 
-* `input_base_commit_oid`
-* `input_head_commit_oid`
-
-A review or investigation result MUST be attributable to a specific diff subject.
+For review and convergence rules below, the bound authoring base commit means the fixed lower bound of the revision's candidate diff subject: `seed_commit_oid` when non-null, otherwise the authoring workspace `base_commit_oid` captured on first authoring dispatch.
 
 Closure-relevant review steps in `delivery:v1` use these diff subjects:
 
-* `review_incremental_initial` MUST review only the newly produced initial authoring commit range, with `input_base_commit_oid=seed_commit_oid` and `input_head_commit_oid` equal to the current authoring workspace head
-* `review_incremental_repair` and `review_incremental_after_integration_repair` MUST review only the newly produced repair commit range, with `input_base_commit_oid` equal to the authoring workspace head before the repair job and `input_head_commit_oid` equal to the current authoring workspace head after the repair job
-* `review_candidate_initial`, `review_candidate_repair`, and `review_after_integration_repair` MUST review the full current candidate subject for the revision, with `input_base_commit_oid=seed_commit_oid` and `input_head_commit_oid` equal to the current authoring workspace head, or `seed_commit_oid` when no authoring workspace exists yet
+* `review_incremental_initial` MUST use `job_input.kind=candidate_subject` with base equal to the bound authoring base commit and head equal to the current authoring workspace head
+* `review_incremental_repair` and `review_incremental_after_integration_repair` MUST use `job_input.kind=candidate_subject` with base equal to the authoring workspace head before the repair job and head equal to the current authoring workspace head after the repair job
+* `review_candidate_initial`, `review_candidate_repair`, and `review_after_integration_repair` MUST use `job_input.kind=candidate_subject` with base equal to the bound authoring base commit and head equal to the current authoring workspace head
 
 `investigate_item` uses a review workspace and MUST also record a specific diff subject:
 
-* on the candidate side, `input_base_commit_oid` defaults to `seed_commit_oid` and `input_head_commit_oid` defaults to the current authoring workspace head, or `seed_commit_oid` when no authoring workspace exists yet
-* when a valid prepared convergence is the current integrated subject, `input_base_commit_oid` MUST be that convergence's `input_target_commit_oid` and `input_head_commit_oid` MUST be its `prepared_commit_oid`
+* on the candidate side, investigation defaults to `job_input.kind=candidate_subject` with base equal to the bound authoring base commit and head equal to the current authoring workspace head
+* if no authoring workspace exists yet and `seed_commit_oid` is non-null, candidate-side investigation uses `job_input.kind=candidate_subject` with both base and head equal to `seed_commit_oid`
+* if no authoring workspace exists yet and `seed_commit_oid` is null, candidate-side investigation MUST atomically resolve the current `target_ref` head, create or adopt a durable local commit reference for that resolved commit, and use `job_input.kind=candidate_subject` with both base and head equal to that commit; this ephemeral investigation subject does not bind the revision's authoring base or create an authoring workspace
+* the durable local commit reference for a pre-authoring investigation subject MUST be daemon-owned or otherwise guaranteed local to the project and MUST remain reachable until all findings from that subject are triaged
+* when a valid prepared convergence is the current integrated subject, the job MUST use `job_input.kind=integrated_subject` with base equal to `input_target_commit_oid` and head equal to `prepared_commit_oid`
 
 ### 7.7 Convergence Lifecycle
 
@@ -1006,7 +1012,7 @@ Prepare:
 
 1. create an integration workspace from the latest `target_ref` head
 2. record `input_target_commit_oid`
-3. compute the current revision source range as the commits in `seed_commit_oid..source_head_commit_oid`, ordered oldest-first
+3. compute the current revision source range as the commits in `bound_authoring_base_commit_oid..source_head_commit_oid`, ordered oldest-first
 4. create a `GitOperation` for `prepare_convergence_commit` with the ordered `source_commit_oids` before replay begins
 5. replay the source range onto `input_target_commit_oid` oldest-first, preserving commit boundaries and creating one daemon-owned prepared commit per source commit
 6. if conflicts occur, mark the `GitOperation` failed, mark convergence `conflicted`, retain the integration workspace, and escalate the item
@@ -1014,7 +1020,7 @@ Prepare:
 
 Validate and finalize:
 
-1. run `validate_integrated` against the prepared result and record `input_base_commit_oid=input_target_commit_oid` plus `input_head_commit_oid=prepared_commit_oid`
+1. run `validate_integrated` against the prepared result and record `job_input={kind:integrated_subject, base_commit_oid=input_target_commit_oid, head_commit_oid=prepared_commit_oid}`
 2. if validation finds issues, return to the post-integration repair loop
 3. if approval is required, the clean completion handler for `validate_integrated` MUST set `approval_state=pending` and wait for explicit approval
 4. if approval is not required, the daemon MUST project and execute `finalize_prepared_convergence`
@@ -1038,7 +1044,8 @@ When convergence becomes `conflicted`:
 * authoring workspaces are retained through the active revision and cleaned up after revision supersession or item closure unless retained for debug
 * review workspaces are removed after completion unless retained for debug
 * integration workspaces are retained while convergence is `running`, `conflicted`, or `prepared`, then removed after finalization, failure, or explicit cleanup
-* any authoring or integration workspace, scratch ref, or equivalent daemon-owned anchor that is the only remaining support for a current revision's `seed_commit_oid` or `seed_target_commit_oid` MUST be retained until that revision is superseded or the item is closed
+* any authoring or integration workspace, scratch ref, or equivalent daemon-owned anchor that is the only remaining support for a current revision's non-null `seed_commit_oid`, bound implicit authoring base commit, or `seed_target_commit_oid` MUST be retained until that revision is superseded or the item is closed
+* any durable local commit reference that is the only remaining support for an untriaged pre-authoring candidate investigation subject MUST be retained until all findings from that subject are triaged
 * however, any authoring workspace or equivalent daemon-owned ref that is the only remaining anchor for an untriaged candidate finding subject MUST be retained until all such findings are triaged
 * likewise, any integration workspace or equivalent daemon-owned ref that is the only remaining anchor for an untriaged integrated finding subject MUST be retained until all such findings are triaged
 
@@ -1124,16 +1131,17 @@ There is no workflow CRUD in v1.
 Item command semantics:
 
 * revision-creating commands accept JSON bodies containing the applicable revision contract fields. `seed_commit_oid` and `seed_target_commit_oid` are optional independent fields on `POST /items`, `POST /items/:id/revise`, `POST /items/:id/reopen`, and `POST /items/:id/approval/reject`.
+* `seed_commit_oid` is an explicit source-baseline override. Omitting it requests the command's default source-baseline handling, which MAY leave `seed_commit_oid=null` and defer binding until first authoring workspace provisioning.
 * when provided explicitly, each seed field MUST be a reachable local commit in the project repository; otherwise the command MUST fail with `revision_seed_unreachable`
-* when a seed field is omitted, that field MUST be derived independently by the command's default rules
+* when a seed field is omitted, that field MUST follow the command's default rules independently. Omitting `seed_commit_oid` does not by itself require eager `target_ref` resolution at revision creation.
 * when command-specific defaults require resolving the current `target_ref` head and that ref does not resolve to a local commit in the project repository, the command MUST fail with `target_ref_unresolved`
-* `POST /items` creates a manual item with `origin_kind=manual` and `origin_finding_id=null`. It MUST also create the initial revision. If `seed_commit_oid` is omitted, the daemon MUST resolve `target_ref`, read its current head, and use that head. If `seed_target_commit_oid` is omitted, the daemon MUST use that same resolved head.
+* `POST /items` creates a manual item with `origin_kind=manual` and `origin_finding_id=null`. It MUST also create the initial revision. If `seed_commit_oid` is omitted, the daemon MUST persist `seed_commit_oid=null` and defer authoring-base binding until the first authoring workspace is provisioned. If `seed_target_commit_oid` is omitted, the daemon MUST resolve `target_ref`, read its current head, and use that resolved head.
 * `PATCH /items/:id` MAY update only `classification`, `priority`, `labels`, and `operator_notes`
 * `POST /items/:id/revise` is required for changes to title, description, acceptance criteria, target ref, approval policy, `seed_commit_oid`, or `seed_target_commit_oid`. The revise procedure MUST:
   1. verify the item is open and idle
   2. create a new immutable revision
   3. freeze a new policy snapshot and template map snapshot for the new revision
-  4. set `seed_commit_oid` from explicit input when provided; otherwise derive it from the prior revision's current authoring head, or fall back to the prior revision's `seed_commit_oid` when no authoring workspace exists
+  4. set `seed_commit_oid` from explicit input when provided; otherwise derive it from the prior revision's current authoring head when one exists; otherwise carry forward the prior revision's explicit `seed_commit_oid` when non-null; otherwise set `seed_commit_oid=null` so the new revision binds its authoring base on first authoring workspace provisioning
   5. set `seed_target_commit_oid` from explicit input when provided; otherwise derive it from the current head of the new revision's `target_ref`
   6. capture any default derived from `target_ref` atomically with revision creation
   7. note that rebinding `seed_target_commit_oid` records a new target baseline but does not itself rebase carried-forward work
@@ -1205,8 +1213,8 @@ Workspace and convergence command semantics:
 Finding command semantics:
 
 * when a job completes successfully with `validation_report:v1`, `review_report:v1`, or `finding_report:v1`, the daemon MUST extract each canonical `finding:v1` object into a durable `Finding` row keyed by `source_job_id + source_finding_key`
-* finding extraction MUST determine `source_subject_kind` canonically: `validate_integrated` findings are always `integrated`; review or investigation findings are `integrated` iff their `input_base_commit_oid` and `input_head_commit_oid` match the prepared or finalized integrated subject for the same revision; all other findings are `candidate`
-* finding extraction MUST persist `source_subject_head_commit_oid=input_head_commit_oid`; it MUST also persist `source_subject_base_commit_oid=input_base_commit_oid` whenever present
+* finding extraction MUST determine `source_subject_kind` canonically: `validate_integrated` findings are always `integrated`; review or investigation findings are `integrated` iff their `job_input` matches the prepared or finalized integrated subject for the same revision; all other findings are `candidate`
+* finding extraction MUST persist `source_subject_head_commit_oid=job_input.head_commit_oid`; it MUST also persist `source_subject_base_commit_oid=job_input.base_commit_oid` whenever present
 * `POST .../findings/:finding_id/triage` is allowed while the finding is still triageable. It records one of the supported dispositions and any required note or linked item. `backlog` MAY create a new linked item in the same project using the source finding summary and evidence as defaults.
 * `POST .../findings/:finding_id/promote` is retained as a compatibility wrapper for `triage_state=backlog` with a new linked item.
 * `POST .../findings/:finding_id/dismiss` is retained as a compatibility wrapper for `triage_state=dismissed_invalid`.
@@ -1359,7 +1367,7 @@ Required core fields:
 
 Semantics:
 
-* `review_subject.base_commit_oid` and `review_subject.head_commit_oid` MUST match the job's `input_base_commit_oid` and `input_head_commit_oid`
+* `review_subject.base_commit_oid` and `review_subject.head_commit_oid` MUST match the job's `job_input` subject payload
 * `outcome=clean` requires `findings=[]`
 
 #### 9.5.4 `finding_report:v1`
@@ -1490,7 +1498,7 @@ Recovery errors:
 8. `approval_state=approved` implies `lifecycle_state=done`, `done_reason=completed`, `resolution_source=approval_command`, and a finalized convergence exists for the current revision.
 9. `escalation_state=operator_required` implies the item is open and escalation metadata is consistent.
 10. Job side effects may be adopted only if `job.item_revision_id == item.current_revision_id` at state-application time.
-11. Successful mutating jobs require `workspace_id`, `input_head_commit_oid`, and `output_commit_oid`.
+11. Successful mutating jobs require `workspace_id`, `job_input.kind=authoring_head`, and `output_commit_oid`.
 12. Every daemon-owned Git side effect requires a corresponding `GitOperation`.
 13. Existing item semantics do not change when live config or templates change.
 14. A completed item cannot be reopened.
@@ -1505,7 +1513,7 @@ An implementation SHOULD enforce at least:
 * one active job per item revision via partial unique index
 * one active convergence per item revision via partial unique index
 * one current revision per item
-* one authoring workspace per revision
+* at most one authoring workspace per revision
 * item done-field coupling
 * unique `revision_no` per item
 * stable `step_id + semantic_attempt_no + retry_no` uniqueness per item revision
@@ -1547,7 +1555,7 @@ At startup the daemon MUST:
 7. if an integration workspace contains unresolved conflicts, mark convergence `conflicted`
 8. if a full prepared replay chain exists and the journaled side effect is present, reconcile it and adopt the prepared state using the rewritten tip
 9. if only a replay prefix exists without unresolved conflicts, mark the prepare operation failed and the integration workspace `stale`
-10. inspect untriaged findings and verify that each candidate subject head remains reachable from a retained daemon-owned authoring anchor or other durable local commit reference, and that each integrated subject remains reachable either from a finalized durable ref or from a retained daemon-owned integration anchor; if not, emit operator-visible diagnostics and require repair before promotion
+10. inspect untriaged findings and verify that each candidate subject head remains reachable from a retained daemon-owned authoring anchor or other durable local commit reference, including the durable local commit reference retained for any pre-authoring candidate investigation subject, and that each integrated subject remains reachable either from a finalized durable ref or from a retained daemon-owned integration anchor; if not, emit operator-visible diagnostics and require repair before promotion
 11. if finalization already happened, reconcile and mark convergence `finalized`
 12. rebuild derived projections from canonical rows
 
@@ -1592,8 +1600,14 @@ dispatch_item(item_id):
   step = evaluation.dispatchable_step_id
   assert step is not null
   assert step is a legal job step
-  create_job_for_step(step)
-  assign_workspace()
+  if step is the first mutating authoring step for a revision with seed_commit_oid = null and no authoring workspace:
+    resolved_head = atomically resolve current target_ref head
+    create the authoring workspace with base_commit_oid = resolved_head and initial head_commit_oid = resolved_head
+    create_job_for_step(step, job_input = { kind: authoring_head, head_commit_oid: resolved_head })
+    assign_workspace(reuse_precreated_authoring_workspace = true)
+  else:
+    create_job_for_step(step)
+    assign_workspace()
   launch_agent_subprocess()
 ```
 
@@ -1638,7 +1652,7 @@ prepare_convergence(item_id):
   assert evaluate(item).next_recommended_action == prepare_convergence
   create convergence row
   provision integration workspace from target_ref head
-  source_commits = list_commits(item.current_revision.seed_commit_oid..source_head, oldest_first)
+  source_commits = list_commits(bound_authoring_base_commit_oid..source_head, oldest_first)
   write GitOperation(
     planned=prepare_convergence_commit,
     metadata={source_commit_oids=source_commits}
@@ -1835,8 +1849,9 @@ Recommended `GET .../items/:item_id` shape:
 * reload affects future revisions and jobs only
 * workflow version is frozen at item creation
 * policy snapshot and template map snapshot are frozen at revision creation
-* every revision stores both `seed_commit_oid` and `seed_target_commit_oid` deterministically
-* default seed values derived from `target_ref` are captured atomically with revision creation
+* every revision stores `seed_target_commit_oid` deterministically and stores `seed_commit_oid` as either an explicit reachable commit or null for implicit authoring-base binding
+* default `seed_target_commit_oid` values derived from `target_ref` are captured atomically with revision creation
+* implicit authoring bases derived from `target_ref` are captured atomically with first mutating authoring dispatch, which creates the initial authoring workspace
 * `seed_target_commit_oid` records target-baseline history and promotion defaults without changing the current candidate diff subject
 * frozen repo-context policy objects conform to `repo_context_policy:v1`
 * prompt snapshot and template digest are frozen at job dispatch
@@ -1855,7 +1870,7 @@ Recommended `GET .../items/:item_id` shape:
 
 ### 14.3 Workspace and Job Protocols
 
-* one authoring workspace exists per revision
+* at most one authoring workspace exists per revision, and first authoring provisioning binds `base_commit_oid` for implicit revisions
 * review workspaces are fresh per review or report-only investigation job
 * integration workspaces are one per convergence attempt
 * mutating jobs produce exactly one daemon-owned commit
@@ -1866,7 +1881,7 @@ Recommended `GET .../items/:item_id` shape:
 * every clean whole-candidate review is followed by final candidate validation before convergence prepare becomes legal
 * validation, review, and report-only investigation jobs normalize structured results into canonical core schemas with optional `extensions`
 * canonical report findings are extracted into durable `Finding` rows keyed by source job and finding key
-* investigation jobs record an explicit diff subject via `input_base_commit_oid` and `input_head_commit_oid`
+* investigation jobs record an explicit diff subject via `job_input.kind=candidate_subject`
 * report-only steps do not advance or rewind closure state
 
 ### 14.4 Convergence and Approval

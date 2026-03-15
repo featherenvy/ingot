@@ -179,7 +179,7 @@ export interface ItemRevision {
   acceptance_criteria: string
   target_ref: string
   approval_policy: 'required' | 'not_required'
-  seed_commit_oid: string
+  seed_commit_oid: string | null
   supersedes_revision_id: string | null
   created_at: string
 }
@@ -229,10 +229,17 @@ export interface Job {
   lease_expires_at?: string | null
   error_code?: string | null
   error_message?: string | null
+  job_input: JobInput
   created_at: string
   started_at: string | null
   ended_at: string | null
 }
+
+export type JobInput =
+  | { kind: 'none' }
+  | { kind: 'authoring_head'; head_commit_oid: string }
+  | { kind: 'candidate_subject'; base_commit_oid: string; head_commit_oid: string }
+  | { kind: 'integrated_subject'; base_commit_oid: string; head_commit_oid: string }
 
 export interface JobLogs {
   prompt: string | null

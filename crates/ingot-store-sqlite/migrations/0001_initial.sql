@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS item_revisions (
     approval_policy TEXT NOT NULL CHECK (approval_policy IN ('required', 'not_required')),
     policy_snapshot TEXT NOT NULL DEFAULT '{}', -- JSON
     template_map_snapshot TEXT NOT NULL DEFAULT '{}', -- JSON
-    seed_commit_oid TEXT NOT NULL,
+    seed_commit_oid TEXT,
     seed_target_commit_oid TEXT,
     supersedes_revision_id TEXT REFERENCES item_revisions(id),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     phase_template_slug TEXT NOT NULL,
     phase_template_digest TEXT,
     prompt_snapshot TEXT,
+    job_input_kind TEXT NOT NULL DEFAULT 'none' CHECK (job_input_kind IN ('none', 'authoring_head', 'candidate_subject', 'integrated_subject')),
     input_base_commit_oid TEXT,
     input_head_commit_oid TEXT,
     output_artifact_kind TEXT NOT NULL CHECK (output_artifact_kind IN ('commit', 'review_report', 'validation_report', 'finding_report', 'none')),
@@ -149,7 +150,14 @@ CREATE TABLE IF NOT EXISTS jobs (
     error_message TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     started_at TEXT,
-    ended_at TEXT
+    ended_at TEXT,
+
+    CHECK (NOT (job_input_kind = 'none' AND input_base_commit_oid IS NOT NULL)),
+    CHECK (NOT (job_input_kind = 'none' AND input_head_commit_oid IS NOT NULL)),
+    CHECK (NOT (job_input_kind = 'authoring_head' AND input_base_commit_oid IS NOT NULL)),
+    CHECK (NOT (job_input_kind = 'authoring_head' AND input_head_commit_oid IS NULL)),
+    CHECK (NOT (job_input_kind IN ('candidate_subject', 'integrated_subject') AND input_base_commit_oid IS NULL)),
+    CHECK (NOT (job_input_kind IN ('candidate_subject', 'integrated_subject') AND input_head_commit_oid IS NULL))
 );
 
 CREATE INDEX idx_jobs_project ON jobs(project_id);
@@ -240,7 +248,7 @@ CREATE UNIQUE INDEX idx_findings_promoted_item
 CREATE TABLE IF NOT EXISTS git_operations (
     id TEXT PRIMARY KEY NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects(id),
-    operation_kind TEXT NOT NULL CHECK (operation_kind IN ('create_job_commit', 'prepare_convergence_commit', 'finalize_target_ref', 'reset_workspace', 'remove_workspace_ref')),
+    operation_kind TEXT NOT NULL CHECK (operation_kind IN ('create_job_commit', 'prepare_convergence_commit', 'finalize_target_ref', 'create_investigation_ref', 'remove_investigation_ref', 'reset_workspace', 'remove_workspace_ref')),
     entity_type TEXT NOT NULL CHECK (entity_type IN ('job', 'convergence', 'workspace', 'item_revision')),
     entity_id TEXT NOT NULL,
     workspace_id TEXT REFERENCES workspaces(id),

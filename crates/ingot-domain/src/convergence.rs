@@ -32,7 +32,10 @@ impl ConvergenceStatus {
 }
 
 impl Convergence {
-    pub fn target_head_valid_for_resolved_oid(&self, resolved_target_oid: Option<&str>) -> Option<bool> {
+    pub fn target_head_valid_for_resolved_oid(
+        &self,
+        resolved_target_oid: Option<&str>,
+    ) -> Option<bool> {
         let input_target_oid = self.input_target_commit_oid.as_deref()?;
         if resolved_target_oid == Some(input_target_oid) {
             return Some(true);

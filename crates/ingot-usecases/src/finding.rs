@@ -142,9 +142,9 @@ pub fn extract_findings(
             let outcome_class =
                 validate_review_report(&report.outcome, &report.findings, &report.summary)?;
 
-            if job.input_base_commit_oid.as_deref()
+            if job.job_input.base_commit_oid()
                 != Some(report.review_subject.base_commit_oid.as_str())
-                || job.input_head_commit_oid.as_deref()
+                || job.job_input.head_commit_oid()
                     != Some(report.review_subject.head_commit_oid.as_str())
             {
                 return Err(UseCaseError::ProtocolViolation(
@@ -175,12 +175,17 @@ pub fn extract_findings(
     let source_subject_kind = classify_subject(job, convergences);
     let created_at = Utc::now();
     let source_subject_base_commit_oid = match source_subject_kind {
-        FindingSubjectKind::Integrated => job.input_base_commit_oid.clone(),
-        FindingSubjectKind::Candidate => job.input_base_commit_oid.clone(),
+        FindingSubjectKind::Integrated | FindingSubjectKind::Candidate => {
+            job.job_input.base_commit_oid().map(ToOwned::to_owned)
+        }
     };
-    let source_subject_head_commit_oid = job.input_head_commit_oid.clone().ok_or_else(|| {
-        UseCaseError::ProtocolViolation("finding extraction requires input_head_commit_oid".into())
-    })?;
+    let source_subject_head_commit_oid = job
+        .job_input
+        .head_commit_oid()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            UseCaseError::ProtocolViolation("finding extraction requires job_input head".into())
+        })?;
 
     let findings = report_findings
         .into_iter()
@@ -386,7 +391,7 @@ pub fn backlog_finding(
         approval_policy,
         policy_snapshot: source_revision.policy_snapshot.clone(),
         template_map_snapshot: source_revision.template_map_snapshot.clone(),
-        seed_commit_oid: finding.source_subject_head_commit_oid.clone(),
+        seed_commit_oid: Some(finding.source_subject_head_commit_oid.clone()),
         seed_target_commit_oid: match finding.source_subject_kind {
             FindingSubjectKind::Integrated => finding.source_subject_base_commit_oid.clone(),
             FindingSubjectKind::Candidate => source_revision.seed_target_commit_oid.clone(),
@@ -570,10 +575,10 @@ fn classify_subject(job: &Job, convergences: &[Convergence]) -> FindingSubjectKi
         return FindingSubjectKind::Candidate;
     }
 
-    let Some(base_commit_oid) = job.input_base_commit_oid.as_deref() else {
+    let Some(base_commit_oid) = job.job_input.base_commit_oid() else {
         return FindingSubjectKind::Candidate;
     };
-    let Some(head_commit_oid) = job.input_head_commit_oid.as_deref() else {
+    let Some(head_commit_oid) = job.job_input.head_commit_oid() else {
         return FindingSubjectKind::Candidate;
     };
 
@@ -605,8 +610,8 @@ mod tests {
         ParkingState, Priority,
     };
     use ingot_domain::job::{
-        ContextPolicy, ExecutionPermission, Job, JobStatus, OutcomeClass, OutputArtifactKind,
-        PhaseKind,
+        ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass,
+        OutputArtifactKind, PhaseKind,
     };
     use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
     use ingot_domain::workspace::WorkspaceKind;
@@ -639,8 +644,7 @@ mod tests {
             })),
             step_id: "validate_integrated".into(),
             phase_kind: PhaseKind::Validate,
-            input_base_commit_oid: Some("base".into()),
-            input_head_commit_oid: Some("head".into()),
+            job_input: JobInput::integrated_subject("base", "head"),
             ..test_job()
         };
 
@@ -752,8 +756,7 @@ mod tests {
             })),
             step_id: "validate_candidate_initial".into(),
             phase_kind: PhaseKind::Validate,
-            input_base_commit_oid: Some("base".into()),
-            input_head_commit_oid: Some("head".into()),
+            job_input: JobInput::candidate_subject("base", "head"),
             ..test_job()
         };
 
@@ -777,8 +780,7 @@ mod tests {
             })),
             step_id: "review_candidate_initial".into(),
             phase_kind: PhaseKind::Review,
-            input_base_commit_oid: Some("base".into()),
-            input_head_commit_oid: Some("head".into()),
+            job_input: JobInput::candidate_subject("base", "head"),
             ..test_job()
         };
 
@@ -820,8 +822,7 @@ mod tests {
             })),
             step_id: "validate_candidate_initial".into(),
             phase_kind: PhaseKind::Validate,
-            input_base_commit_oid: Some("base".into()),
-            input_head_commit_oid: Some("head".into()),
+            job_input: JobInput::candidate_subject("base", "head"),
             ..test_job()
         };
 
@@ -863,8 +864,7 @@ mod tests {
             })),
             step_id: "review_candidate_initial".into(),
             phase_kind: PhaseKind::Review,
-            input_base_commit_oid: Some("base".into()),
-            input_head_commit_oid: Some("head".into()),
+            job_input: JobInput::candidate_subject("base", "head"),
             ..test_job()
         };
 
@@ -901,8 +901,7 @@ mod tests {
             })),
             step_id: "investigate_item".into(),
             phase_kind: PhaseKind::Investigate,
-            input_base_commit_oid: Some("base".into()),
-            input_head_commit_oid: Some("head".into()),
+            job_input: JobInput::candidate_subject("base", "head"),
             ..test_job()
         };
 
@@ -947,7 +946,7 @@ mod tests {
             approval_policy: ApprovalPolicy::Required,
             policy_snapshot: serde_json::json!({}),
             template_map_snapshot: serde_json::json!({}),
-            seed_commit_oid: "seed".into(),
+            seed_commit_oid: Some("seed".into()),
             seed_target_commit_oid: Some("target".into()),
             supersedes_revision_id: None,
             created_at: Utc::now(),
@@ -974,8 +973,7 @@ mod tests {
             phase_template_slug: "investigate-item".into(),
             phase_template_digest: None,
             prompt_snapshot: None,
-            input_base_commit_oid: Some("base".into()),
-            input_head_commit_oid: Some("head".into()),
+            job_input: JobInput::candidate_subject("base", "head"),
             output_artifact_kind: OutputArtifactKind::FindingReport,
             output_commit_oid: None,
             result_schema_version: None,

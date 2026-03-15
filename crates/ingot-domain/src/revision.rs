@@ -22,7 +22,7 @@ pub struct ItemRevision {
     pub approval_policy: ApprovalPolicy,
     pub policy_snapshot: serde_json::Value,
     pub template_map_snapshot: serde_json::Value,
-    pub seed_commit_oid: String,
+    pub seed_commit_oid: Option<String>,
     pub seed_target_commit_oid: Option<String>,
     pub supersedes_revision_id: Option<ItemRevisionId>,
     pub created_at: DateTime<Utc>,

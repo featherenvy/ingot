@@ -4,7 +4,6 @@ import { toast } from 'sonner'
 import { showErrorToast } from '../lib/toast'
 import { cn } from '../lib/utils'
 import { Button } from './ui/button'
-import { ScrollArea, ScrollBar } from './ui/scroll-area'
 
 type CodeBlockProps = {
   value: string | null | undefined
@@ -55,7 +54,7 @@ export function CodeBlock({
     }
   }
   return (
-    <div className={cn('relative overflow-hidden rounded-lg border border-border bg-muted/30', className)}>
+    <div className={cn('relative min-w-0 overflow-hidden rounded-lg border border-border bg-muted/30', className)}>
       <div className="absolute top-2 right-2 z-10">
         <Button
           type="button"
@@ -69,7 +68,7 @@ export function CodeBlock({
           {copied ? <CheckIcon /> : <CopyIcon />}
         </Button>
       </div>
-      <ScrollArea className={cn('rounded-lg', maxHeightClassName)}>
+      <div className={cn('min-w-0 max-w-full overflow-auto rounded-lg', maxHeightClassName)}>
         <pre
           className={cn(
             'p-3 pr-12 text-xs leading-6',
@@ -79,8 +78,7 @@ export function CodeBlock({
         >
           {displayValue}
         </pre>
-        <ScrollBar orientation="horizontal" />
-      </ScrollArea>
+      </div>
     </div>
   )
 }

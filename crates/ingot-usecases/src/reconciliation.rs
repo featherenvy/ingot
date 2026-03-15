@@ -3,9 +3,7 @@ use std::future::Future;
 use crate::UseCaseError;
 
 pub trait ReconciliationPort: Send + Sync {
-    fn reconcile_git_operations(
-        &self,
-    ) -> impl Future<Output = Result<bool, UseCaseError>> + Send;
+    fn reconcile_git_operations(&self) -> impl Future<Output = Result<bool, UseCaseError>> + Send;
 
     fn reconcile_active_jobs(&self) -> impl Future<Output = Result<bool, UseCaseError>> + Send;
 
@@ -124,7 +122,10 @@ mod tests {
         let port = FakePort::new([false, false, false, false]);
         let service = ReconciliationService::new(port.clone());
 
-        service.reconcile_startup().await.expect("startup reconcile");
+        service
+            .reconcile_startup()
+            .await
+            .expect("startup reconcile");
 
         assert_eq!(
             port.calls(),

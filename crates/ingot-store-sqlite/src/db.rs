@@ -477,7 +477,7 @@ mod tests {
             "INSERT INTO jobs (
                 id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
                 status, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid, created_at
+                phase_template_slug, output_artifact_kind, job_input_kind, input_base_commit_oid, input_head_commit_oid, created_at
              ) VALUES (
                 'job_00000000000000000000000000000000',
                 'prj_00000000000000000000000000000000',
@@ -493,6 +493,7 @@ mod tests {
                 'resume_context',
                 'validate-integrated',
                 'validation_report',
+                'integrated_subject',
                 'expected-target',
                 'prepared-head',
                 '2026-03-12T00:00:00Z'
@@ -674,7 +675,7 @@ mod tests {
             "INSERT INTO jobs (
                 id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
                 status, phase_kind, workspace_kind, execution_permission, context_policy,
-                phase_template_slug, output_artifact_kind, input_base_commit_oid, input_head_commit_oid, created_at
+                phase_template_slug, output_artifact_kind, job_input_kind, input_base_commit_oid, input_head_commit_oid, created_at
              ) VALUES (
                 'job_00000000000000000000000000000000',
                 'prj_00000000000000000000000000000000',
@@ -690,6 +691,7 @@ mod tests {
                 'resume_context',
                 'validate-integrated',
                 'validation_report',
+                'integrated_subject',
                 'expected-target',
                 'prepared-head',
                 '2026-03-12T00:00:00Z'

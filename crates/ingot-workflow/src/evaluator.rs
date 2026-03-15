@@ -812,8 +812,8 @@ mod tests {
         ParkingState, Priority,
     };
     use ingot_domain::job::{
-        ContextPolicy, ExecutionPermission, Job, JobStatus, OutcomeClass, OutputArtifactKind,
-        PhaseKind,
+        ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass,
+        OutputArtifactKind, PhaseKind,
     };
     use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
     use ingot_domain::workspace::WorkspaceKind;
@@ -1204,7 +1204,7 @@ mod tests {
             approval_policy,
             policy_snapshot: serde_json::json!({}),
             template_map_snapshot: serde_json::json!({}),
-            seed_commit_oid: "abc123".into(),
+            seed_commit_oid: Some("abc123".into()),
             seed_target_commit_oid: Some("def456".into()),
             supersedes_revision_id: None,
             created_at: Utc::now(),
@@ -1236,8 +1236,7 @@ mod tests {
             phase_template_slug: "template".into(),
             phase_template_digest: None,
             prompt_snapshot: None,
-            input_base_commit_oid: Some("base".into()),
-            input_head_commit_oid: Some("head".into()),
+            job_input: JobInput::candidate_subject("base", "head"),
             output_artifact_kind: match step_id {
                 step::INVESTIGATE_ITEM => OutputArtifactKind::FindingReport,
                 step::AUTHOR_INITIAL | step::REPAIR_CANDIDATE | step::REPAIR_AFTER_INTEGRATION => {
