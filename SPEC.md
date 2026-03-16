@@ -10,7 +10,7 @@ Normative language: The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY ar
 
 ## 1. Problem Statement
 
-Ingot is a long-running local daemon that manages supervised AI coding work in isolated Git workspaces. It tracks durable work, provisions revision-scoped workspaces, dispatches bounded agent jobs, records structured results plus daemon-owned commits, prepares integration against a local target ref, validates the integrated result, and closes work only after policy-satisfied approval or explicit manual disposition.
+Ingot is a long-running local daemon that manages supervised AI coding work in isolated Git workspaces. It tracks durable work, provisions revision-scoped workspaces, dispatches bounded agent jobs, records structured results plus daemon-owned commits, prepares integration against a local target ref, validates the integrated result through harness-driven objective checks, and closes work only after policy-satisfied approval or explicit manual disposition.
 
 Ingot is not a generic workflow platform in v1. It is a narrow execution control layer for one thing: single-item code delivery in a real local Git repository.
 
@@ -49,7 +49,7 @@ v1 operates on local repositories and local refs only. Remote push, PR creation,
 * Agent-driven conflict resolution.
 * Arbitrary user-authored report-only workflow graphs.
 * Remote Git push, PR creation, or hosted CI orchestration.
-* Filesystem hot-reload watchers for live config/template changes.
+* Filesystem hot-reload watchers for live config/template changes. The harness profile is read on demand at execution time, not via a watcher.
 
 ## 3. System Overview
 
@@ -64,6 +64,7 @@ An implementation MUST provide these logical components:
 * `Workspace Manager` that provisions, resets, reuses, and cleans workspaces.
 * `Git Manager` that owns scratch refs, canonical commits, convergence prepare, and target-ref finalization.
 * `Convergence Manager` that prepares, validates, finalizes, and reconciles integration attempts.
+* `Harness Executor` that runs project-declared verification commands and produces deterministic validation reports.
 * `Persistence Layer` backed by SQLite for durable runtime truth.
 * `HTTP API` for commands and queries.
 * `WebSocket Event Stream` with monotonic sequence numbers for live updates.
@@ -87,6 +88,8 @@ Filesystem:
 
 * global defaults
 * per-project config
+* per-project harness profile
+* per-project repo-local skills
 * per-project prompt template overrides
 * job logs and copied artifacts
 * Git worktrees and scratch refs
@@ -125,6 +128,16 @@ There is no global on-disk template library in v1.
 
 Template and config changes take effect only after explicit reload by daemon restart or `POST /api/reload`. Filesystem watch is not required in v1.
 
+Harness profile source:
+
+```text
+<repo>/.ingot/harness.toml
+```
+
+The harness profile declares verification commands and repo-local skills. It is read live from the project working tree at execution time and does not require daemon restart or reload. Changes take effect on the next validation execution.
+
+The harness profile is a committed project file, not daemon-managed state. Agents MUST NOT modify it. The UI MAY write changes to it through the daemon API.
+
 ### 3.5 Scope Rules
 
 * Agents are global across projects.
@@ -154,7 +167,62 @@ Required fields:
 
 All runtime entities are project-scoped.
 
-### 4.2 Agent
+### 4.2 HarnessProfile
+
+The harness profile is an optional project-level TOML file at `<repo>/.ingot/harness.toml`.
+
+#### 4.2.1 Commands
+
+Commands are named verification steps the daemon executes during validate phases.
+
+Each command has:
+
+* `name` (the TOML table key)
+* `run` as a shell command string
+* `timeout` as a duration string with a project-configurable default
+
+Commands are executed in declaration order. Each command maps to one `check` entry in the `validation_report:v1`.
+
+v1 recognizes these conventional command names: `build`, `test`, `lint`. Arbitrary command names are allowed.
+
+If no harness profile exists or no commands are declared, validate steps produce `outcome=clean` with an empty `checks` array. The system degrades gracefully only for an absent profile or an empty command set; malformed harness files are operator errors and MUST fail runtime execution instead of silently degrading.
+
+#### 4.2.2 Skills
+
+Skills are repo-local prompt extensions available to agents during job execution.
+
+* `paths` as an ordered list of glob patterns resolving to skill files
+
+Skill files are read at prompt assembly time and included as agent-available capabilities. If a configured skill glob is malformed or a matched skill file cannot be read, prompt assembly MUST fail the job before agent launch.
+
+#### 4.2.3 Format
+
+```toml
+[commands.build]
+run = "make build"
+timeout = "5m"
+
+[commands.test]
+run = "make test"
+timeout = "10m"
+
+[commands.lint]
+run = "make lint"
+timeout = "2m"
+
+[skills]
+paths = [".ingot/skills/*.md"]
+```
+
+#### 4.2.4 Ownership and Mutability
+
+* the harness profile is operator-owned project configuration
+* agents MUST NOT modify `.ingot/harness.toml`
+* the daemon reads the harness profile live from the project working tree
+* the harness profile is NOT frozen into revision snapshots
+* the UI MAY edit the harness profile through dedicated API endpoints; edits are written to the file on disk
+
+### 4.3 Agent
 
 Required fields:
 
@@ -185,22 +253,23 @@ Agents are global across projects. On startup, if the global agent registry is e
 
 Bootstrap is idempotent and MUST run only when the registry is empty. The daemon MUST probe the configured CLI before persisting the bootstrapped agent and MUST persist the resulting `status` and `health_check`, whether the probe succeeds or fails. Operators MAY update or delete the bootstrapped agent through the normal agent registry endpoints after startup.
 
-### 4.3 PromptTemplate
+### 4.4 PromptTemplate
 
 Required fields:
 
 * `slug`
-* `phase_kind` with values `author|validate|review|investigate`
+* `phase_kind` with values `author|review|investigate`
 * `prompt`
 * `enabled`
 
 Semantics:
 
 * templates are reusable prompt bodies keyed by slug
+* `validate` is not a valid template `phase_kind` because validate steps are daemon-executed harness runs with no agent prompt
 * existing revisions keep a frozen `step_id -> template_slug` mapping
 * existing jobs keep the full prompt snapshot plus template digest
 
-### 4.4 WorkflowDefinition
+### 4.5 WorkflowDefinition
 
 v1 ships with exactly one runtime workflow:
 
@@ -219,7 +288,7 @@ A workflow definition specifies:
 
 Older workflow versions MUST remain available in code until no open item uses them.
 
-### 4.5 Workspace
+### 4.6 Workspace
 
 Required fields:
 
@@ -263,7 +332,7 @@ Field nullability and conditional requirements:
 * `head_commit_oid` is required once the workspace becomes `ready`.
 * `current_job_id` is null unless the workspace is actively attached to a running job.
 
-### 4.6 Item
+### 4.7 Item
 
 Required fields:
 
@@ -302,7 +371,7 @@ Field nullability and conditional requirements:
 * `escalation_reason` is null when `escalation_state=none` and required when `escalation_state=operator_required`.
 * `origin_finding_id` is null when `origin_kind=manual` and required when `origin_kind=promoted_finding`.
 
-### 4.7 ItemRevision
+### 4.8 ItemRevision
 
 Required fields:
 
@@ -341,10 +410,10 @@ Semantics:
 
 Field nullability and conditional requirements:
 
-* `seed_commit_oid` may be null only when the revision uses implicit authoring-base binding. If null, no candidate review or convergence action may proceed until an authoring workspace is provisioned and its `base_commit_oid` is set. The first mutating authoring dispatch MAY perform that binding atomically, and report-only candidate investigation MAY run before binding under the dedicated rule in 7.6.
+* `seed_commit_oid` may be null only when the revision uses implicit authoring-base binding. If null, no candidate review or convergence action may proceed until an authoring workspace is provisioned and its `base_commit_oid` is set. The first mutating authoring dispatch MAY perform that binding atomically, and report-only candidate investigation MAY run before binding under the dedicated rule in 7.7.
 * `supersedes_revision_id` is null for the initial revision and required for later revisions that replace a prior revision.
 
-### 4.8 RevisionContext
+### 4.9 RevisionContext
 
 Required fields:
 
@@ -376,7 +445,7 @@ Required fields:
 
 Steps with `context_policy=resume_context` receive the current snapshot.
 
-### 4.9 Job
+### 4.10 Job
 
 Required fields:
 
@@ -393,7 +462,7 @@ Required fields:
 * `phase_kind` with values `author|validate|review|investigate`
 * `workspace_id`
 * `workspace_kind`
-* `execution_permission` with values `may_mutate|must_not_mutate`
+* `execution_permission` with values `may_mutate|must_not_mutate|daemon_only`
 * `context_policy`
 * `phase_template_slug`
 * `phase_template_digest`
@@ -416,9 +485,8 @@ Required fields:
 
 Semantics:
 
-* every job is a new subprocess
-* there is no provider-native hidden conversation reuse
-* `validate` jobs perform objective verification over a concrete workspace subject and emit `validation_report`
+* every agent job is a new subprocess; there is no provider-native hidden conversation reuse
+* `validate` steps are daemon-executed harness verification runs. The daemon executes the project's declared harness commands in the step's workspace and produces a deterministic `validation_report`. No agent subprocess is involved. If no harness profile or commands are declared, the step auto-completes as `outcome=clean` with an empty `checks` array. If the harness profile exists but is malformed, the job fails terminally.
 * `review` jobs perform agent judgment over an explicit diff subject and emit `review_report`
 * `semantic_attempt_no` increments only when the workflow semantically re-enters the same step
 * redispatch of the same semantic attempt keeps `semantic_attempt_no` and increments `retry_no`
@@ -435,7 +503,7 @@ Field nullability and conditional requirements:
 * `outcome_class` is null until the job reaches a terminal state.
 * `workspace_id` is null while queued and required once the job is assigned.
 * `job_input.kind=authoring_head` is required for mutating authoring jobs once execution begins.
-* `job_input.kind=candidate_subject` is required for review and investigation jobs over candidate diffs.
+* `job_input.kind=candidate_subject` is required for review, investigation, and candidate validation jobs over candidate diffs.
 * `job_input.kind=integrated_subject` is required for `validate_integrated` and other jobs that evaluate an integrated diff subject.
 * `job_input.kind=none` is allowed only when the step contract truly has no input subject.
 * `output_commit_oid` is required for successful mutating jobs and null otherwise.
@@ -443,8 +511,9 @@ Field nullability and conditional requirements:
 * `agent_id` is null until the job is assigned to a concrete agent runtime.
 * `process_pid`, `lease_owner_id`, `heartbeat_at`, and `lease_expires_at` are null until the job is running.
 * `error_code` and `error_message` are null unless the job terminates with failure, cancellation, expiry, or another operator-visible error condition.
+* for daemon-executed harness validation steps, `agent_id`, `process_pid`, `lease_owner_id`, `heartbeat_at`, `lease_expires_at`, `prompt_snapshot`, `phase_template_slug`, and `phase_template_digest` are null. `context_policy` is `none`.
 
-### 4.10 Convergence
+### 4.11 Convergence
 
 Required fields:
 
@@ -483,7 +552,7 @@ Field nullability and conditional requirements:
 * `conflict_summary` is required iff `status=conflicted`.
 * `completed_at` is null while the convergence is active and required for terminal states.
 
-### 4.11 GitOperation
+### 4.12 GitOperation
 
 Required fields:
 
@@ -526,7 +595,7 @@ Field nullability and conditional requirements:
 * `commit_oid` is required for commit-creating operations once the commit exists.
 * `completed_at` is null while the operation is unresolved and required for terminal journal states.
 
-### 4.12 Finding
+### 4.13 Finding
 
 Required fields:
 
@@ -570,7 +639,7 @@ Field nullability and conditional requirements:
 * `triage_note` is required iff `triage_state=wont_fix|dismissed_invalid|needs_investigation`.
 * `triaged_at` is null while `triage_state=untriaged` and required otherwise.
 
-### 4.13 Activity
+### 4.14 Activity
 
 Activity is an append-only structured event log. Typical event types:
 
@@ -623,28 +692,30 @@ All items use this workflow. A `bug` item still executes through `delivery:v1`; 
 | `author_initial`                    | `author`      | `authoring`      | `may_mutate`           | `fresh`          | `commit`               | `closure_relevant`  | `author-initial`      |
 | `review_incremental_initial`        | `review`      | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `closure_relevant`  | `review-incremental`  |
 | `review_candidate_initial`          | `review`      | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `closure_relevant`  | `review-candidate`    |
-| `validate_candidate_initial`        | `validate`    | `authoring`      | `must_not_mutate`      | `resume_context` | `validation_report`    | `closure_relevant`  | `validate-candidate`  |
+| `validate_candidate_initial`        | `validate`    | `authoring`      | `daemon_only`          | `none`           | `validation_report`    | `closure_relevant`  | —                     |
 | `repair_candidate`                  | `author`      | `authoring`      | `may_mutate`           | `resume_context` | `commit`               | `closure_relevant`  | `repair-candidate`    |
 | `review_incremental_repair`         | `review`      | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `closure_relevant`  | `review-incremental`  |
 | `review_candidate_repair`           | `review`      | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `closure_relevant`  | `review-candidate`    |
-| `validate_candidate_repair`         | `validate`    | `authoring`      | `must_not_mutate`      | `resume_context` | `validation_report`    | `closure_relevant`  | `validate-candidate`  |
+| `validate_candidate_repair`         | `validate`    | `authoring`      | `daemon_only`          | `none`           | `validation_report`    | `closure_relevant`  | —                     |
 | `investigate_item`                  | `investigate` | `review`         | `must_not_mutate`      | `fresh`          | `finding_report`       | `report_only`       | `investigate-item`    |
 | `prepare_convergence`               | `system`      | `integration`    | `daemon_only`          | `none`           | `none`                 | `closure_relevant`  | —                     |
-| `validate_integrated`               | `validate`    | `integration`    | `must_not_mutate`      | `resume_context` | `validation_report`    | `closure_relevant`  | `validate-integrated` |
+| `validate_integrated`               | `validate`    | `integration`    | `daemon_only`          | `none`           | `validation_report`    | `closure_relevant`  | —                     |
 | `repair_after_integration`          | `author`      | `authoring`      | `may_mutate`           | `resume_context` | `commit`               | `closure_relevant`  | `repair-integrated`   |
 | `review_incremental_after_integration_repair` | `review` | `review` | `must_not_mutate` | `fresh` | `review_report` | `closure_relevant` | `review-incremental` |
 | `review_after_integration_repair`   | `review`      | `review`         | `must_not_mutate`      | `fresh`          | `review_report`        | `closure_relevant`  | `review-candidate`    |
-| `validate_after_integration_repair` | `validate`    | `authoring`      | `must_not_mutate`      | `resume_context` | `validation_report`    | `closure_relevant`  | `validate-candidate`  |
+| `validate_after_integration_repair` | `validate`    | `authoring`      | `daemon_only`          | `none`           | `validation_report`    | `closure_relevant`  | —                     |
 
 Important semantics:
 
 * `step_id` values are workflow truth
 * repeated `phase_kind` does not imply repeated step identity
-* `prepare_convergence` is a system step, not a job
+* `prepare_convergence` is a system step that creates a Convergence row, not a Job row. Validate steps are also `daemon_only` but create Job rows with structured `validation_report` results and extractable findings. Both are daemon-executed with no agent subprocess; they differ in phase_kind (`system` vs `validate`), output artifact, and whether findings flow through triage.
 * `closure_relevant` steps advance or rewind delivery closure state
 * every successful mutating authoring step is followed by a mandatory incremental review of just the newly produced commit range
 * every closure-relevant `review_*` step is daemon auto-dispatched by default as soon as it becomes the sole legal closure-relevant next job step, unless the item is deferred or another active job or convergence already blocks dispatch
 * whole-candidate review and final candidate validation are mandatory closure-relevant gates before convergence prepare
+* every closure-relevant `validate_*` step is daemon auto-executed as soon as it becomes the sole legal closure-relevant next step, unless the item is deferred or another active job or convergence already blocks execution
+* validate steps execute the project's harness commands and produce a deterministic `validation_report:v1` without involving an agent subprocess
 * `report_only` steps are auxiliary, never consume candidate or integration rework budget, and never change the closure graph position
 
 ### 5.3 Workflow Graph
@@ -799,8 +870,8 @@ Operational terms used elsewhere:
 * `idle item` means `lifecycle_state=open` and zero active jobs plus zero active convergence for the current revision. It does not by itself imply that approval is not pending; individual commands may impose that extra requirement.
 * `next_recommended_action` may point to a job dispatch, a daemon-only operation, or a human command.
 * daemon-only `next_recommended_action` values used in v1 are `prepare_convergence`, `finalize_prepared_convergence`, and `invalidate_prepared_convergence`.
-* `dispatchable_step_id` is the legal job `step_id` to dispatch next, or null when the next recommended action is a human or daemon-only action such as approval or convergence prepare.
-* when `dispatchable_step_id` names a closure-relevant `review_*` step for an open, idle, non-deferred item, the daemon MUST promptly create that queued review job outside the evaluator; until the queued job exists, the projected `dispatchable_step_id` remains the legal current step
+* `dispatchable_step_id` is the legal job `step_id` to dispatch or auto-execute next, or null when the next recommended action is a human action or a daemon-only system action such as approval, convergence prepare, finalization, or invalidation. Daemon-executed harness validation steps are projected as `dispatchable_step_id` because they produce Job rows; daemon-only system actions without Job rows are projected through `next_recommended_action` instead.
+* when `dispatchable_step_id` names a closure-relevant `review_*` or `validate_*` step for an open, idle, non-deferred item, the daemon MUST promptly execute that step outside the evaluator; for review steps this creates a queued agent job; for validate steps this executes the harness validation protocol; until the step is started, the projected `dispatchable_step_id` remains the legal current step
 * `auxiliary_dispatchable_step_ids` is an ordered list of zero or more legal built-in report-only `step_id` values that MAY be dispatched without changing the current closure position
 * report-only steps never change closure workflow position; while a report-only job is running, `current_step_id` continues to reflect the closure-relevant step
 * `board_status` MUST be one of `INBOX|WORKING|APPROVAL|DONE`. `DONE` applies iff `lifecycle_state=done`. `APPROVAL` applies iff `lifecycle_state=open`, `approval_state=pending`, and `next_recommended_action!=invalidate_prepared_convergence`. `INBOX` applies to remaining open items only when there is no active job, no active convergence, and the current revision has no non-superseded terminal closure-relevant jobs yet. `WORKING` applies to all other remaining open items.
@@ -842,7 +913,7 @@ For one item:
 7. If the workflow is at the approval gate and `approval_policy=required`, project approval actions from canonical `approval_state`. Clean completion of `validate_integrated` MUST materialize `approval_state=pending` as part of job-completion handling.
 8. If the workflow is at the approval gate and `approval_policy=not_required`, project `next_recommended_action=finalize_prepared_convergence` and `dispatchable_step_id=null`. The daemon MUST finalize through the daemon-only action, not inside the evaluator.
 9. If a prepared convergence exists but the current `target_ref` head no longer matches `input_target_commit_oid`, project `next_recommended_action=invalidate_prepared_convergence`, remove approval and finalization commands from `allowed_actions`, and require the daemon-only invalidation action before projecting `prepare_convergence` again.
-10. If the resulting `dispatchable_step_id` is a closure-relevant `review_*` step and the item is open, idle, and not deferred, the daemon MUST queue that job outside the evaluator without waiting for an operator dispatch command.
+10. If the resulting `dispatchable_step_id` is a closure-relevant `review_*` or `validate_*` step and the item is open, idle, and not deferred, the daemon MUST execute that step outside the evaluator without waiting for an operator dispatch command. For review steps this means creating a queued agent job. For validate steps this means executing the harness validation protocol.
 
 ### 6.6 Terminal Readiness
 
@@ -952,10 +1023,11 @@ Agents MAY edit files but MUST NOT create commits, rewrite refs, rebase, or move
 
 ### 7.3 Execution Permission
 
-Mutability is a job property, not a workspace property:
+Execution permission is a job property, not a workspace property:
 
-* `may_mutate`
-* `must_not_mutate`
+* `may_mutate` — agent subprocess that may modify workspace files
+* `must_not_mutate` — agent subprocess that must leave workspace unchanged
+* `daemon_only` — daemon-executed step with no agent subprocess (system steps and harness validation)
 
 ### 7.4 Mutating Job Protocol
 
@@ -974,9 +1046,9 @@ For a mutating job the daemon MUST:
 11. record that commit as `output_commit_oid`
 12. advance workspace head and workspace ref to that commit
 
-### 7.5 Non-Mutating Job Protocol
+### 7.5 Non-Mutating Agent Job Protocol
 
-For a non-mutating job the daemon MUST:
+For a non-mutating agent job (review and investigation steps) the daemon MUST:
 
 1. provision the required workspace
 2. record `job_input`
@@ -986,7 +1058,32 @@ For a non-mutating job the daemon MUST:
 6. fail the job as `protocol_violation` if the workspace was dirtied
 7. reset or abandon the workspace according to policy
 
-### 7.6 Review Subjects
+### 7.6 Harness Validation Protocol
+
+For a harness validation step the daemon MUST:
+
+1. load the current harness profile from the project working tree
+2. create a Job row with `execution_permission=daemon_only` and `phase_kind=validate`
+3. determine the target workspace from the step contract (`workspace_kind=authoring` or `workspace_kind=integration`) and set `workspace_id` on the Job row
+4. record `job_input` on the Job row: for `validate_integrated` steps, `job_input={kind:integrated_subject, base_commit_oid=input_target_commit_oid, head_commit_oid=prepared_commit_oid}`; for candidate validate steps, `job_input={kind:candidate_subject, base_commit_oid=bound_authoring_base, head_commit_oid=current_authoring_head}`
+5. if no harness profile exists or no commands are declared, complete the job with `outcome_class=clean`, `validation_report:v1` containing an empty `checks` array and empty `findings` array, and return
+6. if the harness profile exists but fails to parse, or any configured timeout value is invalid, fail the job terminally with a harness-config error instead of executing zero checks
+7. re-sync the selected authoring or integration workspace to the queued `job_input.head_commit_oid` before executing any harness command
+8. set the job to `status=running` and `started_at` before executing commands, so the evaluator sees an active job and does not project concurrent dispatch
+9. for each declared command in declaration order:
+   a. run the command in the workspace directory with the declared timeout
+   b. kill the timed-out command tree before returning control when the timeout elapses
+   c. record exit code, stdout tail, and stderr tail
+   d. determine `status=pass` when exit code is 0, `status=fail` otherwise
+   d. if the command exceeds its timeout, kill it and record `status=fail`
+8. produce a `validation_report:v1`:
+   a. one `check` entry per command with `name`, `status`, and `summary`
+   b. if any check failed, set `outcome=findings` and emit one `finding:v1` per failed command with `finding_key` derived from the command name, `code` equal to the command name, `severity=high`, `summary` derived from the exit code or timeout, `paths=[]`, and stdout/stderr tail as `evidence`
+   c. if all checks passed, set `outcome=clean` with `findings=[]`
+9. complete the job with the appropriate `outcome_class`
+10. extract findings into durable `Finding` rows per the standard extraction rules
+
+### 7.7 Review Subjects
 
 Review and investigation jobs MUST record a typed `job_input` whose `kind` plus commit payload identify an explicit diff subject. A review or investigation result MUST be attributable to that concrete subject.
 
@@ -1006,7 +1103,7 @@ Closure-relevant review steps in `delivery:v1` use these diff subjects:
 * the durable local commit reference for a pre-authoring investigation subject MUST be daemon-owned or otherwise guaranteed local to the project and MUST remain reachable until all findings from that subject are triaged
 * when a valid prepared convergence is the current integrated subject, the job MUST use `job_input.kind=integrated_subject` with base equal to `input_target_commit_oid` and head equal to `prepared_commit_oid`
 
-### 7.7 Convergence Lifecycle
+### 7.8 Convergence Lifecycle
 
 Prepare:
 
@@ -1020,7 +1117,7 @@ Prepare:
 
 Validate and finalize:
 
-1. run `validate_integrated` against the prepared result and record `job_input={kind:integrated_subject, base_commit_oid=input_target_commit_oid, head_commit_oid=prepared_commit_oid}`
+1. execute `validate_integrated` via the harness validation protocol against the prepared result in the integration workspace
 2. if validation finds issues, return to the post-integration repair loop
 3. if approval is required, the clean completion handler for `validate_integrated` MUST set `approval_state=pending` and wait for explicit approval
 4. if approval is not required, the daemon MUST project and execute `finalize_prepared_convergence`
@@ -1028,7 +1125,7 @@ Validate and finalize:
 6. if still valid, finalization MUST create a `GitOperation` for `finalize_target_ref` and move the ref
 7. if target moved, the daemon MUST execute `invalidate_prepared_convergence`, which fails the prepared convergence, clears pending approval when present, and requires a new prepare attempt
 
-### 7.8 Conflict Handling
+### 7.9 Conflict Handling
 
 In-system manual conflict continuation is out of scope in v1.
 
@@ -1039,7 +1136,7 @@ When convergence becomes `conflicted`:
 * no agent jobs run against that retained conflict workspace
 * the operator MAY resolve the issue outside Ingot and create a new revision seeded from the resolved result
 
-### 7.9 Reset and Cleanup
+### 7.10 Reset and Cleanup
 
 * authoring workspaces are retained through the active revision and cleaned up after revision supersession or item closure unless retained for debug
 * review workspaces are removed after completion unless retained for debug
@@ -1049,7 +1146,7 @@ When convergence becomes `conflicted`:
 * however, any authoring workspace or equivalent daemon-owned ref that is the only remaining anchor for an untriaged candidate finding subject MUST be retained until all such findings are triaged
 * likewise, any integration workspace or equivalent daemon-owned ref that is the only remaining anchor for an untriaged integrated finding subject MUST be retained until all such findings are triaged
 
-### 7.10 Journal and Crash Recovery
+### 7.11 Journal and Crash Recovery
 
 Git and SQLite are not atomic together. The journal makes recovery honest.
 
@@ -1112,7 +1209,18 @@ Recovery rules:
 
 There is no workflow CRUD in v1.
 
-### 8.4 Item Endpoints
+### 8.4 Harness Profile Endpoints
+
+* `GET /api/projects/:project_id/harness`
+* `PUT /api/projects/:project_id/harness`
+
+Harness profile endpoint semantics:
+
+* `GET` returns the current parsed harness profile from the project working tree, or a default empty profile if `.ingot/harness.toml` does not exist. If the file exists but is malformed, `GET` MUST return `422`.
+* `PUT` validates the submitted profile and writes it to `<project_path>/.ingot/harness.toml`. The daemon MUST reject malformed TOML or invalid command declarations with `422`. If the `.ingot/` directory does not exist, the daemon MUST create it.
+* the harness profile is NOT a daemon-managed entity in SQLite. The file on disk is the source of truth.
+
+### 8.5 Item Endpoints
 
 * `POST .../items`
 * `GET .../items` with derived `board_status`, `attention_badges`, `current_step_id`, and `next_recommended_action`
@@ -1153,7 +1261,7 @@ Item command semantics:
 * `POST /items/:id/dismiss` and `POST /items/:id/invalidate` require the item to be open and idle
 * `POST /items/:id/reopen` is allowed only for dismissed or invalidated items, never completed items. Its request body MAY include the same optional revision-contract overrides and optional seed fields as `POST /items/:id/revise`. The reopen procedure MUST create a new revision cloned from the last revision by default, derive `seed_commit_oid` and `seed_target_commit_oid` using the same default rules as `POST /items/:id/revise`, set `lifecycle_state=open`, set `parking_state=active`, reset approval state for the new revision, and clear escalation
 
-### 8.5 Job Endpoints
+### 8.6 Job Endpoints
 
 * `POST .../items/:item_id/jobs`
 * `POST .../items/:item_id/jobs/:job_id/retry`
@@ -1175,13 +1283,13 @@ Daemon-only system actions such as `finalize_prepared_convergence` and `invalida
 Job command semantics:
 
 * `POST .../items/:item_id/jobs` dispatches either the current `dispatchable_step_id`, one of the current `auxiliary_dispatchable_step_ids`, or an explicit equivalent legal current job step. If none is available and no explicit legal current job step is provided, the command MUST fail without mutating item state.
-* when the evaluator projects a closure-relevant `review_*` step as the sole legal `dispatchable_step_id`, the daemon MUST create that review job automatically without waiting for an operator dispatch command
-* non-review closure-relevant stages such as authoring, validation, and approval-gated progression remain command-driven unless another explicit daemon-only rule in this spec says otherwise
+* when the evaluator projects a closure-relevant `review_*` or `validate_*` step as the sole legal `dispatchable_step_id`, the daemon MUST execute that step automatically without waiting for an operator dispatch command. For review steps this creates a queued agent job. For validate steps this executes the harness validation protocol.
+* non-review, non-validate closure-relevant stages such as authoring and approval-gated progression remain command-driven unless another explicit daemon-only rule in this spec says otherwise
 * explicit legal current job steps MAY include built-in report-only steps such as `investigate_item`. Dispatching a report-only step requires the item to be open, idle, not pending approval, and not currently projected toward a daemon-only next action, and MUST be reflected in `auxiliary_dispatchable_step_ids`; it MUST NOT change closure position, approval state, or rework budgets.
-* `POST .../items/:item_id/jobs/:job_id/retry` is allowed only when the referenced job is terminal and non-success, the item is open and idle, the job belongs to the current revision, and either the same `step_id` is still currently dispatchable or it remains a legal explicit report-only step for the current item state. It creates a new job row, preserves `semantic_attempt_no`, increments `retry_no`, sets `supersedes_job_id`, and leaves the prior job as historical lineage.
+* `POST .../items/:item_id/jobs/:job_id/retry` is allowed only when the referenced job is terminal and non-success, the item is open and idle, the job belongs to the current revision, the job's `execution_permission` is not `daemon_only`, and either the same `step_id` is still currently dispatchable or it remains a legal explicit report-only step for the current item state. It creates a new job row, preserves `semantic_attempt_no`, increments `retry_no`, sets `supersedes_job_id`, and leaves the prior job as historical lineage. Daemon-executed harness validation jobs cannot be retried through this endpoint; the daemon re-executes them automatically when the step is next projected.
 * `POST .../items/:item_id/jobs/:job_id/cancel` is allowed only when the referenced job is `queued`, `assigned`, or `running`. It terminates any subprocess when present, marks the job `cancelled`, clears active workspace attachment, and leaves the item on the same step with no automatic redispatch.
 
-### 8.6 Workspace and Convergence Endpoints
+### 8.7 Workspace and Convergence Endpoints
 
 * `GET .../workspaces`
 * `GET .../workspaces/:workspace_id`
@@ -1202,7 +1310,7 @@ Workspace and convergence command semantics:
 * `POST .../items/:item_id/convergence/prepare` is allowed only when the evaluator projects `next_recommended_action=prepare_convergence` and there is no active convergence for the current revision.
 * `POST .../convergences/:convergence_id/abort` is allowed only when the convergence is `queued`, `running`, or `prepared` and not finalized. It cancels active convergence work, clears pending approval if this convergence was the prepared current convergence, marks the convergence `cancelled`, and then removes or retains the integration workspace according to retention policy.
 
-### 8.7 Finding Endpoints
+### 8.8 Finding Endpoints
 
 * `GET .../items/:item_id/findings`
 * `GET .../findings/:finding_id`
@@ -1219,13 +1327,13 @@ Finding command semantics:
 * `POST .../findings/:finding_id/promote` is retained as a compatibility wrapper for `triage_state=backlog` with a new linked item.
 * `POST .../findings/:finding_id/dismiss` is retained as a compatibility wrapper for `triage_state=dismissed_invalid`.
 
-### 8.8 Activity and Stats Endpoints
+### 8.9 Activity and Stats Endpoints
 
 * `GET .../activity`
 * `GET /api/activity`
 * `GET /api/stats`
 
-### 8.9 Example Payloads
+### 8.10 Example Payloads
 
 Create item request:
 
@@ -1270,8 +1378,11 @@ The fully assembled prompt MUST be deterministic and ordered as:
 5. repository context according to the revision's frozen policy snapshot
 6. convergence metadata when relevant
 7. structured output instructions and schema hints
+8. harness profile commands and skills when the project has a configured harness
 
-For validate, review, and report-only investigation steps, structured output instructions and schema hints MUST target the canonical core schema for that step and MUST instruct adapters to place any non-core data under `extensions`.
+For review and report-only investigation steps, structured output instructions and schema hints MUST target the canonical core schema for that step and MUST instruct adapters to place any non-core data under `extensions`.
+
+Harness commands inform agents what verification tools are available in their workspace. Skill files from the harness profile are included as agent-available capabilities by inlining the resolved skill files into the prompt, not by listing only the configured glob strings. Both are included regardless of `context_policy` since they describe workspace infrastructure, not prior execution state. If the harness profile is malformed or the configured skill files cannot be loaded, prompt assembly MUST fail the job before agent launch. Validate steps do not use prompt assembly because they are daemon-executed harness runs.
 
 The fully assembled prompt MUST be written to disk before execution.
 
@@ -1350,7 +1461,7 @@ Required core fields:
 
 Semantics:
 
-* validation reports represent objective checks over the job's current workspace subject
+* validation reports represent deterministic harness command results over the step's workspace. Each `check` entry corresponds to one declared harness command. When no harness commands are declared, `checks` is empty and `outcome` is `clean`.
 * `outcome=clean` requires `findings=[]`
 * `outcome=findings` requires at least one finding
 * failed checks remain valid supporting detail in `checks`, but any validation outcome that blocks closure MUST also emit at least one canonical `finding:v1`
@@ -1453,6 +1564,12 @@ Workspace and Git errors:
 * `unexpected_git_write`
 * `empty_mutating_result`
 * `git_operation_failed`
+
+Harness errors:
+
+* `harness_profile_invalid`
+* `harness_command_timeout`
+* `harness_command_failed`
 
 Execution errors:
 
@@ -1627,8 +1744,8 @@ complete_mutating_job(job_id, result):
   persist result_payload and output_commit_oid
   complete job with outcome clean or findings
   rebuild revision context
-  if evaluate(item).dispatchable_step_id is review_*:
-    create_job_for_step(step)
+  if evaluate(item).dispatchable_step_id is review_* or validate_*:
+    auto_execute_next_step()
 ```
 
 ### 12.3.1 Complete Report Job
@@ -1640,8 +1757,41 @@ complete_report_job(job_id, result):
   validate the structured report payload against the job contract
   persist the report, extracted findings, and canonical outcome
   rebuild revision context
-  if evaluate(item).dispatchable_step_id is review_*:
-    create_job_for_step(step)
+  if evaluate(item).dispatchable_step_id is review_* or validate_*:
+    auto_execute_next_step()
+```
+
+### 12.3.2 Execute Harness Validation
+
+```text
+execute_harness_validation(item_id, step_id):
+  item = load_item_with_current_revision(item_id)
+  contract = lookup_step_contract(step_id)
+  harness = load_harness_profile(item.project_path)
+
+  workspace = resolve_workspace(item, contract.workspace_kind)
+  job = create_job(step_id, execution_permission=daemon_only)
+  record job_input from workspace and convergence state per 7.6 step 4
+
+  if harness is empty or has no commands:
+    complete job with outcome=clean, checks=[], findings=[]
+    return
+
+  checks = []
+  findings = []
+  for each command in harness.commands (declaration order):
+    result = run_command(command.run, cwd=workspace.path, timeout=command.timeout)
+    check = { name: command.name, status: pass_or_fail(result), summary: result.summary }
+    checks.append(check)
+    if check.status == fail:
+      findings.append(finding_from_command_failure(command, result))
+
+  outcome = clean if findings.empty else findings
+  complete job with validation_report:v1 { outcome, summary, checks, findings }
+  extract findings into durable Finding rows
+
+  if evaluate(item).dispatchable_step_id is review_* or validate_*:
+    auto_execute_next_step()
 ```
 
 ### 12.4 Prepare Convergence
@@ -1855,13 +2005,16 @@ Recommended `GET .../items/:item_id` shape:
 * `seed_target_commit_oid` records target-baseline history and promotion defaults without changing the current candidate diff subject
 * frozen repo-context policy objects conform to `repo_context_policy:v1`
 * prompt snapshot and template digest are frozen at job dispatch
+* harness profile is read live from `<repo>/.ingot/harness.toml` and is NOT frozen into revision snapshots
+* harness profile is operator-owned; agents must not modify it
+* projects without a harness profile degrade gracefully with auto-clean validation
 
 ### 14.2 State Evaluation
 
 * evaluator derives the current step from canonical rows only and never mutates durable state or Git
 * deferred items do not daemon-auto-dispatch
-* closure-relevant review gates are expressed by projecting exactly one `dispatchable_step_id`, and the daemon auto-dispatches that projected `review_*` job while the item remains open and idle
-* validation gates remain projected but are not auto-dispatched unless a separate daemon-only rule applies
+* closure-relevant review and validate gates are expressed by projecting exactly one `dispatchable_step_id`, and the daemon auto-executes the projected `review_*` or `validate_*` step while the item remains open and idle
+* review auto-dispatch creates a queued agent job; validate auto-dispatch executes the harness validation protocol
 * exhausted rework budgets escalate correctly
 * pending approval requires a prepared convergence, and approval actions require that it is still valid for the current target head
 * target-ref drift projects daemon-only invalidation and requires new prepare
@@ -1875,7 +2028,7 @@ Recommended `GET .../items/:item_id` shape:
 * integration workspaces are one per convergence attempt
 * mutating jobs produce exactly one daemon-owned commit
 * mutating jobs fail if the result is empty
-* non-mutating jobs fail if the workspace becomes dirty
+* non-mutating agent jobs fail if the workspace becomes dirty; harness validation steps do not enforce workspace cleanliness because build and test commands may produce artifacts
 * unexpected agent Git writes are treated as protocol violations
 * every successful authoring commit is followed by incremental review of the new commit range before whole-candidate review
 * every clean whole-candidate review is followed by final candidate validation before convergence prepare becomes legal
@@ -1883,6 +2036,10 @@ Recommended `GET .../items/:item_id` shape:
 * canonical report findings are extracted into durable `Finding` rows keyed by source job and finding key
 * investigation jobs record an explicit diff subject via `job_input.kind=candidate_subject`
 * report-only steps do not advance or rewind closure state
+* validate steps are daemon-executed harness runs, not agent subprocesses
+* validate steps auto-dispatch when projected as the next closure-relevant step for an idle, non-deferred item
+* each harness command maps to one check in the validation report
+* harness validation with no declared commands produces outcome=clean
 
 ### 14.4 Convergence and Approval
 
@@ -1935,6 +2092,10 @@ Required for conformance:
 * deterministic prompt assembly and on-disk prompt snapshots
 * structured activity history plus per-job logs
 * HTTP API and WebSocket stream
+* harness profile loading from `.ingot/harness.toml`
+* daemon-driven harness validation protocol
+* harness profile HTTP API endpoints
+* harness commands and skills in prompt assembly for agent jobs
 
 Recommended but non-required:
 
@@ -1959,3 +2120,7 @@ The following are intentionally deferred and MUST NOT leak into v1 through tempo
 * agent-driven conflict resolution
 * MCP server exposure
 * remote push, PR, or CI integration
+* harness capabilities (browser automation, simulator, database fixtures)
+* harness capture (screenshots, video, logs, metrics, traces)
+* harness boot commands with readiness probes
+* harness profile freezing into revision snapshots

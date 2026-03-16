@@ -2,6 +2,7 @@ mod agents;
 mod convergence;
 mod dispatch;
 mod findings;
+mod harness;
 mod items;
 mod jobs;
 mod projects;
@@ -153,6 +154,10 @@ pub fn build_router_with_project_locks_and_state_root(
         .route(
             "/api/projects/{project_id}/config",
             get(projects::get_project_config),
+        )
+        .route(
+            "/api/projects/{project_id}/harness",
+            get(harness::get_harness_profile).put(harness::put_harness_profile),
         )
         .route(
             "/api/projects/{project_id}/jobs",

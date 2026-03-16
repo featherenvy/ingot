@@ -614,6 +614,13 @@ pub fn retry_job(
     let contract = step::find_step(&previous_job.step_id).ok_or_else(|| {
         UseCaseError::IllegalStepDispatch(format!("Unknown step: {}", previous_job.step_id))
     })?;
+
+    if contract.execution_permission == ingot_domain::job::ExecutionPermission::DaemonOnly {
+        return Err(UseCaseError::IllegalStepDispatch(
+            "Daemon-executed jobs cannot be retried manually".into(),
+        ));
+    }
+
     let closure_position_allows_retry =
         evaluation.current_step_id.as_deref() == Some(previous_job.step_id.as_str());
     let report_only_retry = evaluation

@@ -278,7 +278,9 @@ pub(super) fn api_to_usecase_error(error: ApiError) -> UseCaseError {
         ApiError::UseCase(error) => error,
         ApiError::BadRequest { message, .. }
         | ApiError::Conflict { message, .. }
-        | ApiError::NotFound { message, .. } => UseCaseError::Internal(message),
+        | ApiError::NotFound { message, .. }
+        | ApiError::Validation { message }
+        | ApiError::Internal { message } => UseCaseError::Internal(message),
     }
 }
 

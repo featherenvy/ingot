@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use ingot_agent_runtime::RuntimeError;
@@ -9,6 +10,7 @@ use ingot_domain::workspace::WorkspaceKind;
 use ingot_git::commands::head_oid;
 use ingot_test_support::git::unique_temp_path;
 use ingot_test_support::reports::{clean_review_report, findings_review_report};
+use ingot_workspace::{provision_authoring_workspace, provision_integration_workspace};
 
 mod common;
 use common::*;
@@ -16,6 +18,54 @@ use ingot_domain::finding::{FindingSeverity, FindingTriageState};
 use ingot_git::commands::git;
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
 use ingot_workflow::step;
+
+fn write_harness_toml(repo_path: &Path, contents: &str) {
+    let ingot_dir = repo_path.join(".ingot");
+    std::fs::create_dir_all(&ingot_dir).expect("create .ingot dir");
+    std::fs::write(ingot_dir.join("harness.toml"), contents).expect("write harness.toml");
+}
+
+async fn create_authoring_validation_workspace(
+    h: &TestHarness,
+    revision_id: ingot_domain::ids::ItemRevisionId,
+    base_commit_oid: &str,
+    head_commit_oid: &str,
+) -> ingot_domain::workspace::Workspace {
+    let paths = ensure_test_mirror(&h.state_root, &h.project).await;
+    let workspace_id = ingot_domain::ids::WorkspaceId::new();
+    let workspace_path = paths.worktree_root.join(workspace_id.to_string());
+    let workspace_ref = format!("refs/ingot/workspaces/{workspace_id}");
+    let provisioned = provision_authoring_workspace(
+        paths.mirror_git_dir.as_path(),
+        &workspace_path,
+        &workspace_ref,
+        head_commit_oid,
+    )
+    .await
+    .expect("provision authoring workspace");
+    let workspace = ingot_domain::workspace::Workspace {
+        id: workspace_id,
+        project_id: h.project.id,
+        kind: WorkspaceKind::Authoring,
+        strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
+        path: provisioned.workspace_path.display().to_string(),
+        created_for_revision_id: Some(revision_id),
+        parent_workspace_id: None,
+        target_ref: Some("refs/heads/main".into()),
+        workspace_ref: Some(provisioned.workspace_ref),
+        base_commit_oid: Some(base_commit_oid.to_string()),
+        head_commit_oid: Some(provisioned.head_commit_oid),
+        retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
+        status: ingot_domain::workspace::WorkspaceStatus::Ready,
+        current_job_id: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    h.db.create_workspace(&workspace)
+        .await
+        .expect("create authoring workspace");
+    workspace
+}
 
 #[tokio::test]
 async fn authoring_success_auto_dispatches_incremental_review() {
@@ -649,8 +699,9 @@ async fn clean_candidate_review_auto_dispatches_candidate_validation() {
 
 #[tokio::test]
 async fn daemon_only_validation_job_executes_on_tick() {
-    let h = TestHarness::new(Arc::new(CleanValidationRunner)).await;
-    h.register_review_agent().await;
+    // Daemon-only validation jobs use the harness execution path (no agent needed).
+    // With no harness profile, validation auto-completes as clean.
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
@@ -672,6 +723,30 @@ async fn daemon_only_validation_job_executes_on_tick() {
         .await
         .expect("create item");
 
+    // Create an authoring workspace so the harness validation can resolve it
+    let workspace_id = ingot_domain::ids::WorkspaceId::new();
+    let workspace = ingot_domain::workspace::Workspace {
+        id: workspace_id,
+        project_id: h.project.id,
+        kind: WorkspaceKind::Authoring,
+        strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
+        path: h.repo_path.display().to_string(),
+        created_for_revision_id: Some(revision_id),
+        parent_workspace_id: None,
+        target_ref: Some("refs/heads/main".into()),
+        workspace_ref: Some(format!("refs/ingot/workspaces/{workspace_id}")),
+        base_commit_oid: Some(seed_commit.clone()),
+        head_commit_oid: Some(candidate_head.clone()),
+        retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
+        status: ingot_domain::workspace::WorkspaceStatus::Ready,
+        current_job_id: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    h.db.create_workspace(&workspace)
+        .await
+        .expect("create authoring workspace");
+
     let validation_job = JobBuilder::new(
         h.project.id,
         item_id,
@@ -682,7 +757,7 @@ async fn daemon_only_validation_job_executes_on_tick() {
     .workspace_kind(WorkspaceKind::Authoring)
     .execution_permission(ExecutionPermission::DaemonOnly)
     .context_policy(ContextPolicy::None)
-    .phase_template_slug("validate-candidate")
+    .phase_template_slug("")
     .job_input(JobInput::candidate_subject(
         seed_commit.clone(),
         candidate_head.clone(),
@@ -704,6 +779,762 @@ async fn daemon_only_validation_job_executes_on_tick() {
     assert_eq!(
         job.state.result_schema_version(),
         Some("validation_report:v1")
+    );
+}
+
+#[tokio::test]
+async fn harness_validation_with_commands_produces_findings_on_failure() {
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
+    git_sync(&h.repo_path, &["add", "tracked.txt"]);
+    git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(seed_commit.clone()))
+        .seed_target_commit_oid(Some(seed_commit.clone()))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    // Create authoring workspace
+    let workspace_id = ingot_domain::ids::WorkspaceId::new();
+    let workspace = ingot_domain::workspace::Workspace {
+        id: workspace_id,
+        project_id: h.project.id,
+        kind: WorkspaceKind::Authoring,
+        strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
+        path: h.repo_path.display().to_string(),
+        created_for_revision_id: Some(revision_id),
+        parent_workspace_id: None,
+        target_ref: Some("refs/heads/main".into()),
+        workspace_ref: Some(format!("refs/ingot/workspaces/{workspace_id}")),
+        base_commit_oid: Some(seed_commit.clone()),
+        head_commit_oid: Some(candidate_head.clone()),
+        retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
+        status: ingot_domain::workspace::WorkspaceStatus::Ready,
+        current_job_id: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    h.db.create_workspace(&workspace)
+        .await
+        .expect("create authoring workspace");
+
+    // Create a harness profile with a command that will fail
+    let project_path = std::path::Path::new(&h.project.path);
+    let ingot_dir = project_path.join(".ingot");
+    std::fs::create_dir_all(&ingot_dir).expect("create .ingot dir");
+    std::fs::write(
+        ingot_dir.join("harness.toml"),
+        r#"
+[commands.check]
+run = "exit 0"
+timeout = "30s"
+
+[commands.failing_test]
+run = "echo 'test failed' && exit 1"
+timeout = "30s"
+"#,
+    )
+    .expect("write harness.toml");
+
+    let validation_job = JobBuilder::new(
+        h.project.id,
+        item_id,
+        revision_id,
+        step::VALIDATE_CANDIDATE_INITIAL,
+    )
+    .phase_kind(PhaseKind::Validate)
+    .workspace_kind(WorkspaceKind::Authoring)
+    .execution_permission(ExecutionPermission::DaemonOnly)
+    .context_policy(ContextPolicy::None)
+    .phase_template_slug("")
+    .job_input(JobInput::candidate_subject(
+        seed_commit.clone(),
+        candidate_head.clone(),
+    ))
+    .output_artifact_kind(OutputArtifactKind::ValidationReport)
+    .build();
+    h.db.create_job(&validation_job)
+        .await
+        .expect("create validation job");
+
+    assert!(h.dispatcher.tick().await.expect("validation tick"));
+
+    let job =
+        h.db.get_job(validation_job.id)
+            .await
+            .expect("reload validation job");
+    assert_eq!(job.state.status(), JobStatus::Completed);
+    assert_eq!(job.state.outcome_class(), Some(OutcomeClass::Findings));
+    assert_eq!(
+        job.state.result_schema_version(),
+        Some("validation_report:v1")
+    );
+
+    // Parse the result payload to verify check structure
+    let payload = job.state.result_payload().expect("result payload");
+    let checks = payload["checks"].as_array().expect("checks array");
+    assert_eq!(checks.len(), 2);
+    assert_eq!(checks[0]["name"].as_str(), Some("check"));
+    assert_eq!(checks[0]["status"].as_str(), Some("pass"));
+    assert_eq!(checks[1]["name"].as_str(), Some("failing_test"));
+    assert_eq!(checks[1]["status"].as_str(), Some("fail"));
+
+    let findings = payload["findings"].as_array().expect("findings array");
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0]["code"].as_str(), Some("failing_test"));
+    assert_eq!(findings[0]["severity"].as_str(), Some("high"));
+
+    // Verify findings were extracted into durable rows
+    let db_findings =
+        h.db.list_findings_by_item(item_id)
+            .await
+            .expect("list findings");
+    assert_eq!(db_findings.len(), 1);
+    assert_eq!(db_findings[0].code, "failing_test");
+}
+
+#[tokio::test]
+async fn daemon_only_validation_fails_on_invalid_harness_profile() {
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
+    git_sync(&h.repo_path, &["add", "tracked.txt"]);
+    git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(seed_commit.clone()))
+        .seed_target_commit_oid(Some(seed_commit.clone()))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+    create_authoring_validation_workspace(&h, revision_id, &seed_commit, &candidate_head).await;
+
+    write_harness_toml(
+        &h.repo_path,
+        r#"
+[commands.check]
+run = "exit 0"
+timeout = "bogus"
+"#,
+    );
+
+    let validation_job = JobBuilder::new(
+        h.project.id,
+        item_id,
+        revision_id,
+        step::VALIDATE_CANDIDATE_INITIAL,
+    )
+    .phase_kind(PhaseKind::Validate)
+    .workspace_kind(WorkspaceKind::Authoring)
+    .execution_permission(ExecutionPermission::DaemonOnly)
+    .context_policy(ContextPolicy::None)
+    .phase_template_slug("")
+    .job_input(JobInput::candidate_subject(
+        seed_commit.clone(),
+        candidate_head.clone(),
+    ))
+    .output_artifact_kind(OutputArtifactKind::ValidationReport)
+    .build();
+    h.db.create_job(&validation_job)
+        .await
+        .expect("create validation job");
+
+    assert!(h.dispatcher.tick().await.expect("validation tick"));
+
+    let job =
+        h.db.get_job(validation_job.id)
+            .await
+            .expect("reload validation job");
+    assert_eq!(job.state.status(), JobStatus::Failed);
+    assert_eq!(
+        job.state.outcome_class(),
+        Some(OutcomeClass::TerminalFailure)
+    );
+    assert_eq!(job.state.error_code(), Some("invalid_harness_profile"));
+    assert!(
+        job.state
+            .error_message()
+            .expect("error message")
+            .contains("invalid duration")
+    );
+}
+
+#[tokio::test]
+async fn queued_authoring_job_fails_on_invalid_harness_profile() {
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+    h.register_mutating_agent().await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    write_harness_toml(
+        &h.repo_path,
+        r#"
+[commands.check]
+run = "exit 0"
+timeout = "bogus"
+"#,
+    );
+
+    let job = test_authoring_job(h.project.id, item_id, revision_id, &seed_commit);
+    h.db.create_job(&job).await.expect("create job");
+
+    assert!(h.dispatcher.tick().await.expect("tick should run"));
+
+    let updated_job = h.db.get_job(job.id).await.expect("updated job");
+    assert_eq!(updated_job.state.status(), JobStatus::Failed);
+    assert_eq!(
+        updated_job.state.outcome_class(),
+        Some(OutcomeClass::TerminalFailure)
+    );
+    assert_eq!(
+        updated_job.state.error_code(),
+        Some("invalid_harness_profile")
+    );
+
+    let prompt_path = h
+        .state_root
+        .join("logs")
+        .join(job.id.to_string())
+        .join("prompt.txt");
+    assert!(
+        !prompt_path.exists(),
+        "prep-time harness failure should not write a prompt artifact"
+    );
+}
+
+#[tokio::test]
+async fn authoring_prompt_includes_resolved_repo_local_skill_files() {
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+    h.register_mutating_agent().await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let skill_dir = h.repo_path.join(".ingot/skills");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("local.md"),
+        "Follow the repo-local rule before touching tests.",
+    )
+    .expect("write skill file");
+    write_harness_toml(
+        &h.repo_path,
+        r#"
+[commands.check]
+run = "cargo check"
+timeout = "5m"
+
+[skills]
+paths = [".ingot/skills/*.md"]
+"#,
+    );
+
+    let job = test_authoring_job(h.project.id, item_id, revision_id, &seed_commit);
+    h.db.create_job(&job).await.expect("create job");
+
+    assert!(h.dispatcher.tick().await.expect("tick should run"));
+
+    let prompt_path = h
+        .state_root
+        .join("logs")
+        .join(job.id.to_string())
+        .join("prompt.txt");
+    let prompt = std::fs::read_to_string(&prompt_path).expect("read prompt artifact");
+    assert!(prompt.contains("Available verification commands:"));
+    assert!(prompt.contains("`check`: `cargo check`"));
+    assert!(prompt.contains("Skill file: .ingot/skills/local.md"));
+    assert!(prompt.contains("Follow the repo-local rule before touching tests."));
+    assert!(
+        !prompt.contains(".ingot/skills/*.md"),
+        "prompt should inline resolved skills, not raw glob patterns"
+    );
+}
+
+#[tokio::test]
+async fn queued_authoring_job_fails_when_harness_skill_glob_escapes_repo() {
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+    h.register_mutating_agent().await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let escaped_root = unique_temp_path("ingot-runtime-escaped-skills");
+    std::fs::create_dir_all(&escaped_root).expect("create escaped skill dir");
+    std::fs::write(
+        escaped_root.join("outside.md"),
+        "This file should never be loaded into the prompt.",
+    )
+    .expect("write escaped skill file");
+    let escaped_dir_name = escaped_root
+        .file_name()
+        .expect("escaped dir name")
+        .to_string_lossy();
+    write_harness_toml(
+        &h.repo_path,
+        &format!(
+            r#"
+[commands.check]
+run = "cargo check"
+timeout = "5m"
+
+[skills]
+paths = ["../{escaped_dir_name}/*.md"]
+"#
+        ),
+    );
+
+    let job = test_authoring_job(h.project.id, item_id, revision_id, &seed_commit);
+    h.db.create_job(&job).await.expect("create job");
+
+    assert!(h.dispatcher.tick().await.expect("tick should run"));
+
+    let updated_job = h.db.get_job(job.id).await.expect("updated job");
+    assert_eq!(updated_job.state.status(), JobStatus::Failed);
+    assert_eq!(
+        updated_job.state.outcome_class(),
+        Some(OutcomeClass::TerminalFailure)
+    );
+    assert_eq!(
+        updated_job.state.error_code(),
+        Some("invalid_harness_profile")
+    );
+    assert!(
+        updated_job
+            .state
+            .error_message()
+            .expect("error message")
+            .contains("escapes project root")
+    );
+
+    let prompt_path = h
+        .state_root
+        .join("logs")
+        .join(job.id.to_string())
+        .join("prompt.txt");
+    assert!(
+        !prompt_path.exists(),
+        "prep-time harness failure should not write a prompt artifact"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn queued_authoring_job_fails_when_repo_local_skill_symlink_points_outside_repo() {
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+    h.register_mutating_agent().await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let escaped_root = unique_temp_path("ingot-runtime-escaped-skills");
+    std::fs::create_dir_all(&escaped_root).expect("create escaped skill dir");
+    let escaped_skill_path = escaped_root.join("outside.md");
+    std::fs::write(
+        &escaped_skill_path,
+        "This symlink target should never be loaded into the prompt.",
+    )
+    .expect("write escaped skill file");
+
+    let skill_dir = h.repo_path.join(".ingot/skills");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::os::unix::fs::symlink(&escaped_skill_path, skill_dir.join("escaped.md"))
+        .expect("create escaping symlink");
+    write_harness_toml(
+        &h.repo_path,
+        r#"
+[commands.check]
+run = "cargo check"
+timeout = "5m"
+
+[skills]
+paths = [".ingot/skills/*.md"]
+"#,
+    );
+
+    let job = test_authoring_job(h.project.id, item_id, revision_id, &seed_commit);
+    h.db.create_job(&job).await.expect("create job");
+
+    assert!(h.dispatcher.tick().await.expect("tick should run"));
+
+    let updated_job = h.db.get_job(job.id).await.expect("updated job");
+    assert_eq!(updated_job.state.status(), JobStatus::Failed);
+    assert_eq!(
+        updated_job.state.outcome_class(),
+        Some(OutcomeClass::TerminalFailure)
+    );
+    assert_eq!(
+        updated_job.state.error_code(),
+        Some("invalid_harness_profile")
+    );
+    assert!(
+        updated_job
+            .state
+            .error_message()
+            .expect("error message")
+            .contains("escapes project root")
+    );
+
+    let prompt_path = h
+        .state_root
+        .join("logs")
+        .join(job.id.to_string())
+        .join("prompt.txt");
+    assert!(
+        !prompt_path.exists(),
+        "prep-time harness failure should not write a prompt artifact"
+    );
+}
+
+#[tokio::test]
+async fn harness_validation_timeout_kills_background_processes() {
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
+    git_sync(&h.repo_path, &["add", "tracked.txt"]);
+    git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(seed_commit.clone()))
+        .seed_target_commit_oid(Some(seed_commit.clone()))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let workspace =
+        create_authoring_validation_workspace(&h, revision_id, &seed_commit, &candidate_head).await;
+    write_harness_toml(
+        &h.repo_path,
+        r#"
+[commands.timeout]
+run = "(sleep 2; echo orphan > timeout-orphan.txt) & sleep 30"
+timeout = "1s"
+"#,
+    );
+
+    let validation_job = JobBuilder::new(
+        h.project.id,
+        item_id,
+        revision_id,
+        step::VALIDATE_CANDIDATE_INITIAL,
+    )
+    .phase_kind(PhaseKind::Validate)
+    .workspace_kind(WorkspaceKind::Authoring)
+    .execution_permission(ExecutionPermission::DaemonOnly)
+    .context_policy(ContextPolicy::None)
+    .phase_template_slug("")
+    .job_input(JobInput::candidate_subject(
+        seed_commit.clone(),
+        candidate_head.clone(),
+    ))
+    .output_artifact_kind(OutputArtifactKind::ValidationReport)
+    .build();
+    h.db.create_job(&validation_job)
+        .await
+        .expect("create validation job");
+
+    assert!(h.dispatcher.tick().await.expect("validation tick"));
+
+    let job =
+        h.db.get_job(validation_job.id)
+            .await
+            .expect("reload validation job");
+    assert_eq!(job.state.status(), JobStatus::Completed);
+    assert_eq!(job.state.outcome_class(), Some(OutcomeClass::Findings));
+    let payload = job.state.result_payload().expect("result payload");
+    assert!(
+        payload["checks"][0]["summary"]
+            .as_str()
+            .expect("check summary")
+            .contains("timed out")
+    );
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(
+        !Path::new(&workspace.path)
+            .join("timeout-orphan.txt")
+            .exists(),
+        "timed out harness command should not leave a background writer alive"
+    );
+}
+
+#[tokio::test]
+async fn daemon_validation_resyncs_authoring_workspace_before_running_harness() {
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
+    git_sync(&h.repo_path, &["add", "tracked.txt"]);
+    git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(seed_commit.clone()))
+        .seed_target_commit_oid(Some(seed_commit.clone()))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let workspace =
+        create_authoring_validation_workspace(&h, revision_id, &seed_commit, &candidate_head).await;
+    git_sync(Path::new(&workspace.path), &["checkout", &seed_commit]);
+    write_harness_toml(
+        &h.repo_path,
+        &format!(
+            r#"
+[commands.head_matches]
+run = "test \"$(git rev-parse HEAD)\" = \"{candidate_head}\""
+timeout = "30s"
+"#
+        ),
+    );
+
+    let validation_job = JobBuilder::new(
+        h.project.id,
+        item_id,
+        revision_id,
+        step::VALIDATE_CANDIDATE_INITIAL,
+    )
+    .phase_kind(PhaseKind::Validate)
+    .workspace_kind(WorkspaceKind::Authoring)
+    .execution_permission(ExecutionPermission::DaemonOnly)
+    .context_policy(ContextPolicy::None)
+    .phase_template_slug("")
+    .job_input(JobInput::candidate_subject(
+        seed_commit.clone(),
+        candidate_head.clone(),
+    ))
+    .output_artifact_kind(OutputArtifactKind::ValidationReport)
+    .build();
+    h.db.create_job(&validation_job)
+        .await
+        .expect("create validation job");
+
+    assert!(h.dispatcher.tick().await.expect("validation tick"));
+
+    let job =
+        h.db.get_job(validation_job.id)
+            .await
+            .expect("reload validation job");
+    assert_eq!(job.state.status(), JobStatus::Completed);
+    assert_eq!(job.state.outcome_class(), Some(OutcomeClass::Clean));
+    assert_eq!(
+        head_oid(Path::new(&workspace.path))
+            .await
+            .expect("workspace head"),
+        candidate_head
+    );
+}
+
+#[tokio::test]
+async fn daemon_validation_resyncs_integration_workspace_before_running_harness() {
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(seed_commit.clone()))
+        .seed_target_commit_oid(Some(seed_commit.clone()))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let paths = ensure_test_mirror(&h.state_root, &h.project).await;
+    let workspace_id = ingot_domain::ids::WorkspaceId::new();
+    let workspace_path = paths.worktree_root.join(workspace_id.to_string());
+    let workspace_ref = format!("refs/ingot/workspaces/{workspace_id}");
+    let (_prepared_path, integrated_head) = create_mirror_only_commit(
+        paths.mirror_git_dir.as_path(),
+        &seed_commit,
+        &workspace_ref,
+        "integrated change",
+    )
+    .await;
+    let provisioned = provision_integration_workspace(
+        paths.mirror_git_dir.as_path(),
+        &workspace_path,
+        &workspace_ref,
+        &integrated_head,
+    )
+    .await
+    .expect("provision integration workspace");
+    let workspace = ingot_domain::workspace::Workspace {
+        id: workspace_id,
+        project_id: h.project.id,
+        kind: WorkspaceKind::Integration,
+        strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
+        path: provisioned.workspace_path.display().to_string(),
+        created_for_revision_id: Some(revision_id),
+        parent_workspace_id: None,
+        target_ref: Some("refs/heads/main".into()),
+        workspace_ref: Some(provisioned.workspace_ref),
+        base_commit_oid: Some(seed_commit.clone()),
+        head_commit_oid: Some(provisioned.head_commit_oid),
+        retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
+        status: ingot_domain::workspace::WorkspaceStatus::Ready,
+        current_job_id: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    h.db.create_workspace(&workspace)
+        .await
+        .expect("create integration workspace");
+    let source_workspace =
+        create_authoring_validation_workspace(&h, revision_id, &seed_commit, &integrated_head)
+            .await;
+    let convergence = ConvergenceBuilder::new(h.project.id, item_id, revision_id)
+        .source_workspace_id(source_workspace.id)
+        .integration_workspace_id(workspace.id)
+        .source_head_commit_oid(integrated_head.clone())
+        .input_target_commit_oid(seed_commit.clone())
+        .prepared_commit_oid(integrated_head.clone())
+        .target_head_valid(true)
+        .build();
+    h.db.create_convergence(&convergence)
+        .await
+        .expect("create convergence");
+    git_sync(Path::new(&workspace.path), &["checkout", &seed_commit]);
+    write_harness_toml(
+        &h.repo_path,
+        &format!(
+            r#"
+[commands.head_matches]
+run = "test \"$(git rev-parse HEAD)\" = \"{integrated_head}\""
+timeout = "30s"
+"#
+        ),
+    );
+
+    let validation_job = JobBuilder::new(
+        h.project.id,
+        item_id,
+        revision_id,
+        step::VALIDATE_INTEGRATED,
+    )
+    .phase_kind(PhaseKind::Validate)
+    .workspace_kind(WorkspaceKind::Integration)
+    .execution_permission(ExecutionPermission::DaemonOnly)
+    .context_policy(ContextPolicy::None)
+    .phase_template_slug("")
+    .job_input(JobInput::integrated_subject(
+        seed_commit.clone(),
+        integrated_head.clone(),
+    ))
+    .output_artifact_kind(OutputArtifactKind::ValidationReport)
+    .build();
+    h.db.create_job(&validation_job)
+        .await
+        .expect("create validation job");
+
+    assert!(h.dispatcher.tick().await.expect("validation tick"));
+
+    let job =
+        h.db.get_job(validation_job.id)
+            .await
+            .expect("reload validation job");
+    assert_eq!(job.state.status(), JobStatus::Completed);
+    assert_eq!(job.state.outcome_class(), Some(OutcomeClass::Clean));
+    assert_eq!(
+        head_oid(Path::new(&workspace.path))
+            .await
+            .expect("workspace head"),
+        integrated_head
     );
 }
 

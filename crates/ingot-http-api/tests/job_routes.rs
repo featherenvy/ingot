@@ -198,15 +198,15 @@ async fn retry_route_requeues_terminal_non_success_job_on_current_revision() {
             project_id: &project_id,
             item_id: &item_id,
             item_revision_id: &revision_id,
-            step_id: "validate_candidate_initial",
+            step_id: "review_candidate_initial",
             status: JobStatus::Failed,
             outcome_class: Some(OutcomeClass::TerminalFailure),
-            phase_kind: PhaseKind::Validate,
-            workspace_kind: WorkspaceKind::Authoring,
+            phase_kind: PhaseKind::Review,
+            workspace_kind: WorkspaceKind::Review,
             execution_permission: ExecutionPermission::MustNotMutate,
-            context_policy: ContextPolicy::ResumeContext,
-            phase_template_slug: "validate-candidate",
-            output_artifact_kind: OutputArtifactKind::ValidationReport,
+            context_policy: ContextPolicy::Fresh,
+            phase_template_slug: "review-candidate",
+            output_artifact_kind: OutputArtifactKind::ReviewReport,
             job_input: TestJobInput::CandidateSubject(&base_commit_oid, &base_commit_oid),
             error_code: Some("step_failed"),
             created_at: "2026-03-12T00:00:00Z",
@@ -216,7 +216,7 @@ async fn retry_route_requeues_terminal_non_success_job_on_current_revision() {
                 &project_id,
                 &item_id,
                 &revision_id,
-                "validate_candidate_initial",
+                "review_candidate_initial",
             )
         },
     )
@@ -241,7 +241,7 @@ async fn retry_route_requeues_terminal_non_success_job_on_current_revision() {
         .await
         .expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
-    assert_eq!(json["step_id"].as_str(), Some("validate_candidate_initial"));
+    assert_eq!(json["step_id"].as_str(), Some("review_candidate_initial"));
     assert_eq!(json["semantic_attempt_no"].as_u64(), Some(1));
     assert_eq!(json["retry_no"].as_u64(), Some(1));
     assert_eq!(json["supersedes_job_id"].as_str(), Some(job_id.as_str()));
@@ -253,21 +253,15 @@ async fn retry_route_requeues_terminal_non_success_job_on_current_revision() {
 }
 
 #[tokio::test]
-async fn retry_route_implicit_revision_uses_bound_workspace_base_for_candidate_validation() {
+async fn retry_route_rejects_daemon_only_validation_job() {
     let repo = temp_git_repo("ingot-http-api");
     let bound_base = git_output(&repo, &["rev-parse", "HEAD"]);
-    write_file(&repo.join("tracked.txt"), "authored change");
-    git(&repo, &["add", "tracked.txt"]);
-    git(&repo, &["commit", "-m", "authored change"]);
-    let authored_head = git_output(&repo, &["rev-parse", "HEAD"]);
 
     let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000067".to_string();
     let item_id = "itm_00000000000000000000000000000067".to_string();
     let revision_id = "rev_00000000000000000000000000000067".to_string();
-    let author_job_id = "job_00000000000000000000000000000067".to_string();
     let failed_job_id = "job_00000000000000000000000000000068".to_string();
-    let workspace_id = "wrk_00000000000000000000000000000067".to_string();
 
     sqlx::query(
         "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
@@ -313,58 +307,6 @@ async fn retry_route_implicit_revision_uses_bound_workspace_base_for_candidate_v
     .await
     .expect("insert revision");
 
-    sqlx::query(
-        "INSERT INTO workspaces (
-            id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
-            target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
-            status, current_job_id, created_at, updated_at
-         ) VALUES (?, ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', ?, ?, ?, 'persistent', 'ready', NULL, ?, ?)",
-    )
-    .bind(&workspace_id)
-    .bind(&project_id)
-    .bind(repo.join("retry-implicit-workspace").display().to_string())
-    .bind(&revision_id)
-    .bind(format!("refs/ingot/workspaces/{workspace_id}"))
-    .bind(&bound_base)
-    .bind(&authored_head)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert authoring workspace");
-
-    insert_test_job_row(
-        &db,
-        TestJobInsert {
-            id: &author_job_id,
-            project_id: &project_id,
-            item_id: &item_id,
-            item_revision_id: &revision_id,
-            step_id: "author_initial",
-            status: JobStatus::Completed,
-            outcome_class: Some(OutcomeClass::Clean),
-            phase_kind: PhaseKind::Author,
-            workspace_kind: WorkspaceKind::Authoring,
-            execution_permission: ExecutionPermission::MayMutate,
-            context_policy: ContextPolicy::Fresh,
-            phase_template_slug: "author-initial",
-            output_artifact_kind: OutputArtifactKind::Commit,
-            job_input: TestJobInput::AuthoringHead(&bound_base),
-            output_commit_oid: Some(&authored_head),
-            created_at: "2026-03-12T00:00:00Z",
-            started_at: Some("2026-03-12T00:00:00Z"),
-            ended_at: Some("2026-03-12T00:01:00Z"),
-            ..TestJobInsert::new(
-                &author_job_id,
-                &project_id,
-                &item_id,
-                &revision_id,
-                "author_initial",
-            )
-        },
-    )
-    .await;
-
     insert_test_job_row(
         &db,
         TestJobInsert {
@@ -377,11 +319,11 @@ async fn retry_route_implicit_revision_uses_bound_workspace_base_for_candidate_v
             outcome_class: Some(OutcomeClass::TerminalFailure),
             phase_kind: PhaseKind::Validate,
             workspace_kind: WorkspaceKind::Authoring,
-            execution_permission: ExecutionPermission::MustNotMutate,
-            context_policy: ContextPolicy::ResumeContext,
-            phase_template_slug: "validate-candidate",
+            execution_permission: ExecutionPermission::DaemonOnly,
+            context_policy: ContextPolicy::None,
+            phase_template_slug: "",
             output_artifact_kind: OutputArtifactKind::ValidationReport,
-            job_input: TestJobInput::CandidateSubject(&bound_base, &authored_head),
+            job_input: TestJobInput::CandidateSubject(&bound_base, &bound_base),
             error_code: Some("step_failed"),
             created_at: "2026-03-12T00:00:00Z",
             ended_at: Some("2026-03-12T00:05:00Z"),
@@ -410,25 +352,8 @@ async fn retry_route_implicit_revision_uses_bound_workspace_base_for_candidate_v
         .await
         .expect("route response");
 
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
-    assert_eq!(json["step_id"].as_str(), Some("validate_candidate_initial"));
-    assert_eq!(json["retry_no"].as_u64(), Some(1));
-    assert_eq!(
-        json["job_input"]["kind"].as_str(),
-        Some("candidate_subject")
-    );
-    assert_eq!(
-        json["job_input"]["base_commit_oid"].as_str(),
-        Some(bound_base.as_str())
-    );
-    assert_eq!(
-        json["job_input"]["head_commit_oid"].as_str(),
-        Some(authored_head.as_str())
-    );
+    // Daemon-only validation jobs cannot be retried manually
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]

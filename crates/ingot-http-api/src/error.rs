@@ -10,6 +10,8 @@ pub enum ApiError {
     BadRequest { code: &'static str, message: String },
     Conflict { code: &'static str, message: String },
     NotFound { code: &'static str, message: String },
+    Validation { message: String },
+    Internal { message: String },
 }
 
 impl ApiError {
@@ -17,6 +19,18 @@ impl ApiError {
         Self::BadRequest {
             code: "invalid_id",
             message: format!("Invalid {entity} id: {value}"),
+        }
+    }
+
+    pub fn validation(message: impl Into<String>) -> Self {
+        Self::Validation {
+            message: message.into(),
+        }
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
         }
     }
 }
@@ -162,6 +176,14 @@ impl IntoResponse for ApiError {
             ApiError::Conflict { code, message } => (StatusCode::CONFLICT, code, message),
             ApiError::NotFound { code, message } => (StatusCode::NOT_FOUND, code, message),
             ApiError::BadRequest { code, message } => (StatusCode::BAD_REQUEST, code, message),
+            ApiError::Validation { message } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                message,
+            ),
+            ApiError::Internal { message } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+            }
         };
 
         let body = json!({

@@ -1,12 +1,16 @@
 mod bootstrap;
 
+use std::collections::BTreeSet;
 use std::future::Future;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
+use glob::glob;
 use ingot_agent_adapters::claude_code::ClaudeCodeCliAdapter;
 use ingot_agent_adapters::codex::CodexCliAdapter;
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
@@ -18,6 +22,7 @@ use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::FindingTriageState;
 use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
+use ingot_domain::harness::{HarnessCommand, HarnessProfile, HarnessProfileError};
 use ingot_domain::ids::{GitOperationId, WorkspaceId};
 use ingot_domain::item::{
     ApprovalState, DoneReason, Escalation, EscalationReason, Lifecycle, ResolutionSource,
@@ -62,6 +67,7 @@ use ingot_workspace::{
     provision_review_workspace, remove_workspace,
 };
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::{interval, sleep};
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
@@ -195,11 +201,72 @@ struct PreparedRun {
     workspace_lifecycle: WorkspaceLifecycle,
 }
 
+enum PrepareRunOutcome {
+    NotPrepared,
+    FailedBeforeLaunch,
+    Prepared(Box<PreparedRun>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceLifecycle {
     PersistentAuthoring,
     PersistentIntegration,
     EphemeralReview,
+}
+
+#[derive(Debug, Clone, Default)]
+struct HarnessPromptContext {
+    commands: Vec<HarnessCommand>,
+    skills: Vec<ResolvedHarnessSkill>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedHarnessSkill {
+    relative_path: String,
+    contents: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum HarnessLoadError {
+    #[error("failed to read harness profile at {}: {source}", path.display())]
+    ReadProfile { path: PathBuf, source: io::Error },
+    #[error("invalid harness profile at {}: {source}", path.display())]
+    InvalidProfile {
+        path: PathBuf,
+        source: HarnessProfileError,
+    },
+    #[error("failed to canonicalize project path {}: {source}", path.display())]
+    CanonicalizeProjectPath { path: PathBuf, source: io::Error },
+    #[error("invalid harness skill glob '{pattern}': {message}")]
+    InvalidSkillGlob { pattern: String, message: String },
+    #[error("failed to resolve harness skill path from pattern '{pattern}': {source}")]
+    ResolveSkillPath { pattern: String, source: io::Error },
+    #[error(
+        "harness skill path from pattern '{pattern}' escapes project root {}: {}",
+        project_path.display(),
+        path.display()
+    )]
+    SkillPathEscapesProjectRoot {
+        pattern: String,
+        project_path: PathBuf,
+        path: PathBuf,
+    },
+    #[error("failed to read harness skill {}: {source}", path.display())]
+    ReadSkill { path: PathBuf, source: io::Error },
+}
+
+impl HarnessLoadError {
+    fn error_code(&self) -> &'static str {
+        match self {
+            Self::InvalidProfile { .. }
+            | Self::InvalidSkillGlob { .. }
+            | Self::SkillPathEscapesProjectRoot { .. } => "invalid_harness_profile",
+            Self::ReadProfile { .. }
+            | Self::CanonicalizeProjectPath { .. }
+            | Self::ResolveSkillPath { .. }
+            | Self::ReadSkill { .. } => "harness_io_error",
+        }
+    }
 }
 
 impl ConvergenceSystemActionPort for RuntimeConvergencePort {
@@ -514,56 +581,69 @@ impl JobDispatcher {
         }
 
         if let Some(job) = self.next_runnable_job().await? {
-            if let Some(prepared) = self.prepare_run(job).await? {
-                self.write_prompt_artifact(&prepared.job, &prepared.prompt)
-                    .await?;
-                let request = AgentRequest {
-                    prompt: prepared.prompt.clone(),
-                    working_dir: prepared.workspace.path.clone(),
-                    may_mutate: prepared.job.execution_permission == ExecutionPermission::MayMutate,
-                    timeout_seconds: Some(self.config.job_timeout.as_secs()),
-                    output_schema: output_schema_for_job(&prepared.job),
-                };
-                let response = self.run_with_heartbeats(&prepared, request).await;
-
-                match response {
-                    Ok(response) => {
-                        self.write_response_artifacts(&prepared.job, &response)
-                            .await?;
-                        self.finish_run(prepared, response).await?;
-                    }
-                    Err(AgentError::Timeout) => {
-                        self.fail_run(
-                            &prepared,
-                            OutcomeClass::TransientFailure,
-                            "job_timeout",
-                            Some("job execution timed out".into()),
-                        )
-                        .await?;
-                    }
-                    Err(error) => {
-                        let current_job = self.db.get_job(prepared.job.id).await?;
-                        if current_job.state.status() == JobStatus::Cancelled {
-                            self.finalize_workspace_after_failure(&prepared).await?;
-                            info!(
-                                job_id = %prepared.job.id,
-                                "job cancelled during runtime execution"
-                            );
-                            let _ = self.recover_projected_review_jobs().await?;
-                            return Ok(true);
-                        }
-                        warn!(?error, job_id = %prepared.job.id, "agent launch failed");
-                        self.fail_run(
-                            &prepared,
-                            OutcomeClass::TerminalFailure,
-                            "agent_launch_failed",
-                            Some(error.to_string()),
-                        )
-                        .await?;
-                    }
-                }
-
+            if is_daemon_only_validation(&job) {
+                self.execute_harness_validation(job).await?;
                 made_progress = true;
+            } else {
+                match self.prepare_run(job).await? {
+                    PrepareRunOutcome::Prepared(prepared) => {
+                        let prepared = *prepared;
+                        self.write_prompt_artifact(&prepared.job, &prepared.prompt)
+                            .await?;
+                        let request = AgentRequest {
+                            prompt: prepared.prompt.clone(),
+                            working_dir: prepared.workspace.path.clone(),
+                            may_mutate: prepared.job.execution_permission
+                                == ExecutionPermission::MayMutate,
+                            timeout_seconds: Some(self.config.job_timeout.as_secs()),
+                            output_schema: output_schema_for_job(&prepared.job),
+                        };
+                        let response = self.run_with_heartbeats(&prepared, request).await;
+
+                        match response {
+                            Ok(response) => {
+                                self.write_response_artifacts(&prepared.job, &response)
+                                    .await?;
+                                self.finish_run(prepared, response).await?;
+                            }
+                            Err(AgentError::Timeout) => {
+                                self.fail_run(
+                                    &prepared,
+                                    OutcomeClass::TransientFailure,
+                                    "job_timeout",
+                                    Some("job execution timed out".into()),
+                                )
+                                .await?;
+                            }
+                            Err(error) => {
+                                let current_job = self.db.get_job(prepared.job.id).await?;
+                                if current_job.state.status() == JobStatus::Cancelled {
+                                    self.finalize_workspace_after_failure(&prepared).await?;
+                                    info!(
+                                        job_id = %prepared.job.id,
+                                        "job cancelled during runtime execution"
+                                    );
+                                    let _ = self.recover_projected_review_jobs().await?;
+                                    return Ok(true);
+                                }
+                                warn!(?error, job_id = %prepared.job.id, "agent launch failed");
+                                self.fail_run(
+                                    &prepared,
+                                    OutcomeClass::TerminalFailure,
+                                    "agent_launch_failed",
+                                    Some(error.to_string()),
+                                )
+                                .await?;
+                            }
+                        }
+
+                        made_progress = true;
+                    }
+                    PrepareRunOutcome::FailedBeforeLaunch => {
+                        made_progress = true;
+                    }
+                    PrepareRunOutcome::NotPrepared => {}
+                }
             }
         }
 
@@ -1413,7 +1493,7 @@ impl JobDispatcher {
         Ok(convergence.target_head_valid_for_resolved_oid(resolved.as_deref()))
     }
 
-    async fn prepare_run(&self, queued_job: Job) -> Result<Option<PreparedRun>, RuntimeError> {
+    async fn prepare_run(&self, queued_job: Job) -> Result<PrepareRunOutcome, RuntimeError> {
         let _guard = self
             .project_locks
             .acquire_project_mutation(queued_job.project_id)
@@ -1421,16 +1501,30 @@ impl JobDispatcher {
 
         let mut job = self.db.get_job(queued_job.id).await?;
         if job.state.status() != JobStatus::Queued || !is_supported_runtime_job(&job) {
-            return Ok(None);
+            return Ok(PrepareRunOutcome::NotPrepared);
         }
 
         let item = self.db.get_item(job.item_id).await?;
         if item.current_revision_id != job.item_revision_id {
-            return Ok(None);
+            return Ok(PrepareRunOutcome::NotPrepared);
         }
 
         let revision = self.db.get_revision(job.item_revision_id).await?;
         let project = self.db.get_project(job.project_id).await?;
+        let harness_prompt = match resolve_harness_prompt_context(Path::new(&project.path)) {
+            Ok(context) => context,
+            Err(error) => {
+                self.fail_job_preparation(
+                    &job,
+                    &item,
+                    &project,
+                    error.error_code(),
+                    error.to_string(),
+                )
+                .await?;
+                return Ok(PrepareRunOutcome::FailedBeforeLaunch);
+            }
+        };
         let paths = self.refresh_project_mirror(&project).await?;
         let Some(agent) = self.select_agent(&job).await? else {
             debug!(
@@ -1438,7 +1532,7 @@ impl JobDispatcher {
                 step_id = %job.step_id,
                 "queued job is waiting for a compatible available agent"
             );
-            return Ok(None);
+            return Ok(PrepareRunOutcome::NotPrepared);
         };
         let now = Utc::now();
         let (workspace, workspace_lifecycle, workspace_exists) = self
@@ -1468,7 +1562,7 @@ impl JobDispatcher {
 
         let template = built_in_template(&job.phase_template_slug, &job.step_id);
         let prompt = self
-            .assemble_prompt(&job, &item, &revision, template)
+            .assemble_prompt(&job, &item, &revision, template, &harness_prompt)
             .await?;
         job.assign(
             JobAssignment::new(workspace.id)
@@ -1488,7 +1582,7 @@ impl JobDispatcher {
             "prepared job execution"
         );
 
-        Ok(Some(PreparedRun {
+        Ok(PrepareRunOutcome::Prepared(Box::new(PreparedRun {
             job,
             item,
             revision,
@@ -1499,7 +1593,7 @@ impl JobDispatcher {
             original_head_commit_oid,
             prompt,
             workspace_lifecycle,
-        }))
+        })))
     }
 
     async fn select_agent(&self, job: &Job) -> Result<Option<Agent>, RuntimeError> {
@@ -1552,11 +1646,9 @@ impl JobDispatcher {
                 WorkspaceKind::Integration,
                 ExecutionPermission::MustNotMutate | ExecutionPermission::DaemonOnly,
             ) => {
-                let workspace_id = job.state.workspace_id().ok_or_else(|| {
-                    RuntimeError::InvalidState(
-                        "integration jobs require a provisioned integration workspace".into(),
-                    )
-                })?;
+                let workspace_id = self
+                    .integration_workspace_id_for_job(job, revision.id)
+                    .await?;
                 let existing_workspace = self.db.get_workspace(workspace_id).await?;
                 let workspace_exists = true;
                 let expected_head_commit_oid = job
@@ -1628,12 +1720,39 @@ impl JobDispatcher {
         }
     }
 
+    async fn integration_workspace_id_for_job(
+        &self,
+        job: &Job,
+        revision_id: ingot_domain::ids::ItemRevisionId,
+    ) -> Result<WorkspaceId, RuntimeError> {
+        if let Some(workspace_id) = job.state.workspace_id() {
+            return Ok(workspace_id);
+        }
+
+        if job.execution_permission != ExecutionPermission::DaemonOnly {
+            return Err(RuntimeError::InvalidState(
+                "integration jobs require a provisioned integration workspace".into(),
+            ));
+        }
+
+        self.db
+            .find_prepared_convergence_for_revision(revision_id)
+            .await?
+            .and_then(|convergence| convergence.integration_workspace_id)
+            .ok_or_else(|| {
+                RuntimeError::InvalidState(
+                    "integration jobs require a provisioned integration workspace".into(),
+                )
+            })
+    }
+
     async fn assemble_prompt(
         &self,
         job: &Job,
         item: &ingot_domain::item::Item,
         revision: &ItemRevision,
         template: &str,
+        harness_prompt: &HarnessPromptContext,
     ) -> Result<String, RuntimeError> {
         let revision_context = self.db.get_revision_context(revision.id).await?;
         let context_block = format_revision_context(revision_context.as_ref());
@@ -1754,6 +1873,23 @@ impl JobDispatcher {
             }
             OutputArtifactKind::None => {
                 prompt.push_str("Protocol:\n- No output artifact is expected for this step.\n");
+            }
+        }
+
+        // Include harness commands and skills so agents know what verification tools are available
+        if !harness_prompt.commands.is_empty() {
+            prompt.push_str("\nAvailable verification commands:\n");
+            for cmd in &harness_prompt.commands {
+                prompt.push_str(&format!("- `{}`: `{}`\n", cmd.name, cmd.run));
+            }
+        }
+        if !harness_prompt.skills.is_empty() {
+            prompt.push_str("\nRepo-local skills available:\n");
+            for skill in &harness_prompt.skills {
+                prompt.push_str(&format!(
+                    "\nSkill file: {}\n{}\n",
+                    skill.relative_path, skill.contents
+                ));
             }
         }
 
@@ -2573,9 +2709,6 @@ impl JobDispatcher {
                 validation_job.supersedes_job_id = Some(latest_validate_job.id);
             }
         }
-        if let Some(integration_workspace_id) = convergence.integration_workspace_id {
-            validation_job.assign(JobAssignment::new(integration_workspace_id));
-        }
         self.db.create_job(&validation_job).await?;
         self.append_activity(
             project.id,
@@ -2825,6 +2958,289 @@ impl JobDispatcher {
         Ok(())
     }
 
+    async fn execute_harness_validation(&self, queued_job: Job) -> Result<(), RuntimeError> {
+        // Hold lock for initial job setup only; release before completion
+        // (CompleteJobService acquires its own lock)
+        let harness;
+        let job_id;
+        let item_id;
+        let project_id;
+        let workspace_path;
+        let step_id;
+        let revision_id;
+        {
+            let _guard = self
+                .project_locks
+                .acquire_project_mutation(queued_job.project_id)
+                .await;
+
+            let mut job = self.db.get_job(queued_job.id).await?;
+            if job.state.status() != JobStatus::Queued || !is_daemon_only_validation(&job) {
+                return Ok(());
+            }
+
+            let item = self.db.get_item(job.item_id).await?;
+            if item.current_revision_id != job.item_revision_id {
+                return Ok(());
+            }
+
+            let revision = self.db.get_revision(job.item_revision_id).await?;
+            let project = self.db.get_project(job.project_id).await?;
+            harness = match load_harness_profile(Path::new(&project.path)) {
+                Ok(harness) => harness,
+                Err(error) => {
+                    self.fail_job_preparation(
+                        &job,
+                        &item,
+                        &project,
+                        error.error_code(),
+                        error.to_string(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+
+            let paths = self.refresh_project_mirror(&project).await?;
+            let now = Utc::now();
+            let (workspace, workspace_exists) = match job.workspace_kind {
+                WorkspaceKind::Authoring | WorkspaceKind::Integration => {
+                    let (workspace, _lifecycle, workspace_exists) = self
+                        .prepare_workspace(
+                            &project,
+                            paths.mirror_git_dir.as_path(),
+                            &paths.worktree_root,
+                            &revision,
+                            &job,
+                            now,
+                        )
+                        .await?;
+                    (workspace, workspace_exists)
+                }
+                _ => {
+                    return Err(RuntimeError::InvalidState(format!(
+                        "unsupported workspace kind {:?} for harness validation",
+                        job.workspace_kind
+                    )));
+                }
+            };
+
+            if workspace_exists {
+                self.db.update_workspace(&workspace).await?;
+            } else {
+                self.db.create_workspace(&workspace).await?;
+            }
+
+            // Assign workspace to job (no agent for daemon-only)
+            job.assign(JobAssignment::new(workspace.id));
+            self.db.update_job(&job).await?;
+
+            // Transition to running
+            self.db
+                .start_job_execution(StartJobExecutionParams {
+                    job_id: job.id,
+                    item_id: job.item_id,
+                    expected_item_revision_id: job.item_revision_id,
+                    workspace_id: Some(workspace.id),
+                    agent_id: None,
+                    lease_owner_id: "daemon".into(),
+                    process_pid: None,
+                    lease_expires_at: now + ChronoDuration::minutes(30),
+                })
+                .await?;
+
+            job_id = job.id;
+            item_id = job.item_id;
+            project_id = project.id;
+            step_id = job.step_id.clone();
+            revision_id = job.item_revision_id;
+            workspace_path = PathBuf::from(&workspace.path);
+        }
+        // Guard dropped — lock released
+
+        let mut checks = Vec::new();
+        let mut findings = Vec::new();
+
+        for command in &harness.commands {
+            let result = run_harness_command(&command.run, &workspace_path, command.timeout).await;
+            let status = if result.timed_out || result.exit_code != 0 {
+                "fail"
+            } else {
+                "pass"
+            };
+            let summary = if result.timed_out {
+                format!(
+                    "command '{}' timed out after {:?}",
+                    command.name, command.timeout
+                )
+            } else if result.exit_code != 0 {
+                format!(
+                    "command '{}' exited with code {}",
+                    command.name, result.exit_code
+                )
+            } else {
+                format!("command '{}' passed", command.name)
+            };
+            checks.push(serde_json::json!({
+                "name": command.name,
+                "status": status,
+                "summary": summary,
+            }));
+            if status == "fail" {
+                let mut evidence = Vec::new();
+                if !result.stdout_tail.is_empty() {
+                    evidence.push(format!("stdout:\n{}", result.stdout_tail));
+                }
+                if !result.stderr_tail.is_empty() {
+                    evidence.push(format!("stderr:\n{}", result.stderr_tail));
+                }
+                if evidence.is_empty() {
+                    evidence.push(format!("exit code: {}", result.exit_code));
+                }
+                findings.push(serde_json::json!({
+                    "finding_key": command.name,
+                    "code": command.name,
+                    "severity": "high",
+                    "summary": summary,
+                    "paths": [],
+                    "evidence": evidence,
+                }));
+            }
+        }
+
+        let outcome = if findings.is_empty() {
+            "clean"
+        } else {
+            "findings"
+        };
+        let result_summary = if findings.is_empty() {
+            "all harness checks passed".to_string()
+        } else {
+            format!(
+                "{} of {} harness checks failed",
+                findings.len(),
+                checks.len()
+            )
+        };
+        let result_payload = serde_json::json!({
+            "outcome": outcome,
+            "summary": result_summary,
+            "checks": checks,
+            "findings": findings,
+        });
+        let outcome_class = if findings.is_empty() {
+            OutcomeClass::Clean
+        } else {
+            OutcomeClass::Findings
+        };
+
+        // Complete the job (service acquires its own project lock)
+        if let Err(error) = self
+            .complete_job_service()
+            .execute(CompleteJobCommand {
+                job_id,
+                outcome_class,
+                result_schema_version: Some("validation_report:v1".to_string()),
+                result_payload: Some(result_payload),
+                output_commit_oid: None,
+            })
+            .await
+        {
+            warn!(?error, job_id = %job_id, "harness validation completion failed");
+            self.db
+                .finish_job_non_success(FinishJobNonSuccessParams {
+                    job_id,
+                    item_id,
+                    expected_item_revision_id: revision_id,
+                    status: JobStatus::Failed,
+                    outcome_class: Some(OutcomeClass::TerminalFailure),
+                    error_code: Some("harness_command_failed".into()),
+                    error_message: Some(format!("{error:?}")),
+                    escalation_reason: None,
+                })
+                .await?;
+            return Ok(());
+        }
+
+        self.append_activity(
+            project_id,
+            ActivityEventType::JobCompleted,
+            "job",
+            job_id.to_string(),
+            serde_json::json!({ "item_id": item_id, "outcome": outcome }),
+        )
+        .await?;
+
+        if step_id == "validate_integrated" && outcome_class == OutcomeClass::Clean {
+            let updated_item = self.db.get_item(item_id).await?;
+            if updated_item.approval_state == ApprovalState::Pending {
+                self.append_activity(
+                    project_id,
+                    ActivityEventType::ApprovalRequested,
+                    "item",
+                    item_id.to_string(),
+                    serde_json::json!({ "job_id": job_id }),
+                )
+                .await?;
+            }
+        }
+
+        // Rebuild revision context
+        let revision = self.db.get_revision(revision_id).await?;
+        let item = self.db.get_item(item_id).await?;
+        let jobs = self.db.list_jobs_by_item(item_id).await?;
+        let authoring_workspace = self
+            .db
+            .find_authoring_workspace_for_revision(revision_id)
+            .await?;
+        let authoring_head =
+            ingot_usecases::dispatch::current_authoring_head_for_revision_with_workspace(
+                &revision,
+                &jobs,
+                authoring_workspace.as_ref(),
+            );
+        let changed_paths = if let Some(ref head) = authoring_head {
+            let base = revision
+                .seed_commit_oid
+                .as_deref()
+                .or_else(|| {
+                    authoring_workspace
+                        .as_ref()
+                        .and_then(|ws| ws.base_commit_oid.as_deref())
+                })
+                .unwrap_or(head);
+            let project = self.db.get_project(project_id).await?;
+            let paths = self.refresh_project_mirror(&project).await?;
+            changed_paths_between(&paths.mirror_git_dir, base, head)
+                .await
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let context = rebuild_revision_context(
+            &item,
+            &revision,
+            &jobs,
+            authoring_head,
+            changed_paths,
+            Some(job_id),
+            Utc::now(),
+        );
+        self.db.upsert_revision_context(&context).await?;
+
+        // Auto-dispatch next step
+        self.auto_dispatch_projected_review(project_id, item_id)
+            .await?;
+
+        info!(
+            job_id = %job_id,
+            step_id = %step_id,
+            outcome = outcome,
+            "completed harness validation"
+        );
+        Ok(())
+    }
+
     async fn recover_projected_review_jobs(&self) -> Result<bool, RuntimeError> {
         let mut dispatched_any = false;
 
@@ -2952,7 +3368,7 @@ impl JobDispatcher {
         let Some(step_id) = evaluation.dispatchable_step_id.as_deref() else {
             return Ok(None);
         };
-        if !is_closure_relevant_validate_step(step_id) {
+        if !step::is_closure_relevant_validate_step(step_id) {
             return Ok(None);
         }
 
@@ -3086,6 +3502,63 @@ impl JobDispatcher {
             "job failed"
         );
 
+        Ok(())
+    }
+
+    async fn fail_job_preparation(
+        &self,
+        job: &Job,
+        item: &ingot_domain::item::Item,
+        project: &Project,
+        error_code: &'static str,
+        error_message: String,
+    ) -> Result<(), RuntimeError> {
+        let outcome_class = OutcomeClass::TerminalFailure;
+        let escalation_reason = failure_escalation_reason(job, outcome_class);
+
+        self.db
+            .finish_job_non_success(FinishJobNonSuccessParams {
+                job_id: job.id,
+                item_id: item.id,
+                expected_item_revision_id: job.item_revision_id,
+                status: JobStatus::Failed,
+                outcome_class: Some(outcome_class),
+                error_code: Some(error_code.into()),
+                error_message: Some(error_message.clone()),
+                escalation_reason,
+            })
+            .await?;
+        self.append_activity(
+            project.id,
+            ActivityEventType::JobFailed,
+            "job",
+            job.id.to_string(),
+            serde_json::json!({ "item_id": item.id, "error_code": error_code }),
+        )
+        .await?;
+        if let Some(escalation_reason) = escalation_reason {
+            self.append_activity(
+                project.id,
+                ActivityEventType::ItemEscalated,
+                "item",
+                item.id.to_string(),
+                serde_json::json!({ "reason": escalation_reason }),
+            )
+            .await?;
+        }
+        self.refresh_revision_context_for_ids(
+            project.id,
+            item.id,
+            job.item_revision_id,
+            Some(job.id),
+        )
+        .await?;
+        warn!(
+            job_id = %job.id,
+            error_code,
+            error_message = %error_message,
+            "job failed during preparation"
+        );
         Ok(())
     }
 
@@ -3442,9 +3915,10 @@ fn is_supported_runtime_job(job: &Job) -> bool {
 }
 
 fn supports_job(agent: &Agent, job: &Job) -> bool {
-    if !agent
-        .capabilities
-        .contains(&AgentCapability::StructuredOutput)
+    if job.execution_permission == ExecutionPermission::DaemonOnly
+        || !agent
+            .capabilities
+            .contains(&AgentCapability::StructuredOutput)
     {
         return false;
     }
@@ -3456,17 +3930,275 @@ fn supports_job(agent: &Agent, job: &Job) -> bool {
         ExecutionPermission::MustNotMutate => {
             agent.capabilities.contains(&AgentCapability::ReadOnlyJobs)
         }
-        ExecutionPermission::DaemonOnly => {
-            agent.capabilities.contains(&AgentCapability::ReadOnlyJobs)
+        ExecutionPermission::DaemonOnly => unreachable!("daemon-only jobs are filtered above"),
+    }
+}
+
+fn is_daemon_only_validation(job: &Job) -> bool {
+    job.execution_permission == ExecutionPermission::DaemonOnly
+        && job.phase_kind == PhaseKind::Validate
+}
+
+fn read_harness_profile_if_present(
+    project_path: &Path,
+) -> Result<Option<HarnessProfile>, HarnessLoadError> {
+    let path = project_path.join(".ingot/harness.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => HarnessProfile::from_toml(&content)
+            .map(Some)
+            .map_err(|source| HarnessLoadError::InvalidProfile { path, source }),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(HarnessLoadError::ReadProfile { path, source }),
+    }
+}
+
+fn load_harness_profile(project_path: &Path) -> Result<HarnessProfile, HarnessLoadError> {
+    Ok(read_harness_profile_if_present(project_path)?.unwrap_or_default())
+}
+
+fn resolve_harness_prompt_context(
+    project_path: &Path,
+) -> Result<HarnessPromptContext, HarnessLoadError> {
+    let harness = load_harness_profile(project_path)?;
+    Ok(HarnessPromptContext {
+        commands: harness.commands,
+        skills: resolve_harness_skills(project_path, &harness.skills.paths)?,
+    })
+}
+
+fn resolve_harness_skills(
+    project_path: &Path,
+    patterns: &[String],
+) -> Result<Vec<ResolvedHarnessSkill>, HarnessLoadError> {
+    let canonical_project_path = std::fs::canonicalize(project_path).map_err(|source| {
+        HarnessLoadError::CanonicalizeProjectPath {
+            path: project_path.to_path_buf(),
+            source,
+        }
+    })?;
+    let mut seen = BTreeSet::new();
+    let mut resolved = Vec::new();
+    for pattern in patterns {
+        let pattern_path = project_path.join(pattern);
+        let pattern_glob = pattern_path.to_string_lossy().into_owned();
+        let mut matches = Vec::new();
+        for entry in glob(&pattern_glob).map_err(|error| HarnessLoadError::InvalidSkillGlob {
+            pattern: pattern.clone(),
+            message: error.msg.to_string(),
+        })? {
+            match entry {
+                Ok(path) => matches.push(path),
+                Err(error) => {
+                    return Err(HarnessLoadError::ResolveSkillPath {
+                        pattern: pattern.clone(),
+                        source: io::Error::new(error.error().kind(), error.error().to_string()),
+                    });
+                }
+            }
+        }
+        matches.sort();
+        for path in matches {
+            if !path.is_file() {
+                continue;
+            }
+            let canonical_path = std::fs::canonicalize(&path).map_err(|source| {
+                HarnessLoadError::ResolveSkillPath {
+                    pattern: pattern.clone(),
+                    source,
+                }
+            })?;
+            let relative_path = canonical_path
+                .strip_prefix(&canonical_project_path)
+                .map_err(|_| HarnessLoadError::SkillPathEscapesProjectRoot {
+                    pattern: pattern.clone(),
+                    project_path: canonical_project_path.clone(),
+                    path: canonical_path.clone(),
+                })?
+                .display()
+                .to_string();
+            if !seen.insert(relative_path.clone()) {
+                continue;
+            }
+            let contents = std::fs::read_to_string(&canonical_path).map_err(|source| {
+                HarnessLoadError::ReadSkill {
+                    path: canonical_path.clone(),
+                    source,
+                }
+            })?;
+            resolved.push(ResolvedHarnessSkill {
+                relative_path,
+                contents,
+            });
+        }
+    }
+    Ok(resolved)
+}
+
+struct HarnessCommandResult {
+    exit_code: i32,
+    stdout_tail: String,
+    stderr_tail: String,
+    timed_out: bool,
+}
+
+async fn run_harness_command(run: &str, cwd: &Path, timeout: Duration) -> HarnessCommandResult {
+    let mut command = tokio::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg(run)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    let child = command.spawn();
+
+    let mut child = match child {
+        Ok(child) => child,
+        Err(error) => {
+            return HarnessCommandResult {
+                exit_code: -1,
+                stdout_tail: String::new(),
+                stderr_tail: format!("failed to spawn command: {error}"),
+                timed_out: false,
+            };
+        }
+    };
+
+    let stdout_task = spawn_pipe_reader(child.stdout.take());
+    let stderr_task = spawn_pipe_reader(child.stderr.take());
+
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => build_harness_command_result(
+            status.code().unwrap_or(-1),
+            collect_pipe_output(stdout_task, "stdout").await,
+            collect_pipe_output(stderr_task, "stderr").await,
+            false,
+            Vec::new(),
+        ),
+        Ok(Err(error)) => build_harness_command_result(
+            -1,
+            collect_pipe_output(stdout_task, "stdout").await,
+            collect_pipe_output(stderr_task, "stderr").await,
+            false,
+            vec![format!("command I/O error: {error}")],
+        ),
+        Err(_) => {
+            let mut notes = vec!["command timed out".to_string()];
+            if let Err(error) = terminate_harness_command(&mut child).await {
+                notes.push(format!("failed to terminate timed out command: {error}"));
+            }
+            if let Err(error) = child.wait().await {
+                notes.push(format!("failed to reap timed out command: {error}"));
+            }
+            build_harness_command_result(
+                -1,
+                collect_pipe_output(stdout_task, "stdout").await,
+                collect_pipe_output(stderr_task, "stderr").await,
+                true,
+                notes,
+            )
         }
     }
 }
 
-fn is_closure_relevant_validate_step(step_id: &str) -> bool {
-    step::find_step(step_id).is_some_and(|contract| {
-        contract.phase_kind == PhaseKind::Validate
-            && contract.closure_relevance == ingot_workflow::ClosureRelevance::ClosureRelevant
-    })
+fn build_harness_command_result(
+    exit_code: i32,
+    stdout: Result<String, String>,
+    stderr: Result<String, String>,
+    timed_out: bool,
+    mut notes: Vec<String>,
+) -> HarnessCommandResult {
+    let stdout_tail = match stdout {
+        Ok(output) => tail_lines(&output, 50),
+        Err(error) => {
+            notes.push(error);
+            String::new()
+        }
+    };
+    let stderr_tail = match stderr {
+        Ok(output) => {
+            if output.is_empty() {
+                notes.join("\n\n")
+            } else {
+                let mut parts = notes;
+                parts.push(tail_lines(&output, 50));
+                parts.join("\n\n")
+            }
+        }
+        Err(error) => {
+            notes.push(error);
+            notes.join("\n\n")
+        }
+    };
+    HarnessCommandResult {
+        exit_code,
+        stdout_tail,
+        stderr_tail,
+        timed_out,
+    }
+}
+
+fn spawn_pipe_reader<R>(pipe: Option<R>) -> tokio::task::JoinHandle<io::Result<String>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move { read_pipe_to_string(pipe).await })
+}
+
+async fn collect_pipe_output(
+    handle: tokio::task::JoinHandle<io::Result<String>>,
+    stream_name: &str,
+) -> Result<String, String> {
+    match handle.await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(format!("failed to read {stream_name}: {error}")),
+        Err(error) => Err(format!("{stream_name} reader task failed: {error}")),
+    }
+}
+
+async fn read_pipe_to_string<R>(pipe: Option<R>) -> io::Result<String>
+where
+    R: AsyncRead + Unpin,
+{
+    let Some(mut pipe) = pipe else {
+        return Ok(String::new());
+    };
+    let mut output = Vec::new();
+    pipe.read_to_end(&mut output).await?;
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+#[cfg(unix)]
+async fn terminate_harness_command(child: &mut tokio::process::Child) -> io::Result<()> {
+    let Some(pid) = child.id() else {
+        return Ok(());
+    };
+    let result = unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn terminate_harness_command(child: &mut tokio::process::Child) -> io::Result<()> {
+    child.kill().await
+}
+
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= n {
+        s.to_string()
+    } else {
+        lines[lines.len() - n..].join("\n")
+    }
 }
 
 fn built_in_template(template_slug: &str, step_id: &str) -> &'static str {

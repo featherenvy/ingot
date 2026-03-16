@@ -40,7 +40,7 @@ pub struct StepContract {
 
 impl StepContract {
     pub fn is_dispatchable_job(&self) -> bool {
-        self.execution_permission != ExecutionPermission::DaemonOnly
+        self.phase_kind != PhaseKind::System
     }
 }
 
@@ -74,21 +74,16 @@ const fn review_step(step_id: StepId, template_slug: &'static str) -> StepContra
     }
 }
 
-const fn validate_step(
-    step_id: StepId,
-    workspace_kind: WorkspaceKind,
-    context_policy: ContextPolicy,
-    template_slug: &'static str,
-) -> StepContract {
+const fn validate_step(step_id: StepId, workspace_kind: WorkspaceKind) -> StepContract {
     StepContract {
         step_id,
         phase_kind: PhaseKind::Validate,
         workspace_kind,
-        execution_permission: ExecutionPermission::MustNotMutate,
-        context_policy,
+        execution_permission: ExecutionPermission::DaemonOnly,
+        context_policy: ContextPolicy::None,
         output_artifact_kind: OutputArtifactKind::ValidationReport,
         closure_relevance: ClosureRelevance::ClosureRelevant,
-        default_template_slug: Some(template_slug),
+        default_template_slug: None,
     }
 }
 
@@ -127,12 +122,7 @@ pub static DELIVERY_V1_STEPS: &[StepContract] = &[
     author_step(AUTHOR_INITIAL, ContextPolicy::Fresh, "author-initial"),
     review_step(REVIEW_INCREMENTAL_INITIAL, "review-incremental"),
     review_step(REVIEW_CANDIDATE_INITIAL, "review-candidate"),
-    validate_step(
-        VALIDATE_CANDIDATE_INITIAL,
-        WorkspaceKind::Authoring,
-        ContextPolicy::ResumeContext,
-        "validate-candidate",
-    ),
+    validate_step(VALIDATE_CANDIDATE_INITIAL, WorkspaceKind::Authoring),
     author_step(
         REPAIR_CANDIDATE,
         ContextPolicy::ResumeContext,
@@ -140,12 +130,7 @@ pub static DELIVERY_V1_STEPS: &[StepContract] = &[
     ),
     review_step(REVIEW_INCREMENTAL_REPAIR, "review-incremental"),
     review_step(REVIEW_CANDIDATE_REPAIR, "review-candidate"),
-    validate_step(
-        VALIDATE_CANDIDATE_REPAIR,
-        WorkspaceKind::Authoring,
-        ContextPolicy::ResumeContext,
-        "validate-candidate",
-    ),
+    validate_step(VALIDATE_CANDIDATE_REPAIR, WorkspaceKind::Authoring),
     report_only_step(
         INVESTIGATE_ITEM,
         PhaseKind::Investigate,
@@ -153,12 +138,7 @@ pub static DELIVERY_V1_STEPS: &[StepContract] = &[
         "investigate-item",
     ),
     system_step(PREPARE_CONVERGENCE),
-    validate_step(
-        VALIDATE_INTEGRATED,
-        WorkspaceKind::Integration,
-        ContextPolicy::ResumeContext,
-        "validate-integrated",
-    ),
+    validate_step(VALIDATE_INTEGRATED, WorkspaceKind::Integration),
     author_step(
         REPAIR_AFTER_INTEGRATION,
         ContextPolicy::ResumeContext,
@@ -169,12 +149,7 @@ pub static DELIVERY_V1_STEPS: &[StepContract] = &[
         "review-incremental",
     ),
     review_step(REVIEW_AFTER_INTEGRATION_REPAIR, "review-candidate"),
-    validate_step(
-        VALIDATE_AFTER_INTEGRATION_REPAIR,
-        WorkspaceKind::Authoring,
-        ContextPolicy::ResumeContext,
-        "validate-candidate",
-    ),
+    validate_step(VALIDATE_AFTER_INTEGRATION_REPAIR, WorkspaceKind::Authoring),
 ];
 
 pub fn find_step(step_id: &str) -> Option<&'static StepContract> {
@@ -184,6 +159,13 @@ pub fn find_step(step_id: &str) -> Option<&'static StepContract> {
 pub fn is_closure_relevant_review_step(step_id: &str) -> bool {
     find_step(step_id).is_some_and(|contract| {
         contract.phase_kind == PhaseKind::Review
+            && contract.closure_relevance == ClosureRelevance::ClosureRelevant
+    })
+}
+
+pub fn is_closure_relevant_validate_step(step_id: &str) -> bool {
+    find_step(step_id).is_some_and(|contract| {
+        contract.phase_kind == PhaseKind::Validate
             && contract.closure_relevance == ClosureRelevance::ClosureRelevant
     })
 }

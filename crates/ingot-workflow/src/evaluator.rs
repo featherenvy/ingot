@@ -483,9 +483,7 @@ impl Evaluator {
                                 }
 
                                 if let Some(contract) = step::find_step(next_step) {
-                                    if contract.execution_permission
-                                        == ingot_domain::job::ExecutionPermission::DaemonOnly
-                                    {
+                                    if !contract.is_dispatchable_job() {
                                         return IdleProjection {
                                             current_step_id: Some(last_job.step_id.clone()),
                                             phase_status: PhaseStatus::AwaitingConvergence,
