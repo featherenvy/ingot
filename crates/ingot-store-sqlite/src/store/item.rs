@@ -10,6 +10,8 @@ use super::helpers::{
 };
 use crate::db::Database;
 
+type SqliteQuery<'a> = sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>;
+
 impl Database {
     pub async fn list_items_by_project(
         &self,
@@ -148,10 +150,7 @@ impl ItemRepository for Database {
     }
 }
 
-fn insert_item_query(
-    item: &Item,
-) -> Result<sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>>, RepositoryError>
-{
+fn insert_item_query<'a>(item: &'a Item) -> Result<SqliteQuery<'a>, RepositoryError> {
     Ok(sqlx::query(
         "INSERT INTO items (
             id, project_id, classification, workflow_version, lifecycle_state, parking_state,
@@ -163,7 +162,7 @@ fn insert_item_query(
     .bind(item.id.to_string())
     .bind(item.project_id.to_string())
     .bind(encode_enum(&item.classification)?)
-    .bind(item.workflow_version.clone())
+    .bind(&item.workflow_version)
     .bind(item.lifecycle.as_db_str())
     .bind(encode_enum(&item.parking_state)?)
     .bind(
@@ -194,79 +193,87 @@ fn insert_item_query(
     .bind(item.origin.finding_id().map(|id| id.to_string()))
     .bind(encode_enum(&item.priority)?)
     .bind(serde_json::to_string(&item.labels).map_err(json_err)?)
-    .bind(item.operator_notes.clone())
+    .bind(item.operator_notes.as_deref())
     .bind(item.created_at)
     .bind(item.updated_at)
-    .bind(item.lifecycle.closed_at())
-    )
+    .bind(item.lifecycle.closed_at()))
 }
 
 fn map_item(row: &SqliteRow) -> Result<Item, RepositoryError> {
-    let lifecycle_state: String = row.try_get("lifecycle_state").map_err(db_err)?;
-    let lifecycle = match lifecycle_state.as_str() {
-        "open" => Lifecycle::Open,
-        "done" => Lifecycle::Done {
-            reason: parse_enum(row.try_get::<String, _>("done_reason").map_err(db_err)?)?,
-            source: parse_enum(
-                row.try_get::<String, _>("resolution_source")
-                    .map_err(db_err)?,
-            )?,
-            closed_at: row.try_get("closed_at").map_err(db_err)?,
-        },
-        other => {
-            return Err(RepositoryError::Database(
-                format!("unknown lifecycle_state: {other}").into(),
-            ));
-        }
-    };
-
-    let escalation_state: String = row.try_get("escalation_state").map_err(db_err)?;
-    let escalation = match escalation_state.as_str() {
-        "none" => Escalation::None,
-        "operator_required" => Escalation::OperatorRequired {
-            reason: parse_enum(
-                row.try_get::<String, _>("escalation_reason")
-                    .map_err(db_err)?,
-            )?,
-        },
-        other => {
-            return Err(RepositoryError::Database(
-                format!("unknown escalation_state: {other}").into(),
-            ));
-        }
-    };
-
-    let origin_kind: String = row.try_get("origin_kind").map_err(db_err)?;
-    let origin = match origin_kind.as_str() {
-        "manual" => Origin::Manual,
-        "promoted_finding" => Origin::PromotedFinding {
-            finding_id: parse_id(
-                row.try_get::<String, _>("origin_finding_id")
-                    .map_err(db_err)?,
-            )?,
-        },
-        other => {
-            return Err(RepositoryError::Database(
-                format!("unknown origin_kind: {other}").into(),
-            ));
-        }
-    };
-
     Ok(Item {
         id: parse_id(row.try_get("id").map_err(db_err)?)?,
         project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
         classification: parse_enum(row.try_get("classification").map_err(db_err)?)?,
         workflow_version: row.try_get("workflow_version").map_err(db_err)?,
-        lifecycle,
+        lifecycle: parse_lifecycle(row)?,
         parking_state: parse_enum(row.try_get("parking_state").map_err(db_err)?)?,
         approval_state: parse_enum(row.try_get("approval_state").map_err(db_err)?)?,
-        escalation,
+        escalation: parse_escalation(row)?,
         current_revision_id: parse_id(row.try_get("current_revision_id").map_err(db_err)?)?,
-        origin,
+        origin: parse_origin(row)?,
         priority: parse_enum(row.try_get("priority").map_err(db_err)?)?,
         labels: parse_json(row.try_get("labels").map_err(db_err)?)?,
         operator_notes: row.try_get("operator_notes").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
         updated_at: row.try_get("updated_at").map_err(db_err)?,
     })
+}
+
+fn parse_lifecycle(row: &SqliteRow) -> Result<Lifecycle, RepositoryError> {
+    match row
+        .try_get::<String, _>("lifecycle_state")
+        .map_err(db_err)?
+        .as_str()
+    {
+        "open" => Ok(Lifecycle::Open),
+        "done" => Ok(Lifecycle::Done {
+            reason: parse_enum(row.try_get::<String, _>("done_reason").map_err(db_err)?)?,
+            source: parse_enum(
+                row.try_get::<String, _>("resolution_source")
+                    .map_err(db_err)?,
+            )?,
+            closed_at: row.try_get("closed_at").map_err(db_err)?,
+        }),
+        other => invalid_state("lifecycle_state", other),
+    }
+}
+
+fn parse_escalation(row: &SqliteRow) -> Result<Escalation, RepositoryError> {
+    match row
+        .try_get::<String, _>("escalation_state")
+        .map_err(db_err)?
+        .as_str()
+    {
+        "none" => Ok(Escalation::None),
+        "operator_required" => Ok(Escalation::OperatorRequired {
+            reason: parse_enum(
+                row.try_get::<String, _>("escalation_reason")
+                    .map_err(db_err)?,
+            )?,
+        }),
+        other => invalid_state("escalation_state", other),
+    }
+}
+
+fn parse_origin(row: &SqliteRow) -> Result<Origin, RepositoryError> {
+    match row
+        .try_get::<String, _>("origin_kind")
+        .map_err(db_err)?
+        .as_str()
+    {
+        "manual" => Ok(Origin::Manual),
+        "promoted_finding" => Ok(Origin::PromotedFinding {
+            finding_id: parse_id(
+                row.try_get::<String, _>("origin_finding_id")
+                    .map_err(db_err)?,
+            )?,
+        }),
+        other => invalid_state("origin_kind", other),
+    }
+}
+
+fn invalid_state<T>(field: &str, value: &str) -> Result<T, RepositoryError> {
+    Err(RepositoryError::Database(
+        format!("unknown {field}: {value}").into(),
+    ))
 }

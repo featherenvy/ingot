@@ -1,5 +1,6 @@
 use chrono::Utc;
 use ingot_domain::ids::JobId;
+use ingot_domain::item::Escalation;
 use ingot_domain::job::JobStatus;
 use ingot_domain::ports::{
     CompletedJobCompletion, JobCompletionContext, JobCompletionMutation, JobCompletionRepository,
@@ -37,7 +38,7 @@ impl Database {
         job_id: JobId,
     ) -> Result<Option<CompletedJobCompletion>, RepositoryError> {
         let job = self.get_job(job_id).await?;
-        if job.status != JobStatus::Completed {
+        if job.state.status() != JobStatus::Completed {
             return Ok(None);
         }
 
@@ -153,7 +154,7 @@ impl Database {
                  WHERE id = ?
                    AND current_revision_id = ?",
             )
-            .bind("none")
+            .bind(Escalation::None.as_db_str())
             .bind(Utc::now())
             .bind(mutation.item_id.to_string())
             .bind(mutation.expected_item_revision_id.to_string())
@@ -488,7 +489,7 @@ mod tests {
             fk_violations.is_empty(),
             "foreign key violations: {fk_violations:?}"
         );
-        assert_eq!(completed.job.status, JobStatus::Completed);
+        assert_eq!(completed.job.state.status(), JobStatus::Completed);
         assert_eq!(completed.finding_count, 1);
     }
 
@@ -602,7 +603,7 @@ mod tests {
             .await
             .expect("load item after rollback");
 
-        assert_eq!(persisted_job.status, JobStatus::Running);
+        assert_eq!(persisted_job.state.status(), JobStatus::Running);
         assert_eq!(persisted_item.approval_state, ApprovalState::NotRequested);
     }
 
@@ -666,7 +667,7 @@ mod tests {
             .await
             .expect("load item after rollback");
 
-        assert_eq!(persisted_job.status, JobStatus::Running);
+        assert_eq!(persisted_job.state.status(), JobStatus::Running);
         assert_eq!(persisted_item.approval_state, ApprovalState::NotRequested);
     }
 
@@ -735,7 +736,7 @@ mod tests {
             .await
             .expect("load item after rollback");
 
-        assert_eq!(persisted_job.status, JobStatus::Running);
+        assert_eq!(persisted_job.state.status(), JobStatus::Running);
         assert_eq!(persisted_item.current_revision_id, next_revision.id);
     }
 }

@@ -718,21 +718,11 @@ pub(super) fn overlay_evaluation_with_queue_state(
     if queue.state.is_some()
         && evaluation.next_recommended_action == RecommendedAction::PrepareConvergence
     {
-        evaluation.next_recommended_action = RecommendedAction::AwaitConvergenceLane;
-        evaluation.dispatchable_step_id = None;
-        evaluation
-            .allowed_actions
-            .retain(|action| *action != AllowedAction::PrepareConvergence);
-        evaluation.phase_status = Some(PhaseStatus::AwaitingConvergence);
+        set_awaiting_convergence_lane(&mut evaluation);
     }
 
     if queue.state.as_deref() == Some("queued") {
-        evaluation.next_recommended_action = RecommendedAction::AwaitConvergenceLane;
-        evaluation.dispatchable_step_id = None;
-        evaluation
-            .allowed_actions
-            .retain(|action| *action != AllowedAction::PrepareConvergence);
-        evaluation.phase_status = Some(PhaseStatus::AwaitingConvergence);
+        set_awaiting_convergence_lane(&mut evaluation);
     }
 
     if item.approval_state == ApprovalState::Granted && has_prepared_convergence {
@@ -762,6 +752,15 @@ pub(super) fn overlay_evaluation_with_queue_state(
     }
 
     evaluation
+}
+
+fn set_awaiting_convergence_lane(evaluation: &mut Evaluation) {
+    evaluation.next_recommended_action = RecommendedAction::AwaitConvergenceLane;
+    evaluation.dispatchable_step_id = None;
+    evaluation
+        .allowed_actions
+        .retain(|action| *action != AllowedAction::PrepareConvergence);
+    evaluation.phase_status = Some(PhaseStatus::AwaitingConvergence);
 }
 
 pub(super) async fn load_queue_status(
@@ -1568,15 +1567,15 @@ mod tests {
         support_temp_git_repo("ingot-http-api")
     }
 
-    fn git(path: &PathBuf, args: &[&str]) {
+    fn git(path: &std::path::Path, args: &[&str]) {
         support_git(path, args);
     }
 
-    fn git_output(path: &PathBuf, args: &[&str]) -> String {
+    fn git_output(path: &std::path::Path, args: &[&str]) -> String {
         support_git_output(path, args)
     }
 
-    fn write_file(path: &PathBuf, contents: &str) {
+    fn write_file(path: &std::path::Path, contents: &str) {
         support_write_file(path, contents);
     }
 

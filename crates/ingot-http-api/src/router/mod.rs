@@ -43,7 +43,7 @@ use ingot_domain::item::{
     ApprovalState, Classification, DoneReason, Escalation, EscalationReason, Item, Lifecycle,
     Priority, ResolutionSource,
 };
-use ingot_domain::job::{Job, JobStatus, OutcomeClass};
+use ingot_domain::job::{Job, JobAssignment, JobStatus, OutcomeClass};
 use ingot_domain::ports::{ProjectMutationLockPort, RepositoryError};
 use ingot_domain::project::Project;
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};

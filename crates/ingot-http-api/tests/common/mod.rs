@@ -11,10 +11,12 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use ingot_domain::ids::{JobId, WorkspaceId};
 use ingot_domain::job::{
-    ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
-    PhaseKind,
+    ContextPolicy, ExecutionPermission, Job, JobAssignment, JobInput, JobLease, JobState,
+    JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind, TerminalStatus,
 };
-use ingot_domain::workspace::WorkspaceKind;
+use ingot_domain::workspace::{
+    RetentionPolicy, Workspace, WorkspaceKind, WorkspaceStatus, WorkspaceStrategy,
+};
 use ingot_store_sqlite::Database;
 pub use ingot_test_support::fixtures::{DEFAULT_TEST_TIMESTAMP, parse_timestamp};
 pub use ingot_test_support::git::{git_output, run_git as git, temp_git_repo, write_file};
@@ -168,6 +170,78 @@ fn into_test_job_input(input: TestJobInput<'_>) -> JobInput {
 }
 
 pub async fn insert_test_job_row(db: &Database, row: TestJobInsert<'_>) {
+    let workspace_id = row.workspace_id.map(parse_id::<WorkspaceId>).or_else(|| {
+        matches!(row.status, JobStatus::Assigned | JobStatus::Running).then(WorkspaceId::new)
+    });
+    let assignment = workspace_id.map(|workspace_id| JobAssignment {
+        workspace_id,
+        agent_id: None,
+        prompt_snapshot: None,
+        phase_template_digest: None,
+    });
+
+    let state = match row.status {
+        JobStatus::Queued => JobState::Queued,
+        JobStatus::Assigned => JobState::Assigned(assignment.expect("assigned workspace")),
+        JobStatus::Running => {
+            let now = Utc::now();
+            JobState::Running {
+                assignment: assignment.expect("running workspace"),
+                lease: JobLease {
+                    process_pid: None,
+                    lease_owner_id: "test".into(),
+                    heartbeat_at: now,
+                    lease_expires_at: now + chrono::Duration::seconds(1800),
+                    started_at: row.started_at.map(parse_test_ts).unwrap_or(now),
+                },
+            }
+        }
+        JobStatus::Completed => JobState::Completed {
+            assignment,
+            started_at: row.started_at.map(parse_test_ts),
+            outcome_class: row.outcome_class.unwrap_or(OutcomeClass::Clean),
+            ended_at: row.ended_at.map(parse_test_ts).unwrap_or_else(Utc::now),
+            output_commit_oid: row.output_commit_oid.map(ToOwned::to_owned),
+            result_schema_version: row.result_schema_version.map(ToOwned::to_owned),
+            result_payload: row.result_payload.clone(),
+        },
+        JobStatus::Failed => JobState::Terminated {
+            terminal_status: TerminalStatus::Failed,
+            assignment,
+            started_at: row.started_at.map(parse_test_ts),
+            outcome_class: row.outcome_class,
+            ended_at: row.ended_at.map(parse_test_ts).unwrap_or_else(Utc::now),
+            error_code: row.error_code.map(ToOwned::to_owned),
+            error_message: row.error_message.map(ToOwned::to_owned),
+        },
+        JobStatus::Cancelled => JobState::Terminated {
+            terminal_status: TerminalStatus::Cancelled,
+            assignment,
+            started_at: row.started_at.map(parse_test_ts),
+            outcome_class: row.outcome_class,
+            ended_at: row.ended_at.map(parse_test_ts).unwrap_or_else(Utc::now),
+            error_code: row.error_code.map(ToOwned::to_owned),
+            error_message: row.error_message.map(ToOwned::to_owned),
+        },
+        JobStatus::Expired => JobState::Terminated {
+            terminal_status: TerminalStatus::Expired,
+            assignment,
+            started_at: row.started_at.map(parse_test_ts),
+            outcome_class: row.outcome_class,
+            ended_at: row.ended_at.map(parse_test_ts).unwrap_or_else(Utc::now),
+            error_code: row.error_code.map(ToOwned::to_owned),
+            error_message: row.error_message.map(ToOwned::to_owned),
+        },
+        JobStatus::Superseded => JobState::Terminated {
+            terminal_status: TerminalStatus::Superseded,
+            assignment,
+            started_at: row.started_at.map(parse_test_ts),
+            outcome_class: row.outcome_class,
+            ended_at: row.ended_at.map(parse_test_ts).unwrap_or_else(Utc::now),
+            error_code: row.error_code.map(ToOwned::to_owned),
+            error_message: row.error_message.map(ToOwned::to_owned),
+        },
+    };
     let job = Job {
         id: parse_id(row.id),
         project_id: parse_id(row.project_id),
@@ -177,32 +251,44 @@ pub async fn insert_test_job_row(db: &Database, row: TestJobInsert<'_>) {
         semantic_attempt_no: row.semantic_attempt_no,
         retry_no: row.retry_no,
         supersedes_job_id: row.supersedes_job_id.map(parse_id::<JobId>),
-        status: row.status,
-        outcome_class: row.outcome_class,
         phase_kind: row.phase_kind,
-        workspace_id: row.workspace_id.map(parse_id::<WorkspaceId>),
         workspace_kind: row.workspace_kind,
         execution_permission: row.execution_permission,
         context_policy: row.context_policy,
         phase_template_slug: row.phase_template_slug.into(),
-        phase_template_digest: None,
-        prompt_snapshot: None,
-        job_input: into_test_job_input(row.job_input),
         output_artifact_kind: row.output_artifact_kind,
-        output_commit_oid: row.output_commit_oid.map(ToOwned::to_owned),
-        result_schema_version: row.result_schema_version.map(ToOwned::to_owned),
-        result_payload: row.result_payload,
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: row.error_code.map(ToOwned::to_owned),
-        error_message: row.error_message.map(ToOwned::to_owned),
+        job_input: into_test_job_input(row.job_input),
         created_at: parse_test_ts(row.created_at),
-        started_at: row.started_at.map(parse_test_ts),
-        ended_at: row.ended_at.map(parse_test_ts),
+        state,
     };
+    if let Some(workspace_id) = job.state.workspace_id() {
+        let workspace = Workspace {
+            id: workspace_id,
+            project_id: job.project_id,
+            kind: job.workspace_kind,
+            status: if job.state.is_active() {
+                WorkspaceStatus::Busy
+            } else {
+                WorkspaceStatus::Ready
+            },
+            retention_policy: RetentionPolicy::Persistent,
+            strategy: WorkspaceStrategy::Worktree,
+            created_for_revision_id: Some(job.item_revision_id),
+            parent_workspace_id: None,
+            path: std::env::temp_dir()
+                .join(format!("ingot-http-api-workspace-{workspace_id}"))
+                .display()
+                .to_string(),
+            base_commit_oid: None,
+            head_commit_oid: None,
+            workspace_ref: None,
+            target_ref: None,
+            current_job_id: job.state.is_active().then_some(job.id),
+            updated_at: job.created_at,
+            created_at: job.created_at,
+        };
+        let _ = db.create_workspace(&workspace).await;
+    }
     db.create_job(&job).await.expect("insert test job");
 }
 
@@ -214,6 +300,7 @@ pub async fn seeded_route_test_app() -> (PathBuf, Database, String, String, Stri
     let item_id = "itm_00000000000000000000000000000000".to_string();
     let revision_id = "rev_00000000000000000000000000000000".to_string();
     let job_id = "job_00000000000000000000000000000000".to_string();
+    let workspace_id = "wrk_00000000000000000000000000000000".to_string();
 
     sqlx::query(
         "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
@@ -257,6 +344,22 @@ pub async fn seeded_route_test_app() -> (PathBuf, Database, String, String, Stri
     .await
     .expect("insert revision");
 
+    sqlx::query(
+        "INSERT INTO workspaces (
+            id, project_id, kind, status, retention_policy,
+            created_for_revision_id, path, created_at, updated_at
+         ) VALUES (?, ?, 'authoring', 'busy', 'persistent', ?, ?, ?, ?)",
+    )
+    .bind(&workspace_id)
+    .bind(&project_id)
+    .bind(&revision_id)
+    .bind(repo.display().to_string())
+    .bind(TS)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert workspace");
+
     insert_test_job_row(
         &db,
         TestJobInsert {
@@ -266,6 +369,7 @@ pub async fn seeded_route_test_app() -> (PathBuf, Database, String, String, Stri
             item_revision_id: &revision_id,
             step_id: "validate_candidate_initial",
             status: JobStatus::Running,
+            workspace_id: Some(&workspace_id),
             phase_kind: PhaseKind::Validate,
             workspace_kind: WorkspaceKind::Authoring,
             execution_permission: ExecutionPermission::MustNotMutate,

@@ -703,7 +703,7 @@ async fn tick_reprepares_granted_lane_head_without_prepared_convergence() {
     assert!(
         jobs.iter().any(|job| {
             job.step_id == step::VALIDATE_INTEGRATED
-                && job.status == JobStatus::Queued
+                && job.state.is_active()
                 && job.item_revision_id == revision.id
         }),
         "reprepare should dispatch a fresh integrated validation job"
@@ -901,7 +901,7 @@ async fn tick_reprepare_of_already_integrated_patch_does_not_leave_running_busy_
     assert!(
         jobs.iter().any(|job| {
             job.step_id == step::VALIDATE_INTEGRATED
-                && job.status == JobStatus::Queued
+                && job.state.is_active()
                 && job.item_revision_id == revision.id
         }),
         "reprepare should queue a fresh integrated validation job"
@@ -1069,7 +1069,7 @@ async fn candidate_repair_loop_advances_to_prepare_convergence() {
         .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
         .cloned()
         .expect("auto-dispatched review initial");
-    assert_eq!(review_initial.status, JobStatus::Queued);
+    assert_eq!(review_initial.state.status(), JobStatus::Queued);
     h.dispatcher.tick().await.expect("review initial tick");
 
     jobs = h.db.list_jobs_by_item(item.id).await.expect("jobs");
@@ -1091,7 +1091,7 @@ async fn candidate_repair_loop_advances_to_prepare_convergence() {
         .find(|job| job.step_id == step::REVIEW_INCREMENTAL_REPAIR)
         .cloned()
         .expect("auto-dispatched review incremental repair");
-    assert_eq!(review_incremental_repair.status, JobStatus::Queued);
+    assert_eq!(review_incremental_repair.state.status(), JobStatus::Queued);
     h.dispatcher
         .tick()
         .await
@@ -1103,25 +1103,19 @@ async fn candidate_repair_loop_advances_to_prepare_convergence() {
         .find(|job| job.step_id == step::REVIEW_CANDIDATE_REPAIR)
         .cloned()
         .expect("auto-dispatched review candidate repair");
-    assert_eq!(review_candidate_repair.status, JobStatus::Queued);
+    assert_eq!(review_candidate_repair.state.status(), JobStatus::Queued);
     h.dispatcher
         .tick()
         .await
         .expect("review candidate repair tick");
 
     jobs = h.db.list_jobs_by_item(item.id).await.expect("jobs");
-    let validate_candidate_repair = dispatch_job(
-        &item,
-        &revision,
-        &jobs,
-        &[],
-        &[],
-        DispatchJobCommand { step_id: None },
-    )
-    .expect("dispatch validate candidate repair");
-    h.db.create_job(&validate_candidate_repair)
-        .await
-        .expect("create validate candidate repair");
+    let validate_candidate_repair = jobs
+        .iter()
+        .find(|job| job.step_id == step::VALIDATE_CANDIDATE_REPAIR)
+        .cloned()
+        .expect("auto-dispatched validate candidate repair");
+    assert_eq!(validate_candidate_repair.state.status(), JobStatus::Queued);
     h.dispatcher
         .tick()
         .await

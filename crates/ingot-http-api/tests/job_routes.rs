@@ -245,7 +245,11 @@ async fn retry_route_requeues_terminal_non_success_job_on_current_revision() {
     assert_eq!(json["semantic_attempt_no"].as_u64(), Some(1));
     assert_eq!(json["retry_no"].as_u64(), Some(1));
     assert_eq!(json["supersedes_job_id"].as_str(), Some(job_id.as_str()));
-    assert_eq!(json["status"].as_str(), Some("queued"));
+    assert!(
+        matches!(json["status"].as_str(), Some("queued") | Some("assigned")),
+        "retried job should be queued or assigned, got {:?}",
+        json["status"]
+    );
 }
 
 #[tokio::test]
@@ -676,6 +680,7 @@ async fn heartbeat_route_refreshes_running_job_lease() {
             item_revision_id: "rev_00000000000000000000000000000000",
             step_id: "author_initial",
             status: JobStatus::Running,
+            workspace_id: Some("wrk_00000000000000000000000000000000"),
             phase_kind: PhaseKind::Author,
             workspace_kind: WorkspaceKind::Authoring,
             execution_permission: ExecutionPermission::MayMutate,

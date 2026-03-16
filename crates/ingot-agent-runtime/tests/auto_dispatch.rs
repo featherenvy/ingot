@@ -59,21 +59,24 @@ async fn authoring_success_auto_dispatches_incremental_review() {
         .iter()
         .find(|job| job.step_id == step::AUTHOR_INITIAL)
         .expect("completed author job");
-    assert_eq!(completed_author.status, JobStatus::Completed);
-    assert_eq!(completed_author.outcome_class, Some(OutcomeClass::Clean));
+    assert_eq!(completed_author.state.status(), JobStatus::Completed);
+    assert_eq!(
+        completed_author.state.outcome_class(),
+        Some(OutcomeClass::Clean)
+    );
 
     let review_job = jobs
         .iter()
         .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
         .expect("auto-dispatched incremental review job");
-    assert_eq!(review_job.status, JobStatus::Queued);
+    assert_eq!(review_job.state.status(), JobStatus::Queued);
     assert_eq!(
         review_job.job_input.base_commit_oid(),
         Some(seed_commit.as_str())
     );
     assert_eq!(
         review_job.job_input.head_commit_oid(),
-        completed_author.output_commit_oid.as_deref()
+        completed_author.state.output_commit_oid()
     );
 }
 
@@ -154,7 +157,7 @@ async fn implicit_revision_auto_dispatches_incremental_review_from_bound_workspa
         .iter()
         .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
         .expect("auto-dispatched incremental review job");
-    assert_eq!(review_job.status, JobStatus::Queued);
+    assert_eq!(review_job.state.status(), JobStatus::Queued);
     assert_eq!(
         review_job.job_input.base_commit_oid(),
         Some(bound_base.as_str())
@@ -397,12 +400,12 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
         .iter()
         .find(|job| job.step_id == step::AUTHOR_INITIAL)
         .expect("completed busy author");
-    assert_eq!(busy_completed_author.status, JobStatus::Completed);
+    assert_eq!(busy_completed_author.state.status(), JobStatus::Completed);
     assert!(
         busy_jobs
             .iter()
             .any(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL
-                && job.status == JobStatus::Queued)
+                && job.state.status() == JobStatus::Queued)
     );
 
     let idle_jobs =
@@ -413,7 +416,7 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
         .iter()
         .find(|job| job.step_id == step::REVIEW_CANDIDATE_INITIAL)
         .expect("recovered idle candidate review");
-    assert_eq!(idle_candidate_review.status, JobStatus::Queued);
+    assert_eq!(idle_candidate_review.state.status(), JobStatus::Queued);
 }
 
 #[tokio::test]
@@ -510,14 +513,17 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
         .iter()
         .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
         .expect("completed incremental review");
-    assert_eq!(completed_review.status, JobStatus::Completed);
-    assert_eq!(completed_review.outcome_class, Some(OutcomeClass::Clean));
+    assert_eq!(completed_review.state.status(), JobStatus::Completed);
+    assert_eq!(
+        completed_review.state.outcome_class(),
+        Some(OutcomeClass::Clean)
+    );
 
     let candidate_review = jobs
         .iter()
         .find(|job| job.step_id == step::REVIEW_CANDIDATE_INITIAL)
         .expect("auto-dispatched candidate review");
-    assert_eq!(candidate_review.status, JobStatus::Queued);
+    assert_eq!(candidate_review.state.status(), JobStatus::Queued);
     assert_eq!(
         candidate_review.job_input.base_commit_oid(),
         Some(seed_commit.as_str())
@@ -525,6 +531,179 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
     assert_eq!(
         candidate_review.job_input.head_commit_oid(),
         Some(candidate_head.as_str())
+    );
+}
+
+#[tokio::test]
+async fn clean_candidate_review_auto_dispatches_candidate_validation() {
+    let repo = temp_git_repo("ingot-runtime-repo");
+    let seed_commit = head_oid(&repo).await.expect("seed head");
+    std::fs::write(repo.join("feature.txt"), "candidate change").expect("write feature");
+    git_sync(&repo, &["add", "feature.txt"]);
+    git_sync(&repo, &["commit", "-m", "candidate change"]);
+    let candidate_head = head_oid(&repo).await.expect("candidate head");
+
+    let db = migrated_test_db("ingot-runtime-auto-candidate-validation").await;
+    let dispatcher = ingot_agent_runtime::JobDispatcher::with_runner(
+        db.clone(),
+        ingot_usecases::ProjectLocks::default(),
+        ingot_agent_runtime::DispatcherConfig::new(unique_temp_path(
+            "ingot-runtime-auto-candidate-validation-state",
+        )),
+        Arc::new(CleanCandidateReviewRunner),
+    );
+
+    let created_at = default_timestamp();
+    let project = ProjectBuilder::new(&repo).created_at(created_at).build();
+    db.create_project(&project).await.expect("create project");
+
+    let agent = AgentBuilder::new(
+        "codex",
+        vec![
+            ingot_domain::agent::AgentCapability::ReadOnlyJobs,
+            ingot_domain::agent::AgentCapability::StructuredOutput,
+        ],
+    )
+    .build();
+    db.create_agent(&agent).await.expect("create agent");
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(seed_commit.clone()))
+        .seed_target_commit_oid(Some(seed_commit.clone()))
+        .build();
+    db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    db.create_job(
+        &JobBuilder::new(project.id, item_id, revision_id, step::AUTHOR_INITIAL)
+            .status(JobStatus::Completed)
+            .outcome_class(OutcomeClass::Clean)
+            .phase_template_slug("author-initial")
+            .job_input(JobInput::authoring_head(seed_commit.clone()))
+            .output_artifact_kind(OutputArtifactKind::Commit)
+            .output_commit_oid(candidate_head.clone())
+            .created_at(created_at)
+            .started_at(created_at)
+            .ended_at(created_at)
+            .build(),
+    )
+    .await
+    .expect("create author job");
+
+    db.create_job(
+        &JobBuilder::new(
+            project.id,
+            item_id,
+            revision_id,
+            step::REVIEW_CANDIDATE_INITIAL,
+        )
+        .phase_kind(PhaseKind::Review)
+        .workspace_kind(WorkspaceKind::Review)
+        .execution_permission(ExecutionPermission::MustNotMutate)
+        .phase_template_slug("review-candidate")
+        .job_input(JobInput::candidate_subject(
+            seed_commit.clone(),
+            candidate_head.clone(),
+        ))
+        .output_artifact_kind(OutputArtifactKind::ReviewReport)
+        .created_at(created_at)
+        .build(),
+    )
+    .await
+    .expect("create review candidate job");
+
+    assert!(dispatcher.tick().await.expect("review candidate tick"));
+
+    let jobs = db.list_jobs_by_item(item.id).await.expect("jobs");
+    let completed_review = jobs
+        .iter()
+        .find(|job| job.step_id == step::REVIEW_CANDIDATE_INITIAL)
+        .expect("completed candidate review");
+    assert_eq!(completed_review.state.status(), JobStatus::Completed);
+    assert_eq!(
+        completed_review.state.outcome_class(),
+        Some(OutcomeClass::Clean)
+    );
+
+    let validation_job = jobs
+        .iter()
+        .find(|job| job.step_id == step::VALIDATE_CANDIDATE_INITIAL)
+        .expect("auto-dispatched candidate validation");
+    assert_eq!(validation_job.state.status(), JobStatus::Queued);
+    assert_eq!(
+        validation_job.job_input.base_commit_oid(),
+        Some(seed_commit.as_str())
+    );
+    assert_eq!(
+        validation_job.job_input.head_commit_oid(),
+        Some(candidate_head.as_str())
+    );
+}
+
+#[tokio::test]
+async fn daemon_only_validation_job_executes_on_tick() {
+    let h = TestHarness::new(Arc::new(CleanValidationRunner)).await;
+    h.register_review_agent().await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
+    git_sync(&h.repo_path, &["add", "tracked.txt"]);
+    git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(seed_commit.clone()))
+        .seed_target_commit_oid(Some(seed_commit.clone()))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let validation_job = JobBuilder::new(
+        h.project.id,
+        item_id,
+        revision_id,
+        step::VALIDATE_CANDIDATE_INITIAL,
+    )
+    .phase_kind(PhaseKind::Validate)
+    .workspace_kind(WorkspaceKind::Authoring)
+    .execution_permission(ExecutionPermission::DaemonOnly)
+    .context_policy(ContextPolicy::None)
+    .phase_template_slug("validate-candidate")
+    .job_input(JobInput::candidate_subject(
+        seed_commit.clone(),
+        candidate_head.clone(),
+    ))
+    .output_artifact_kind(OutputArtifactKind::ValidationReport)
+    .build();
+    h.db.create_job(&validation_job)
+        .await
+        .expect("create validation job");
+
+    assert!(h.dispatcher.tick().await.expect("validation tick"));
+
+    let job =
+        h.db.get_job(validation_job.id)
+            .await
+            .expect("reload validation job");
+    assert_eq!(job.state.status(), JobStatus::Completed);
+    assert_eq!(job.state.outcome_class(), Some(OutcomeClass::Clean));
+    assert_eq!(
+        job.state.result_schema_version(),
+        Some("validation_report:v1")
     );
 }
 
@@ -657,13 +836,13 @@ async fn idle_item_auto_dispatches_candidate_review_after_nonblocking_incrementa
         .iter()
         .find(|job| job.step_id == step::REVIEW_CANDIDATE_INITIAL)
         .expect("auto-dispatched candidate review");
-    assert_eq!(candidate_review.status, JobStatus::Queued);
+    assert_eq!(candidate_review.state.status(), JobStatus::Queued);
     assert_eq!(
         candidate_review.job_input.base_commit_oid(),
         revision.seed_commit_oid.as_deref()
     );
     assert_eq!(
         candidate_review.job_input.head_commit_oid(),
-        author_job.output_commit_oid.as_deref()
+        author_job.state.output_commit_oid()
     );
 }

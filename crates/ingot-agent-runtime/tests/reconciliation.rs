@@ -81,12 +81,12 @@ async fn reconcile_startup_expires_stale_running_jobs_and_marks_workspace_stale(
         .expect("reconcile startup");
 
     let updated_job = h.db.get_job(stale_job.id).await.expect("updated job");
-    assert_eq!(updated_job.status, JobStatus::Expired);
+    assert_eq!(updated_job.state.status(), JobStatus::Expired);
     assert_eq!(
-        updated_job.outcome_class,
+        updated_job.state.outcome_class(),
         Some(OutcomeClass::TransientFailure)
     );
-    assert_eq!(updated_job.error_code.as_deref(), Some("heartbeat_expired"));
+    assert_eq!(updated_job.state.error_code(), Some("heartbeat_expired"));
 
     let updated_workspace = h.db.get_workspace(workspace.id).await.expect("workspace");
     assert_eq!(updated_workspace.status, WorkspaceStatus::Stale);
@@ -153,7 +153,7 @@ async fn reconcile_active_jobs_reports_progress_when_it_expires_a_running_job() 
 
     assert!(made_progress);
     let updated_job = h.db.get_job(stale_job.id).await.expect("updated job");
-    assert_eq!(updated_job.status, JobStatus::Expired);
+    assert_eq!(updated_job.state.status(), JobStatus::Expired);
 }
 
 #[tokio::test]
@@ -984,10 +984,10 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
         .expect("reconcile startup");
 
     let updated_job = db.get_job(job.id).await.expect("updated job");
-    assert_eq!(updated_job.status, JobStatus::Completed);
-    assert_eq!(updated_job.outcome_class, Some(OutcomeClass::Clean));
+    assert_eq!(updated_job.state.status(), JobStatus::Completed);
+    assert_eq!(updated_job.state.outcome_class(), Some(OutcomeClass::Clean));
     assert_eq!(
-        updated_job.output_commit_oid.as_deref(),
+        updated_job.state.output_commit_oid(),
         Some(authored_commit.as_str())
     );
 
@@ -1003,7 +1003,7 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
         .iter()
         .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
         .expect("auto-dispatched review job after startup adoption");
-    assert_eq!(review_job.status, JobStatus::Queued);
+    assert_eq!(review_job.state.status(), JobStatus::Queued);
     assert_eq!(
         review_job.job_input.base_commit_oid(),
         Some(base_commit.as_str())
@@ -1142,7 +1142,7 @@ async fn reconcile_startup_continues_review_recovery_past_broken_project() {
         .iter()
         .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
         .expect("startup queued review for healthy project");
-    assert_eq!(review_job.status, JobStatus::Queued);
+    assert_eq!(review_job.state.status(), JobStatus::Queued);
     assert_eq!(
         review_job.job_input.base_commit_oid(),
         Some(healthy_seed_commit.as_str())
@@ -1677,14 +1677,14 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
     h.db.create_workspace(&workspace_a)
         .await
         .expect("workspace a");
-    let mut assigned_job = JobBuilder::new(h.project.id, item_a.id, rev_a.id, "author_initial")
+    let assigned_job = JobBuilder::new(h.project.id, item_a.id, rev_a.id, "author_initial")
         .workspace_kind(WorkspaceKind::Authoring)
         .job_input(JobInput::authoring_head(&seed_commit))
         .output_artifact_kind(OutputArtifactKind::Commit)
+        .status(JobStatus::Assigned)
+        .workspace_id(workspace_a.id)
         .created_at(created_at)
         .build();
-    assigned_job.status = JobStatus::Assigned;
-    assigned_job.workspace_id = Some(workspace_a.id);
     h.db.create_job(&assigned_job).await.expect("assigned job");
 
     let item_b_id = ingot_domain::ids::ItemId::new();
@@ -1713,17 +1713,17 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
     h.db.create_workspace(&workspace_b)
         .await
         .expect("workspace b");
-    let mut running_job = JobBuilder::new(h.project.id, item_b.id, rev_b.id, "author_initial")
+    let running_job = JobBuilder::new(h.project.id, item_b.id, rev_b.id, "author_initial")
         .workspace_kind(WorkspaceKind::Authoring)
         .job_input(JobInput::authoring_head(&seed_commit))
         .output_artifact_kind(OutputArtifactKind::Commit)
+        .status(JobStatus::Running)
+        .workspace_id(workspace_b.id)
+        .lease_owner_id("old-daemon")
+        .lease_expires_at(created_at - ChronoDuration::minutes(1))
+        .started_at(created_at)
         .created_at(created_at)
         .build();
-    running_job.status = JobStatus::Running;
-    running_job.workspace_id = Some(workspace_b.id);
-    running_job.lease_owner_id = Some("old-daemon".into());
-    running_job.lease_expires_at = Some(created_at - ChronoDuration::minutes(1));
-    running_job.started_at = Some(created_at);
     h.db.create_job(&running_job).await.expect("running job");
 
     h.dispatcher
@@ -1732,13 +1732,13 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
         .expect("reconcile startup");
 
     let updated_assigned = h.db.get_job(assigned_job.id).await.expect("assigned");
-    assert_eq!(updated_assigned.status, JobStatus::Queued);
-    assert_eq!(updated_assigned.workspace_id, None);
+    assert_eq!(updated_assigned.state.status(), JobStatus::Queued);
+    assert_eq!(updated_assigned.state.workspace_id(), None);
 
     let updated_running = h.db.get_job(running_job.id).await.expect("running");
-    assert_eq!(updated_running.status, JobStatus::Expired);
+    assert_eq!(updated_running.state.status(), JobStatus::Expired);
     assert_eq!(
-        updated_running.outcome_class,
+        updated_running.state.outcome_class(),
         Some(OutcomeClass::TransientFailure)
     );
 

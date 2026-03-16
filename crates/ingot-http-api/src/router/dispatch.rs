@@ -277,7 +277,7 @@ pub(super) async fn link_job_to_workspace_or_cleanup(
     investigation_ref_name: Option<&PendingInvestigationRef>,
     cleanup_workspace_on_failure: bool,
 ) -> Result<(), ApiError> {
-    job.workspace_id = Some(workspace.id);
+    job.assign(JobAssignment::new(workspace.id));
     if let Err(error) = state.db.update_job(job).await {
         cleanup_failed_dispatch_side_effects(
             state,
@@ -704,11 +704,11 @@ mod tests {
         support_temp_git_repo("ingot-http-api")
     }
 
-    fn git(path: &PathBuf, args: &[&str]) {
+    fn git(path: &std::path::Path, args: &[&str]) {
         support_git(path, args);
     }
 
-    fn git_output(path: &PathBuf, args: &[&str]) -> String {
+    fn git_output(path: &std::path::Path, args: &[&str]) -> String {
         support_git_output(path, args)
     }
 

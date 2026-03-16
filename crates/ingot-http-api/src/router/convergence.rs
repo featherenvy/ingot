@@ -189,7 +189,7 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 item,
                 has_active_job: jobs
                     .iter()
-                    .any(|job| job.item_revision_id == revision.id && job.status.is_active()),
+                    .any(|job| job.item_revision_id == revision.id && job.state.is_active()),
                 has_active_convergence: convergences.iter().any(|convergence| {
                     convergence.item_revision_id == revision.id
                         && matches!(
@@ -264,7 +264,7 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 .map_err(UseCaseError::Repository)?;
             let has_active_job = jobs
                 .iter()
-                .any(|job| job.item_revision_id == revision.id && job.status.is_active());
+                .any(|job| job.item_revision_id == revision.id && job.state.is_active());
             let convergences = state
                 .db
                 .list_convergences_by_item(item.id)
@@ -544,7 +544,7 @@ mod tests {
         support_temp_git_repo("ingot-http-api")
     }
 
-    fn git_output(path: &PathBuf, args: &[&str]) -> String {
+    fn git_output(path: &std::path::Path, args: &[&str]) -> String {
         support_git_output(path, args)
     }
 

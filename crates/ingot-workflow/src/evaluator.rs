@@ -96,9 +96,9 @@ impl From<RecommendedAction> for String {
     }
 }
 
-impl From<String> for RecommendedAction {
-    fn from(s: String) -> Self {
-        match s.as_str() {
+impl From<&str> for RecommendedAction {
+    fn from(action: &str) -> Self {
+        match action {
             "none" => Self::None,
             "approval_approve" => Self::ApprovalApprove,
             "operator_intervention" => Self::OperatorIntervention,
@@ -108,8 +108,14 @@ impl From<String> for RecommendedAction {
             "prepare_convergence" => Self::PrepareConvergence,
             "await_convergence_lane" => Self::AwaitConvergenceLane,
             "resolve_checkout_sync" => Self::ResolveCheckoutSync,
-            _ => Self::DispatchStep(s),
+            _ => Self::DispatchStep(action.to_owned()),
         }
+    }
+}
+
+impl From<String> for RecommendedAction {
+    fn from(action: String) -> Self {
+        Self::from(action.as_str())
     }
 }
 
@@ -232,7 +238,7 @@ impl Evaluator {
         let active_job = current_revision_jobs
             .iter()
             .copied()
-            .find(|job| job.status.is_active());
+            .find(|job| job.state.is_active());
         let active_convergence = current_revision_convergences.iter().copied().find(|conv| {
             matches!(
                 conv.status,
@@ -412,21 +418,8 @@ impl Evaluator {
         }
 
         if let Some(last_job) = latest_closure_job {
-            let Some(outcome) = last_job.outcome_class else {
-                diagnostics.push(format!(
-                    "last closure job {} has no outcome_class despite terminal status {}",
-                    last_job.step_id,
-                    job_status_name(last_job.status)
-                ));
-
-                return IdleProjection {
-                    current_step_id,
-                    phase_status: PhaseStatus::Unknown,
-                    next_recommended_action: RecommendedAction::OperatorIntervention,
-                    dispatchable_step_id: None,
-                    allowed_actions: vec![],
-                    terminal_readiness: false,
-                };
+            let Some(outcome) = closure_outcome(last_job, diagnostics) else {
+                return operator_intervention_projection(current_step_id);
             };
 
             if last_job.step_id == step::VALIDATE_INTEGRATED && outcome == OutcomeClass::Clean {
@@ -444,46 +437,15 @@ impl Evaluator {
                     diagnostics.push(
                         "validate_integrated clean but no prepared convergence exists".into(),
                     );
-                    return IdleProjection {
-                        current_step_id,
-                        phase_status: PhaseStatus::Unknown,
-                        next_recommended_action: RecommendedAction::OperatorIntervention,
-                        dispatchable_step_id: None,
-                        allowed_actions: vec![],
-                        terminal_readiness: false,
-                    };
+                    return operator_intervention_projection(current_step_id);
                 } else if item.approval_state == ApprovalState::Pending {
-                    return IdleProjection {
-                        current_step_id,
-                        phase_status: PhaseStatus::PendingApproval,
-                        next_recommended_action: RecommendedAction::ApprovalApprove,
-                        dispatchable_step_id: None,
-                        allowed_actions: vec![
-                            AllowedAction::ApprovalApprove,
-                            AllowedAction::ApprovalReject,
-                        ],
-                        terminal_readiness: false,
-                    };
+                    return pending_approval_projection(current_step_id);
                 } else if revision.approval_policy == ApprovalPolicy::NotRequired {
-                    return IdleProjection {
-                        current_step_id,
-                        phase_status: PhaseStatus::FinalizationReady,
-                        next_recommended_action: RecommendedAction::FinalizePreparedConvergence,
-                        dispatchable_step_id: None,
-                        allowed_actions: vec![],
-                        terminal_readiness: true,
-                    };
+                    return finalization_ready_projection(current_step_id);
                 } else {
                     diagnostics
                         .push("validate_integrated clean but approval_state is not pending".into());
-                    return IdleProjection {
-                        current_step_id,
-                        phase_status: PhaseStatus::Unknown,
-                        next_recommended_action: RecommendedAction::OperatorIntervention,
-                        dispatchable_step_id: None,
-                        allowed_actions: vec![],
-                        terminal_readiness: false,
-                    };
+                    return operator_intervention_projection(current_step_id);
                 }
             }
 
@@ -502,21 +464,8 @@ impl Evaluator {
         }
 
         if let Some(last_job) = latest_closure_job {
-            let Some(outcome) = last_job.outcome_class else {
-                diagnostics.push(format!(
-                    "last closure job {} has no outcome_class despite terminal status {}",
-                    last_job.step_id,
-                    job_status_name(last_job.status)
-                ));
-
-                return IdleProjection {
-                    current_step_id,
-                    phase_status: PhaseStatus::Unknown,
-                    next_recommended_action: RecommendedAction::OperatorIntervention,
-                    dispatchable_step_id: None,
-                    allowed_actions: vec![],
-                    terminal_readiness: false,
-                };
+            let Some(outcome) = closure_outcome(last_job, diagnostics) else {
+                return operator_intervention_projection(current_step_id);
             };
             match outcome {
                 OutcomeClass::Clean | OutcomeClass::Findings => {
@@ -541,7 +490,7 @@ impl Evaluator {
                                             current_step_id: Some(last_job.step_id.clone()),
                                             phase_status: PhaseStatus::AwaitingConvergence,
                                             next_recommended_action: RecommendedAction::from(
-                                                next_step.to_string(),
+                                                *next_step,
                                             ),
                                             dispatchable_step_id: None,
                                             allowed_actions: vec![
@@ -562,9 +511,7 @@ impl Evaluator {
                                 return IdleProjection {
                                     current_step_id: Some(last_job.step_id.clone()),
                                     phase_status: PhaseStatus::AwaitingConvergence,
-                                    next_recommended_action: RecommendedAction::from(
-                                        action.to_string(),
-                                    ),
+                                    next_recommended_action: RecommendedAction::from(*action),
                                     dispatchable_step_id: None,
                                     allowed_actions: vec![],
                                     terminal_readiness: false,
@@ -608,14 +555,7 @@ impl Evaluator {
             return dispatchable_projection(None, PhaseStatus::New, step::AUTHOR_INITIAL);
         }
 
-        IdleProjection {
-            current_step_id,
-            phase_status: PhaseStatus::Unknown,
-            next_recommended_action: RecommendedAction::OperatorIntervention,
-            dispatchable_step_id: None,
-            allowed_actions: vec![],
-            terminal_readiness: false,
-        }
+        operator_intervention_projection(current_step_id)
     }
 
     fn finish_evaluation(
@@ -649,8 +589,8 @@ fn closure_terminal_jobs<'a>(jobs: &'a [&'a Job]) -> Vec<&'a Job> {
     jobs.iter()
         .copied()
         .filter(|job| {
-            job.status.is_terminal()
-                && job.status != JobStatus::Superseded
+            job.state.is_terminal()
+                && job.state.status() != JobStatus::Superseded
                 && is_closure_relevant_step(&job.step_id)
         })
         .collect()
@@ -659,7 +599,7 @@ fn closure_terminal_jobs<'a>(jobs: &'a [&'a Job]) -> Vec<&'a Job> {
 fn latest_terminal_job<'a>(jobs: &'a [&'a Job]) -> Option<&'a Job> {
     jobs.iter()
         .copied()
-        .max_by_key(|job| (job.ended_at, job.created_at))
+        .max_by_key(|job| (job.state.ended_at(), job.created_at))
 }
 
 fn current_closure_step_id(
@@ -761,37 +701,19 @@ fn triaged_findings_clean_projection(
 
         if revision.approval_policy == ApprovalPolicy::Required {
             if item.approval_state == ApprovalState::Pending {
-                return Some(IdleProjection {
-                    current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
-                    phase_status: PhaseStatus::PendingApproval,
-                    next_recommended_action: RecommendedAction::ApprovalApprove,
-                    dispatchable_step_id: None,
-                    allowed_actions: vec![
-                        AllowedAction::ApprovalApprove,
-                        AllowedAction::ApprovalReject,
-                    ],
-                    terminal_readiness: false,
-                });
+                return Some(pending_approval_projection(Some(
+                    step::VALIDATE_INTEGRATED.into(),
+                )));
             }
 
-            return Some(IdleProjection {
-                current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
-                phase_status: PhaseStatus::Unknown,
-                next_recommended_action: RecommendedAction::OperatorIntervention,
-                dispatchable_step_id: None,
-                allowed_actions: vec![],
-                terminal_readiness: false,
-            });
+            return Some(operator_intervention_projection(Some(
+                step::VALIDATE_INTEGRATED.into(),
+            )));
         }
 
-        return Some(IdleProjection {
-            current_step_id: Some(step::VALIDATE_INTEGRATED.into()),
-            phase_status: PhaseStatus::FinalizationReady,
-            next_recommended_action: RecommendedAction::FinalizePreparedConvergence,
-            dispatchable_step_id: None,
-            allowed_actions: vec![],
-            terminal_readiness: true,
-        });
+        return Some(finalization_ready_projection(Some(
+            step::VALIDATE_INTEGRATED.into(),
+        )));
     }
 
     graph_target_projection(
@@ -815,7 +737,7 @@ fn graph_target_projection(
         TransitionTarget::SystemAction(action) => Some(IdleProjection {
             current_step_id,
             phase_status: PhaseStatus::AwaitingConvergence,
-            next_recommended_action: RecommendedAction::from(action.to_string()),
+            next_recommended_action: RecommendedAction::from(*action),
             dispatchable_step_id: None,
             allowed_actions: vec![],
             terminal_readiness: false,
@@ -868,6 +790,55 @@ fn merge_allowed_actions(
     }
 
     allowed_actions
+}
+
+fn closure_outcome(last_job: &Job, diagnostics: &mut Vec<String>) -> Option<OutcomeClass> {
+    if let Some(outcome) = last_job.state.outcome_class() {
+        return Some(outcome);
+    }
+
+    diagnostics.push(format!(
+        "last closure job {} has no outcome_class despite terminal status {}",
+        last_job.step_id,
+        job_status_name(last_job.state.status())
+    ));
+    None
+}
+
+fn operator_intervention_projection(current_step_id: Option<String>) -> IdleProjection {
+    IdleProjection {
+        current_step_id,
+        phase_status: PhaseStatus::Unknown,
+        next_recommended_action: RecommendedAction::OperatorIntervention,
+        dispatchable_step_id: None,
+        allowed_actions: vec![],
+        terminal_readiness: false,
+    }
+}
+
+fn pending_approval_projection(current_step_id: Option<String>) -> IdleProjection {
+    IdleProjection {
+        current_step_id,
+        phase_status: PhaseStatus::PendingApproval,
+        next_recommended_action: RecommendedAction::ApprovalApprove,
+        dispatchable_step_id: None,
+        allowed_actions: vec![
+            AllowedAction::ApprovalApprove,
+            AllowedAction::ApprovalReject,
+        ],
+        terminal_readiness: false,
+    }
+}
+
+fn finalization_ready_projection(current_step_id: Option<String>) -> IdleProjection {
+    IdleProjection {
+        current_step_id,
+        phase_status: PhaseStatus::FinalizationReady,
+        next_recommended_action: RecommendedAction::FinalizePreparedConvergence,
+        dispatchable_step_id: None,
+        allowed_actions: vec![],
+        terminal_readiness: true,
+    }
 }
 
 fn is_daemon_action(action: &RecommendedAction) -> bool {

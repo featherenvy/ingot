@@ -312,6 +312,64 @@ impl AgentRunner for CleanInitialReviewRunner {
     }
 }
 
+pub struct CleanCandidateReviewRunner;
+
+impl AgentRunner for CleanCandidateReviewRunner {
+    fn launch<'a>(
+        &'a self,
+        _agent: &'a Agent,
+        request: &'a AgentRequest,
+        _working_dir: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
+        Box::pin(async move {
+            match prompt_value(&request.prompt, "Step").as_deref() {
+                Some("review_candidate_initial") | Some("review_candidate_repair") => {
+                    Ok(AgentResponse {
+                        exit_code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        result: Some(clean_review_report(
+                            &prompt_value(&request.prompt, "Input base commit").unwrap_or_default(),
+                            &prompt_value(&request.prompt, "Input head commit").unwrap_or_default(),
+                        )),
+                    })
+                }
+                other => Err(AgentError::ProtocolViolation(format!(
+                    "unexpected step in clean candidate review runner: {other:?}"
+                ))),
+            }
+        })
+    }
+}
+
+pub struct CleanValidationRunner;
+
+impl AgentRunner for CleanValidationRunner {
+    fn launch<'a>(
+        &'a self,
+        _agent: &'a Agent,
+        request: &'a AgentRequest,
+        _working_dir: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
+        Box::pin(async move {
+            match prompt_value(&request.prompt, "Step").as_deref() {
+                Some("validate_candidate_initial")
+                | Some("validate_candidate_repair")
+                | Some("validate_after_integration_repair")
+                | Some("validate_integrated") => Ok(AgentResponse {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    result: Some(clean_validation_report("validation clean")),
+                }),
+                other => Err(AgentError::ProtocolViolation(format!(
+                    "unexpected step in clean validation runner: {other:?}"
+                ))),
+            }
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Mirror / git helpers
 // ---------------------------------------------------------------------------

@@ -48,9 +48,9 @@ async fn tick_executes_a_queued_authoring_job_and_creates_a_commit() {
     assert!(h.dispatcher.tick().await.expect("tick should run"));
 
     let updated_job = h.db.get_job(job.id).await.expect("updated job");
-    assert_eq!(updated_job.status, JobStatus::Completed);
-    assert_eq!(updated_job.outcome_class, Some(OutcomeClass::Clean));
-    assert!(updated_job.output_commit_oid.is_some());
+    assert_eq!(updated_job.state.status(), JobStatus::Completed);
+    assert_eq!(updated_job.state.outcome_class(), Some(OutcomeClass::Clean));
+    assert!(updated_job.state.output_commit_oid().is_some());
 
     let workspace =
         h.db.find_authoring_workspace_for_revision(revision.id)
@@ -59,7 +59,10 @@ async fn tick_executes_a_queued_authoring_job_and_creates_a_commit() {
             .expect("workspace exists");
     assert_eq!(workspace.status, WorkspaceStatus::Ready);
     assert_eq!(workspace.current_job_id, None);
-    assert_eq!(workspace.head_commit_oid, updated_job.output_commit_oid);
+    assert_eq!(
+        workspace.head_commit_oid.as_deref(),
+        updated_job.state.output_commit_oid()
+    );
 
     let prompt_path = h
         .state_root
@@ -127,16 +130,16 @@ async fn tick_executes_a_review_job_and_persists_structured_report() {
     assert!(dispatcher.tick().await.expect("tick should run"));
 
     let updated_job = db.get_job(job.id).await.expect("updated job");
-    assert_eq!(updated_job.status, JobStatus::Completed);
-    assert_eq!(updated_job.outcome_class, Some(OutcomeClass::Clean));
+    assert_eq!(updated_job.state.status(), JobStatus::Completed);
+    assert_eq!(updated_job.state.outcome_class(), Some(OutcomeClass::Clean));
     assert_eq!(
-        updated_job.result_schema_version.as_deref(),
+        updated_job.state.result_schema_version(),
         Some("review_report:v1")
     );
     assert_eq!(
         updated_job
-            .result_payload
-            .as_ref()
+            .state
+            .result_payload()
             .and_then(|payload| payload.get("outcome"))
             .and_then(|value| value.as_str()),
         Some("clean")
@@ -203,12 +206,12 @@ async fn tick_times_out_long_running_job_and_marks_it_failed() {
     assert!(h.dispatcher.tick().await.expect("tick should run"));
 
     let updated_job = h.db.get_job(job.id).await.expect("updated job");
-    assert_eq!(updated_job.status, JobStatus::Failed);
+    assert_eq!(updated_job.state.status(), JobStatus::Failed);
     assert_eq!(
-        updated_job.outcome_class,
+        updated_job.state.outcome_class(),
         Some(OutcomeClass::TransientFailure)
     );
-    assert_eq!(updated_job.error_code.as_deref(), Some("job_timeout"));
+    assert_eq!(updated_job.state.error_code(), Some("job_timeout"));
 }
 
 #[tokio::test]
@@ -287,10 +290,10 @@ async fn tick_runs_healthy_queued_job_even_when_another_project_is_broken() {
         .iter()
         .find(|job| job.step_id == step::AUTHOR_INITIAL)
         .expect("completed healthy author job");
-    assert_eq!(completed_author.status, JobStatus::Completed);
+    assert_eq!(completed_author.state.status(), JobStatus::Completed);
     let review_job = healthy_jobs
         .iter()
         .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
         .expect("queued healthy review job");
-    assert_eq!(review_job.status, JobStatus::Queued);
+    assert_eq!(review_job.state.status(), JobStatus::Queued);
 }

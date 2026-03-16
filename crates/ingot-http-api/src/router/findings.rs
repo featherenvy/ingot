@@ -352,7 +352,9 @@ pub(super) async fn maybe_enter_approval_after_finding_triage(
     let latest_closure_findings_job = jobs
         .iter()
         .filter(|job| job.item_revision_id == source_revision.id)
-        .filter(|job| job.status.is_terminal() && job.outcome_class == Some(OutcomeClass::Findings))
+        .filter(|job| {
+            job.state.is_terminal() && job.state.outcome_class() == Some(OutcomeClass::Findings)
+        })
         .filter(|job| {
             matches!(
                 ingot_workflow::step::find_step(&job.step_id)
@@ -360,7 +362,7 @@ pub(super) async fn maybe_enter_approval_after_finding_triage(
                 Some(ingot_workflow::ClosureRelevance::ClosureRelevant)
             )
         })
-        .max_by_key(|job| (job.ended_at, job.created_at));
+        .max_by_key(|job| (job.state.ended_at(), job.created_at));
 
     let Some(latest_job) = latest_closure_findings_job else {
         return Ok(());
@@ -490,7 +492,7 @@ mod tests {
         support_temp_git_repo("ingot-http-api")
     }
 
-    fn git_output(path: &PathBuf, args: &[&str]) -> String {
+    fn git_output(path: &std::path::Path, args: &[&str]) -> String {
         ingot_test_support::git::git_output(path, args)
     }
 

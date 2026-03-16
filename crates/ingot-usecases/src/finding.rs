@@ -111,13 +111,13 @@ pub fn extract_findings(
     job: &Job,
     convergences: &[Convergence],
 ) -> Result<ExtractedFindings, UseCaseError> {
-    let Some(schema_version) = job.result_schema_version.as_deref() else {
+    let Some(schema_version) = job.state.result_schema_version() else {
         return Ok(ExtractedFindings {
             outcome_class: OutcomeClass::Clean,
             findings: vec![],
         });
     };
-    let Some(result_payload) = job.result_payload.as_ref() else {
+    let Some(result_payload) = job.state.result_payload() else {
         return Ok(ExtractedFindings {
             outcome_class: OutcomeClass::Clean,
             findings: vec![],
@@ -619,7 +619,16 @@ mod tests {
     #[test]
     fn extraction_marks_integrated_validation_findings_as_integrated() {
         let item = nil_item();
-        let job = Job {
+        let mut job = test_job();
+        job.step_id = "validate_integrated".into();
+        job.phase_kind = PhaseKind::Validate;
+        job.job_input = JobInput::integrated_subject("base", "head");
+        job.state = ingot_domain::job::JobState::Completed {
+            assignment: None,
+            started_at: None,
+            outcome_class: OutcomeClass::Findings,
+            ended_at: chrono::Utc::now(),
+            output_commit_oid: None,
             result_schema_version: Some("validation_report:v1".into()),
             result_payload: Some(serde_json::json!({
                 "outcome": "findings",
@@ -634,10 +643,6 @@ mod tests {
                     "evidence": ["broken"]
                 }]
             })),
-            step_id: "validate_integrated".into(),
-            phase_kind: PhaseKind::Validate,
-            job_input: JobInput::integrated_subject("base", "head"),
-            ..test_job()
         };
 
         let extracted = extract_findings(&item, &job, &[]).unwrap();
@@ -738,7 +743,16 @@ mod tests {
     #[test]
     fn validation_reports_require_checks_and_failed_signal_for_findings() {
         let item = nil_item();
-        let job = Job {
+        let mut job = test_job();
+        job.step_id = "validate_candidate_initial".into();
+        job.phase_kind = PhaseKind::Validate;
+        job.job_input = JobInput::candidate_subject("base", "head");
+        job.state = ingot_domain::job::JobState::Completed {
+            assignment: None,
+            started_at: None,
+            outcome_class: OutcomeClass::Findings,
+            ended_at: chrono::Utc::now(),
+            output_commit_oid: None,
             result_schema_version: Some("validation_report:v1".into()),
             result_payload: Some(serde_json::json!({
                 "outcome": "findings",
@@ -746,10 +760,6 @@ mod tests {
                 "checks": [],
                 "findings": []
             })),
-            step_id: "validate_candidate_initial".into(),
-            phase_kind: PhaseKind::Validate,
-            job_input: JobInput::candidate_subject("base", "head"),
-            ..test_job()
         };
 
         let error = extract_findings(&item, &job, &[]).expect_err("expected protocol violation");
@@ -759,7 +769,16 @@ mod tests {
     #[test]
     fn review_reports_require_overall_risk() {
         let item = nil_item();
-        let job = Job {
+        let mut job = test_job();
+        job.step_id = "review_candidate_initial".into();
+        job.phase_kind = PhaseKind::Review;
+        job.job_input = JobInput::candidate_subject("base", "head");
+        job.state = ingot_domain::job::JobState::Completed {
+            assignment: None,
+            started_at: None,
+            outcome_class: OutcomeClass::Findings,
+            ended_at: chrono::Utc::now(),
+            output_commit_oid: None,
             result_schema_version: Some("review_report:v1".into()),
             result_payload: Some(serde_json::json!({
                 "outcome": "clean",
@@ -770,10 +789,6 @@ mod tests {
                 },
                 "findings": []
             })),
-            step_id: "review_candidate_initial".into(),
-            phase_kind: PhaseKind::Review,
-            job_input: JobInput::candidate_subject("base", "head"),
-            ..test_job()
         };
 
         let error = extract_findings(&item, &job, &[]).expect_err("expected protocol violation");
@@ -783,7 +798,16 @@ mod tests {
     #[test]
     fn validation_reports_reject_duplicate_finding_keys() {
         let item = nil_item();
-        let job = Job {
+        let mut job = test_job();
+        job.step_id = "validate_candidate_initial".into();
+        job.phase_kind = PhaseKind::Validate;
+        job.job_input = JobInput::candidate_subject("base", "head");
+        job.state = ingot_domain::job::JobState::Completed {
+            assignment: None,
+            started_at: None,
+            outcome_class: OutcomeClass::Findings,
+            ended_at: chrono::Utc::now(),
+            output_commit_oid: None,
             result_schema_version: Some("validation_report:v1".into()),
             result_payload: Some(serde_json::json!({
                 "outcome": "findings",
@@ -812,10 +836,6 @@ mod tests {
                     }
                 ]
             })),
-            step_id: "validate_candidate_initial".into(),
-            phase_kind: PhaseKind::Validate,
-            job_input: JobInput::candidate_subject("base", "head"),
-            ..test_job()
         };
 
         let error = extract_findings(&item, &job, &[]).expect_err("expected protocol violation");
@@ -825,7 +845,16 @@ mod tests {
     #[test]
     fn review_reports_reject_duplicate_finding_keys() {
         let item = nil_item();
-        let job = Job {
+        let mut job = test_job();
+        job.step_id = "review_candidate_initial".into();
+        job.phase_kind = PhaseKind::Review;
+        job.job_input = JobInput::candidate_subject("base", "head");
+        job.state = ingot_domain::job::JobState::Completed {
+            assignment: None,
+            started_at: None,
+            outcome_class: OutcomeClass::Findings,
+            ended_at: chrono::Utc::now(),
+            output_commit_oid: None,
             result_schema_version: Some("review_report:v1".into()),
             result_payload: Some(serde_json::json!({
                 "outcome": "findings",
@@ -854,10 +883,6 @@ mod tests {
                     }
                 ]
             })),
-            step_id: "review_candidate_initial".into(),
-            phase_kind: PhaseKind::Review,
-            job_input: JobInput::candidate_subject("base", "head"),
-            ..test_job()
         };
 
         let error = extract_findings(&item, &job, &[]).expect_err("expected protocol violation");
@@ -867,7 +892,16 @@ mod tests {
     #[test]
     fn finding_reports_reject_duplicate_finding_keys() {
         let item = nil_item();
-        let job = Job {
+        let mut job = test_job();
+        job.step_id = "investigate_item".into();
+        job.phase_kind = PhaseKind::Investigate;
+        job.job_input = JobInput::candidate_subject("base", "head");
+        job.state = ingot_domain::job::JobState::Completed {
+            assignment: None,
+            started_at: None,
+            outcome_class: OutcomeClass::Findings,
+            ended_at: chrono::Utc::now(),
+            output_commit_oid: None,
             result_schema_version: Some("finding_report:v1".into()),
             result_payload: Some(serde_json::json!({
                 "outcome": "findings",
@@ -891,10 +925,6 @@ mod tests {
                     }
                 ]
             })),
-            step_id: "investigate_item".into(),
-            phase_kind: PhaseKind::Investigate,
-            job_input: JobInput::candidate_subject("base", "head"),
-            ..test_job()
         };
 
         let error = extract_findings(&item, &job, &[]).expect_err("expected protocol violation");

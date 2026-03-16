@@ -92,7 +92,7 @@ async fn dispatch_item_job_route_creates_queued_author_initial_job_and_workspace
     let json: serde_json::Value = serde_json::from_slice(&body).expect("dispatch json");
 
     assert_eq!(json["step_id"].as_str(), Some("author_initial"));
-    assert_eq!(json["status"].as_str(), Some("queued"));
+    assert_eq!(json["status"].as_str(), Some("assigned"));
     assert_eq!(json["phase_template_slug"].as_str(), Some("author-initial"));
     assert_eq!(json["job_input"]["kind"].as_str(), Some("authoring_head"));
     assert_eq!(

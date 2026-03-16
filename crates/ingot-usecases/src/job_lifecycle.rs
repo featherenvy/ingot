@@ -41,7 +41,7 @@ where
     W: WorkspaceRepository,
     A: ActivityRepository,
 {
-    if !job.status.is_active() {
+    if !job.state.is_active() {
         return Err(UseCaseError::JobNotActive);
     }
 
@@ -64,8 +64,12 @@ where
             )
         })?;
 
-    let released_workspace_id =
-        release_workspace(workspace_repo, job.workspace_id, target_workspace_status).await?;
+    let released_workspace_id = release_workspace(
+        workspace_repo,
+        job.state.workspace_id(),
+        target_workspace_status,
+    )
+    .await?;
 
     activity_repo
         .append(&Activity {
@@ -108,7 +112,7 @@ where
     W: WorkspaceRepository,
     A: ActivityRepository,
 {
-    if !job.status.is_active() {
+    if !job.state.is_active() {
         return Err(UseCaseError::JobNotActive);
     }
 
@@ -138,8 +142,12 @@ where
             )
         })?;
 
-    let released_workspace_id =
-        release_workspace(workspace_repo, job.workspace_id, target_workspace_status).await?;
+    let released_workspace_id = release_workspace(
+        workspace_repo,
+        job.state.workspace_id(),
+        target_workspace_status,
+    )
+    .await?;
 
     if escalation_reason.is_some() {
         activity_repo
@@ -196,7 +204,7 @@ where
     W: WorkspaceRepository,
     A: ActivityRepository,
 {
-    if !job.status.is_active() {
+    if !job.state.is_active() {
         return Err(UseCaseError::JobNotActive);
     }
 
@@ -219,8 +227,12 @@ where
             )
         })?;
 
-    let released_workspace_id =
-        release_workspace(workspace_repo, job.workspace_id, target_workspace_status).await?;
+    let released_workspace_id = release_workspace(
+        workspace_repo,
+        job.state.workspace_id(),
+        target_workspace_status,
+    )
+    .await?;
 
     activity_repo
         .append(&Activity {
@@ -303,7 +315,7 @@ mod tests {
         let result = cancel_job(
             &job_repo,
             &FakeWorkspaceRepository::default(),
-            &FakeActivityRepository::default(),
+            &FakeActivityRepository,
             &job,
             &item,
             "operator_cancelled",
@@ -325,7 +337,7 @@ mod tests {
         let result = cancel_job(
             &job_repo,
             &FakeWorkspaceRepository::default(),
-            &FakeActivityRepository::default(),
+            &FakeActivityRepository,
             &job,
             &item,
             "operator_cancelled",
@@ -351,7 +363,7 @@ mod tests {
         let result = fail_job(
             &job_repo,
             &FakeWorkspaceRepository::default(),
-            &FakeActivityRepository::default(),
+            &FakeActivityRepository,
             &job,
             &item,
             OutcomeClass::TransientFailure,
@@ -379,7 +391,7 @@ mod tests {
         let result = expire_job(
             &job_repo,
             &FakeWorkspaceRepository::default(),
-            &FakeActivityRepository::default(),
+            &FakeActivityRepository,
             &job,
             &item,
             WorkspaceStatus::Ready,
@@ -403,7 +415,7 @@ mod tests {
         let result = cancel_job(
             &FakeJobRepository::default(),
             &workspace_repo,
-            &FakeActivityRepository::default(),
+            &FakeActivityRepository,
             &job,
             &item,
             "operator_cancelled",
@@ -455,98 +467,78 @@ mod tests {
     }
 
     impl JobRepository for FakeJobRepository {
-        fn list_by_project(
+        async fn list_by_project(
             &self,
             _project_id: ProjectId,
-        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        ) -> Result<Vec<Job>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn list_by_revision(
+        async fn list_by_revision(
             &self,
             _revision_id: ItemRevisionId,
-        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        ) -> Result<Vec<Job>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn get(
-            &self,
-            _id: JobId,
-        ) -> impl std::future::Future<Output = Result<Job, RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn get(&self, _id: JobId) -> Result<Job, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn create(
-            &self,
-            _job: &Job,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn create(&self, _job: &Job) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn update(
-            &self,
-            _job: &Job,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn update(&self, _job: &Job) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn find_active_for_revision(
+        async fn find_active_for_revision(
             &self,
             _revision_id: ItemRevisionId,
-        ) -> impl std::future::Future<Output = Result<Option<Job>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Option<Job>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn list_by_item(
-            &self,
-            _item_id: ItemId,
-        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn list_by_item(&self, _item_id: ItemId) -> Result<Vec<Job>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn list_queued(
-            &self,
-            _limit: u32,
-        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn list_queued(&self, _limit: u32) -> Result<Vec<Job>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn list_active(
-            &self,
-        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn list_active(&self) -> Result<Vec<Job>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn start_execution(
+        async fn start_execution(
             &self,
             _params: StartJobExecutionParams,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        ) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn heartbeat_execution(
+        async fn heartbeat_execution(
             &self,
             _job_id: JobId,
             _item_id: ItemId,
             _revision_id: ItemRevisionId,
             _lease_owner_id: &str,
             _lease_expires_at: chrono::DateTime<Utc>,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        ) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn finish_non_success(
+        async fn finish_non_success(
             &self,
             _params: FinishJobNonSuccessParams,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+        ) -> Result<(), RepositoryError> {
             let finish_error = self.finish_error.clone();
-            async move {
-                if let Some(error) = finish_error.lock().expect("finish error lock").take() {
-                    return Err(error);
-                }
-                Ok(())
+            if let Some(error) = finish_error.lock().expect("finish error lock").take() {
+                return Err(error);
             }
+            Ok(())
         }
     }
 
@@ -581,62 +573,45 @@ mod tests {
     }
 
     impl WorkspaceRepository for FakeWorkspaceRepository {
-        fn list_by_project(
+        async fn list_by_project(
             &self,
             _project_id: ProjectId,
-        ) -> impl std::future::Future<Output = Result<Vec<Workspace>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Vec<Workspace>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn get(
-            &self,
-            _id: WorkspaceId,
-        ) -> impl std::future::Future<Output = Result<Workspace, RepositoryError>> + Send {
+        async fn get(&self, _id: WorkspaceId) -> Result<Workspace, RepositoryError> {
             let workspace = self
                 .state
                 .lock()
                 .expect("workspace state lock")
                 .workspace
                 .clone();
-            async move { workspace.ok_or(RepositoryError::NotFound) }
+            workspace.ok_or(RepositoryError::NotFound)
         }
 
-        fn create(
-            &self,
-            _workspace: &Workspace,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn create(&self, _workspace: &Workspace) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn update(
-            &self,
-            workspace: &Workspace,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
+        async fn update(&self, workspace: &Workspace) -> Result<(), RepositoryError> {
             let state = self.state.clone();
             let workspace = workspace.clone();
-            async move {
-                let mut state = state.lock().expect("workspace state lock");
-                state.updated = Some(workspace.clone());
-                state.workspace = Some(workspace);
-                Ok(())
-            }
+            let mut state = state.lock().expect("workspace state lock");
+            state.updated = Some(workspace.clone());
+            state.workspace = Some(workspace);
+            Ok(())
         }
 
-        fn find_authoring_for_revision(
+        async fn find_authoring_for_revision(
             &self,
             _revision_id: ItemRevisionId,
-        ) -> impl std::future::Future<Output = Result<Option<Workspace>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Option<Workspace>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn list_by_item(
-            &self,
-            _item_id: ItemId,
-        ) -> impl std::future::Future<Output = Result<Vec<Workspace>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        async fn list_by_item(&self, _item_id: ItemId) -> Result<Vec<Workspace>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
     }
 
@@ -644,21 +619,17 @@ mod tests {
     struct FakeActivityRepository;
 
     impl ActivityRepository for FakeActivityRepository {
-        fn append(
-            &self,
-            _activity: &Activity,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { Ok(()) }
+        async fn append(&self, _activity: &Activity) -> Result<(), RepositoryError> {
+            Ok(())
         }
 
-        fn list_by_project(
+        async fn list_by_project(
             &self,
             _project_id: ProjectId,
             _limit: u32,
             _offset: u32,
-        ) -> impl std::future::Future<Output = Result<Vec<Activity>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Vec<Activity>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
     }
 }

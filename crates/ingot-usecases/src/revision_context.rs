@@ -40,27 +40,27 @@ pub fn rebuild_revision_context(
 fn latest_summary(jobs: &[Job], phase_kind: PhaseKind) -> Option<RevisionContextResultSummary> {
     structured_result_jobs(jobs)
         .filter(|job| job.phase_kind == phase_kind)
-        .max_by_key(|job| (job.ended_at, job.created_at))
+        .max_by_key(|job| (job.state.ended_at(), job.created_at))
         .and_then(summary_from_job)
 }
 
 fn accepted_result_refs(jobs: &[Job]) -> Vec<RevisionContextAcceptedResultRef> {
     let mut jobs = structured_result_jobs(jobs).collect::<Vec<_>>();
-    jobs.sort_by_key(|job| (job.ended_at, job.created_at));
+    jobs.sort_by_key(|job| (job.state.ended_at(), job.created_at));
     jobs.into_iter()
         .filter_map(|job| {
-            let outcome = job.outcome_class?;
+            let outcome = job.state.outcome_class()?;
             let summary = job
-                .result_payload
-                .as_ref()
+                .state
+                .result_payload()
                 .and_then(|payload| payload.get("summary"))
                 .and_then(|value| value.as_str())?;
-            let schema_version = job.result_schema_version.as_ref()?;
+            let schema_version = job.state.result_schema_version()?;
 
             Some(RevisionContextAcceptedResultRef {
                 job_id: job.id.to_string(),
                 step_id: job.step_id.clone(),
-                schema_version: schema_version.clone(),
+                schema_version: schema_version.to_owned(),
                 outcome: outcome_name(outcome).into(),
                 summary: summary.into(),
             })
@@ -71,28 +71,23 @@ fn accepted_result_refs(jobs: &[Job]) -> Vec<RevisionContextAcceptedResultRef> {
 fn summary_from_job(job: &Job) -> Option<RevisionContextResultSummary> {
     Some(RevisionContextResultSummary {
         job_id: job.id.to_string(),
-        schema_version: job.result_schema_version.clone()?,
-        outcome: outcome_name(job.outcome_class?).into(),
-        summary: job
-            .result_payload
-            .as_ref()?
-            .get("summary")?
-            .as_str()?
-            .into(),
+        schema_version: job.state.result_schema_version()?.to_owned(),
+        outcome: outcome_name(job.state.outcome_class()?).into(),
+        summary: job.state.result_payload()?.get("summary")?.as_str()?.into(),
     })
 }
 
 fn structured_result_jobs(jobs: &[Job]) -> impl Iterator<Item = &Job> {
     jobs.iter().filter(|job| {
-        job.status == JobStatus::Completed
+        job.state.status() == JobStatus::Completed
             && matches!(
                 job.output_artifact_kind,
                 OutputArtifactKind::ReviewReport
                     | OutputArtifactKind::ValidationReport
                     | OutputArtifactKind::FindingReport
             )
-            && job.result_schema_version.is_some()
-            && job.result_payload.is_some()
+            && job.state.result_schema_version().is_some()
+            && job.state.result_payload().is_some()
     })
 }
 

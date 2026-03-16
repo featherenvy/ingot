@@ -1,6 +1,7 @@
 use chrono::Utc;
 use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId};
-use ingot_domain::job::{Job, JobInput};
+use ingot_domain::item::Escalation;
+use ingot_domain::job::{Job, JobAssignment, JobInput, JobLease, JobState, TerminalStatus};
 use ingot_domain::ports::{
     FinishJobNonSuccessParams, JobRepository, RepositoryError, StartJobExecutionParams,
 };
@@ -253,6 +254,7 @@ impl Database {
     pub async fn create_job(&self, job: &Job) -> Result<(), RepositoryError> {
         let (job_input_kind, input_base_commit_oid, input_head_commit_oid) =
             encode_job_input(&job.job_input);
+        let status = job.state.status();
         sqlx::query(
             "INSERT INTO jobs (
                 id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
@@ -272,33 +274,33 @@ impl Database {
         .bind(job.semantic_attempt_no as i64)
         .bind(job.retry_no as i64)
         .bind(job.supersedes_job_id.map(|id| id.to_string()))
-        .bind(encode_enum(&job.status)?)
-        .bind(job.outcome_class.as_ref().map(encode_enum).transpose()?)
+        .bind(encode_enum(&status)?)
+        .bind(job.state.outcome_class().as_ref().map(encode_enum).transpose()?)
         .bind(encode_enum(&job.phase_kind)?)
-        .bind(job.workspace_id.map(|id| id.to_string()))
+        .bind(job.state.workspace_id().map(|id| id.to_string()))
         .bind(encode_enum(&job.workspace_kind)?)
         .bind(encode_enum(&job.execution_permission)?)
         .bind(encode_enum(&job.context_policy)?)
         .bind(&job.phase_template_slug)
-        .bind(job.phase_template_digest.as_deref())
-        .bind(job.prompt_snapshot.as_deref())
+        .bind(job.state.phase_template_digest())
+        .bind(job.state.prompt_snapshot())
         .bind(job_input_kind)
         .bind(input_base_commit_oid)
         .bind(input_head_commit_oid)
         .bind(encode_enum(&job.output_artifact_kind)?)
-        .bind(job.output_commit_oid.as_deref())
-        .bind(job.result_schema_version.as_deref())
-        .bind(serialize_optional_json(job.result_payload.as_ref())?)
-        .bind(job.agent_id.map(|id| id.to_string()))
-        .bind(job.process_pid.map(i64::from))
-        .bind(job.lease_owner_id.as_deref())
-        .bind(job.heartbeat_at)
-        .bind(job.lease_expires_at)
-        .bind(job.error_code.as_deref())
-        .bind(job.error_message.as_deref())
+        .bind(job.state.output_commit_oid())
+        .bind(job.state.result_schema_version())
+        .bind(serialize_optional_json(job.state.result_payload())?)
+        .bind(job.state.agent_id().map(|id| id.to_string()))
+        .bind(job.state.process_pid().map(i64::from))
+        .bind(job.state.lease_owner_id())
+        .bind(job.state.heartbeat_at())
+        .bind(job.state.lease_expires_at())
+        .bind(job.state.error_code())
+        .bind(job.state.error_message())
         .bind(job.created_at)
-        .bind(job.started_at)
-        .bind(job.ended_at)
+        .bind(job.state.started_at())
+        .bind(job.state.ended_at())
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -309,6 +311,7 @@ impl Database {
     pub async fn update_job(&self, job: &Job) -> Result<(), RepositoryError> {
         let (job_input_kind, input_base_commit_oid, input_head_commit_oid) =
             encode_job_input(&job.job_input);
+        let status = job.state.status();
         let result = sqlx::query(
             "UPDATE jobs
              SET step_id = ?, semantic_attempt_no = ?, retry_no = ?, supersedes_job_id = ?, status = ?,
@@ -326,33 +329,33 @@ impl Database {
         .bind(job.semantic_attempt_no as i64)
         .bind(job.retry_no as i64)
         .bind(job.supersedes_job_id.map(|id| id.to_string()))
-        .bind(encode_enum(&job.status)?)
-        .bind(job.outcome_class.as_ref().map(encode_enum).transpose()?)
+        .bind(encode_enum(&status)?)
+        .bind(job.state.outcome_class().as_ref().map(encode_enum).transpose()?)
         .bind(encode_enum(&job.phase_kind)?)
-        .bind(job.workspace_id.map(|id| id.to_string()))
+        .bind(job.state.workspace_id().map(|id| id.to_string()))
         .bind(encode_enum(&job.workspace_kind)?)
         .bind(encode_enum(&job.execution_permission)?)
         .bind(encode_enum(&job.context_policy)?)
         .bind(&job.phase_template_slug)
-        .bind(job.phase_template_digest.as_deref())
-        .bind(job.prompt_snapshot.as_deref())
+        .bind(job.state.phase_template_digest())
+        .bind(job.state.prompt_snapshot())
         .bind(job_input_kind)
         .bind(input_base_commit_oid)
         .bind(input_head_commit_oid)
         .bind(encode_enum(&job.output_artifact_kind)?)
-        .bind(job.output_commit_oid.as_deref())
-        .bind(job.result_schema_version.as_deref())
-        .bind(serialize_optional_json(job.result_payload.as_ref())?)
-        .bind(job.agent_id.map(|id| id.to_string()))
-        .bind(job.process_pid.map(i64::from))
-        .bind(job.lease_owner_id.as_deref())
-        .bind(job.heartbeat_at)
-        .bind(job.lease_expires_at)
-        .bind(job.error_code.as_deref())
-        .bind(job.error_message.as_deref())
+        .bind(job.state.output_commit_oid())
+        .bind(job.state.result_schema_version())
+        .bind(serialize_optional_json(job.state.result_payload())?)
+        .bind(job.state.agent_id().map(|id| id.to_string()))
+        .bind(job.state.process_pid().map(i64::from))
+        .bind(job.state.lease_owner_id())
+        .bind(job.state.heartbeat_at())
+        .bind(job.state.lease_expires_at())
+        .bind(job.state.error_code())
+        .bind(job.state.error_message())
         .bind(job.created_at)
-        .bind(job.started_at)
-        .bind(job.ended_at)
+        .bind(job.state.started_at())
+        .bind(job.state.ended_at())
         .bind(job.id.to_string())
         .execute(&self.pool)
         .await
@@ -463,7 +466,12 @@ impl Database {
                  WHERE id = ?
                    AND current_revision_id = ?",
             )
-            .bind("operator_required")
+            .bind(
+                Escalation::OperatorRequired {
+                    reason: escalation_reason,
+                }
+                .as_db_str(),
+            )
             .bind(encode_enum(&escalation_reason)?)
             .bind(Utc::now())
             .bind(item_id.to_string())
@@ -614,6 +622,120 @@ async fn classify_terminal_job_conflict(
 }
 
 fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {
+    use ingot_domain::job::{JobStatus, OutcomeClass};
+
+    // Extract flat columns
+    let status: JobStatus = parse_enum(row.try_get("status").map_err(db_err)?)?;
+    let outcome_class: Option<OutcomeClass> = row
+        .try_get::<Option<String>, _>("outcome_class")
+        .map_err(db_err)?
+        .map(parse_enum)
+        .transpose()?;
+    let workspace_id = row
+        .try_get::<Option<String>, _>("workspace_id")
+        .map_err(db_err)?
+        .map(parse_id)
+        .transpose()?;
+    let agent_id = row
+        .try_get::<Option<String>, _>("agent_id")
+        .map_err(db_err)?
+        .map(parse_id)
+        .transpose()?;
+    let prompt_snapshot: Option<String> = row.try_get("prompt_snapshot").map_err(db_err)?;
+    let phase_template_digest: Option<String> =
+        row.try_get("phase_template_digest").map_err(db_err)?;
+    let output_commit_oid: Option<String> = row.try_get("output_commit_oid").map_err(db_err)?;
+    let result_schema_version: Option<String> =
+        row.try_get("result_schema_version").map_err(db_err)?;
+    let result_payload: Option<serde_json::Value> = row
+        .try_get::<Option<String>, _>("result_payload")
+        .map_err(db_err)?
+        .map(parse_json)
+        .transpose()?;
+    let process_pid: Option<u32> = row
+        .try_get::<Option<i64>, _>("process_pid")
+        .map_err(db_err)?
+        .map(|value| value as u32);
+    let lease_owner_id: Option<String> = row.try_get("lease_owner_id").map_err(db_err)?;
+    let heartbeat_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get("heartbeat_at").map_err(db_err)?;
+    let lease_expires_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get("lease_expires_at").map_err(db_err)?;
+    let error_code: Option<String> = row.try_get("error_code").map_err(db_err)?;
+    let error_message: Option<String> = row.try_get("error_message").map_err(db_err)?;
+    let started_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get("started_at").map_err(db_err)?;
+    let ended_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get("ended_at").map_err(db_err)?;
+
+    // Build assignment from flat fields (if workspace_id present)
+    let assignment = workspace_id.map(|wid| JobAssignment {
+        workspace_id: wid,
+        agent_id,
+        prompt_snapshot,
+        phase_template_digest,
+    });
+
+    let state = match status {
+        JobStatus::Queued => JobState::Queued,
+        JobStatus::Assigned => JobState::Assigned(required_job_field("workspace_id", assignment)?),
+        JobStatus::Running => JobState::Running {
+            assignment: required_job_field("workspace_id", assignment)?,
+            lease: JobLease {
+                process_pid,
+                lease_owner_id: required_job_field("lease_owner_id", lease_owner_id)?,
+                heartbeat_at: required_job_field("heartbeat_at", heartbeat_at)?,
+                lease_expires_at: required_job_field("lease_expires_at", lease_expires_at)?,
+                started_at: required_job_field("started_at", started_at)?,
+            },
+        },
+        JobStatus::Completed => JobState::Completed {
+            assignment,
+            started_at,
+            outcome_class: required_job_field("outcome_class", outcome_class)?,
+            ended_at: required_job_field("ended_at", ended_at)?,
+            output_commit_oid,
+            result_schema_version,
+            result_payload,
+        },
+        JobStatus::Failed => JobState::Terminated {
+            terminal_status: TerminalStatus::Failed,
+            assignment,
+            started_at,
+            outcome_class,
+            ended_at: required_job_field("ended_at", ended_at)?,
+            error_code,
+            error_message,
+        },
+        JobStatus::Cancelled => JobState::Terminated {
+            terminal_status: TerminalStatus::Cancelled,
+            assignment,
+            started_at,
+            outcome_class,
+            ended_at: required_job_field("ended_at", ended_at)?,
+            error_code,
+            error_message,
+        },
+        JobStatus::Expired => JobState::Terminated {
+            terminal_status: TerminalStatus::Expired,
+            assignment,
+            started_at,
+            outcome_class,
+            ended_at: required_job_field("ended_at", ended_at)?,
+            error_code,
+            error_message,
+        },
+        JobStatus::Superseded => JobState::Terminated {
+            terminal_status: TerminalStatus::Superseded,
+            assignment,
+            started_at,
+            outcome_class,
+            ended_at: required_job_field("ended_at", ended_at)?,
+            error_code,
+            error_message,
+        },
+    };
+
     Ok(Job {
         id: parse_id(row.try_get("id").map_err(db_err)?)?,
         project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
@@ -629,24 +751,11 @@ fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {
             .map_err(db_err)?
             .map(parse_id)
             .transpose()?,
-        status: parse_enum(row.try_get("status").map_err(db_err)?)?,
-        outcome_class: row
-            .try_get::<Option<String>, _>("outcome_class")
-            .map_err(db_err)?
-            .map(parse_enum)
-            .transpose()?,
         phase_kind: parse_enum(row.try_get("phase_kind").map_err(db_err)?)?,
-        workspace_id: row
-            .try_get::<Option<String>, _>("workspace_id")
-            .map_err(db_err)?
-            .map(parse_id)
-            .transpose()?,
         workspace_kind: parse_enum(row.try_get("workspace_kind").map_err(db_err)?)?,
         execution_permission: parse_enum(row.try_get("execution_permission").map_err(db_err)?)?,
         context_policy: parse_enum(row.try_get("context_policy").map_err(db_err)?)?,
         phase_template_slug: row.try_get("phase_template_slug").map_err(db_err)?,
-        phase_template_digest: row.try_get("phase_template_digest").map_err(db_err)?,
-        prompt_snapshot: row.try_get("prompt_snapshot").map_err(db_err)?,
         job_input: decode_job_input(
             row.try_get("job_input_kind").map_err(db_err)?,
             row.try_get("input_base_commit_oid").map_err(db_err)?,
@@ -654,36 +763,21 @@ fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {
         )
         .map_err(|error| RepositoryError::Database(Box::new(error)))?,
         output_artifact_kind: parse_enum(row.try_get("output_artifact_kind").map_err(db_err)?)?,
-        output_commit_oid: row.try_get("output_commit_oid").map_err(db_err)?,
-        result_schema_version: row.try_get("result_schema_version").map_err(db_err)?,
-        result_payload: row
-            .try_get::<Option<String>, _>("result_payload")
-            .map_err(db_err)?
-            .map(parse_json)
-            .transpose()?,
-        agent_id: row
-            .try_get::<Option<String>, _>("agent_id")
-            .map_err(db_err)?
-            .map(parse_id)
-            .transpose()?,
-        process_pid: row
-            .try_get::<Option<i64>, _>("process_pid")
-            .map_err(db_err)?
-            .map(|value| value as u32),
-        lease_owner_id: row.try_get("lease_owner_id").map_err(db_err)?,
-        heartbeat_at: row.try_get("heartbeat_at").map_err(db_err)?,
-        lease_expires_at: row.try_get("lease_expires_at").map_err(db_err)?,
-        error_code: row.try_get("error_code").map_err(db_err)?,
-        error_message: row.try_get("error_message").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
-        started_at: row.try_get("started_at").map_err(db_err)?,
-        ended_at: row.try_get("ended_at").map_err(db_err)?,
+        state,
+    })
+}
+
+fn required_job_field<T>(field: &'static str, value: Option<T>) -> Result<T, RepositoryError> {
+    value.ok_or_else(|| {
+        RepositoryError::Database(format!("job {field} is required for this status").into())
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use ingot_domain::ids::{ItemId, ItemRevisionId};
+    use chrono::Utc;
+    use ingot_domain::ids::{ItemId, ItemRevisionId, JobId};
     use ingot_domain::item::EscalationReason;
     use ingot_domain::job::{
         ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
@@ -782,7 +876,81 @@ mod tests {
             .expect("load item after rollback");
 
         assert_eq!(next_revision.id, persisted_item.current_revision_id);
-        assert_eq!(persisted_job.status, JobStatus::Running);
+        assert_eq!(persisted_job.state.status(), JobStatus::Running);
         assert!(!persisted_item.escalation.is_escalated());
+    }
+
+    #[tokio::test]
+    async fn get_job_rejects_assigned_rows_without_workspace_id() {
+        let db = migrated_test_db("ingot-store").await;
+
+        let project = ProjectBuilder::new("/tmp/test")
+            .name("Test")
+            .build()
+            .persist(&db)
+            .await
+            .expect("create project");
+        let revision = RevisionBuilder::new(ItemId::new()).build();
+        let item = ItemBuilder::new(project.id, revision.id)
+            .id(revision.item_id)
+            .build();
+        let (item, revision) = (item, revision)
+            .persist(&db)
+            .await
+            .expect("create item with revision");
+
+        let job_id = JobId::new();
+        sqlx::query(
+            "INSERT INTO jobs (
+                id, project_id, item_id, item_revision_id, step_id, semantic_attempt_no, retry_no,
+                supersedes_job_id, status, outcome_class, phase_kind, workspace_id, workspace_kind,
+                execution_permission, context_policy, phase_template_slug, phase_template_digest,
+                prompt_snapshot, job_input_kind, input_base_commit_oid, input_head_commit_oid,
+                output_artifact_kind, output_commit_oid, result_schema_version, result_payload,
+                agent_id, process_pid, lease_owner_id, heartbeat_at, lease_expires_at, error_code,
+                error_message, created_at, started_at, ended_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(job_id.to_string())
+        .bind(project.id.to_string())
+        .bind(item.id.to_string())
+        .bind(revision.id.to_string())
+        .bind("author_initial")
+        .bind(1_i64)
+        .bind(0_i64)
+        .bind(Option::<String>::None)
+        .bind("assigned")
+        .bind(Option::<String>::None)
+        .bind("author")
+        .bind(Option::<String>::None)
+        .bind("authoring")
+        .bind("may_mutate")
+        .bind("fresh")
+        .bind("template")
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind("none")
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind("none")
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<i64>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<chrono::DateTime<Utc>>::None)
+        .bind(Option::<chrono::DateTime<Utc>>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Utc::now())
+        .bind(Option::<chrono::DateTime<Utc>>::None)
+        .bind(Option::<chrono::DateTime<Utc>>::None)
+        .execute(&db.pool)
+        .await
+        .expect("insert malformed assigned job");
+
+        let error = db.get_job(job_id).await.expect_err("missing workspace_id");
+        assert!(matches!(error, RepositoryError::Database(_)));
     }
 }

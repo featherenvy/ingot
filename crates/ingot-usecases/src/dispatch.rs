@@ -37,12 +37,15 @@ pub fn current_authoring_head_for_revision(
 ) -> Option<String> {
     jobs.iter()
         .filter(|job| job.item_revision_id == revision.id)
-        .filter(|job| job.status == JobStatus::Completed)
+        .filter(|job| job.state.status() == JobStatus::Completed)
         .filter(|job| job.output_artifact_kind == OutputArtifactKind::Commit)
         .filter_map(|job| {
-            job.output_commit_oid
-                .as_ref()
-                .map(|commit_oid| ((job.ended_at, job.created_at), commit_oid.clone()))
+            job.state.output_commit_oid().map(|commit_oid| {
+                (
+                    (job.state.ended_at(), job.created_at),
+                    commit_oid.to_owned(),
+                )
+            })
         })
         .max_by_key(|(sort_key, _)| *sort_key)
         .map(|(_, commit_oid)| commit_oid)

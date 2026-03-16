@@ -304,9 +304,13 @@ where
                     .expect("report completion should include payload");
 
                 let mut completed_job = context.job.clone();
-                completed_job.outcome_class = Some(command.outcome_class);
-                completed_job.result_schema_version = Some(result_schema_version.clone());
-                completed_job.result_payload = Some(result_payload.clone());
+                completed_job.complete(
+                    command.outcome_class,
+                    chrono::Utc::now(),
+                    None,
+                    Some(result_schema_version.clone()),
+                    Some(result_payload.clone()),
+                );
 
                 let extracted =
                     extract_findings(&context.item, &completed_job, &context.convergences)?;
@@ -472,23 +476,23 @@ fn normalize_completion_command(
 }
 
 fn completed_job_matches_retry_command(job: &Job, command: &CompleteJobCommand) -> bool {
-    job.status == JobStatus::Completed
-        && job.outcome_class == Some(command.outcome_class)
-        && job.result_schema_version == command.result_schema_version
-        && job.result_payload == command.result_payload
-        && job.output_commit_oid == command.output_commit_oid
+    job.state.status() == JobStatus::Completed
+        && job.state.outcome_class() == Some(command.outcome_class)
+        && job.state.result_schema_version().map(ToOwned::to_owned) == command.result_schema_version
+        && job.state.result_payload().cloned() == command.result_payload
+        && job.state.output_commit_oid().map(ToOwned::to_owned) == command.output_commit_oid
 }
 
 fn completed_job_retry_allowed(job: &Job) -> bool {
-    job.status == JobStatus::Completed && !completed_job_uses_target_ref_hold(job)
+    job.state.status() == JobStatus::Completed && !completed_job_uses_target_ref_hold(job)
 }
 
 fn completed_job_uses_target_ref_hold(job: &Job) -> bool {
-    job.step_id == "validate_integrated" && job.outcome_class == Some(OutcomeClass::Clean)
+    job.step_id == "validate_integrated" && job.state.outcome_class() == Some(OutcomeClass::Clean)
 }
 
 fn validate_completion_context(context: &JobCompletionContext) -> Result<(), CompleteJobError> {
-    if !context.job.status.is_active() {
+    if !context.job.state.is_active() {
         return Err(UseCaseError::JobNotActive.into());
     }
 
@@ -512,7 +516,9 @@ fn desired_completion_approval_state(
     revision: &ItemRevision,
     job: &Job,
 ) -> Option<ApprovalState> {
-    if job.step_id != "validate_integrated" || job.outcome_class != Some(OutcomeClass::Clean) {
+    if job.step_id != "validate_integrated"
+        || job.state.outcome_class() != Some(OutcomeClass::Clean)
+    {
         return None;
     }
 
@@ -563,31 +569,15 @@ pub fn dispatch_job(
         semantic_attempt_no,
         retry_no: 0,
         supersedes_job_id: None,
-        status: JobStatus::Queued,
-        outcome_class: None,
         phase_kind: contract.phase_kind,
-        workspace_id: None,
         workspace_kind: contract.workspace_kind,
         execution_permission: contract.execution_permission,
         context_policy: contract.context_policy,
         phase_template_slug: template_slug,
-        phase_template_digest: None,
-        prompt_snapshot: None,
         job_input,
         output_artifact_kind: contract.output_artifact_kind,
-        output_commit_oid: None,
-        result_schema_version: None,
-        result_payload: None,
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
         created_at: chrono::Utc::now(),
-        started_at: None,
-        ended_at: None,
+        state: ingot_domain::job::JobState::Queued,
     })
 }
 
@@ -609,9 +599,9 @@ pub fn retry_job(
 
     ensure_no_active_execution(item.current_revision_id, jobs, convergences)?;
 
-    if !previous_job.status.is_terminal()
+    if !previous_job.state.is_terminal()
         || matches!(
-            previous_job.outcome_class,
+            previous_job.state.outcome_class(),
             Some(OutcomeClass::Clean | OutcomeClass::Findings)
         )
     {
@@ -663,31 +653,15 @@ pub fn retry_job(
         semantic_attempt_no: previous_job.semantic_attempt_no,
         retry_no,
         supersedes_job_id: Some(previous_job.id),
-        status: JobStatus::Queued,
-        outcome_class: None,
         phase_kind: contract.phase_kind,
-        workspace_id: None,
         workspace_kind: contract.workspace_kind,
         execution_permission: contract.execution_permission,
         context_policy: contract.context_policy,
         phase_template_slug: template_slug,
-        phase_template_digest: None,
-        prompt_snapshot: None,
         job_input,
         output_artifact_kind: contract.output_artifact_kind,
-        output_commit_oid: None,
-        result_schema_version: None,
-        result_payload: None,
-        agent_id: None,
-        process_pid: None,
-        lease_owner_id: None,
-        heartbeat_at: None,
-        lease_expires_at: None,
-        error_code: None,
-        error_message: None,
         created_at: chrono::Utc::now(),
-        started_at: None,
-        ended_at: None,
+        state: ingot_domain::job::JobState::Queued,
     })
 }
 
@@ -821,7 +795,7 @@ fn ensure_no_active_execution(
 ) -> Result<(), UseCaseError> {
     if jobs
         .iter()
-        .any(|job| job.item_revision_id == revision_id && job.status.is_active())
+        .any(|job| job.item_revision_id == revision_id && job.state.is_active())
     {
         return Err(UseCaseError::ActiveJobExists);
     }
@@ -869,12 +843,15 @@ fn successful_commit_oids(jobs: &[Job], revision: &ItemRevision) -> Vec<String> 
     let mut commit_jobs = jobs
         .iter()
         .filter(|job| job.item_revision_id == revision.id)
-        .filter(|job| job.status == JobStatus::Completed)
+        .filter(|job| job.state.status() == JobStatus::Completed)
         .filter(|job| job.output_artifact_kind == OutputArtifactKind::Commit)
         .filter_map(|job| {
-            job.output_commit_oid
-                .as_ref()
-                .map(|commit_oid| ((job.ended_at, job.created_at), commit_oid.clone()))
+            job.state.output_commit_oid().map(|commit_oid| {
+                (
+                    (job.state.ended_at(), job.created_at),
+                    commit_oid.to_owned(),
+                )
+            })
         })
         .collect::<Vec<_>>();
 
@@ -914,7 +891,9 @@ fn prepared_convergence_guard(
     job: &Job,
     convergences: &[Convergence],
 ) -> Result<Option<PreparedConvergenceGuard>, CompleteJobError> {
-    if job.step_id != "validate_integrated" || job.outcome_class != Some(OutcomeClass::Clean) {
+    if job.step_id != "validate_integrated"
+        || job.state.outcome_class() != Some(OutcomeClass::Clean)
+    {
         return Ok(None);
     }
 
@@ -1003,7 +982,7 @@ mod tests {
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
     use ingot_domain::item::Escalation;
     use ingot_domain::job::{
-        ContextPolicy, ExecutionPermission, JobStatus, OutputArtifactKind, PhaseKind,
+        ContextPolicy, ExecutionPermission, JobState, JobStatus, OutputArtifactKind, PhaseKind,
     };
     use ingot_domain::project::Project;
     use ingot_domain::workspace::WorkspaceKind;
@@ -1054,51 +1033,67 @@ mod tests {
         let revision = nil_revision();
 
         let mut author_initial = test_job("author_initial", OutputArtifactKind::Commit);
-        author_initial.status = JobStatus::Completed;
         author_initial.phase_kind = PhaseKind::Author;
         author_initial.workspace_kind = WorkspaceKind::Authoring;
         author_initial.execution_permission = ExecutionPermission::MayMutate;
-        author_initial.output_commit_oid = Some("commit-1".into());
-        author_initial.ended_at = Some(Utc::now());
+        author_initial.state = JobState::Completed {
+            assignment: author_initial.state.assignment().cloned(),
+            started_at: author_initial.state.started_at(),
+            outcome_class: OutcomeClass::Clean,
+            ended_at: Utc::now(),
+            output_commit_oid: Some("commit-1".into()),
+            result_schema_version: None,
+            result_payload: None,
+        };
 
         let mut review_incremental = test_job(
             "review_incremental_initial",
             OutputArtifactKind::ReviewReport,
         );
         review_incremental.id = JobId::from_uuid(Uuid::now_v7());
-        review_incremental.status = JobStatus::Completed;
         review_incremental.phase_kind = PhaseKind::Review;
         review_incremental.workspace_kind = WorkspaceKind::Review;
         review_incremental.execution_permission = ExecutionPermission::MustNotMutate;
-        review_incremental.outcome_class = Some(OutcomeClass::Findings);
-        review_incremental.result_schema_version = Some("review_report:v1".into());
-        review_incremental.result_payload = Some(json!({
-            "outcome": "findings",
-            "summary": "needs repair",
-            "review_subject": {
-                "base_commit_oid": "seed",
-                "head_commit_oid": "commit-1"
-            },
-            "overall_risk": "medium",
-            "findings": [{
-              "finding_key": "f1",
-              "code": "BUG",
-              "severity": "medium",
-              "summary": "repair",
-              "paths": ["src/lib.rs"],
-              "evidence": ["repair"]
-            }]
-        }));
-        review_incremental.ended_at = Some(Utc::now());
+        review_incremental.state = JobState::Completed {
+            assignment: review_incremental.state.assignment().cloned(),
+            started_at: review_incremental.state.started_at(),
+            outcome_class: OutcomeClass::Findings,
+            ended_at: Utc::now(),
+            output_commit_oid: None,
+            result_schema_version: Some("review_report:v1".into()),
+            result_payload: Some(json!({
+                "outcome": "findings",
+                "summary": "needs repair",
+                "review_subject": {
+                    "base_commit_oid": "seed",
+                    "head_commit_oid": "commit-1"
+                },
+                "overall_risk": "medium",
+                "findings": [{
+                  "finding_key": "f1",
+                  "code": "BUG",
+                  "severity": "medium",
+                  "summary": "repair",
+                  "paths": ["src/lib.rs"],
+                  "evidence": ["repair"]
+                }]
+            })),
+        };
 
         let mut repair_candidate = test_job("repair_candidate", OutputArtifactKind::Commit);
         repair_candidate.id = JobId::from_uuid(Uuid::now_v7());
-        repair_candidate.status = JobStatus::Completed;
         repair_candidate.phase_kind = PhaseKind::Author;
         repair_candidate.workspace_kind = WorkspaceKind::Authoring;
         repair_candidate.execution_permission = ExecutionPermission::MayMutate;
-        repair_candidate.output_commit_oid = Some("commit-2".into());
-        repair_candidate.ended_at = Some(Utc::now());
+        repair_candidate.state = JobState::Completed {
+            assignment: repair_candidate.state.assignment().cloned(),
+            started_at: repair_candidate.state.started_at(),
+            outcome_class: OutcomeClass::Clean,
+            ended_at: Utc::now(),
+            output_commit_oid: Some("commit-2".into()),
+            result_schema_version: None,
+            result_payload: None,
+        };
 
         let job = dispatch_job(
             &item,
@@ -1121,35 +1116,45 @@ mod tests {
         let revision = nil_revision();
 
         let mut repair_candidate = test_job("repair_candidate", OutputArtifactKind::Commit);
-        repair_candidate.status = JobStatus::Completed;
         repair_candidate.phase_kind = PhaseKind::Author;
         repair_candidate.workspace_kind = WorkspaceKind::Authoring;
         repair_candidate.execution_permission = ExecutionPermission::MayMutate;
-        repair_candidate.output_commit_oid = Some("commit-2".into());
-        repair_candidate.ended_at = Some(Utc::now());
+        repair_candidate.state = JobState::Completed {
+            assignment: repair_candidate.state.assignment().cloned(),
+            started_at: repair_candidate.state.started_at(),
+            outcome_class: OutcomeClass::Clean,
+            ended_at: Utc::now(),
+            output_commit_oid: Some("commit-2".into()),
+            result_schema_version: None,
+            result_payload: None,
+        };
 
         let mut review_incremental_repair = test_job(
             "review_incremental_repair",
             OutputArtifactKind::ReviewReport,
         );
         review_incremental_repair.id = JobId::from_uuid(Uuid::now_v7());
-        review_incremental_repair.status = JobStatus::Completed;
         review_incremental_repair.phase_kind = PhaseKind::Review;
         review_incremental_repair.workspace_kind = WorkspaceKind::Review;
         review_incremental_repair.execution_permission = ExecutionPermission::MustNotMutate;
-        review_incremental_repair.outcome_class = Some(OutcomeClass::Clean);
-        review_incremental_repair.result_schema_version = Some("review_report:v1".into());
-        review_incremental_repair.result_payload = Some(json!({
-            "outcome": "clean",
-            "summary": "incremental clean",
-            "review_subject": {
-                "base_commit_oid": "seed",
-                "head_commit_oid": "commit-2"
-            },
-            "overall_risk": "low",
-            "findings": []
-        }));
-        review_incremental_repair.ended_at = Some(Utc::now());
+        review_incremental_repair.state = JobState::Completed {
+            assignment: review_incremental_repair.state.assignment().cloned(),
+            started_at: review_incremental_repair.state.started_at(),
+            outcome_class: OutcomeClass::Clean,
+            ended_at: Utc::now(),
+            output_commit_oid: None,
+            result_schema_version: Some("review_report:v1".into()),
+            result_payload: Some(json!({
+                "outcome": "clean",
+                "summary": "incremental clean",
+                "review_subject": {
+                    "base_commit_oid": "seed",
+                    "head_commit_oid": "commit-2"
+                },
+                "overall_risk": "low",
+                "findings": []
+            })),
+        };
 
         let candidate_review_job = dispatch_job(
             &item,
@@ -1165,23 +1170,27 @@ mod tests {
         let mut review_candidate_repair =
             test_job("review_candidate_repair", OutputArtifactKind::ReviewReport);
         review_candidate_repair.id = JobId::from_uuid(Uuid::now_v7());
-        review_candidate_repair.status = JobStatus::Completed;
         review_candidate_repair.phase_kind = PhaseKind::Review;
         review_candidate_repair.workspace_kind = WorkspaceKind::Review;
         review_candidate_repair.execution_permission = ExecutionPermission::MustNotMutate;
-        review_candidate_repair.outcome_class = Some(OutcomeClass::Clean);
-        review_candidate_repair.result_schema_version = Some("review_report:v1".into());
-        review_candidate_repair.result_payload = Some(json!({
-            "outcome": "clean",
-            "summary": "candidate clean",
-            "review_subject": {
-                "base_commit_oid": "seed",
-                "head_commit_oid": "commit-2"
-            },
-            "overall_risk": "low",
-            "findings": []
-        }));
-        review_candidate_repair.ended_at = Some(Utc::now());
+        review_candidate_repair.state = JobState::Completed {
+            assignment: review_candidate_repair.state.assignment().cloned(),
+            started_at: review_candidate_repair.state.started_at(),
+            outcome_class: OutcomeClass::Clean,
+            ended_at: Utc::now(),
+            output_commit_oid: None,
+            result_schema_version: Some("review_report:v1".into()),
+            result_payload: Some(json!({
+                "outcome": "clean",
+                "summary": "candidate clean",
+                "review_subject": {
+                    "base_commit_oid": "seed",
+                    "head_commit_oid": "commit-2"
+                },
+                "overall_risk": "low",
+                "findings": []
+            })),
+        };
 
         let validation_job = dispatch_job(
             &item,
@@ -1234,7 +1243,7 @@ mod tests {
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
-        context.job.outcome_class = Some(OutcomeClass::Clean);
+        // outcome_class is derived from the command, not the job state
         context.convergences[0].input_target_commit_oid = Some("target".into());
         let repository = FakeRepository::new(context);
         let git = FakeGitPort::default();
@@ -1258,7 +1267,7 @@ mod tests {
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
-        context.job.outcome_class = Some(OutcomeClass::Clean);
+        // outcome_class is derived from the command, not the job state
         context.convergences.clear();
         let service = test_service(context);
 
@@ -1278,7 +1287,7 @@ mod tests {
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
-        context.job.outcome_class = Some(OutcomeClass::Clean);
+        // outcome_class is derived from the command, not the job state
         context.convergences[0].input_target_commit_oid = Some("target".into());
         let repository = FakeRepository::new(context);
         let git = FakeGitPort::default().with_hold_error(TargetRefHoldError::Stale);
@@ -1300,7 +1309,7 @@ mod tests {
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
-        context.job.outcome_class = Some(OutcomeClass::Clean);
+        // outcome_class is derived from the command, not the job state
         context.convergences[0].input_target_commit_oid = Some("target".into());
         let hold_active = Arc::new(AtomicBool::new(false));
         let hold_released = Arc::new(AtomicBool::new(false));
@@ -1327,7 +1336,7 @@ mod tests {
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
-        context.job.outcome_class = Some(OutcomeClass::Clean);
+        // outcome_class is derived from the command, not the job state
         context.convergences[0].input_target_commit_oid = Some("target".into());
         let hold_active = Arc::new(AtomicBool::new(false));
         let hold_released = Arc::new(AtomicBool::new(false));
@@ -1361,7 +1370,7 @@ mod tests {
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
-        context.job.outcome_class = Some(OutcomeClass::Clean);
+        // outcome_class is derived from the command, not the job state
         context.convergences[0].input_target_commit_oid = Some("target".into());
         let release_calls = Arc::new(AtomicUsize::new(0));
         let repository = FakeRepository::new(context)
@@ -1391,7 +1400,7 @@ mod tests {
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
-        context.job.outcome_class = Some(OutcomeClass::Clean);
+        // outcome_class is derived from the command, not the job state
         context.convergences[0].input_target_commit_oid = Some("target".into());
         let repository = FakeRepository::new(context);
         let git = FakeGitPort::default()
@@ -1422,21 +1431,26 @@ mod tests {
         let mut job = test_job("investigate_item", OutputArtifactKind::FindingReport);
         job.phase_kind = PhaseKind::Investigate;
         job.workspace_kind = WorkspaceKind::Review;
-        job.status = JobStatus::Completed;
-        job.outcome_class = Some(OutcomeClass::Findings);
-        job.result_schema_version = Some("finding_report:v1".into());
-        job.result_payload = Some(json!({
-            "outcome": "findings",
-            "summary": "Found issues",
-            "findings": [{
-                "finding_key": "f-1",
-                "code": "BUG001",
-                "severity": "high",
-                "summary": "first",
-                "paths": ["src/lib.rs"],
-                "evidence": ["broken"]
-            }]
-        }));
+        job.state = JobState::Completed {
+            assignment: job.state.assignment().cloned(),
+            started_at: job.state.started_at(),
+            outcome_class: OutcomeClass::Findings,
+            ended_at: Utc::now(),
+            output_commit_oid: None,
+            result_schema_version: Some("finding_report:v1".into()),
+            result_payload: Some(json!({
+                "outcome": "findings",
+                "summary": "Found issues",
+                "findings": [{
+                    "finding_key": "f-1",
+                    "code": "BUG001",
+                    "severity": "high",
+                    "summary": "first",
+                    "paths": ["src/lib.rs"],
+                    "evidence": ["broken"]
+                }]
+            })),
+        };
         let repository = FakeRepository::new(test_context(job)).with_completion_finding_count(1);
         let service = CompleteJobService::new(
             repository,
@@ -1457,21 +1471,26 @@ mod tests {
         let mut job = test_job("investigate_item", OutputArtifactKind::FindingReport);
         job.phase_kind = PhaseKind::Investigate;
         job.workspace_kind = WorkspaceKind::Review;
-        job.status = JobStatus::Completed;
-        job.outcome_class = Some(OutcomeClass::Findings);
-        job.result_schema_version = Some("finding_report:v1".into());
-        job.result_payload = Some(json!({
-            "outcome": "findings",
-            "summary": "Found issues",
-            "findings": [{
-                "finding_key": "f-1",
-                "code": "BUG001",
-                "severity": "high",
-                "summary": "first",
-                "paths": ["src/lib.rs"],
-                "evidence": ["broken"]
-            }]
-        }));
+        job.state = JobState::Completed {
+            assignment: job.state.assignment().cloned(),
+            started_at: job.state.started_at(),
+            outcome_class: OutcomeClass::Findings,
+            ended_at: Utc::now(),
+            output_commit_oid: None,
+            result_schema_version: Some("finding_report:v1".into()),
+            result_payload: Some(json!({
+                "outcome": "findings",
+                "summary": "Found issues",
+                "findings": [{
+                    "finding_key": "f-1",
+                    "code": "BUG001",
+                    "severity": "high",
+                    "summary": "first",
+                    "paths": ["src/lib.rs"],
+                    "evidence": ["broken"]
+                }]
+            })),
+        };
         let service = test_service(test_context(job));
         let mut mismatched_command = completed_finding_report_command();
         mismatched_command.result_payload = Some(json!({
@@ -1501,7 +1520,15 @@ mod tests {
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
-        context.job.status = JobStatus::Failed;
+        context.job.state = ingot_domain::job::JobState::Terminated {
+            terminal_status: ingot_domain::job::TerminalStatus::Failed,
+            assignment: context.job.state.assignment().cloned(),
+            started_at: context.job.state.started_at(),
+            outcome_class: None,
+            ended_at: Utc::now(),
+            error_code: None,
+            error_message: None,
+        };
         let service = test_service(context);
 
         let result = service
@@ -1525,21 +1552,26 @@ mod tests {
         let mut job = test_job("investigate_item", OutputArtifactKind::FindingReport);
         job.phase_kind = PhaseKind::Investigate;
         job.workspace_kind = WorkspaceKind::Review;
-        job.status = JobStatus::Completed;
-        job.outcome_class = Some(OutcomeClass::Findings);
-        job.result_schema_version = Some("finding_report:v1".into());
-        job.result_payload = Some(json!({
-            "outcome": "findings",
-            "summary": "Found issues",
-            "findings": [{
-                "finding_key": "f-1",
-                "code": "BUG001",
-                "severity": "high",
-                "summary": "first",
-                "paths": ["src/lib.rs"],
-                "evidence": ["broken"]
-            }]
-        }));
+        job.state = JobState::Completed {
+            assignment: job.state.assignment().cloned(),
+            started_at: job.state.started_at(),
+            outcome_class: OutcomeClass::Findings,
+            ended_at: Utc::now(),
+            output_commit_oid: None,
+            result_schema_version: Some("finding_report:v1".into()),
+            result_payload: Some(json!({
+                "outcome": "findings",
+                "summary": "Found issues",
+                "findings": [{
+                    "finding_key": "f-1",
+                    "code": "BUG001",
+                    "severity": "high",
+                    "summary": "first",
+                    "paths": ["src/lib.rs"],
+                    "evidence": ["broken"]
+                }]
+            })),
+        };
         let service = test_service(test_context(job));
 
         let result = service
@@ -1560,11 +1592,10 @@ mod tests {
 
     #[tokio::test]
     async fn completion_maps_transactional_revision_drift_to_protocol_violation() {
-        let mut context = test_context(test_job(
+        let context = test_context(test_job(
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
-        context.job.outcome_class = Some(OutcomeClass::Clean);
         let repository = FakeRepository::new(context)
             .with_apply_error(RepositoryError::Conflict("job_revision_stale".into()));
         let service = CompleteJobService::new(
@@ -1809,7 +1840,7 @@ mod tests {
         > + Send {
             let completed = {
                 let state = self.state.lock().expect("state lock");
-                (state.context.job.status == JobStatus::Completed).then(|| {
+                (state.context.job.state.status() == JobStatus::Completed).then(|| {
                     ingot_domain::ports::CompletedJobCompletion {
                         job: state.context.job.clone(),
                         finding_count: state.completion_finding_count,
@@ -1837,11 +1868,15 @@ mod tests {
                 if let Some(error) = state.apply_error.take() {
                     return Err(error);
                 }
-                state.context.job.status = JobStatus::Completed;
-                state.context.job.outcome_class = Some(mutation.outcome_class);
-                state.context.job.result_schema_version = mutation.result_schema_version.clone();
-                state.context.job.result_payload = mutation.result_payload.clone();
-                state.context.job.output_commit_oid = mutation.output_commit_oid.clone();
+                state.context.job.state = JobState::Completed {
+                    assignment: state.context.job.state.assignment().cloned(),
+                    started_at: state.context.job.state.started_at(),
+                    outcome_class: mutation.outcome_class,
+                    ended_at: chrono::Utc::now(),
+                    output_commit_oid: mutation.output_commit_oid.clone(),
+                    result_schema_version: mutation.result_schema_version.clone(),
+                    result_payload: mutation.result_payload.clone(),
+                };
                 if mutation.clear_item_escalation {
                     state.context.item.escalation = ingot_domain::item::Escalation::None;
                 }

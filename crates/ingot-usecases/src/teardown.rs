@@ -81,7 +81,7 @@ where
         .list_by_item(item_id)
         .await?
         .into_iter()
-        .filter(|job| job.item_revision_id == revision.id && job.status.is_active())
+        .filter(|job| job.item_revision_id == revision.id && job.state.is_active())
     {
         job_repo
             .finish_non_success(FinishJobNonSuccessParams {
@@ -103,7 +103,7 @@ where
             })?;
         result.cancelled_job_ids.push(job.id);
 
-        if let Some(workspace_id) = job.workspace_id {
+        if let Some(workspace_id) = job.state.workspace_id() {
             let mut workspace = workspace_repo.get(workspace_id).await?;
             workspace.current_job_id = None;
             if workspace.status == WorkspaceStatus::Busy {
@@ -258,11 +258,11 @@ mod tests {
 
         let result = teardown_revision_lane(
             &job_repo,
-            &FakeConvergenceRepository::default(),
-            &FakeQueueRepository::default(),
+            &FakeConvergenceRepository,
+            &FakeQueueRepository,
             &FakeWorkspaceRepository::default(),
-            &FakeGitOperationRepository::default(),
-            &FakeActivityRepository::default(),
+            &FakeGitOperationRepository,
+            &FakeActivityRepository,
             ProjectId::from_uuid(Uuid::nil()),
             revision.item_id,
             &revision,
@@ -282,11 +282,11 @@ mod tests {
 
         let result = teardown_revision_lane(
             &job_repo,
-            &FakeConvergenceRepository::default(),
-            &FakeQueueRepository::default(),
+            &FakeConvergenceRepository,
+            &FakeQueueRepository,
             &FakeWorkspaceRepository::default(),
-            &FakeGitOperationRepository::default(),
-            &FakeActivityRepository::default(),
+            &FakeGitOperationRepository,
+            &FakeActivityRepository,
             ProjectId::from_uuid(Uuid::nil()),
             revision.item_id,
             &revision,
@@ -310,11 +310,11 @@ mod tests {
 
         let result = teardown_revision_lane(
             &job_repo,
-            &FakeConvergenceRepository::default(),
-            &FakeQueueRepository::default(),
+            &FakeConvergenceRepository,
+            &FakeQueueRepository,
             &workspace_repo,
-            &FakeGitOperationRepository::default(),
-            &FakeActivityRepository::default(),
+            &FakeGitOperationRepository,
+            &FakeActivityRepository,
             job.project_id,
             job.item_id,
             &revision,
@@ -399,100 +399,79 @@ mod tests {
     }
 
     impl JobRepository for FakeJobRepository {
-        fn list_by_project(
+        async fn list_by_project(
             &self,
             _project_id: ProjectId,
-        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        ) -> Result<Vec<Job>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn list_by_revision(
+        async fn list_by_revision(
             &self,
             _revision_id: ItemRevisionId,
-        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        ) -> Result<Vec<Job>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn get(
-            &self,
-            _id: JobId,
-        ) -> impl std::future::Future<Output = Result<Job, RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn get(&self, _id: JobId) -> Result<Job, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn create(
-            &self,
-            _job: &Job,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn create(&self, _job: &Job) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn update(
-            &self,
-            _job: &Job,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn update(&self, _job: &Job) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn find_active_for_revision(
+        async fn find_active_for_revision(
             &self,
             _revision_id: ItemRevisionId,
-        ) -> impl std::future::Future<Output = Result<Option<Job>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Option<Job>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn list_by_item(
-            &self,
-            _item_id: ItemId,
-        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
+        async fn list_by_item(&self, _item_id: ItemId) -> Result<Vec<Job>, RepositoryError> {
             let jobs = self.state.lock().expect("job state lock").jobs.clone();
-            async move { Ok(jobs) }
+            Ok(jobs)
         }
 
-        fn list_queued(
-            &self,
-            _limit: u32,
-        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn list_queued(&self, _limit: u32) -> Result<Vec<Job>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn list_active(
-            &self,
-        ) -> impl std::future::Future<Output = Result<Vec<Job>, RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn list_active(&self) -> Result<Vec<Job>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn start_execution(
+        async fn start_execution(
             &self,
             _params: StartJobExecutionParams,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        ) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn heartbeat_execution(
+        async fn heartbeat_execution(
             &self,
             _job_id: JobId,
             _item_id: ItemId,
             _revision_id: ItemRevisionId,
             _lease_owner_id: &str,
             _lease_expires_at: chrono::DateTime<Utc>,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        ) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn finish_non_success(
+        async fn finish_non_success(
             &self,
             _params: FinishJobNonSuccessParams,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            let state = self.state.clone();
-            async move {
-                let mut state = state.lock().expect("job state lock");
-                if let Some(error) = state.finish_error.take() {
-                    return Err(error);
-                }
-                Ok(())
+        ) -> Result<(), RepositoryError> {
+            let mut state = self.state.lock().expect("job state lock");
+            if let Some(error) = state.finish_error.take() {
+                return Err(error);
             }
+            Ok(())
         }
     }
 
@@ -500,65 +479,48 @@ mod tests {
     struct FakeConvergenceRepository;
 
     impl ConvergenceRepository for FakeConvergenceRepository {
-        fn list_by_revision(
+        async fn list_by_revision(
             &self,
             _revision_id: ItemRevisionId,
-        ) -> impl std::future::Future<Output = Result<Vec<Convergence>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Vec<Convergence>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn get(
-            &self,
-            _id: ConvergenceId,
-        ) -> impl std::future::Future<Output = Result<Convergence, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        async fn get(&self, _id: ConvergenceId) -> Result<Convergence, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn create(
-            &self,
-            _convergence: &Convergence,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn create(&self, _convergence: &Convergence) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn update(
-            &self,
-            _convergence: &Convergence,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { Ok(()) }
+        async fn update(&self, _convergence: &Convergence) -> Result<(), RepositoryError> {
+            Ok(())
         }
 
-        fn find_active_for_revision(
+        async fn find_active_for_revision(
             &self,
             _revision_id: ItemRevisionId,
-        ) -> impl std::future::Future<Output = Result<Option<Convergence>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Option<Convergence>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn find_prepared_for_revision(
+        async fn find_prepared_for_revision(
             &self,
             _revision_id: ItemRevisionId,
-        ) -> impl std::future::Future<Output = Result<Option<Convergence>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Option<Convergence>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn list_by_item(
+        async fn list_by_item(
             &self,
             _item_id: ItemId,
-        ) -> impl std::future::Future<Output = Result<Vec<Convergence>, RepositoryError>> + Send
-        {
-            async { Ok(vec![]) }
+        ) -> Result<Vec<Convergence>, RepositoryError> {
+            Ok(vec![])
         }
 
-        fn list_active(
-            &self,
-        ) -> impl std::future::Future<Output = Result<Vec<Convergence>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        async fn list_active(&self) -> Result<Vec<Convergence>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
     }
 
@@ -566,80 +528,64 @@ mod tests {
     struct FakeQueueRepository;
 
     impl ConvergenceQueueRepository for FakeQueueRepository {
-        fn list_by_item(
+        async fn list_by_item(
             &self,
             _item_id: ItemId,
-        ) -> impl std::future::Future<Output = Result<Vec<ConvergenceQueueEntry>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Vec<ConvergenceQueueEntry>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn get(
+        async fn get(
             &self,
             _id: ConvergenceQueueEntryId,
-        ) -> impl std::future::Future<Output = Result<ConvergenceQueueEntry, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<ConvergenceQueueEntry, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn find_active_for_revision(
+        async fn find_active_for_revision(
             &self,
             _revision_id: ItemRevisionId,
-        ) -> impl std::future::Future<
-            Output = Result<Option<ConvergenceQueueEntry>, RepositoryError>,
-        > + Send {
-            async { Ok(None) }
+        ) -> Result<Option<ConvergenceQueueEntry>, RepositoryError> {
+            Ok(None)
         }
 
-        fn find_head(
+        async fn find_head(
             &self,
             _project_id: ProjectId,
             _target_ref: &str,
-        ) -> impl std::future::Future<
-            Output = Result<Option<ConvergenceQueueEntry>, RepositoryError>,
-        > + Send {
-            async { unreachable!("unused in test") }
+        ) -> Result<Option<ConvergenceQueueEntry>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn find_next_queued(
+        async fn find_next_queued(
             &self,
             _project_id: ProjectId,
             _target_ref: &str,
-        ) -> impl std::future::Future<
-            Output = Result<Option<ConvergenceQueueEntry>, RepositoryError>,
-        > + Send {
-            async { unreachable!("unused in test") }
+        ) -> Result<Option<ConvergenceQueueEntry>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn create(
-            &self,
-            _entry: &ConvergenceQueueEntry,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn create(&self, _entry: &ConvergenceQueueEntry) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn list_active_by_project(
+        async fn list_active_by_project(
             &self,
             _project_id: ProjectId,
-        ) -> impl std::future::Future<Output = Result<Vec<ConvergenceQueueEntry>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Vec<ConvergenceQueueEntry>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn list_active_for_lane(
+        async fn list_active_for_lane(
             &self,
             _project_id: ProjectId,
             _target_ref: &str,
-        ) -> impl std::future::Future<Output = Result<Vec<ConvergenceQueueEntry>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Vec<ConvergenceQueueEntry>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn update(
-            &self,
-            _entry: &ConvergenceQueueEntry,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { Ok(()) }
+        async fn update(&self, _entry: &ConvergenceQueueEntry) -> Result<(), RepositoryError> {
+            Ok(())
         }
     }
 
@@ -674,62 +620,44 @@ mod tests {
     }
 
     impl WorkspaceRepository for FakeWorkspaceRepository {
-        fn list_by_project(
+        async fn list_by_project(
             &self,
             _project_id: ProjectId,
-        ) -> impl std::future::Future<Output = Result<Vec<Workspace>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Vec<Workspace>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn get(
-            &self,
-            _id: WorkspaceId,
-        ) -> impl std::future::Future<Output = Result<Workspace, RepositoryError>> + Send {
+        async fn get(&self, _id: WorkspaceId) -> Result<Workspace, RepositoryError> {
             let workspace = self
                 .state
                 .lock()
                 .expect("workspace state lock")
                 .workspace
                 .clone();
-            async move { workspace.ok_or(RepositoryError::NotFound) }
+            workspace.ok_or(RepositoryError::NotFound)
         }
 
-        fn create(
-            &self,
-            _workspace: &Workspace,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn create(&self, _workspace: &Workspace) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn update(
-            &self,
-            workspace: &Workspace,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            let state = self.state.clone();
+        async fn update(&self, workspace: &Workspace) -> Result<(), RepositoryError> {
             let workspace = workspace.clone();
-            async move {
-                let mut state = state.lock().expect("workspace state lock");
-                state.updated = Some(workspace.clone());
-                state.workspace = Some(workspace);
-                Ok(())
-            }
+            let mut state = self.state.lock().expect("workspace state lock");
+            state.updated = Some(workspace.clone());
+            state.workspace = Some(workspace);
+            Ok(())
         }
 
-        fn find_authoring_for_revision(
+        async fn find_authoring_for_revision(
             &self,
             _revision_id: ItemRevisionId,
-        ) -> impl std::future::Future<Output = Result<Option<Workspace>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Option<Workspace>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn list_by_item(
-            &self,
-            _item_id: ItemId,
-        ) -> impl std::future::Future<Output = Result<Vec<Workspace>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        async fn list_by_item(&self, _item_id: ItemId) -> Result<Vec<Workspace>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
     }
 
@@ -737,25 +665,16 @@ mod tests {
     struct FakeGitOperationRepository;
 
     impl GitOperationRepository for FakeGitOperationRepository {
-        fn create(
-            &self,
-            _operation: &GitOperation,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { unreachable!("unused in test") }
+        async fn create(&self, _operation: &GitOperation) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
-        fn update(
-            &self,
-            _operation: &GitOperation,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { Ok(()) }
+        async fn update(&self, _operation: &GitOperation) -> Result<(), RepositoryError> {
+            Ok(())
         }
 
-        fn find_unresolved(
-            &self,
-        ) -> impl std::future::Future<Output = Result<Vec<GitOperation>, RepositoryError>> + Send
-        {
-            async { Ok(vec![]) }
+        async fn find_unresolved(&self) -> Result<Vec<GitOperation>, RepositoryError> {
+            Ok(vec![])
         }
     }
 
@@ -763,21 +682,17 @@ mod tests {
     struct FakeActivityRepository;
 
     impl ActivityRepository for FakeActivityRepository {
-        fn append(
-            &self,
-            _activity: &Activity,
-        ) -> impl std::future::Future<Output = Result<(), RepositoryError>> + Send {
-            async { Ok(()) }
+        async fn append(&self, _activity: &Activity) -> Result<(), RepositoryError> {
+            Ok(())
         }
 
-        fn list_by_project(
+        async fn list_by_project(
             &self,
             _project_id: ProjectId,
             _limit: u32,
             _offset: u32,
-        ) -> impl std::future::Future<Output = Result<Vec<Activity>, RepositoryError>> + Send
-        {
-            async { unreachable!("unused in test") }
+        ) -> Result<Vec<Activity>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
     }
 }

@@ -68,10 +68,10 @@ pub(super) async fn assign_job(
     let job_id = parse_id::<JobId>(&job_id, "job")?;
     let agent_id = parse_id::<AgentId>(&request.agent_id, "agent")?;
     let mut job = state.db.get_job(job_id).await.map_err(repo_to_internal)?;
-    if job.status == JobStatus::Assigned {
+    if job.state.status() == JobStatus::Assigned {
         return Ok(Json(job));
     }
-    if job.status != JobStatus::Queued {
+    if job.state.status() != JobStatus::Queued {
         return Err(ApiError::Conflict {
             code: "job_not_assignable",
             message: "Only queued jobs can be assigned".into(),
@@ -115,9 +115,7 @@ pub(super) async fn assign_job(
         .await;
     let workspace = ensure_authoring_workspace(&state, &project, &revision, &job).await?;
 
-    job.status = JobStatus::Assigned;
-    job.workspace_id = Some(workspace.id);
-    job.agent_id = Some(agent.id);
+    job.assign(JobAssignment::new(workspace.id).with_agent(agent.id));
     state.db.update_job(&job).await.map_err(repo_to_internal)?;
 
     Ok(Json(job))
@@ -130,7 +128,7 @@ pub(super) async fn start_job(
 ) -> Result<Json<Job>, ApiError> {
     let job_id = parse_id::<JobId>(&job_id, "job")?;
     let mut job = state.db.get_job(job_id).await.map_err(repo_to_internal)?;
-    if job.status == JobStatus::Running {
+    if job.state.status() == JobStatus::Running {
         return Ok(Json(job));
     }
     let item = state.db.get_item(job.item_id).await.map_err(repo_to_item)?;
@@ -146,8 +144,8 @@ pub(super) async fn start_job(
             job_id: job.id,
             item_id: item.id,
             expected_item_revision_id: job.item_revision_id,
-            workspace_id: job.workspace_id,
-            agent_id: job.agent_id,
+            workspace_id: job.state.workspace_id(),
+            agent_id: job.state.agent_id(),
             lease_owner_id: request.lease_owner_id.clone(),
             process_pid: request.process_pid,
             lease_expires_at,
@@ -246,7 +244,7 @@ pub(super) async fn complete_job(
         ActivityEventType::JobCompleted,
         "job",
         job.id,
-        serde_json::json!({ "item_id": job.item_id, "outcome": job.outcome_class }),
+        serde_json::json!({ "item_id": job.item_id, "outcome": job.state.outcome_class() }),
     )
     .await?;
     if prior_item.escalation.is_escalated()
@@ -264,7 +262,7 @@ pub(super) async fn complete_job(
         .await?;
     }
     if job.step_id == "validate_integrated"
-        && job.outcome_class == Some(OutcomeClass::Clean)
+        && job.state.outcome_class() == Some(OutcomeClass::Clean)
         && item.approval_state == ApprovalState::Pending
     {
         append_activity(

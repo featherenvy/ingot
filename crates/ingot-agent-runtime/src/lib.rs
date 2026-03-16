@@ -22,7 +22,10 @@ use ingot_domain::ids::{GitOperationId, WorkspaceId};
 use ingot_domain::item::{
     ApprovalState, DoneReason, Escalation, EscalationReason, Lifecycle, ResolutionSource,
 };
-use ingot_domain::job::{ExecutionPermission, Job, JobStatus, OutcomeClass, OutputArtifactKind};
+use ingot_domain::job::{
+    ExecutionPermission, Job, JobAssignment, JobState, JobStatus, OutcomeClass, OutputArtifactKind,
+    PhaseKind,
+};
 use ingot_domain::ports::{JobCompletionMutation, ProjectMutationLockPort, RepositoryError};
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
@@ -540,7 +543,7 @@ impl JobDispatcher {
                     }
                     Err(error) => {
                         let current_job = self.db.get_job(prepared.job.id).await?;
-                        if current_job.status == JobStatus::Cancelled {
+                        if current_job.state.status() == JobStatus::Cancelled {
                             self.finalize_workspace_after_failure(&prepared).await?;
                             info!(
                                 job_id = %prepared.job.id,
@@ -607,7 +610,7 @@ impl JobDispatcher {
         let active_jobs = self.db.list_active_jobs().await?;
         let mut made_progress = false;
         for job in active_jobs {
-            match job.status {
+            match job.state.status() {
                 JobStatus::Assigned => {
                     self.reconcile_assigned_job(job).await?;
                     made_progress = true;
@@ -820,22 +823,21 @@ impl JobDispatcher {
                 RuntimeError::InvalidState("reconciled create_job_commit missing commit oid".into())
             })?;
 
-        if !matches!(
-            job.status,
-            JobStatus::Queued | JobStatus::Assigned | JobStatus::Running
-        ) {
+        if !job.state.is_active() {
             return Ok(());
         }
 
-        job.status = JobStatus::Completed;
-        job.outcome_class = Some(OutcomeClass::Clean);
-        job.output_commit_oid = Some(commit_oid.clone());
-        job.error_code = None;
-        job.error_message = None;
-        job.ended_at.get_or_insert_with(Utc::now);
+        let ended_at = job.state.ended_at().unwrap_or_else(Utc::now);
+        job.complete(
+            OutcomeClass::Clean,
+            ended_at,
+            Some(commit_oid.clone()),
+            None,
+            None,
+        );
         self.db.update_job(&job).await?;
 
-        if let Some(workspace_id) = operation.workspace_id.or(job.workspace_id) {
+        if let Some(workspace_id) = operation.workspace_id.or(job.state.workspace_id()) {
             let mut workspace = self.db.get_workspace(workspace_id).await?;
             workspace.head_commit_oid = Some(commit_oid);
             workspace.current_job_id = None;
@@ -908,24 +910,20 @@ impl JobDispatcher {
         if item.current_revision_id == convergence.item_revision_id {
             if !item.lifecycle.is_done() {
                 let revision = self.db.get_revision(item.current_revision_id).await?;
-                item.lifecycle = Lifecycle::Done {
-                    reason: DoneReason::Completed,
-                    source: match revision.approval_policy {
-                        ingot_domain::revision::ApprovalPolicy::Required => {
-                            ResolutionSource::ApprovalCommand
-                        }
-                        ingot_domain::revision::ApprovalPolicy::NotRequired => {
-                            ResolutionSource::SystemCommand
-                        }
-                    },
-                    closed_at: Utc::now(),
-                };
-                item.approval_state = match revision.approval_policy {
-                    ingot_domain::revision::ApprovalPolicy::Required => ApprovalState::Approved,
+                let (resolution_source, approval_state) = match revision.approval_policy {
+                    ingot_domain::revision::ApprovalPolicy::Required => {
+                        (ResolutionSource::ApprovalCommand, ApprovalState::Approved)
+                    }
                     ingot_domain::revision::ApprovalPolicy::NotRequired => {
-                        ApprovalState::NotRequired
+                        (ResolutionSource::SystemCommand, ApprovalState::NotRequired)
                     }
                 };
+                item.lifecycle = Lifecycle::Done {
+                    reason: DoneReason::Completed,
+                    source: resolution_source,
+                    closed_at: Utc::now(),
+                };
+                item.approval_state = approval_state;
             }
             item.escalation = Escalation::None;
             item.updated_at = Utc::now();
@@ -1067,19 +1065,12 @@ impl JobDispatcher {
             .acquire_project_mutation(job.project_id)
             .await;
         let mut job = self.db.get_job(job.id).await?;
-        if job.status != JobStatus::Assigned {
+        if job.state.status() != JobStatus::Assigned {
             return Ok(());
         }
 
-        let workspace_id = job.workspace_id;
-        job.status = JobStatus::Queued;
-        job.workspace_id = None;
-        job.agent_id = None;
-        job.process_pid = None;
-        job.lease_owner_id = None;
-        job.heartbeat_at = None;
-        job.lease_expires_at = None;
-        job.started_at = None;
+        let workspace_id = job.state.workspace_id();
+        job.state = JobState::Queued;
         self.db.update_job(&job).await?;
 
         if let Some(workspace_id) = workspace_id {
@@ -1097,10 +1088,11 @@ impl JobDispatcher {
 
     async fn reconcile_running_job(&self, job: Job) -> Result<(), RuntimeError> {
         let expired = job
-            .lease_expires_at
+            .state
+            .lease_expires_at()
             .map(|lease| lease <= Utc::now())
             .unwrap_or(true);
-        let foreign_owner = job.lease_owner_id.as_deref() != Some(self.lease_owner_id.as_str());
+        let foreign_owner = job.state.lease_owner_id() != Some(self.lease_owner_id.as_str());
         if !expired && !foreign_owner {
             return Ok(());
         }
@@ -1110,7 +1102,7 @@ impl JobDispatcher {
             .acquire_project_mutation(job.project_id)
             .await;
         let job = self.db.get_job(job.id).await?;
-        if job.status != JobStatus::Running {
+        if job.state.status() != JobStatus::Running {
             return Ok(());
         }
         let item = self.db.get_item(job.item_id).await?;
@@ -1127,7 +1119,7 @@ impl JobDispatcher {
             })
             .await?;
 
-        if let Some(workspace_id) = job.workspace_id {
+        if let Some(workspace_id) = job.state.workspace_id() {
             let mut workspace = self.db.get_workspace(workspace_id).await?;
             workspace.current_job_id = None;
             workspace.status = WorkspaceStatus::Stale;
@@ -1365,7 +1357,7 @@ impl JobDispatcher {
                 }
                 _ = ticker.tick() => {
                     match self.db.get_job(prepared.job.id).await {
-                        Ok(job) if job.status == JobStatus::Cancelled => {
+                        Ok(job) if job.state.status() == JobStatus::Cancelled => {
                             handle.abort();
                             info!(job_id = %prepared.job.id, "cancelling running job after operator request");
                             return Err(AgentError::ProcessError("job cancelled".into()));
@@ -1428,7 +1420,7 @@ impl JobDispatcher {
             .await;
 
         let mut job = self.db.get_job(queued_job.id).await?;
-        if job.status != JobStatus::Queued || !is_supported_runtime_job(&job) {
+        if job.state.status() != JobStatus::Queued || !is_supported_runtime_job(&job) {
             return Ok(None);
         }
 
@@ -1478,12 +1470,12 @@ impl JobDispatcher {
         let prompt = self
             .assemble_prompt(&job, &item, &revision, template)
             .await?;
-        job.workspace_id = Some(workspace.id);
-        job.agent_id = Some(agent.id);
-        job.prompt_snapshot = Some(prompt.clone());
-        job.phase_template_digest = Some(template_digest(template));
-        job.error_code = None;
-        job.error_message = None;
+        job.assign(
+            JobAssignment::new(workspace.id)
+                .with_agent(agent.id)
+                .with_prompt_snapshot(prompt.clone())
+                .with_phase_template_digest(template_digest(template)),
+        );
         self.db.update_job(&job).await?;
 
         info!(
@@ -1556,8 +1548,11 @@ impl JobDispatcher {
                     workspace_exists,
                 ))
             }
-            (WorkspaceKind::Integration, ExecutionPermission::MustNotMutate) => {
-                let workspace_id = job.workspace_id.ok_or_else(|| {
+            (
+                WorkspaceKind::Integration,
+                ExecutionPermission::MustNotMutate | ExecutionPermission::DaemonOnly,
+            ) => {
+                let workspace_id = job.state.workspace_id().ok_or_else(|| {
                     RuntimeError::InvalidState(
                         "integration jobs require a provisioned integration workspace".into(),
                     )
@@ -1689,10 +1684,10 @@ impl JobDispatcher {
             let latest_closure_findings_job = jobs
                 .iter()
                 .filter(|candidate| candidate.item_revision_id == revision.id)
-                .filter(|candidate| candidate.status.is_terminal())
-                .filter(|candidate| candidate.outcome_class == Some(OutcomeClass::Findings))
+                .filter(|candidate| candidate.state.status().is_terminal())
+                .filter(|candidate| candidate.state.outcome_class() == Some(OutcomeClass::Findings))
                 .filter(|candidate| is_closure_relevant_job(candidate))
-                .max_by_key(|candidate| (candidate.ended_at, candidate.created_at));
+                .max_by_key(|candidate| (candidate.state.ended_at(), candidate.created_at));
 
             if let Some(latest_job) = latest_closure_findings_job {
                 let scoped_findings = findings
@@ -1771,7 +1766,7 @@ impl JobDispatcher {
         response: AgentResponse,
     ) -> Result<(), RuntimeError> {
         let current_job = self.db.get_job(prepared.job.id).await?;
-        if current_job.status == JobStatus::Cancelled {
+        if current_job.state.status() == JobStatus::Cancelled {
             self.finalize_workspace_after_failure(&prepared).await?;
             info!(job_id = %prepared.job.id, "job was cancelled while subprocess was running");
             return Ok(());
@@ -2568,7 +2563,7 @@ impl JobDispatcher {
                 .max_by_key(|job| {
                     (
                         (job.semantic_attempt_no, job.retry_no),
-                        job.ended_at,
+                        job.state.ended_at(),
                         job.created_at,
                     )
                 });
@@ -2578,7 +2573,9 @@ impl JobDispatcher {
                 validation_job.supersedes_job_id = Some(latest_validate_job.id);
             }
         }
-        validation_job.workspace_id = convergence.integration_workspace_id;
+        if let Some(integration_workspace_id) = convergence.integration_workspace_id {
+            validation_job.assign(JobAssignment::new(integration_workspace_id));
+        }
         self.db.create_job(&validation_job).await?;
         self.append_activity(
             project.id,
@@ -2608,14 +2605,15 @@ impl JobDispatcher {
     ) -> Result<CheckoutSyncStatus, RuntimeError> {
         let mut item = self.db.get_item(item_id).await?;
         let status = checkout_sync_status(Path::new(&project.path), &revision.target_ref).await?;
+        let checkout_sync_blocked = matches!(
+            item.escalation,
+            Escalation::OperatorRequired {
+                reason: EscalationReason::CheckoutSyncBlocked
+            }
+        );
         match &status {
             CheckoutSyncStatus::Ready => {
-                if matches!(
-                    item.escalation,
-                    Escalation::OperatorRequired {
-                        reason: EscalationReason::CheckoutSyncBlocked
-                    }
-                ) {
+                if checkout_sync_blocked {
                     item.escalation = Escalation::None;
                     item.updated_at = Utc::now();
                     self.db.update_item(&item).await?;
@@ -2638,12 +2636,7 @@ impl JobDispatcher {
                 }
             }
             CheckoutSyncStatus::Blocked { message, .. } => {
-                if !matches!(
-                    item.escalation,
-                    Escalation::OperatorRequired {
-                        reason: EscalationReason::CheckoutSyncBlocked
-                    }
-                ) {
+                if !checkout_sync_blocked {
                     item.escalation = Escalation::OperatorRequired {
                         reason: EscalationReason::CheckoutSyncBlocked,
                     };
@@ -2928,9 +2921,105 @@ impl JobDispatcher {
         if let Some(job) = result {
             info!(job_id = %job.id, step_id = %job.step_id, item_id = %item.id, "auto-dispatched review");
             Ok(true)
+        } else if let Some(job) = self
+            .auto_dispatch_projected_validation_job(
+                project,
+                &item,
+                &revision,
+                &jobs,
+                &findings,
+                &convergences,
+            )
+            .await?
+        {
+            info!(job_id = %job.id, step_id = %job.step_id, item_id = %item.id, "auto-dispatched validation");
+            Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    async fn auto_dispatch_projected_validation_job(
+        &self,
+        project: &Project,
+        item: &ingot_domain::item::Item,
+        revision: &ItemRevision,
+        jobs: &[Job],
+        findings: &[ingot_domain::finding::Finding],
+        convergences: &[Convergence],
+    ) -> Result<Option<Job>, RuntimeError> {
+        let evaluation = Evaluator::new().evaluate(item, revision, jobs, findings, convergences);
+        let Some(step_id) = evaluation.dispatchable_step_id.as_deref() else {
+            return Ok(None);
+        };
+        if !is_closure_relevant_validate_step(step_id) {
+            return Ok(None);
+        }
+
+        let mut job = dispatch_job(
+            item,
+            revision,
+            jobs,
+            findings,
+            convergences,
+            DispatchJobCommand {
+                step_id: Some(step_id.to_string()),
+            },
+        )
+        .map_err(|error| {
+            RuntimeError::InvalidState(format!("failed to auto-dispatch validation: {error}"))
+        })?;
+
+        if ingot_usecases::dispatch::should_fill_candidate_subject_from_workspace(&job.step_id) {
+            let authoring_workspace = self
+                .db
+                .find_authoring_workspace_for_revision(revision.id)
+                .await?;
+            let base = job
+                .job_input
+                .base_commit_oid()
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    ingot_usecases::dispatch::effective_authoring_base_commit_oid(
+                        revision,
+                        authoring_workspace.as_ref(),
+                    )
+                });
+            let head = job
+                .job_input
+                .head_commit_oid()
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    ingot_usecases::dispatch::current_authoring_head_for_revision_with_workspace(
+                        revision,
+                        jobs,
+                        authoring_workspace.as_ref(),
+                    )
+                });
+            match (base, head) {
+                (Some(base), Some(head)) => {
+                    job.job_input = ingot_domain::job::JobInput::candidate_subject(base, head);
+                }
+                _ => {
+                    return Err(RuntimeError::InvalidState(format!(
+                        "failed to auto-dispatch validation: incomplete candidate subject for {}",
+                        job.step_id
+                    )));
+                }
+            }
+        }
+
+        self.db.create_job(&job).await?;
+        self.append_activity(
+            project.id,
+            ActivityEventType::JobDispatched,
+            "job",
+            job.id.to_string(),
+            serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
+        )
+        .await?;
+
+        Ok(Some(job))
     }
 
     async fn fail_run(
@@ -3344,6 +3433,10 @@ fn is_supported_runtime_job(job: &Job) -> bool {
             OutputArtifactKind::ReviewReport
                 | OutputArtifactKind::ValidationReport
                 | OutputArtifactKind::FindingReport,
+        ) | (
+            WorkspaceKind::Authoring | WorkspaceKind::Integration,
+            ExecutionPermission::DaemonOnly,
+            OutputArtifactKind::ValidationReport,
         )
     )
 }
@@ -3363,8 +3456,17 @@ fn supports_job(agent: &Agent, job: &Job) -> bool {
         ExecutionPermission::MustNotMutate => {
             agent.capabilities.contains(&AgentCapability::ReadOnlyJobs)
         }
-        ExecutionPermission::DaemonOnly => false,
+        ExecutionPermission::DaemonOnly => {
+            agent.capabilities.contains(&AgentCapability::ReadOnlyJobs)
+        }
     }
+}
+
+fn is_closure_relevant_validate_step(step_id: &str) -> bool {
+    step::find_step(step_id).is_some_and(|contract| {
+        contract.phase_kind == PhaseKind::Validate
+            && contract.closure_relevance == ingot_workflow::ClosureRelevance::ClosureRelevant
+    })
 }
 
 fn built_in_template(template_slug: &str, step_id: &str) -> &'static str {

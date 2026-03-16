@@ -43,6 +43,35 @@ impl PersistFixture for (Item, ItemRevision) {
 
 impl PersistFixture for Job {
     async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
+        // Auto-create workspace if the job state references one that may not exist
+        if let Some(workspace_id) = self.state.workspace_id() {
+            if db.get_workspace(workspace_id).await.is_err() {
+                let workspace_is_active = self.state.is_active();
+                let workspace = Workspace {
+                    id: workspace_id,
+                    project_id: self.project_id,
+                    kind: self.workspace_kind,
+                    status: if workspace_is_active {
+                        ingot_domain::workspace::WorkspaceStatus::Busy
+                    } else {
+                        ingot_domain::workspace::WorkspaceStatus::Ready
+                    },
+                    retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
+                    strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
+                    created_for_revision_id: Some(self.item_revision_id),
+                    parent_workspace_id: None,
+                    path: "/tmp/test-workspace".into(),
+                    base_commit_oid: None,
+                    head_commit_oid: None,
+                    workspace_ref: None,
+                    target_ref: None,
+                    current_job_id: workspace_is_active.then_some(self.id),
+                    updated_at: self.created_at,
+                    created_at: self.created_at,
+                };
+                db.create_workspace(&workspace).await?;
+            }
+        }
         db.create_job(&self).await?;
         Ok(self)
     }
@@ -66,5 +95,59 @@ impl PersistFixture for Finding {
     async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
         db.create_finding(&self).await?;
         Ok(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ingot_domain::job::JobStatus;
+    use ingot_domain::workspace::WorkspaceStatus;
+    use ingot_test_support::fixtures::{ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder};
+    use ingot_test_support::sqlite::temp_db_path;
+
+    use super::*;
+
+    async fn migrated_test_db(prefix: &str) -> Database {
+        let path = temp_db_path(prefix);
+        let db = Database::connect(&path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        db
+    }
+
+    #[tokio::test]
+    async fn persisting_terminal_job_does_not_create_busy_current_workspace() {
+        let db = migrated_test_db("ingot-store-fixture").await;
+
+        let project = ProjectBuilder::new("/tmp/test")
+            .name("Test")
+            .build()
+            .persist(&db)
+            .await
+            .expect("create project");
+        let revision = RevisionBuilder::new(ingot_domain::ids::ItemId::new()).build();
+        let item = ItemBuilder::new(project.id, revision.id)
+            .id(revision.item_id)
+            .build();
+        let (item, revision) = (item, revision)
+            .persist(&db)
+            .await
+            .expect("create item with revision");
+
+        let workspace_id = ingot_domain::ids::WorkspaceId::new();
+        let job = JobBuilder::new(project.id, item.id, revision.id, "author_initial")
+            .workspace_id(workspace_id)
+            .status(JobStatus::Completed)
+            .build()
+            .persist(&db)
+            .await
+            .expect("persist terminal job");
+
+        let workspace = db
+            .get_workspace(workspace_id)
+            .await
+            .expect("auto-created workspace");
+        assert_eq!(job.state.workspace_id(), Some(workspace.id));
+        assert_eq!(workspace.status, WorkspaceStatus::Ready);
+        assert_eq!(workspace.current_job_id, None);
     }
 }

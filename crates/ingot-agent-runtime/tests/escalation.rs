@@ -130,7 +130,7 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
         .iter()
         .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
         .expect("auto-dispatched review job");
-    assert_eq!(review_job.status, JobStatus::Queued);
+    assert_eq!(review_job.state.status(), JobStatus::Queued);
 
     let activity =
         h.db.list_activity_by_project(h.project.id, 20, 0)

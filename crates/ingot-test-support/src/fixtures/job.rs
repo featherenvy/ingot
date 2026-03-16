@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use ingot_domain::ids;
 use ingot_domain::job::{
-    ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
-    PhaseKind,
+    ContextPolicy, ExecutionPermission, Job, JobAssignment, JobInput, JobLease, JobState,
+    JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind, TerminalStatus,
 };
 use ingot_domain::workspace::WorkspaceKind;
 
@@ -214,6 +214,62 @@ impl JobBuilder {
     }
 
     pub fn build(self) -> Job {
+        let assignment = self.workspace_id.map(|workspace_id| JobAssignment {
+            workspace_id,
+            agent_id: self.agent_id,
+            prompt_snapshot: self.prompt_snapshot,
+            phase_template_digest: self.phase_template_digest,
+        });
+
+        let state = match self.status {
+            JobStatus::Queued => JobState::Queued,
+            JobStatus::Assigned => match assignment {
+                Some(a) => JobState::Assigned(a),
+                None => JobState::Queued,
+            },
+            JobStatus::Running => {
+                let lease_owner_id = self.lease_owner_id.unwrap_or_else(|| "test".into());
+                let assignment = assignment.unwrap_or_else(|| JobAssignment {
+                    workspace_id: ids::WorkspaceId::new(),
+                    agent_id: self.agent_id,
+                    prompt_snapshot: None,
+                    phase_template_digest: None,
+                });
+                JobState::Running {
+                    assignment,
+                    lease: JobLease {
+                        process_pid: self.process_pid,
+                        lease_owner_id,
+                        heartbeat_at: self.heartbeat_at.unwrap_or_else(Utc::now),
+                        lease_expires_at: self.lease_expires_at.unwrap_or_else(Utc::now),
+                        started_at: self.started_at.unwrap_or_else(Utc::now),
+                    },
+                }
+            }
+            JobStatus::Completed => JobState::Completed {
+                assignment,
+                started_at: self.started_at,
+                outcome_class: self.outcome_class.unwrap_or(OutcomeClass::Clean),
+                ended_at: self.ended_at.unwrap_or_else(Utc::now),
+                output_commit_oid: self.output_commit_oid,
+                result_schema_version: self.result_schema_version,
+                result_payload: self.result_payload,
+            },
+            status @ (JobStatus::Failed
+            | JobStatus::Cancelled
+            | JobStatus::Expired
+            | JobStatus::Superseded) => JobState::Terminated {
+                terminal_status: TerminalStatus::from_job_status(status)
+                    .expect("terminal job status"),
+                assignment,
+                started_at: self.started_at,
+                outcome_class: self.outcome_class,
+                ended_at: self.ended_at.unwrap_or_else(Utc::now),
+                error_code: self.error_code,
+                error_message: self.error_message,
+            },
+        };
+
         Job {
             id: self.id,
             project_id: self.project_id,
@@ -223,31 +279,15 @@ impl JobBuilder {
             semantic_attempt_no: self.semantic_attempt_no,
             retry_no: self.retry_no,
             supersedes_job_id: self.supersedes_job_id,
-            status: self.status,
-            outcome_class: self.outcome_class,
             phase_kind: self.phase_kind,
-            workspace_id: self.workspace_id,
             workspace_kind: self.workspace_kind,
             execution_permission: self.execution_permission,
             context_policy: self.context_policy,
             phase_template_slug: self.phase_template_slug,
-            phase_template_digest: self.phase_template_digest,
-            prompt_snapshot: self.prompt_snapshot,
-            job_input: self.job_input,
             output_artifact_kind: self.output_artifact_kind,
-            output_commit_oid: self.output_commit_oid,
-            result_schema_version: self.result_schema_version,
-            result_payload: self.result_payload,
-            agent_id: self.agent_id,
-            process_pid: self.process_pid,
-            lease_owner_id: self.lease_owner_id,
-            heartbeat_at: self.heartbeat_at,
-            lease_expires_at: self.lease_expires_at,
-            error_code: self.error_code,
-            error_message: self.error_message,
+            job_input: self.job_input,
             created_at: self.created_at,
-            started_at: self.started_at,
-            ended_at: self.ended_at,
+            state,
         }
     }
 }

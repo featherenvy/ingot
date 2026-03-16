@@ -80,6 +80,7 @@ pub enum Lifecycle {
 }
 
 impl Lifecycle {
+    #[must_use]
     pub fn as_db_str(&self) -> &'static str {
         match self {
             Self::Open => "open",
@@ -87,14 +88,17 @@ impl Lifecycle {
         }
     }
 
+    #[must_use]
     pub fn is_open(self) -> bool {
         matches!(self, Self::Open)
     }
 
+    #[must_use]
     pub fn is_done(self) -> bool {
         matches!(self, Self::Done { .. })
     }
 
+    #[must_use]
     pub fn done_reason(self) -> Option<DoneReason> {
         match self {
             Self::Done { reason, .. } => Some(reason),
@@ -102,6 +106,7 @@ impl Lifecycle {
         }
     }
 
+    #[must_use]
     pub fn resolution_source(self) -> Option<ResolutionSource> {
         match self {
             Self::Done { source, .. } => Some(source),
@@ -109,6 +114,7 @@ impl Lifecycle {
         }
     }
 
+    #[must_use]
     pub fn closed_at(self) -> Option<DateTime<Utc>> {
         match self {
             Self::Done { closed_at, .. } => Some(closed_at),
@@ -129,6 +135,7 @@ pub enum Escalation {
 }
 
 impl Escalation {
+    #[must_use]
     pub fn as_db_str(&self) -> &'static str {
         match self {
             Self::None => "none",
@@ -136,10 +143,12 @@ impl Escalation {
         }
     }
 
+    #[must_use]
     pub fn is_escalated(self) -> bool {
         matches!(self, Self::OperatorRequired { .. })
     }
 
+    #[must_use]
     pub fn reason(self) -> Option<EscalationReason> {
         match self {
             Self::OperatorRequired { reason } => Some(reason),
@@ -160,6 +169,7 @@ pub enum Origin {
 }
 
 impl Origin {
+    #[must_use]
     pub fn as_db_str(&self) -> &'static str {
         match self {
             Self::Manual => "manual",
@@ -167,10 +177,12 @@ impl Origin {
         }
     }
 
+    #[must_use]
     pub fn is_promoted_finding(self) -> bool {
         matches!(self, Self::PromotedFinding { .. })
     }
 
+    #[must_use]
     pub fn finding_id(self) -> Option<FindingId> {
         match self {
             Self::PromotedFinding { finding_id } => Some(finding_id),
@@ -207,18 +219,12 @@ mod tests {
     #[test]
     fn escalation_as_db_str_matches_serde_tag() {
         let none = Escalation::None;
-        assert_eq!(
-            none.as_db_str(),
-            serde_tag_value(&none, "escalation_state")
-        );
+        assert_eq!(none.as_db_str(), serde_tag_value(&none, "escalation_state"));
 
         let esc = Escalation::OperatorRequired {
             reason: EscalationReason::StepFailed,
         };
-        assert_eq!(
-            esc.as_db_str(),
-            serde_tag_value(&esc, "escalation_state")
-        );
+        assert_eq!(esc.as_db_str(), serde_tag_value(&esc, "escalation_state"));
     }
 
     #[test]
