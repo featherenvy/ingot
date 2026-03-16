@@ -63,7 +63,7 @@ pub fn current_authoring_head_for_revision_with_workspace(
         return Some(commit_oid);
     }
 
-    workspace.and_then(|ws| ws.head_commit_oid.clone())
+    workspace.and_then(|ws| ws.state.head_commit_oid().map(ToOwned::to_owned))
 }
 
 /// Returns the effective authoring base commit OID for a revision, using the seed commit
@@ -76,7 +76,7 @@ pub fn effective_authoring_base_commit_oid(
         return Some(seed_commit_oid);
     }
 
-    workspace.and_then(|ws| ws.base_commit_oid.clone())
+    workspace.and_then(|ws| ws.state.base_commit_oid().map(ToOwned::to_owned))
 }
 
 /// Returns true if the job's step is closure-relevant (i.e., failures on it should escalate).

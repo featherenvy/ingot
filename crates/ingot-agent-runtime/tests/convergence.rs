@@ -469,7 +469,7 @@ async fn tick_invalidates_stale_prepared_convergence() {
         h.db.get_workspace(integration_workspace.id)
             .await
             .expect("workspace");
-    assert_eq!(updated_workspace.status, WorkspaceStatus::Stale);
+    assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Stale);
 }
 
 #[tokio::test]
@@ -897,7 +897,7 @@ async fn tick_reprepare_of_already_integrated_patch_does_not_leave_running_busy_
     assert!(
         !workspaces.iter().any(|workspace| {
             workspace.kind == WorkspaceKind::Integration
-                && workspace.status == WorkspaceStatus::Busy
+                && workspace.state.status() == WorkspaceStatus::Busy
         }),
         "empty replay must not strand a busy integration workspace"
     );
@@ -944,7 +944,7 @@ async fn fail_prepare_convergence_attempt_marks_non_conflict_failures_as_step_fa
         .created_for_revision_id(revision.id)
         .base_commit_oid(seed_commit.clone())
         .head_commit_oid(seed_commit.clone())
-        .status(WorkspaceStatus::Busy)
+        .status(WorkspaceStatus::Provisioning)
         .created_at(created_at)
         .build();
     h.db.create_workspace(&integration_workspace)

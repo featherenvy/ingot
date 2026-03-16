@@ -5,7 +5,8 @@ use ingot_domain::ids::ProjectId;
 use ingot_domain::job::Job;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::workspace::{
-    RetentionPolicy, Workspace, WorkspaceKind, WorkspaceStatus, WorkspaceStrategy,
+    RetentionPolicy, Workspace, WorkspaceCommitState, WorkspaceKind, WorkspaceState,
+    WorkspaceStatus, WorkspaceStrategy,
 };
 use ingot_git::commands::{GitCommandError, git, head_oid, resolve_ref_oid};
 
@@ -216,6 +217,18 @@ pub async fn ensure_authoring_workspace_state(
     job: &Job,
     now: DateTime<Utc>,
 ) -> Result<Workspace, WorkspaceError> {
+    fn resolve_base_commit_oid(
+        workspace: Option<&Workspace>,
+        revision: &ItemRevision,
+        job: &Job,
+    ) -> String {
+        workspace
+            .and_then(|workspace| workspace.state.base_commit_oid().map(ToOwned::to_owned))
+            .or_else(|| revision.seed_commit_oid.clone())
+            .or_else(|| job.job_input.head_commit_oid().map(ToOwned::to_owned))
+            .unwrap_or_default()
+    }
+
     let expected_head_commit_oid = job
         .job_input
         .head_commit_oid()
@@ -235,7 +248,7 @@ pub async fn ensure_authoring_workspace_state(
         .unwrap_or_else(|| format!("refs/ingot/workspaces/{workspace_id}"));
 
     if let Some(mut workspace) = existing {
-        if workspace.status == WorkspaceStatus::Busy {
+        if workspace.state.status() == WorkspaceStatus::Busy {
             return Err(WorkspaceError::Busy);
         }
 
@@ -249,15 +262,13 @@ pub async fn ensure_authoring_workspace_state(
         workspace.path = provisioned.workspace_path.display().to_string();
         workspace.target_ref = Some(revision.target_ref.clone());
         workspace.workspace_ref = Some(provisioned.workspace_ref);
-        workspace.base_commit_oid = workspace
-            .base_commit_oid
-            .clone()
-            .or_else(|| revision.seed_commit_oid.clone())
-            .or_else(|| job.job_input.head_commit_oid().map(ToOwned::to_owned));
-        workspace.head_commit_oid = Some(provisioned.head_commit_oid);
-        workspace.status = WorkspaceStatus::Ready;
-        workspace.current_job_id = None;
-        workspace.updated_at = now;
+        workspace.mark_ready(
+            WorkspaceCommitState::new(
+                resolve_base_commit_oid(Some(&workspace), revision, job),
+                provisioned.head_commit_oid,
+            ),
+            now,
+        );
         Ok(workspace)
     } else {
         let provisioned = provision_authoring_workspace(
@@ -278,14 +289,13 @@ pub async fn ensure_authoring_workspace_state(
             parent_workspace_id: None,
             target_ref: Some(revision.target_ref.clone()),
             workspace_ref: Some(provisioned.workspace_ref),
-            base_commit_oid: revision
-                .seed_commit_oid
-                .clone()
-                .or_else(|| job.job_input.head_commit_oid().map(ToOwned::to_owned)),
-            head_commit_oid: Some(provisioned.head_commit_oid),
             retention_policy: RetentionPolicy::Persistent,
-            status: WorkspaceStatus::Ready,
-            current_job_id: None,
+            state: WorkspaceState::Ready {
+                commits: WorkspaceCommitState::new(
+                    resolve_base_commit_oid(None, revision, job),
+                    provisioned.head_commit_oid,
+                ),
+            },
             created_at: now,
             updated_at: now,
         })

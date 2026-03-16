@@ -53,11 +53,13 @@ async fn create_authoring_validation_workspace(
         parent_workspace_id: None,
         target_ref: Some("refs/heads/main".into()),
         workspace_ref: Some(provisioned.workspace_ref),
-        base_commit_oid: Some(base_commit_oid.to_string()),
-        head_commit_oid: Some(provisioned.head_commit_oid),
         retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-        status: ingot_domain::workspace::WorkspaceStatus::Ready,
-        current_job_id: None,
+        state: ingot_domain::workspace::WorkspaceState::Ready {
+            commits: ingot_domain::workspace::WorkspaceCommitState {
+                base_commit_oid: base_commit_oid.to_string(),
+                head_commit_oid: provisioned.head_commit_oid,
+            },
+        },
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -735,11 +737,13 @@ async fn daemon_only_validation_job_executes_on_tick() {
         parent_workspace_id: None,
         target_ref: Some("refs/heads/main".into()),
         workspace_ref: Some(format!("refs/ingot/workspaces/{workspace_id}")),
-        base_commit_oid: Some(seed_commit.clone()),
-        head_commit_oid: Some(candidate_head.clone()),
         retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-        status: ingot_domain::workspace::WorkspaceStatus::Ready,
-        current_job_id: None,
+        state: ingot_domain::workspace::WorkspaceState::Ready {
+            commits: ingot_domain::workspace::WorkspaceCommitState {
+                base_commit_oid: seed_commit.clone(),
+                head_commit_oid: candidate_head.clone(),
+            },
+        },
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -818,11 +822,13 @@ async fn harness_validation_with_commands_produces_findings_on_failure() {
         parent_workspace_id: None,
         target_ref: Some("refs/heads/main".into()),
         workspace_ref: Some(format!("refs/ingot/workspaces/{workspace_id}")),
-        base_commit_oid: Some(seed_commit.clone()),
-        head_commit_oid: Some(candidate_head.clone()),
         retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-        status: ingot_domain::workspace::WorkspaceStatus::Ready,
-        current_job_id: None,
+        state: ingot_domain::workspace::WorkspaceState::Ready {
+            commits: ingot_domain::workspace::WorkspaceCommitState {
+                base_commit_oid: seed_commit.clone(),
+                head_commit_oid: candidate_head.clone(),
+            },
+        },
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -1464,11 +1470,13 @@ async fn daemon_validation_resyncs_integration_workspace_before_running_harness(
         parent_workspace_id: None,
         target_ref: Some("refs/heads/main".into()),
         workspace_ref: Some(provisioned.workspace_ref),
-        base_commit_oid: Some(seed_commit.clone()),
-        head_commit_oid: Some(provisioned.head_commit_oid),
         retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-        status: ingot_domain::workspace::WorkspaceStatus::Ready,
-        current_job_id: None,
+        state: ingot_domain::workspace::WorkspaceState::Ready {
+            commits: ingot_domain::workspace::WorkspaceCommitState {
+                base_commit_oid: seed_commit.clone(),
+                head_commit_oid: provisioned.head_commit_oid,
+            },
+        },
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };

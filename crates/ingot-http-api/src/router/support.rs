@@ -247,7 +247,7 @@ pub(super) fn workspace_to_api_error(error: WorkspaceError) -> ApiError {
 }
 
 pub(super) fn ensure_workspace_not_busy(workspace: &Workspace) -> Result<(), ApiError> {
-    if workspace.status == WorkspaceStatus::Busy {
+    if workspace.state.status() == WorkspaceStatus::Busy {
         return Err(ApiError::Conflict {
             code: "workspace_busy",
             message: "Workspace is busy".into(),

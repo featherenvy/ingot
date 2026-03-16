@@ -5,7 +5,7 @@ use ingot_domain::job::Job;
 use ingot_domain::ports::RepositoryError;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
-use ingot_domain::workspace::Workspace;
+use ingot_domain::workspace::{Workspace, WorkspaceCommitState, WorkspaceState};
 
 use crate::db::Database;
 
@@ -47,25 +47,29 @@ impl PersistFixture for Job {
         if let Some(workspace_id) = self.state.workspace_id() {
             if db.get_workspace(workspace_id).await.is_err() {
                 let workspace_is_active = self.state.is_active();
+                let empty_commits = WorkspaceCommitState::empty();
+                let state = if workspace_is_active {
+                    WorkspaceState::Busy {
+                        commits: empty_commits.clone(),
+                        current_job_id: self.id,
+                    }
+                } else {
+                    WorkspaceState::Ready {
+                        commits: empty_commits,
+                    }
+                };
                 let workspace = Workspace {
                     id: workspace_id,
                     project_id: self.project_id,
                     kind: self.workspace_kind,
-                    status: if workspace_is_active {
-                        ingot_domain::workspace::WorkspaceStatus::Busy
-                    } else {
-                        ingot_domain::workspace::WorkspaceStatus::Ready
-                    },
                     retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
                     strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
                     created_for_revision_id: Some(self.item_revision_id),
                     parent_workspace_id: None,
                     path: "/tmp/test-workspace".into(),
-                    base_commit_oid: None,
-                    head_commit_oid: None,
                     workspace_ref: None,
                     target_ref: None,
-                    current_job_id: workspace_is_active.then_some(self.id),
+                    state,
                     updated_at: self.created_at,
                     created_at: self.created_at,
                 };
@@ -147,7 +151,7 @@ mod tests {
             .await
             .expect("auto-created workspace");
         assert_eq!(job.state.workspace_id(), Some(workspace.id));
-        assert_eq!(workspace.status, WorkspaceStatus::Ready);
-        assert_eq!(workspace.current_job_id, None);
+        assert_eq!(workspace.state.status(), WorkspaceStatus::Ready);
+        assert_eq!(workspace.state.current_job_id(), None);
     }
 }

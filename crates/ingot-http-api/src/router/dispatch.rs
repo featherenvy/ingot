@@ -679,7 +679,7 @@ mod tests {
         GitOperationId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId,
     };
     use ingot_domain::job::{ExecutionPermission, Job, JobInput, OutputArtifactKind, PhaseKind};
-    use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
+    use ingot_domain::workspace::{Workspace, WorkspaceKind};
     use ingot_git::commands::resolve_ref_oid;
     use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
     use ingot_test_support::fixtures::{
@@ -829,11 +829,8 @@ mod tests {
                 "refs/ingot/workspaces/{}",
                 WorkspaceId::from_uuid(Uuid::now_v7())
             )),
-            base_commit_oid: Some(head.clone()),
-            head_commit_oid: None,
             retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-            status: WorkspaceStatus::Ready,
-            current_job_id: None,
+            state: ingot_domain::workspace::WorkspaceState::Provisioning { commits: None },
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -921,11 +918,8 @@ mod tests {
                 "refs/ingot/workspaces/{}",
                 WorkspaceId::from_uuid(Uuid::now_v7())
             )),
-            base_commit_oid: Some(head.clone()),
-            head_commit_oid: None,
             retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-            status: WorkspaceStatus::Ready,
-            current_job_id: None,
+            state: ingot_domain::workspace::WorkspaceState::Provisioning { commits: None },
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -1059,11 +1053,13 @@ mod tests {
             parent_workspace_id: None,
             target_ref: Some("refs/heads/main".into()),
             workspace_ref: Some(workspace_ref.clone()),
-            base_commit_oid: Some(head.clone()),
-            head_commit_oid: Some(head.clone()),
             retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-            status: WorkspaceStatus::Ready,
-            current_job_id: None,
+            state: ingot_domain::workspace::WorkspaceState::Ready {
+                commits: ingot_domain::workspace::WorkspaceCommitState {
+                    base_commit_oid: head.clone(),
+                    head_commit_oid: head.clone(),
+                },
+            },
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -1170,11 +1166,13 @@ mod tests {
                 "refs/ingot/workspaces/{}",
                 WorkspaceId::from_uuid(Uuid::now_v7())
             )),
-            base_commit_oid: Some("deadbeef".repeat(5)),
-            head_commit_oid: Some("deadbeef".repeat(5)),
             retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-            status: WorkspaceStatus::Ready,
-            current_job_id: None,
+            state: ingot_domain::workspace::WorkspaceState::Ready {
+                commits: ingot_domain::workspace::WorkspaceCommitState {
+                    base_commit_oid: "deadbeef".repeat(5),
+                    head_commit_oid: "deadbeef".repeat(5),
+                },
+            },
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -1309,11 +1307,13 @@ mod tests {
             parent_workspace_id: None,
             target_ref: Some("refs/heads/main".into()),
             workspace_ref: Some(workspace_ref.clone()),
-            base_commit_oid: Some(head.clone()),
-            head_commit_oid: Some(head.clone()),
             retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-            status: WorkspaceStatus::Ready,
-            current_job_id: None,
+            state: ingot_domain::workspace::WorkspaceState::Ready {
+                commits: ingot_domain::workspace::WorkspaceCommitState {
+                    base_commit_oid: head.clone(),
+                    head_commit_oid: head.clone(),
+                },
+            },
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

@@ -15,7 +15,7 @@ use ingot_domain::job::{
     JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind, TerminalStatus,
 };
 use ingot_domain::workspace::{
-    RetentionPolicy, Workspace, WorkspaceKind, WorkspaceStatus, WorkspaceStrategy,
+    RetentionPolicy, Workspace, WorkspaceKind, WorkspaceState, WorkspaceStatus, WorkspaceStrategy,
 };
 use ingot_store_sqlite::Database;
 pub use ingot_test_support::fixtures::{DEFAULT_TEST_TIMESTAMP, parse_timestamp};
@@ -262,15 +262,20 @@ pub async fn insert_test_job_row(db: &Database, row: TestJobInsert<'_>) {
         state,
     };
     if let Some(workspace_id) = job.state.workspace_id() {
+        let state = if job.state.is_active() {
+            WorkspaceState::Busy {
+                commits: ingot_domain::workspace::WorkspaceCommitState::empty(),
+                current_job_id: job.id,
+            }
+        } else {
+            WorkspaceState::Ready {
+                commits: ingot_domain::workspace::WorkspaceCommitState::empty(),
+            }
+        };
         let workspace = Workspace {
             id: workspace_id,
             project_id: job.project_id,
             kind: job.workspace_kind,
-            status: if job.state.is_active() {
-                WorkspaceStatus::Busy
-            } else {
-                WorkspaceStatus::Ready
-            },
             retention_policy: RetentionPolicy::Persistent,
             strategy: WorkspaceStrategy::Worktree,
             created_for_revision_id: Some(job.item_revision_id),
@@ -279,11 +284,9 @@ pub async fn insert_test_job_row(db: &Database, row: TestJobInsert<'_>) {
                 .join(format!("ingot-http-api-workspace-{workspace_id}"))
                 .display()
                 .to_string(),
-            base_commit_oid: None,
-            head_commit_oid: None,
             workspace_ref: None,
             target_ref: None,
-            current_job_id: job.state.is_active().then_some(job.id),
+            state,
             updated_at: job.created_at,
             created_at: job.created_at,
         };
@@ -347,12 +350,13 @@ pub async fn seeded_route_test_app() -> (PathBuf, Database, String, String, Stri
     sqlx::query(
         "INSERT INTO workspaces (
             id, project_id, kind, status, retention_policy,
-            created_for_revision_id, path, created_at, updated_at
-         ) VALUES (?, ?, 'authoring', 'busy', 'persistent', ?, ?, ?, ?)",
+            created_for_revision_id, current_job_id, base_commit_oid, head_commit_oid, path, created_at, updated_at
+         ) VALUES (?, ?, 'authoring', 'busy', 'persistent', ?, ?, 'base', 'head', ?, ?, ?)",
     )
     .bind(&workspace_id)
     .bind(&project_id)
     .bind(&revision_id)
+    .bind(&job_id)
     .bind(repo.display().to_string())
     .bind(TS)
     .bind(TS)

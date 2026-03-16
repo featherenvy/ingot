@@ -10,13 +10,11 @@ pub async fn abandon_workspace<W: WorkspaceRepository>(
     workspace_repo: &W,
     workspace: &Workspace,
 ) -> Result<Workspace, UseCaseError> {
-    if workspace.status == WorkspaceStatus::Abandoned {
+    if workspace.state.status() == WorkspaceStatus::Abandoned {
         return Ok(workspace.clone());
     }
     let mut updated = workspace.clone();
-    updated.status = WorkspaceStatus::Abandoned;
-    updated.current_job_id = None;
-    updated.updated_at = Utc::now();
+    updated.mark_abandoned(Utc::now());
     workspace_repo.update(&updated).await?;
     Ok(updated)
 }
@@ -27,8 +25,7 @@ pub async fn plan_workspace_removal<W: WorkspaceRepository>(
     workspace: &Workspace,
 ) -> Result<Workspace, UseCaseError> {
     let mut updated = workspace.clone();
-    updated.status = WorkspaceStatus::Removing;
-    updated.updated_at = Utc::now();
+    updated.mark_removing(Utc::now());
     workspace_repo.update(&updated).await?;
     Ok(updated)
 }
@@ -39,9 +36,7 @@ pub async fn finalize_workspace_removal<W: WorkspaceRepository>(
     workspace: &Workspace,
 ) -> Result<Workspace, UseCaseError> {
     let mut updated = workspace.clone();
-    updated.status = WorkspaceStatus::Abandoned;
-    updated.current_job_id = None;
-    updated.updated_at = Utc::now();
+    updated.mark_abandoned(Utc::now());
     workspace_repo.update(&updated).await?;
     Ok(updated)
 }

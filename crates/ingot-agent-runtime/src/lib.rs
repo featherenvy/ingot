@@ -36,7 +36,8 @@ use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::revision_context::RevisionContext;
 use ingot_domain::workspace::{
-    RetentionPolicy, Workspace, WorkspaceKind, WorkspaceStatus, WorkspaceStrategy,
+    RetentionPolicy, Workspace, WorkspaceCommitState, WorkspaceKind, WorkspaceState,
+    WorkspaceStatus, WorkspaceStrategy,
 };
 use ingot_git::GitJobCompletionPort;
 use ingot_git::commands::{
@@ -919,12 +920,11 @@ impl JobDispatcher {
 
         if let Some(workspace_id) = operation.workspace_id.or(job.state.workspace_id()) {
             let mut workspace = self.db.get_workspace(workspace_id).await?;
-            workspace.head_commit_oid = Some(commit_oid);
-            workspace.current_job_id = None;
-            if workspace.status == WorkspaceStatus::Busy {
-                workspace.status = WorkspaceStatus::Ready;
+            let now = Utc::now();
+            workspace.set_head_commit_oid(commit_oid, now);
+            if workspace.state.status() == WorkspaceStatus::Busy {
+                workspace.release_to(WorkspaceStatus::Ready, now);
             }
-            workspace.updated_at = Utc::now();
             self.db.update_workspace(&workspace).await?;
         }
 
@@ -975,7 +975,7 @@ impl JobDispatcher {
         let project = self.db.get_project(convergence.project_id).await?;
         if let Some(workspace_id) = convergence.state.integration_workspace_id() {
             let workspace = self.db.get_workspace(workspace_id).await?;
-            if workspace.status != WorkspaceStatus::Abandoned {
+            if workspace.state.status() != WorkspaceStatus::Abandoned {
                 self.finalize_integration_workspace_after_close(&project, &workspace)
                     .await?;
             }
@@ -1050,10 +1050,18 @@ impl JobDispatcher {
 
         if let Some(workspace_id) = convergence.state.integration_workspace_id() {
             let mut workspace = self.db.get_workspace(workspace_id).await?;
-            workspace.head_commit_oid = operation.commit_oid.clone().or(operation.new_oid.clone());
-            workspace.status = WorkspaceStatus::Ready;
-            workspace.current_job_id = None;
-            workspace.updated_at = Utc::now();
+            let now = Utc::now();
+            let head_commit_oid = operation.commit_oid.clone().or(operation.new_oid.clone());
+            workspace.mark_ready_with_head(
+                head_commit_oid.unwrap_or_else(|| {
+                    workspace
+                        .state
+                        .head_commit_oid()
+                        .unwrap_or_default()
+                        .to_owned()
+                }),
+                now,
+            );
             self.db.update_workspace(&workspace).await?;
         }
 
@@ -1123,12 +1131,17 @@ impl JobDispatcher {
             return Ok(());
         };
         let mut workspace = self.db.get_workspace(workspace_id).await?;
-        workspace.current_job_id = None;
-        workspace.status = WorkspaceStatus::Ready;
-        if let Some(new_oid) = operation.new_oid.as_ref() {
-            workspace.head_commit_oid = Some(new_oid.clone());
-        }
-        workspace.updated_at = Utc::now();
+        let now = Utc::now();
+        workspace.mark_ready_with_head(
+            operation.new_oid.clone().unwrap_or_else(|| {
+                workspace
+                    .state
+                    .head_commit_oid()
+                    .unwrap_or_default()
+                    .to_owned()
+            }),
+            now,
+        );
         self.db.update_workspace(&workspace).await?;
         Ok(())
     }
@@ -1141,12 +1154,12 @@ impl JobDispatcher {
             return Ok(());
         };
         let mut workspace = self.db.get_workspace(workspace_id).await?;
-        workspace.current_job_id = None;
-        workspace.status = WorkspaceStatus::Abandoned;
+        let now = Utc::now();
+        workspace.mark_abandoned(now);
         if operation.ref_name.is_some() {
             workspace.workspace_ref = None;
         }
-        workspace.updated_at = Utc::now();
+        workspace.updated_at = now;
         self.db.update_workspace(&workspace).await?;
         Ok(())
     }
@@ -1167,11 +1180,7 @@ impl JobDispatcher {
 
         if let Some(workspace_id) = workspace_id {
             let mut workspace = self.db.get_workspace(workspace_id).await?;
-            workspace.current_job_id = None;
-            if workspace.status == WorkspaceStatus::Busy {
-                workspace.status = WorkspaceStatus::Ready;
-            }
-            workspace.updated_at = Utc::now();
+            workspace.release_to(WorkspaceStatus::Ready, Utc::now());
             self.db.update_workspace(&workspace).await?;
         }
 
@@ -1213,9 +1222,7 @@ impl JobDispatcher {
 
         if let Some(workspace_id) = job.state.workspace_id() {
             let mut workspace = self.db.get_workspace(workspace_id).await?;
-            workspace.current_job_id = None;
-            workspace.status = WorkspaceStatus::Stale;
-            workspace.updated_at = Utc::now();
+            workspace.mark_stale(Utc::now());
             self.db.update_workspace(&workspace).await?;
         }
 
@@ -1251,9 +1258,7 @@ impl JobDispatcher {
 
             if let Some(workspace_id) = convergence.state.integration_workspace_id() {
                 let mut workspace = self.db.get_workspace(workspace_id).await?;
-                workspace.current_job_id = None;
-                workspace.status = WorkspaceStatus::Stale;
-                workspace.updated_at = Utc::now();
+                workspace.mark_stale(Utc::now());
                 self.db.update_workspace(&workspace).await?;
             }
 
@@ -1275,7 +1280,7 @@ impl JobDispatcher {
         for project in self.db.list_projects().await? {
             let workspaces = self.db.list_workspaces_by_project(project.id).await?;
             for workspace in workspaces {
-                if workspace.status != WorkspaceStatus::Abandoned
+                if workspace.state.status() != WorkspaceStatus::Abandoned
                     || workspace.retention_policy == RetentionPolicy::RetainUntilDebug
                 {
                     continue;
@@ -1314,7 +1319,7 @@ impl JobDispatcher {
         }
 
         let findings = self.db.list_findings_by_item(item.id).await?;
-        let head_commit_oid = workspace.head_commit_oid.as_deref().unwrap_or_default();
+        let head_commit_oid = workspace.state.head_commit_oid().unwrap_or_default();
         let blocked = findings.iter().any(|finding| {
             finding.source_item_revision_id == revision.id
                 && finding.triage.is_unresolved()
@@ -1557,13 +1562,12 @@ impl JobDispatcher {
             .await?;
         let mut workspace = workspace;
         let original_head_commit_oid = workspace
-            .head_commit_oid
-            .clone()
+            .state
+            .head_commit_oid()
+            .map(ToOwned::to_owned)
             .ok_or_else(|| RuntimeError::InvalidState("workspace missing head".into()))?;
 
-        workspace.status = WorkspaceStatus::Busy;
-        workspace.current_job_id = Some(job.id);
-        workspace.updated_at = now;
+        workspace.attach_job(job.id, now);
         if workspace_exists {
             self.db.update_workspace(&workspace).await?;
         } else {
@@ -1680,10 +1684,8 @@ impl JobDispatcher {
                 .await?;
                 let mut workspace = existing_workspace;
                 workspace.path = provisioned.workspace_path.display().to_string();
-                workspace.head_commit_oid = Some(provisioned.head_commit_oid);
                 workspace.workspace_ref = Some(provisioned.workspace_ref);
-                workspace.status = WorkspaceStatus::Ready;
-                workspace.updated_at = now;
+                workspace.mark_ready_with_head(provisioned.head_commit_oid, now);
                 Ok((
                     workspace,
                     WorkspaceLifecycle::PersistentIntegration,
@@ -1713,13 +1715,18 @@ impl JobDispatcher {
                     parent_workspace_id: None,
                     target_ref: None,
                     workspace_ref: None,
-                    base_commit_oid: job.job_input.base_commit_oid().map(ToOwned::to_owned),
-                    head_commit_oid: Some(provisioned.head_commit_oid),
                     retention_policy: RetentionPolicy::Ephemeral,
-                    status: WorkspaceStatus::Ready,
-                    current_job_id: None,
                     created_at: now,
                     updated_at: now,
+                    state: WorkspaceState::Ready {
+                        commits: WorkspaceCommitState::new(
+                            job.job_input
+                                .base_commit_oid()
+                                .map(ToOwned::to_owned)
+                                .unwrap_or_default(),
+                            provisioned.head_commit_oid,
+                        ),
+                    },
                 };
                 Ok((workspace, WorkspaceLifecycle::EphemeralReview, false))
             }
@@ -2297,9 +2304,7 @@ impl JobDispatcher {
         summary: String,
         failure_kind: PrepareFailureKind,
     ) -> Result<(), RuntimeError> {
-        integration_workspace.status = WorkspaceStatus::Error;
-        integration_workspace.current_job_id = None;
-        integration_workspace.updated_at = Utc::now();
+        integration_workspace.mark_error(Utc::now());
         self.db.update_workspace(integration_workspace).await?;
 
         match failure_kind {
@@ -2436,13 +2441,15 @@ impl JobDispatcher {
             parent_workspace_id: Some(source_workspace.id),
             target_ref: Some(revision.target_ref.clone()),
             workspace_ref: Some(integration_workspace_ref.clone()),
-            base_commit_oid: Some(input_target_commit_oid.clone()),
-            head_commit_oid: Some(input_target_commit_oid.clone()),
             retention_policy: RetentionPolicy::Persistent,
-            status: WorkspaceStatus::Provisioning,
-            current_job_id: None,
             created_at: now,
             updated_at: now,
+            state: WorkspaceState::Provisioning {
+                commits: Some(WorkspaceCommitState::new(
+                    input_target_commit_oid.clone(),
+                    input_target_commit_oid.clone(),
+                )),
+            },
         };
         self.db.create_workspace(&integration_workspace).await?;
 
@@ -2455,9 +2462,7 @@ impl JobDispatcher {
         .await?;
         integration_workspace.path = provisioned.workspace_path.display().to_string();
         integration_workspace.workspace_ref = Some(provisioned.workspace_ref);
-        integration_workspace.head_commit_oid = Some(provisioned.head_commit_oid);
-        integration_workspace.status = WorkspaceStatus::Busy;
-        integration_workspace.updated_at = Utc::now();
+        integration_workspace.set_head_commit_oid(provisioned.head_commit_oid, Utc::now());
         self.db.update_workspace(&integration_workspace).await?;
 
         let mut convergence = Convergence {
@@ -2653,9 +2658,7 @@ impl JobDispatcher {
             prepared_commit_oids.push(prepared_tip.clone());
         }
 
-        integration_workspace.head_commit_oid = Some(prepared_tip.clone());
-        integration_workspace.status = WorkspaceStatus::Ready;
-        integration_workspace.updated_at = Utc::now();
+        integration_workspace.mark_ready_with_head(prepared_tip.clone(), Utc::now());
         self.db.update_workspace(&integration_workspace).await?;
 
         convergence.transition_to_prepared(prepared_tip.clone(), Some(Utc::now()));
@@ -3213,7 +3216,7 @@ impl JobDispatcher {
                 .or_else(|| {
                     authoring_workspace
                         .as_ref()
-                        .and_then(|ws| ws.base_commit_oid.as_deref())
+                        .and_then(|ws| ws.state.base_commit_oid())
                 })
                 .unwrap_or(head);
             let project = self.db.get_project(project_id).await?;
@@ -3609,19 +3612,16 @@ impl JobDispatcher {
         match prepared.workspace_lifecycle {
             WorkspaceLifecycle::PersistentAuthoring => {
                 let mut workspace = self.db.get_workspace(prepared.workspace.id).await?;
-                workspace.status = WorkspaceStatus::Ready;
-                workspace.current_job_id = None;
+                let now = Utc::now();
+                workspace.release_to(WorkspaceStatus::Ready, now);
                 if let Some(head_commit_oid) = head_commit_oid {
-                    workspace.head_commit_oid = Some(head_commit_oid.to_string());
+                    workspace.set_head_commit_oid(head_commit_oid.to_string(), now);
                 }
-                workspace.updated_at = Utc::now();
                 self.db.update_workspace(&workspace).await?;
             }
             WorkspaceLifecycle::PersistentIntegration => {
                 let mut workspace = self.db.get_workspace(prepared.workspace.id).await?;
-                workspace.status = WorkspaceStatus::Ready;
-                workspace.current_job_id = None;
-                workspace.updated_at = Utc::now();
+                workspace.release_to(WorkspaceStatus::Ready, Utc::now());
                 self.db.update_workspace(&workspace).await?;
             }
             WorkspaceLifecycle::EphemeralReview => {
@@ -3631,9 +3631,7 @@ impl JobDispatcher {
                 )
                 .await?;
                 let mut workspace = self.db.get_workspace(prepared.workspace.id).await?;
-                workspace.status = WorkspaceStatus::Abandoned;
-                workspace.current_job_id = None;
-                workspace.updated_at = Utc::now();
+                workspace.mark_abandoned(Utc::now());
                 self.db.update_workspace(&workspace).await?;
             }
         }
@@ -3649,9 +3647,7 @@ impl JobDispatcher {
         let repo_path = self.project_paths(project).mirror_git_dir;
         remove_workspace(repo_path.as_path(), Path::new(&workspace.path)).await?;
         let mut workspace = workspace.clone();
-        workspace.status = WorkspaceStatus::Abandoned;
-        workspace.current_job_id = None;
-        workspace.updated_at = Utc::now();
+        workspace.mark_abandoned(Utc::now());
         self.db.update_workspace(&workspace).await?;
         Ok(())
     }
@@ -3670,25 +3666,19 @@ impl JobDispatcher {
         match prepared.workspace_lifecycle {
             WorkspaceLifecycle::PersistentAuthoring => {
                 let mut workspace = self.db.get_workspace(prepared.workspace.id).await?;
-                workspace.status = WorkspaceStatus::Ready;
-                workspace.current_job_id = None;
-                workspace.head_commit_oid = Some(prepared.original_head_commit_oid.clone());
-                workspace.updated_at = Utc::now();
+                let now = Utc::now();
+                workspace.release_with_head(prepared.original_head_commit_oid.clone(), now);
                 self.db.update_workspace(&workspace).await?;
             }
             WorkspaceLifecycle::PersistentIntegration => {
                 let mut workspace = self.db.get_workspace(prepared.workspace.id).await?;
-                workspace.status = WorkspaceStatus::Ready;
-                workspace.current_job_id = None;
-                workspace.head_commit_oid = Some(prepared.original_head_commit_oid.clone());
-                workspace.updated_at = Utc::now();
+                let now = Utc::now();
+                workspace.release_with_head(prepared.original_head_commit_oid.clone(), now);
                 self.db.update_workspace(&workspace).await?;
             }
             WorkspaceLifecycle::EphemeralReview => {
                 let mut workspace = self.db.get_workspace(prepared.workspace.id).await?;
-                workspace.status = WorkspaceStatus::Abandoned;
-                workspace.current_job_id = None;
-                workspace.updated_at = Utc::now();
+                workspace.mark_abandoned(Utc::now());
                 self.db.update_workspace(&workspace).await?;
             }
         }

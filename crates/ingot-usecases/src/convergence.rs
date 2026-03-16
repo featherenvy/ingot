@@ -16,7 +16,7 @@ use ingot_domain::ports::{
 use ingot_domain::project::Project;
 use ingot_domain::revision::ApprovalPolicy;
 use ingot_domain::revision::ItemRevision;
-use ingot_domain::workspace::WorkspaceStatus;
+
 use ingot_workflow::{Evaluator, RecommendedAction};
 
 use crate::UseCaseError;
@@ -528,9 +528,7 @@ where
 
     if let Some(workspace_id) = convergence.state.integration_workspace_id() {
         let mut workspace = workspace_repo.get(workspace_id).await?;
-        workspace.status = WorkspaceStatus::Stale;
-        workspace.current_job_id = None;
-        workspace.updated_at = Utc::now();
+        workspace.mark_stale(Utc::now());
         workspace_repo.update(&workspace).await?;
     }
 

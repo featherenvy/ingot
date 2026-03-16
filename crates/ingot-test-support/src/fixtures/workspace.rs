@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use ingot_domain::ids;
 use ingot_domain::workspace::{
-    RetentionPolicy, Workspace, WorkspaceKind, WorkspaceStatus, WorkspaceStrategy,
+    RetentionPolicy, Workspace, WorkspaceCommitState, WorkspaceKind, WorkspaceState,
+    WorkspaceStatus, WorkspaceStrategy,
 };
 use uuid::Uuid;
 
@@ -110,6 +111,26 @@ impl WorkspaceBuilder {
     }
 
     pub fn build(self) -> Workspace {
+        let commits =
+            WorkspaceCommitState::from_option_parts(self.base_commit_oid, self.head_commit_oid);
+        let required_commits = matches!(
+            self.status,
+            WorkspaceStatus::Ready
+                | WorkspaceStatus::Busy
+                | WorkspaceStatus::Stale
+                | WorkspaceStatus::RetainedForDebug
+        );
+        let state = WorkspaceState::from_parts(
+            self.status,
+            if required_commits {
+                Some(commits.unwrap_or_else(WorkspaceCommitState::empty))
+            } else {
+                commits
+            },
+            self.current_job_id,
+        )
+        .unwrap_or_else(|error| panic!("WorkspaceBuilder: {error}"));
+
         Workspace {
             id: self.id,
             project_id: self.project_id,
@@ -120,13 +141,10 @@ impl WorkspaceBuilder {
             parent_workspace_id: None,
             target_ref: self.target_ref,
             workspace_ref: self.workspace_ref,
-            base_commit_oid: self.base_commit_oid,
-            head_commit_oid: self.head_commit_oid,
             retention_policy: self.retention_policy,
-            status: self.status,
-            current_job_id: self.current_job_id,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            state,
         }
     }
 }

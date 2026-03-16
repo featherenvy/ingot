@@ -57,10 +57,10 @@ async fn tick_executes_a_queued_authoring_job_and_creates_a_commit() {
             .await
             .expect("workspace query")
             .expect("workspace exists");
-    assert_eq!(workspace.status, WorkspaceStatus::Ready);
-    assert_eq!(workspace.current_job_id, None);
+    assert_eq!(workspace.state.status(), WorkspaceStatus::Ready);
+    assert_eq!(workspace.state.current_job_id(), None);
     assert_eq!(
-        workspace.head_commit_oid.as_deref(),
+        workspace.state.head_commit_oid(),
         updated_job.state.output_commit_oid()
     );
 
@@ -151,7 +151,7 @@ async fn tick_executes_a_review_job_and_persists_structured_report() {
         .expect("list workspaces");
     assert_eq!(workspaces.len(), 1);
     assert_eq!(workspaces[0].kind, WorkspaceKind::Review);
-    assert_eq!(workspaces[0].status, WorkspaceStatus::Abandoned);
+    assert_eq!(workspaces[0].state.status(), WorkspaceStatus::Abandoned);
     assert!(!Path::new(&workspaces[0].path).exists());
 }
 

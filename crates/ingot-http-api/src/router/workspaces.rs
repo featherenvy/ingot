@@ -31,11 +31,15 @@ pub(super) async fn reset_workspace_route(
     }
     ensure_workspace_not_busy(&workspace)?;
 
-    let expected_head = workspace.head_commit_oid.clone().ok_or_else(|| {
-        ApiError::from(UseCaseError::Internal(
-            "workspace missing head_commit_oid".into(),
-        ))
-    })?;
+    let expected_head = workspace
+        .state
+        .head_commit_oid()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            ApiError::from(UseCaseError::Internal(
+                "workspace missing head_commit_oid".into(),
+            ))
+        })?;
     let now = Utc::now();
     let mut operation = GitOperation {
         id: ingot_domain::ids::GitOperationId::new(),
@@ -45,7 +49,7 @@ pub(super) async fn reset_workspace_route(
         entity_id: workspace.id.to_string(),
         workspace_id: Some(workspace.id),
         ref_name: workspace.workspace_ref.clone(),
-        expected_old_oid: workspace.head_commit_oid.clone(),
+        expected_old_oid: workspace.state.head_commit_oid().map(ToOwned::to_owned),
         new_oid: Some(expected_head.clone()),
         commit_oid: None,
         status: GitOperationStatus::Planned,
@@ -99,9 +103,7 @@ pub(super) async fn reset_workspace_route(
         }
     }
 
-    workspace.status = WorkspaceStatus::Ready;
-    workspace.current_job_id = None;
-    workspace.updated_at = Utc::now();
+    workspace.mark_ready_with_head(expected_head.clone(), Utc::now());
     state
         .db
         .update_workspace(&workspace)
@@ -203,7 +205,7 @@ pub(super) async fn remove_workspace_route(
                 entity_id: workspace.id.to_string(),
                 workspace_id: Some(workspace.id),
                 ref_name: Some(workspace_ref.into()),
-                expected_old_oid: workspace.head_commit_oid.clone(),
+                expected_old_oid: workspace.state.head_commit_oid().map(ToOwned::to_owned),
                 new_oid: None,
                 commit_oid: None,
                 status: GitOperationStatus::Planned,

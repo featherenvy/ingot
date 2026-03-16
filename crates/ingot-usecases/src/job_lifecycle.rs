@@ -266,11 +266,7 @@ async fn release_workspace<W: WorkspaceRepository>(
         return Ok(None);
     };
     let mut workspace = workspace_repo.get(workspace_id).await?;
-    workspace.current_job_id = None;
-    if workspace.status == WorkspaceStatus::Busy {
-        workspace.status = target_status;
-    }
-    workspace.updated_at = Utc::now();
+    workspace.release_to(target_status, Utc::now());
     workspace_repo.update(&workspace).await?;
     Ok(Some(workspace_id))
 }
@@ -426,8 +422,8 @@ mod tests {
 
         let updated_workspace = workspace_repo.last_updated().expect("updated workspace");
         assert_eq!(result.released_workspace_id, Some(updated_workspace.id));
-        assert_eq!(updated_workspace.current_job_id, None);
-        assert_eq!(updated_workspace.status, WorkspaceStatus::Ready);
+        assert_eq!(updated_workspace.state.current_job_id(), None);
+        assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Ready);
     }
 
     fn test_job(workspace_id: Option<WorkspaceId>) -> Job {
@@ -450,6 +446,7 @@ mod tests {
         WorkspaceBuilder::new(ProjectId::from_uuid(Uuid::nil()), WorkspaceKind::Authoring)
             .id(WorkspaceId::from_uuid(Uuid::nil()))
             .status(WorkspaceStatus::Busy)
+            .current_job_id(JobId::from_uuid(Uuid::nil()))
             .build()
     }
 

@@ -1617,7 +1617,7 @@ async fn dismiss_route_cancels_lane_state() {
             id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
             target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
             status, current_job_id, created_at, updated_at
-         ) VALUES ('wrk_00000000000000000000000000000060', ?, 'integration', 'worktree', ?, ?, 'wrk_00000000000000000000000000000059', 'refs/heads/main', 'refs/ingot/workspaces/dismiss-integration', ?, ?, 'persistent', 'busy', NULL, ?, ?)",
+         ) VALUES ('wrk_00000000000000000000000000000060', ?, 'integration', 'worktree', ?, ?, 'wrk_00000000000000000000000000000059', 'refs/heads/main', 'refs/ingot/workspaces/dismiss-integration', ?, ?, 'persistent', 'ready', NULL, ?, ?)",
     )
     .bind(&project_id)
     .bind(repo.join("dismiss-integration").display().to_string())

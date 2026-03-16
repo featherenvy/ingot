@@ -1132,11 +1132,13 @@ pub(super) async fn prepare_convergence_workspace(
         parent_workspace_id: Some(source_workspace.id),
         target_ref: Some(revision.target_ref.clone()),
         workspace_ref: Some(integration_workspace_ref.clone()),
-        base_commit_oid: Some(input_target_commit_oid.clone()),
-        head_commit_oid: Some(input_target_commit_oid.clone()),
         retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-        status: ingot_domain::workspace::WorkspaceStatus::Provisioning,
-        current_job_id: None,
+        state: ingot_domain::workspace::WorkspaceState::Provisioning {
+            commits: Some(ingot_domain::workspace::WorkspaceCommitState::new(
+                input_target_commit_oid.clone(),
+                input_target_commit_oid.clone(),
+            )),
+        },
         created_at: now,
         updated_at: now,
     };
@@ -1156,9 +1158,7 @@ pub(super) async fn prepare_convergence_workspace(
     .map_err(workspace_to_api_error)?;
     integration_workspace.path = provisioned.workspace_path.display().to_string();
     integration_workspace.workspace_ref = Some(provisioned.workspace_ref);
-    integration_workspace.head_commit_oid = Some(provisioned.head_commit_oid);
-    integration_workspace.status = ingot_domain::workspace::WorkspaceStatus::Busy;
-    integration_workspace.updated_at = Utc::now();
+    integration_workspace.mark_ready_with_head(provisioned.head_commit_oid, Utc::now());
     state
         .db
         .update_workspace(&integration_workspace)
@@ -1257,8 +1257,7 @@ pub(super) async fn prepare_convergence_workspace(
             cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid).await
         {
             let _ = abort_cherry_pick(&integration_workspace_dir).await;
-            integration_workspace.status = ingot_domain::workspace::WorkspaceStatus::Error;
-            integration_workspace.updated_at = Utc::now();
+            integration_workspace.mark_error(Utc::now());
             let _ = state.db.update_workspace(&integration_workspace).await;
 
             convergence.transition_to_conflicted(error.to_string(), Utc::now());
@@ -1312,8 +1311,7 @@ pub(super) async fn prepare_convergence_workspace(
         let original_message = match commit_message(repo_path, source_commit_oid).await {
             Ok(message) => message,
             Err(error) => {
-                integration_workspace.status = ingot_domain::workspace::WorkspaceStatus::Error;
-                integration_workspace.updated_at = Utc::now();
+                integration_workspace.mark_error(Utc::now());
                 let _ = state.db.update_workspace(&integration_workspace).await;
 
                 convergence.transition_to_failed(Some(error.to_string()), Utc::now());
@@ -1371,8 +1369,7 @@ pub(super) async fn prepare_convergence_workspace(
         {
             Ok(prepared_tip) => prepared_tip,
             Err(error) => {
-                integration_workspace.status = ingot_domain::workspace::WorkspaceStatus::Error;
-                integration_workspace.updated_at = Utc::now();
+                integration_workspace.mark_error(Utc::now());
                 let _ = state.db.update_workspace(&integration_workspace).await;
 
                 convergence.transition_to_failed(Some(error.to_string()), Utc::now());
@@ -1422,8 +1419,7 @@ pub(super) async fn prepare_convergence_workspace(
             )
             .await
             {
-                integration_workspace.status = ingot_domain::workspace::WorkspaceStatus::Error;
-                integration_workspace.updated_at = Utc::now();
+                integration_workspace.mark_error(Utc::now());
                 let _ = state.db.update_workspace(&integration_workspace).await;
 
                 convergence.transition_to_failed(Some(error.to_string()), Utc::now());
@@ -1470,9 +1466,7 @@ pub(super) async fn prepare_convergence_workspace(
         prepared_commit_oids.push(prepared_tip.clone());
     }
 
-    integration_workspace.head_commit_oid = Some(prepared_tip.clone());
-    integration_workspace.status = ingot_domain::workspace::WorkspaceStatus::Ready;
-    integration_workspace.updated_at = Utc::now();
+    integration_workspace.mark_ready_with_head(prepared_tip.clone(), Utc::now());
     state
         .db
         .update_workspace(&integration_workspace)

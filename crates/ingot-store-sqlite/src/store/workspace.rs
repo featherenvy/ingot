@@ -1,6 +1,6 @@
 use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId, WorkspaceId};
 use ingot_domain::ports::{RepositoryError, WorkspaceRepository};
-use ingot_domain::workspace::Workspace;
+use ingot_domain::workspace::{Workspace, WorkspaceCommitState, WorkspaceState, WorkspaceStatus};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
@@ -41,11 +41,11 @@ impl Database {
         .bind(workspace.parent_workspace_id.map(|id| id.to_string()))
         .bind(workspace.target_ref.as_deref())
         .bind(workspace.workspace_ref.as_deref())
-        .bind(workspace.base_commit_oid.as_deref())
-        .bind(workspace.head_commit_oid.as_deref())
+        .bind(workspace.state.base_commit_oid())
+        .bind(workspace.state.head_commit_oid())
         .bind(encode_enum(&workspace.retention_policy)?)
-        .bind(encode_enum(&workspace.status)?)
-        .bind(workspace.current_job_id.map(|id| id.to_string()))
+        .bind(encode_enum(&workspace.state.status())?)
+        .bind(workspace.state.current_job_id().map(|id| id.to_string()))
         .bind(workspace.created_at)
         .bind(workspace.updated_at)
         .execute(&self.pool)
@@ -65,11 +65,11 @@ impl Database {
         .bind(&workspace.path)
         .bind(workspace.target_ref.as_deref())
         .bind(workspace.workspace_ref.as_deref())
-        .bind(workspace.base_commit_oid.as_deref())
-        .bind(workspace.head_commit_oid.as_deref())
+        .bind(workspace.state.base_commit_oid())
+        .bind(workspace.state.head_commit_oid())
         .bind(encode_enum(&workspace.retention_policy)?)
-        .bind(encode_enum(&workspace.status)?)
-        .bind(workspace.current_job_id.map(|id| id.to_string()))
+        .bind(encode_enum(&workspace.state.status())?)
+        .bind(workspace.state.current_job_id().map(|id| id.to_string()))
         .bind(workspace.updated_at)
         .bind(workspace.id.to_string())
         .execute(&self.pool)
@@ -170,6 +170,22 @@ impl WorkspaceRepository for Database {
 }
 
 fn map_workspace(row: &SqliteRow) -> Result<Workspace, RepositoryError> {
+    let status: WorkspaceStatus = parse_enum(row.try_get("status").map_err(db_err)?)?;
+    let current_job_id = row
+        .try_get::<Option<String>, _>("current_job_id")
+        .map_err(db_err)?
+        .map(parse_id)
+        .transpose()?;
+    let state = WorkspaceState::from_parts(
+        status,
+        WorkspaceCommitState::from_option_parts(
+            row.try_get("base_commit_oid").map_err(db_err)?,
+            row.try_get("head_commit_oid").map_err(db_err)?,
+        ),
+        current_job_id,
+    )
+    .map_err(|error| db_err(std::io::Error::other(error)))?;
+
     Ok(Workspace {
         id: parse_id(row.try_get("id").map_err(db_err)?)?,
         project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
@@ -188,16 +204,9 @@ fn map_workspace(row: &SqliteRow) -> Result<Workspace, RepositoryError> {
             .transpose()?,
         target_ref: row.try_get("target_ref").map_err(db_err)?,
         workspace_ref: row.try_get("workspace_ref").map_err(db_err)?,
-        base_commit_oid: row.try_get("base_commit_oid").map_err(db_err)?,
-        head_commit_oid: row.try_get("head_commit_oid").map_err(db_err)?,
         retention_policy: parse_enum(row.try_get("retention_policy").map_err(db_err)?)?,
-        status: parse_enum(row.try_get("status").map_err(db_err)?)?,
-        current_job_id: row
-            .try_get::<Option<String>, _>("current_job_id")
-            .map_err(db_err)?
-            .map(parse_id)
-            .transpose()?,
         created_at: row.try_get("created_at").map_err(db_err)?,
         updated_at: row.try_get("updated_at").map_err(db_err)?,
+        state,
     })
 }

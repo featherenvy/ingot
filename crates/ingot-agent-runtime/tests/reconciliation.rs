@@ -43,6 +43,7 @@ async fn reconcile_startup_expires_stale_running_jobs_and_marks_workspace_stale(
         .expect("create item");
 
     let created_at = default_timestamp();
+    let job_id = ingot_domain::ids::JobId::new();
     let workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
         .path(
             unique_temp_path("ingot-runtime-stale-workspace")
@@ -51,6 +52,7 @@ async fn reconcile_startup_expires_stale_running_jobs_and_marks_workspace_stale(
         )
         .created_for_revision_id(revision.id)
         .status(WorkspaceStatus::Busy)
+        .current_job_id(job_id)
         .base_commit_oid(&seed_commit)
         .head_commit_oid(&seed_commit)
         .workspace_ref("refs/ingot/workspaces/reconcile")
@@ -61,6 +63,7 @@ async fn reconcile_startup_expires_stale_running_jobs_and_marks_workspace_stale(
         .expect("create workspace");
 
     let stale_job = JobBuilder::new(h.project.id, item_id, revision_id, "author_initial")
+        .id(job_id)
         .status(JobStatus::Running)
         .workspace_id(workspace.id)
         .workspace_kind(WorkspaceKind::Authoring)
@@ -89,8 +92,8 @@ async fn reconcile_startup_expires_stale_running_jobs_and_marks_workspace_stale(
     assert_eq!(updated_job.state.error_code(), Some("heartbeat_expired"));
 
     let updated_workspace = h.db.get_workspace(workspace.id).await.expect("workspace");
-    assert_eq!(updated_workspace.status, WorkspaceStatus::Stale);
-    assert_eq!(updated_workspace.current_job_id, None);
+    assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Stale);
+    assert_eq!(updated_workspace.state.current_job_id(), None);
 }
 
 #[tokio::test]
@@ -113,6 +116,7 @@ async fn reconcile_active_jobs_reports_progress_when_it_expires_a_running_job() 
         .expect("create item");
 
     let created_at = default_timestamp();
+    let job_id = ingot_domain::ids::JobId::new();
     let workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
         .path(
             unique_temp_path("ingot-runtime-progress-workspace")
@@ -121,6 +125,7 @@ async fn reconcile_active_jobs_reports_progress_when_it_expires_a_running_job() 
         )
         .created_for_revision_id(revision.id)
         .status(WorkspaceStatus::Busy)
+        .current_job_id(job_id)
         .base_commit_oid(&seed_commit)
         .head_commit_oid(&seed_commit)
         .workspace_ref("refs/ingot/workspaces/progress")
@@ -131,6 +136,7 @@ async fn reconcile_active_jobs_reports_progress_when_it_expires_a_running_job() 
         .expect("create workspace");
 
     let stale_job = JobBuilder::new(h.project.id, item_id, revision_id, "author_initial")
+        .id(job_id)
         .status(JobStatus::Running)
         .workspace_id(workspace.id)
         .workspace_kind(WorkspaceKind::Authoring)
@@ -183,7 +189,7 @@ async fn reconcile_startup_fails_inflight_convergences_and_marks_workspace_stale
                 .to_string(),
         )
         .created_for_revision_id(revision.id)
-        .status(WorkspaceStatus::Busy)
+        .status(WorkspaceStatus::Provisioning)
         .base_commit_oid(&seed_commit)
         .head_commit_oid(&seed_commit)
         .workspace_ref("refs/ingot/workspaces/reconcile-conv")
@@ -228,7 +234,7 @@ async fn reconcile_startup_fails_inflight_convergences_and_marks_workspace_stale
     );
 
     let updated_workspace = h.db.get_workspace(workspace.id).await.expect("workspace");
-    assert_eq!(updated_workspace.status, WorkspaceStatus::Stale);
+    assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Stale);
 }
 
 #[tokio::test]
@@ -704,7 +710,7 @@ async fn reconcile_startup_adopts_prepared_convergence_from_git_operation() {
     let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Integration)
         .path(repo.display().to_string())
         .created_for_revision_id(revision.id)
-        .status(WorkspaceStatus::Busy)
+        .status(WorkspaceStatus::Provisioning)
         .base_commit_oid(&base_commit)
         .head_commit_oid(&base_commit)
         .workspace_ref("refs/ingot/workspaces/prepare-adopt")
@@ -737,9 +743,10 @@ async fn reconcile_startup_adopts_prepared_convergence_from_git_operation() {
     .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
     .expected_old_oid(
         workspace
-            .base_commit_oid
-            .clone()
-            .expect("workspace base commit"),
+            .state
+            .base_commit_oid()
+            .expect("workspace base commit")
+            .to_owned(),
     )
     .new_oid(prepared_head.clone())
     .commit_oid(prepared_head.clone())
@@ -769,9 +776,9 @@ async fn reconcile_startup_adopts_prepared_convergence_from_git_operation() {
     );
     assert!(updated_convergence.state.prepared_commit_oid().is_some());
     let updated_workspace = db.get_workspace(workspace.id).await.expect("workspace");
-    assert_eq!(updated_workspace.status, WorkspaceStatus::Ready);
+    assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Ready);
     assert_eq!(
-        updated_workspace.head_commit_oid.as_deref(),
+        updated_workspace.state.head_commit_oid(),
         updated_convergence.state.prepared_commit_oid()
     );
     let unresolved = db
@@ -844,7 +851,7 @@ async fn reconcile_startup_does_not_resurrect_cancelled_convergence_from_prepare
         .integration_workspace_id(workspace.id)
         .source_head_commit_oid(prepared_head.clone())
         .status(ConvergenceStatus::Cancelled)
-        .input_target_commit_oid(base_commit)
+        .input_target_commit_oid(base_commit.clone())
         .prepared_commit_oid(prepared_head.clone())
         .completed_at(created_at)
         .created_at(created_at)
@@ -861,12 +868,7 @@ async fn reconcile_startup_does_not_resurrect_cancelled_convergence_from_prepare
     )
     .workspace_id(workspace.id)
     .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
-    .expected_old_oid(
-        workspace
-            .base_commit_oid
-            .clone()
-            .expect("workspace base commit"),
-    )
+    .expected_old_oid(base_commit)
     .new_oid(prepared_head.clone())
     .commit_oid(prepared_head)
     .status(GitOperationStatus::Applied)
@@ -894,7 +896,7 @@ async fn reconcile_startup_does_not_resurrect_cancelled_convergence_from_prepare
         ConvergenceStatus::Cancelled
     );
     let updated_workspace = db.get_workspace(workspace.id).await.expect("workspace");
-    assert_eq!(updated_workspace.status, WorkspaceStatus::Abandoned);
+    assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Abandoned);
     let unresolved = db
         .list_unresolved_git_operations()
         .await
@@ -947,10 +949,12 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
         .await
         .expect("create item");
 
+    let job_id = ingot_domain::ids::JobId::new();
     let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
         .path(repo.display().to_string())
         .created_for_revision_id(revision.id)
         .status(WorkspaceStatus::Busy)
+        .current_job_id(job_id)
         .base_commit_oid(&base_commit)
         .head_commit_oid(&base_commit)
         .workspace_ref("refs/ingot/workspaces/adopt-job")
@@ -961,6 +965,7 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
         .expect("create workspace");
 
     let job = JobBuilder::new(project.id, item_id, revision_id, "author_initial")
+        .id(job_id)
         .status(JobStatus::Running)
         .workspace_id(workspace.id)
         .workspace_kind(WorkspaceKind::Authoring)
@@ -1007,9 +1012,9 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
     );
 
     let updated_workspace = db.get_workspace(workspace.id).await.expect("workspace");
-    assert_eq!(updated_workspace.status, WorkspaceStatus::Ready);
+    assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Ready);
     assert_eq!(
-        updated_workspace.head_commit_oid.as_deref(),
+        updated_workspace.state.head_commit_oid(),
         Some(authored_commit.as_str())
     );
 
@@ -1196,9 +1201,10 @@ async fn reconcile_startup_adopts_reset_workspace_operation() {
     .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
     .expected_old_oid(
         workspace
-            .head_commit_oid
-            .clone()
-            .expect("workspace head commit"),
+            .state
+            .head_commit_oid()
+            .expect("workspace head commit")
+            .to_owned(),
     )
     .new_oid(head)
     .status(GitOperationStatus::Applied)
@@ -1214,8 +1220,8 @@ async fn reconcile_startup_adopts_reset_workspace_operation() {
         .expect("reconcile startup");
 
     let updated_workspace = h.db.get_workspace(workspace.id).await.expect("workspace");
-    assert_eq!(updated_workspace.status, WorkspaceStatus::Ready);
-    assert_eq!(updated_workspace.current_job_id, None);
+    assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Ready);
+    assert_eq!(updated_workspace.state.current_job_id(), None);
 }
 
 #[tokio::test]
@@ -1277,9 +1283,10 @@ async fn reconcile_startup_adopts_remove_workspace_ref_operation() {
     .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
     .expected_old_oid(
         workspace
-            .head_commit_oid
-            .clone()
-            .expect("workspace head commit"),
+            .state
+            .head_commit_oid()
+            .expect("workspace head commit")
+            .to_owned(),
     )
     .status(GitOperationStatus::Applied)
     .created_at(created_at)
@@ -1294,8 +1301,8 @@ async fn reconcile_startup_adopts_remove_workspace_ref_operation() {
         .expect("reconcile startup");
 
     let updated_workspace = db.get_workspace(workspace.id).await.expect("workspace");
-    assert_eq!(updated_workspace.status, WorkspaceStatus::Abandoned);
-    assert_eq!(updated_workspace.current_job_id, None);
+    assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Abandoned);
+    assert_eq!(updated_workspace.state.current_job_id(), None);
     assert_eq!(updated_workspace.workspace_ref, None);
 }
 
@@ -1681,10 +1688,12 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
     h.db.create_item_with_revision(&item_a, &rev_a)
         .await
         .expect("create item a");
+    let assigned_job_id = ingot_domain::ids::JobId::new();
     let workspace_a = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
         .path(h.repo_path.display().to_string())
         .created_for_revision_id(rev_a.id)
         .status(WorkspaceStatus::Busy)
+        .current_job_id(assigned_job_id)
         .base_commit_oid(&seed_commit)
         .head_commit_oid(&seed_commit)
         .created_at(created_at)
@@ -1693,6 +1702,7 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
         .await
         .expect("workspace a");
     let assigned_job = JobBuilder::new(h.project.id, item_a.id, rev_a.id, "author_initial")
+        .id(assigned_job_id)
         .workspace_kind(WorkspaceKind::Authoring)
         .job_input(JobInput::authoring_head(&seed_commit))
         .output_artifact_kind(OutputArtifactKind::Commit)
@@ -1717,10 +1727,12 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
     h.db.create_item_with_revision(&item_b, &rev_b)
         .await
         .expect("create item b");
+    let running_job_id = ingot_domain::ids::JobId::new();
     let workspace_b = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
         .path(h.repo_path.display().to_string())
         .created_for_revision_id(rev_b.id)
         .status(WorkspaceStatus::Busy)
+        .current_job_id(running_job_id)
         .base_commit_oid(&seed_commit)
         .head_commit_oid(&seed_commit)
         .created_at(created_at)
@@ -1729,6 +1741,7 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
         .await
         .expect("workspace b");
     let running_job = JobBuilder::new(h.project.id, item_b.id, rev_b.id, "author_initial")
+        .id(running_job_id)
         .workspace_kind(WorkspaceKind::Authoring)
         .job_input(JobInput::authoring_head(&seed_commit))
         .output_artifact_kind(OutputArtifactKind::Commit)
@@ -1761,10 +1774,10 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
         h.db.get_workspace(workspace_a.id)
             .await
             .expect("workspace a");
-    assert_eq!(updated_workspace_a.status, WorkspaceStatus::Ready);
+    assert_eq!(updated_workspace_a.state.status(), WorkspaceStatus::Ready);
     let updated_workspace_b =
         h.db.get_workspace(workspace_b.id)
             .await
             .expect("workspace b");
-    assert_eq!(updated_workspace_b.status, WorkspaceStatus::Stale);
+    assert_eq!(updated_workspace_b.state.status(), WorkspaceStatus::Stale);
 }

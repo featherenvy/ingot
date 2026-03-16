@@ -105,11 +105,7 @@ where
 
         if let Some(workspace_id) = job.state.workspace_id() {
             let mut workspace = workspace_repo.get(workspace_id).await?;
-            workspace.current_job_id = None;
-            if workspace.status == WorkspaceStatus::Busy {
-                workspace.status = WorkspaceStatus::Ready;
-            }
-            workspace.updated_at = Utc::now();
+            workspace.release_to(WorkspaceStatus::Ready, Utc::now());
             workspace_repo.update(&workspace).await?;
             result.cancelled_job_workspace_ids.push(workspace_id);
         }
@@ -148,11 +144,9 @@ where
 
         if let Some(workspace_id) = convergence.state.integration_workspace_id() {
             let workspace = workspace_repo.get(workspace_id).await?;
-            if workspace.status != WorkspaceStatus::Abandoned {
+            if workspace.state.status() != WorkspaceStatus::Abandoned {
                 let mut abandoned_workspace = workspace;
-                abandoned_workspace.status = WorkspaceStatus::Abandoned;
-                abandoned_workspace.current_job_id = None;
-                abandoned_workspace.updated_at = Utc::now();
+                abandoned_workspace.mark_abandoned(Utc::now());
                 workspace_repo.update(&abandoned_workspace).await?;
             }
             result.integration_workspace_ids.push(workspace_id);
@@ -328,8 +322,8 @@ mod tests {
         );
 
         let updated_workspace = workspace_repo.last_updated().expect("updated workspace");
-        assert_eq!(updated_workspace.current_job_id, None);
-        assert_eq!(updated_workspace.status, WorkspaceStatus::Ready);
+        assert_eq!(updated_workspace.state.current_job_id(), None);
+        assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Ready);
     }
 
     fn test_revision() -> ItemRevision {
@@ -357,13 +351,11 @@ mod tests {
     fn test_workspace() -> Workspace {
         let nil = Uuid::nil();
         let job_id = JobId::from_uuid(nil);
-        let mut workspace =
-            WorkspaceBuilder::new(ProjectId::from_uuid(nil), WorkspaceKind::Authoring)
-                .id(WorkspaceId::from_uuid(nil))
-                .status(WorkspaceStatus::Busy)
-                .build();
-        workspace.current_job_id = Some(job_id);
-        workspace
+        WorkspaceBuilder::new(ProjectId::from_uuid(nil), WorkspaceKind::Authoring)
+            .id(WorkspaceId::from_uuid(nil))
+            .status(WorkspaceStatus::Busy)
+            .current_job_id(job_id)
+            .build()
     }
 
     #[derive(Clone, Default)]
