@@ -131,6 +131,12 @@ pub(super) async fn start_job(
     if job.state.status() == JobStatus::Running {
         return Ok(Json(job));
     }
+    if job.state.status() != JobStatus::Assigned {
+        return Err(ApiError::Conflict {
+            code: "job_not_startable",
+            message: "Only assigned jobs can be started".into(),
+        });
+    }
     let item = state.db.get_item(job.item_id).await.map_err(repo_to_item)?;
     let _guard = state
         .project_locks

@@ -268,7 +268,6 @@ async fn classify_job_completion_conflict(
 #[cfg(test)]
 mod tests {
     use ingot_domain::convergence::{Convergence, ConvergenceStatus};
-    use ingot_domain::finding::FindingTriageState;
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId, WorkspaceId};
     use ingot_domain::item::{ApprovalState, Classification, Item, Origin};
     use ingot_domain::job::{
@@ -469,9 +468,11 @@ mod tests {
 
         let (promoted_item, _) = persist_promoted_finding_item(&db, project.id, finding.id).await;
 
-        finding.triage_state = FindingTriageState::Backlog;
-        finding.linked_item_id = Some(promoted_item.id);
-        finding.triaged_at = Some(default_timestamp());
+        finding.triage = ingot_domain::finding::FindingTriage::Backlog {
+            linked_item_id: promoted_item.id,
+            triage_note: None,
+            triaged_at: default_timestamp(),
+        };
         db.triage_finding(&finding).await.expect("promote finding");
 
         let fk_violations: Vec<(String, String, String, i64)> =

@@ -158,6 +158,7 @@ impl Database {
                  started_at = COALESCE(started_at, ?)
              WHERE id = ?
                AND status IN ('queued', 'assigned')
+               AND COALESCE(?, workspace_id) IS NOT NULL
                AND EXISTS (
                    SELECT 1
                    FROM items
@@ -173,6 +174,7 @@ impl Database {
         .bind(lease_expires_at)
         .bind(Utc::now())
         .bind(job_id.to_string())
+        .bind(workspace_id.map(|id| id.to_string()))
         .bind(item_id.to_string())
         .bind(expected_item_revision_id.to_string())
         .execute(&self.pool)
@@ -590,6 +592,20 @@ async fn classify_running_job_conflict(
         return Ok(RepositoryError::Conflict("job_not_active".into()));
     }
 
+    let workspace_id: Option<String> = sqlx::query_scalar(
+        "SELECT workspace_id
+         FROM jobs
+         WHERE id = ?",
+    )
+    .bind(job_id.to_string())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?
+    .flatten();
+    if workspace_id.is_none() {
+        return Ok(RepositoryError::Conflict("job_missing_workspace".into()));
+    }
+
     Ok(RepositoryError::Conflict("job_update_conflict".into()))
 }
 
@@ -790,8 +806,8 @@ mod tests {
     use ingot_test_support::sqlite::temp_db_path;
 
     use crate::Database;
-    use crate::FinishJobNonSuccessParams;
     use crate::store::test_fixtures::PersistFixture;
+    use crate::{FinishJobNonSuccessParams, StartJobExecutionParams};
 
     async fn migrated_test_db(prefix: &str) -> Database {
         let path = temp_db_path(prefix);
@@ -952,5 +968,66 @@ mod tests {
 
         let error = db.get_job(job_id).await.expect_err("missing workspace_id");
         assert!(matches!(error, RepositoryError::Database(_)));
+    }
+
+    #[tokio::test]
+    async fn start_job_execution_rejects_jobs_without_workspace_binding() {
+        let db = migrated_test_db("ingot-store").await;
+
+        let project = ProjectBuilder::new("/tmp/test")
+            .name("Test")
+            .build()
+            .persist(&db)
+            .await
+            .expect("create project");
+
+        let item_id = ItemId::new();
+        let revision = RevisionBuilder::new(item_id)
+            .seed_commit_oid(Some("abc"))
+            .seed_target_commit_oid(Some("def"))
+            .build();
+        let item = ItemBuilder::new(project.id, revision.id)
+            .id(item_id)
+            .build();
+        let (item, revision) = (item, revision)
+            .persist(&db)
+            .await
+            .expect("create item with revision");
+
+        let job = JobBuilder::new(project.id, item.id, revision.id, "author_initial")
+            .status(JobStatus::Queued)
+            .phase_kind(PhaseKind::Author)
+            .workspace_kind(WorkspaceKind::Authoring)
+            .execution_permission(ExecutionPermission::MayMutate)
+            .context_policy(ContextPolicy::Fresh)
+            .phase_template_slug("author-initial")
+            .output_artifact_kind(OutputArtifactKind::Commit)
+            .build()
+            .persist(&db)
+            .await
+            .expect("create queued job");
+
+        let error = db
+            .start_job_execution(StartJobExecutionParams {
+                job_id: job.id,
+                item_id: item.id,
+                expected_item_revision_id: revision.id,
+                workspace_id: None,
+                agent_id: None,
+                lease_owner_id: "ingotd:test".into(),
+                process_pid: Some(1234),
+                lease_expires_at: Utc::now() + chrono::Duration::seconds(60),
+            })
+            .await
+            .expect_err("missing workspace binding should fail");
+
+        assert!(matches!(
+            error,
+            RepositoryError::Conflict(message) if message == "job_missing_workspace"
+        ));
+
+        let persisted_job = db.get_job(job.id).await.expect("job remains readable");
+        assert_eq!(persisted_job.state.status(), JobStatus::Queued);
+        assert_eq!(persisted_job.state.workspace_id(), None);
     }
 }

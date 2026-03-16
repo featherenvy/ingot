@@ -634,12 +634,10 @@ fn triage_projection(
         return None;
     }
 
-    if job_findings.iter().any(|finding| {
-        matches!(
-            finding.triage_state,
-            FindingTriageState::Untriaged | FindingTriageState::NeedsInvestigation
-        )
-    }) {
+    if job_findings
+        .iter()
+        .any(|finding| finding.triage.is_unresolved())
+    {
         return Some(IdleProjection {
             current_step_id: Some(latest_closure_job.step_id.clone()),
             phase_status: PhaseStatus::Triaging,
@@ -652,7 +650,7 @@ fn triage_projection(
 
     if job_findings
         .iter()
-        .any(|finding| finding.triage_state == FindingTriageState::FixNow)
+        .any(|finding| finding.triage.state() == FindingTriageState::FixNow)
     {
         return triaged_findings_repair_projection(latest_closure_job);
     }

@@ -1317,7 +1317,7 @@ impl JobDispatcher {
         let head_commit_oid = workspace.head_commit_oid.as_deref().unwrap_or_default();
         let blocked = findings.iter().any(|finding| {
             finding.source_item_revision_id == revision.id
-                && finding.triage_state.is_unresolved()
+                && finding.triage.is_unresolved()
                 && finding.source_subject_head_commit_oid == head_commit_oid
                 && match workspace.kind {
                     WorkspaceKind::Authoring => {
@@ -1826,18 +1826,11 @@ impl JobDispatcher {
                     .collect::<Vec<_>>();
                 let fix_now_findings = scoped_findings
                     .iter()
-                    .filter(|finding| finding.triage_state == FindingTriageState::FixNow)
+                    .filter(|finding| finding.triage.state() == FindingTriageState::FixNow)
                     .collect::<Vec<_>>();
                 let accepted_findings = scoped_findings
                     .iter()
-                    .filter(|finding| {
-                        !matches!(
-                            finding.triage_state,
-                            FindingTriageState::Untriaged
-                                | FindingTriageState::FixNow
-                                | FindingTriageState::NeedsInvestigation
-                        )
-                    })
+                    .filter(|finding| !finding.triage.blocks_closure())
                     .collect::<Vec<_>>();
 
                 if !fix_now_findings.is_empty() || !accepted_findings.is_empty() {
@@ -1857,7 +1850,9 @@ impl JobDispatcher {
                     for finding in &accepted_findings {
                         prompt.push_str(&format!(
                             "  - [{}] {} => {:?}\n",
-                            finding.code, finding.summary, finding.triage_state
+                            finding.code,
+                            finding.summary,
+                            finding.triage.state()
                         ));
                     }
                 }

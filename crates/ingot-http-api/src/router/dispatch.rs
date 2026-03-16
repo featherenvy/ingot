@@ -407,8 +407,7 @@ pub(super) async fn maybe_cleanup_investigation_ref(
         .map_err(repo_to_internal)?
         .into_iter()
         .any(|candidate| {
-            candidate.source_job_id == finding.source_job_id
-                && candidate.triage_state.is_unresolved()
+            candidate.source_job_id == finding.source_job_id && candidate.triage.is_unresolved()
         });
     if remaining_unresolved {
         return Ok(());

@@ -1,5 +1,5 @@
 use chrono::Utc;
-use ingot_domain::finding::Finding;
+use ingot_domain::finding::{Finding, FindingTriage, FindingTriageState};
 use ingot_domain::ids::{FindingId, ItemId, JobId};
 use ingot_domain::item::Item;
 use ingot_domain::ports::{FindingRepository, RepositoryError};
@@ -66,11 +66,11 @@ impl Database {
         .bind(&finding.summary)
         .bind(serde_json::to_string(&finding.paths).map_err(json_err)?)
         .bind(serde_json::to_string(&finding.evidence).map_err(json_err)?)
-        .bind(encode_enum(&finding.triage_state)?)
-        .bind(finding.linked_item_id.map(|id| id.to_string()))
-        .bind(finding.triage_note.as_deref())
+        .bind(encode_enum(&finding.triage.state())?)
+        .bind(finding.triage.linked_item_id().map(|id| id.to_string()))
+        .bind(finding.triage.triage_note())
         .bind(finding.created_at)
-        .bind(finding.triaged_at)
+        .bind(finding.triage.triaged_at())
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -101,10 +101,10 @@ impl Database {
              SET triage_state = ?, triage_note = ?, triaged_at = ?, linked_item_id = ?
              WHERE id = ?",
         )
-        .bind(encode_enum(&finding.triage_state)?)
-        .bind(finding.triage_note.as_deref())
-        .bind(finding.triaged_at)
-        .bind(finding.linked_item_id.map(|id| id.to_string()))
+        .bind(encode_enum(&finding.triage.state())?)
+        .bind(finding.triage.triage_note())
+        .bind(finding.triage.triaged_at())
+        .bind(finding.triage.linked_item_id().map(|id| id.to_string()))
         .bind(finding.id.to_string())
         .execute(&self.pool)
         .await
@@ -125,10 +125,10 @@ impl Database {
              SET triage_state = ?, triage_note = ?, triaged_at = ?, linked_item_id = ?
              WHERE id = ?",
         )
-        .bind(encode_enum(&finding.triage_state)?)
-        .bind(finding.triage_note.as_deref())
-        .bind(finding.triaged_at)
-        .bind(finding.linked_item_id.map(|id| id.to_string()))
+        .bind(encode_enum(&finding.triage.state())?)
+        .bind(finding.triage.triage_note())
+        .bind(finding.triage.triaged_at())
+        .bind(finding.triage.linked_item_id().map(|id| id.to_string()))
         .bind(finding.id.to_string())
         .execute(&mut *tx)
         .await
@@ -229,10 +229,10 @@ impl Database {
              SET triage_state = ?, linked_item_id = ?, triage_note = ?, triaged_at = ?
              WHERE id = ?",
         )
-        .bind(encode_enum(&finding.triage_state)?)
+        .bind(encode_enum(&finding.triage.state())?)
         .bind(linked_item.id.to_string())
-        .bind(finding.triage_note.as_deref())
-        .bind(finding.triaged_at)
+        .bind(finding.triage.triage_note())
+        .bind(finding.triage.triaged_at())
         .bind(finding.id.to_string())
         .execute(&mut *tx)
         .await
@@ -277,10 +277,10 @@ impl Database {
         .bind(&finding.summary)
         .bind(serde_json::to_string(&finding.paths).map_err(json_err)?)
         .bind(serde_json::to_string(&finding.evidence).map_err(json_err)?)
-        .bind(encode_enum(&finding.triage_state)?)
-        .bind(finding.linked_item_id.map(|id| id.to_string()))
-        .bind(finding.triage_note.as_deref())
-        .bind(finding.triaged_at)
+        .bind(encode_enum(&finding.triage.state())?)
+        .bind(finding.triage.linked_item_id().map(|id| id.to_string()))
+        .bind(finding.triage.triage_note())
+        .bind(finding.triage.triaged_at())
         .bind(finding.id.to_string())
         .execute(&self.pool)
         .await
@@ -377,11 +377,11 @@ pub(super) async fn upsert_finding(
     .bind(&finding.summary)
     .bind(serde_json::to_string(&finding.paths).map_err(json_err)?)
     .bind(serde_json::to_string(&finding.evidence).map_err(json_err)?)
-    .bind(encode_enum(&finding.triage_state)?)
-    .bind(finding.linked_item_id.map(|id| id.to_string()))
-    .bind(finding.triage_note.as_deref())
+    .bind(encode_enum(&finding.triage.state())?)
+    .bind(finding.triage.linked_item_id().map(|id| id.to_string()))
+    .bind(finding.triage.triage_note())
     .bind(finding.created_at)
-    .bind(finding.triaged_at)
+    .bind(finding.triage.triaged_at())
     .execute(&mut **tx)
     .await
     .map_err(db_err)?;
@@ -390,6 +390,25 @@ pub(super) async fn upsert_finding(
 }
 
 fn map_finding(row: &SqliteRow) -> Result<Finding, RepositoryError> {
+    let state: FindingTriageState = parse_enum(row.try_get("triage_state").map_err(db_err)?)?;
+    let linked_item_id: Option<ItemId> = row
+        .try_get::<Option<String>, _>("linked_item_id")
+        .map_err(db_err)?
+        .map(parse_id)
+        .transpose()?;
+    let triage_note: Option<String> = row.try_get("triage_note").map_err(db_err)?;
+    let triaged_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get("triaged_at").map_err(db_err)?;
+    let triage = FindingTriage::try_from_parts(
+        state,
+        linked_item_id,
+        triage_note,
+        triaged_at,
+        |state, field| {
+            RepositoryError::Conflict(format!("{} finding missing {field}", state.as_str()))
+        },
+    )?;
+
     Ok(Finding {
         id: parse_id(row.try_get("id").map_err(db_err)?)?,
         project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
@@ -413,14 +432,7 @@ fn map_finding(row: &SqliteRow) -> Result<Finding, RepositoryError> {
         summary: row.try_get("summary").map_err(db_err)?,
         paths: parse_json(row.try_get("paths").map_err(db_err)?)?,
         evidence: parse_json(row.try_get("evidence").map_err(db_err)?)?,
-        triage_state: parse_enum(row.try_get("triage_state").map_err(db_err)?)?,
-        linked_item_id: row
-            .try_get::<Option<String>, _>("linked_item_id")
-            .map_err(db_err)?
-            .map(parse_id)
-            .transpose()?,
-        triage_note: row.try_get("triage_note").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
-        triaged_at: row.try_get("triaged_at").map_err(db_err)?,
+        triage,
     })
 }

@@ -587,6 +587,85 @@ async fn start_route_marks_job_running_and_sets_lease_fields() {
 }
 
 #[tokio::test]
+async fn start_route_rejects_unassigned_queued_job_without_workspace_binding() {
+    let (repo, db, project_id, item_id, seeded_job_id) = seeded_route_test_app().await;
+    let start_job_id = "job_00000000000000000000000000000065".to_string();
+    let head_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    sqlx::query("DELETE FROM jobs WHERE id = ?")
+        .bind(&seeded_job_id)
+        .execute(&db.pool)
+        .await
+        .expect("delete seeded job");
+
+    insert_test_job_row(
+        &db,
+        TestJobInsert {
+            id: &start_job_id,
+            project_id: &project_id,
+            item_id: &item_id,
+            item_revision_id: "rev_00000000000000000000000000000000",
+            step_id: "author_initial",
+            status: JobStatus::Queued,
+            phase_kind: PhaseKind::Author,
+            workspace_id: None,
+            workspace_kind: WorkspaceKind::Authoring,
+            execution_permission: ExecutionPermission::MayMutate,
+            context_policy: ContextPolicy::Fresh,
+            phase_template_slug: "author-initial",
+            output_artifact_kind: OutputArtifactKind::Commit,
+            job_input: TestJobInput::AuthoringHead(&head_commit_oid),
+            created_at: "2026-03-12T00:00:00Z",
+            ..TestJobInsert::new(
+                &start_job_id,
+                &project_id,
+                &item_id,
+                "rev_00000000000000000000000000000000",
+                "author_initial",
+            )
+        },
+    )
+    .await;
+
+    let app = test_router(db.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/jobs/{start_job_id}/start"))
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "lease_owner_id": "ingotd:test",
+                        "process_pid": 1234,
+                        "lease_duration_seconds": 60
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("route response");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["error"]["code"].as_str(), Some("job_not_startable"));
+    assert_eq!(
+        json["error"]["message"].as_str(),
+        Some("Only assigned jobs can be started")
+    );
+
+    let job = db
+        .get_job(parse_id(&start_job_id))
+        .await
+        .expect("job remains readable");
+    assert_eq!(job.state.status(), JobStatus::Queued);
+    assert_eq!(job.state.workspace_id(), None);
+}
+
+#[tokio::test]
 async fn heartbeat_route_refreshes_running_job_lease() {
     let (_repo, db, project_id, item_id, seeded_job_id) = seeded_route_test_app().await;
     let running_job_id = "job_00000000000000000000000000000063".to_string();

@@ -259,8 +259,8 @@ pub(super) async fn apply_finding_triage(
         applied.finding.id,
         serde_json::json!({
             "item_id": source_item.id,
-            "triage_state": applied.finding.triage_state,
-            "linked_item_id": applied.finding.linked_item_id,
+            "triage_state": applied.finding.triage.state(),
+            "linked_item_id": applied.finding.triage.linked_item_id(),
         }),
     )
     .await?;
@@ -286,10 +286,10 @@ pub(super) async fn find_detached_origin_item_id(
     finding: &Finding,
     next_linked_item_id: Option<ItemId>,
 ) -> Result<Option<ItemId>, ApiError> {
-    let Some(current_linked_item_id) = finding.linked_item_id else {
+    let Some(current_linked_item_id) = finding.triage.linked_item_id() else {
         return Ok(None);
     };
-    if finding.triage_state != FindingTriageState::Backlog {
+    if finding.triage.state() != FindingTriageState::Backlog {
         return Ok(None);
     }
     if next_linked_item_id == Some(current_linked_item_id) {
@@ -384,7 +384,7 @@ pub(super) async fn maybe_enter_approval_after_finding_triage(
 
     if latest_job_findings.is_empty()
         || latest_job_findings.iter().any(|row| {
-            row.triage_state.is_unresolved() || row.triage_state == FindingTriageState::FixNow
+            row.triage.is_unresolved() || row.triage.state() == FindingTriageState::FixNow
         })
     {
         return Ok(());

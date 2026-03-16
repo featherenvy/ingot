@@ -20,6 +20,8 @@ After this change, closure-relevant review and validation findings no longer for
 - [x] (2026-03-13 20:23Z) Added the generic finding-triage API route and item-detail UI controls for per-finding triage, including backlog item creation and duplicate linking.
 - [x] (2026-03-13 20:25Z) Added or updated evaluator, usecase, router, runtime, and UI tests and verified them with targeted Rust and Vitest commands.
 - [x] (2026-03-13 20:40Z) Addressed the follow-up review findings by fixing the integrated approval transition, allowing safe re-triage of prior decisions, rejecting self-linked backlog items, and adding focused regressions for each case.
+- [x] (2026-03-16 13:58Z) Ran a Rust simplification pass over the touched triage code, extracted a shared `FindingTriage::try_from_parts` constructor in `crates/ingot-domain`, rewired the usecase, SQLite mapper, and test fixtures to use it, and re-ran the targeted Rust crate tests.
+- [x] (2026-03-16 14:04Z) Ran `cargo clippy -p ingot-domain -p ingot-usecases -p ingot-store-sqlite -p ingot-workflow -p ingot-http-api --tests -- -D warnings` to confirm the simplification pass remains warning-free in the affected crates.
 
 ## Surprises & Discoveries
 
@@ -37,6 +39,9 @@ After this change, closure-relevant review and validation findings no longer for
 
 - Observation: route-level regression tests for backlog re-triage require cyclic foreign keys (`finding.linked_item_id` and `item.origin_finding_id`), so test fixtures must seed one side first and then update both columns into a valid steady state.
   Evidence: the first regression attempt failed with `FOREIGN KEY constraint failed` and then `CHECK constraint failed: NOT (triage_state = 'backlog' AND linked_item_id IS NULL)` until the fixture switched to an `untriaged` insert followed by a single `UPDATE` into backlog state.
+
+- Observation: the triage refactor duplicated the same required-field matrix in domain serde, SQLite row decoding, and test fixtures, which made later cleanup risky because each copy could drift.
+  Evidence: on 2026-03-16, `crates/ingot-domain/src/finding.rs`, `crates/ingot-store-sqlite/src/store/finding.rs`, and `crates/ingot-test-support/src/fixtures/finding.rs` each contained a separate `match` over all triage states before the shared constructor was extracted.
 
 ## Decision Log
 
@@ -56,6 +61,10 @@ After this change, closure-relevant review and validation findings no longer for
   Rationale: a triage workflow needs durable, attributable findings. Failed checks can still be reported in `checks`, but if the result should block closure it must also produce at least one canonical finding row.
   Date/Author: 2026-03-13 / Codex
 
+- Decision: centralize triage variant construction in `ingot-domain::finding::FindingTriage::try_from_parts` and keep callers responsible only for caller-specific error translation and extra policy checks.
+  Rationale: the required-field rules are part of the domain model, not the persistence or test layers. Pulling them into one constructor preserves behavior while removing three open-coded copies of the same state machine.
+  Date/Author: 2026-03-16 / Codex
+
 ## Outcomes & Retrospective
 
 The core user-visible goal is now implemented. Closure-relevant findings no longer force immediate all-findings repair. The evaluator holds the item in `triaging`, the item detail page exposes per-finding dispositions, triaged findings can create or link follow-up work, and repair prompts are scoped to the findings marked `fix_now`.
@@ -65,6 +74,8 @@ The main compromise was storage migration strategy. The implementation originall
 Residual gap: the repository still emits one dead-code warning for the `status` field on `ValidationCheckV1` in `crates/ingot-usecases/src/finding.rs`. It does not block tests or the behavior implemented here, but it should be cleaned up before a warning-free lint gate is expected.
 
 The follow-up review pass also closed three concrete bugs: required-policy integrated findings now enter pending approval after the last non-blocking triage decision, previously triaged findings remain editable, and backlog links can no longer point back to the source item. The regression suite now covers all three.
+
+The later simplification pass did not change the outward behavior of the feature, but it did tighten the implementation boundary. The domain model now owns the triage required-field matrix, the usecase layer still owns request-shape validation such as forbidding extra linked-item references, and the store/test layers only translate errors or supply defaults. The targeted Rust crate test sweep still passes after that cleanup.
 
 ## Context and Orientation
 
@@ -186,3 +197,5 @@ In `ui/src/api/client.ts`, add a client helper equivalent to:
 Revision note: created this ExecPlan before implementation to satisfy the repository requirement for significant workflow and spec refactors and to record the design constraints discovered during the initial investigation.
 
 Revision note: updated after implementation to record the completed migration, evaluator/API/UI behavior, the SQLite foreign-key migration discovery, and the targeted Rust and Vitest validation commands that passed.
+
+Revision note: updated on 2026-03-16 after a code-simplification pass to record the new shared triage constructor, why it moved into the domain crate, and the targeted Rust test and clippy commands that still pass.

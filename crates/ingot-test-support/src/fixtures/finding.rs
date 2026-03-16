@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
-use ingot_domain::finding::{Finding, FindingSeverity, FindingSubjectKind, FindingTriageState};
+use ingot_domain::finding::{
+    Finding, FindingSeverity, FindingSubjectKind, FindingTriage, FindingTriageState,
+};
 use ingot_domain::ids;
 use serde_json::json;
 
@@ -147,6 +149,7 @@ impl FindingBuilder {
     }
 
     pub fn build(self) -> Finding {
+        let triage = self.build_triage();
         Finding {
             id: self.id,
             project_id: self.project_id,
@@ -164,11 +167,45 @@ impl FindingBuilder {
             summary: self.summary,
             paths: self.paths,
             evidence: self.evidence,
-            triage_state: self.triage_state,
-            linked_item_id: self.linked_item_id,
-            triage_note: self.triage_note,
             created_at: self.created_at,
-            triaged_at: self.triaged_at,
+            triage,
         }
+    }
+
+    fn build_triage(&self) -> FindingTriage {
+        let triage_note = match self.triage_state {
+            FindingTriageState::WontFix
+            | FindingTriageState::DismissedInvalid
+            | FindingTriageState::NeedsInvestigation => self
+                .triage_note
+                .clone()
+                .or_else(|| Some("test note".into())),
+            _ => self.triage_note.clone(),
+        };
+        let linked_item_id = match self.triage_state {
+            FindingTriageState::Backlog | FindingTriageState::Duplicate => {
+                Some(self.linked_item_id.unwrap_or_default())
+            }
+            _ => self.linked_item_id,
+        };
+        let triaged_at = if self.triage_state == FindingTriageState::Untriaged {
+            None
+        } else {
+            Some(self.triaged_at.unwrap_or_else(Utc::now))
+        };
+
+        FindingTriage::try_from_parts(
+            self.triage_state,
+            linked_item_id,
+            triage_note,
+            triaged_at,
+            |state, field| {
+                format!(
+                    "invalid test triage for {}: missing {field}",
+                    state.as_str()
+                )
+            },
+        )
+        .expect("test finding triage should be internally consistent")
     }
 }
