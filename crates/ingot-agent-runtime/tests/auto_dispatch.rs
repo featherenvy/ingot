@@ -1678,7 +1678,7 @@ async fn idle_item_auto_dispatches_candidate_review_after_nonblocking_incrementa
     assert_eq!(candidate_review.state.status(), JobStatus::Queued);
     assert_eq!(
         candidate_review.job_input.base_commit_oid(),
-        revision.seed_commit_oid.as_deref()
+        revision.seed.seed_commit_oid()
     );
     assert_eq!(
         candidate_review.job_input.head_commit_oid(),

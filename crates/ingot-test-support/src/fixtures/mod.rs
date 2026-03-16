@@ -28,7 +28,9 @@ pub fn nil_item() -> ingot_domain::item::Item {
 
 pub fn nil_revision() -> ingot_domain::revision::ItemRevision {
     RevisionBuilder::nil()
-        .explicit_seed("seed")
-        .seed_target_commit_oid(Some("target"))
+        .seed(ingot_domain::revision::AuthoringBaseSeed::Explicit {
+            seed_commit_oid: "seed".into(),
+            seed_target_commit_oid: "target".into(),
+        })
         .build()
 }

@@ -414,18 +414,20 @@ mod tests {
             .expect("create validate job")
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn persist_prepared_convergence(
         db: &Database,
         project_id: ProjectId,
         item_id: ItemId,
         revision_id: ItemRevisionId,
         source_workspace_id: WorkspaceId,
+        integration_workspace_id: WorkspaceId,
         expected_target_head_oid: &str,
         prepared_head_oid: &str,
     ) -> Convergence {
         ConvergenceBuilder::new(project_id, item_id, revision_id)
             .source_workspace_id(source_workspace_id)
-            .no_integration_workspace_id()
+            .integration_workspace_id(integration_workspace_id)
             .source_head_commit_oid(prepared_head_oid)
             .status(ConvergenceStatus::Prepared)
             .input_target_commit_oid(expected_target_head_oid)
@@ -566,6 +568,7 @@ mod tests {
             item.id,
             revision.id,
             workspace.id,
+            workspace.id,
             "expected-target",
             "prepared-head",
         )
@@ -629,6 +632,7 @@ mod tests {
             project.id,
             item.id,
             revision.id,
+            workspace.id,
             workspace.id,
             "expected-target",
             "prepared-head",

@@ -224,7 +224,7 @@ pub async fn ensure_authoring_workspace_state(
     ) -> String {
         workspace
             .and_then(|workspace| workspace.state.base_commit_oid().map(ToOwned::to_owned))
-            .or_else(|| revision.seed_commit_oid.clone())
+            .or_else(|| revision.seed.seed_commit_oid().map(ToOwned::to_owned))
             .or_else(|| job.job_input.head_commit_oid().map(ToOwned::to_owned))
             .unwrap_or_default()
     }

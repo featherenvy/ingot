@@ -525,9 +525,19 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
         .await
         .expect("create source workspace");
 
+    let integration_workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Integration)
+        .created_for_revision_id(revision.id)
+        .base_commit_oid(base_commit.clone())
+        .head_commit_oid(prepared_commit.clone())
+        .created_at(created_at)
+        .build();
+    db.create_workspace(&integration_workspace)
+        .await
+        .expect("create integration workspace");
+
     let convergence = ConvergenceBuilder::new(project.id, item_id, revision_id)
         .source_workspace_id(source_workspace.id)
-        .no_integration_workspace_id()
+        .integration_workspace_id(integration_workspace.id)
         .source_head_commit_oid(prepared_commit.clone())
         .input_target_commit_oid(base_commit.clone())
         .prepared_commit_oid(prepared_commit.clone())

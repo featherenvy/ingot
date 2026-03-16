@@ -10,7 +10,7 @@ use ingot_domain::item::{
     ApprovalState, Classification, Escalation, Item, Lifecycle, Origin, ParkingState,
 };
 use ingot_domain::job::{Job, OutcomeClass};
-use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
+use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use serde::Deserialize;
 
 use crate::UseCaseError;
@@ -66,15 +66,6 @@ struct FindingReportV1 {
     outcome: String,
     summary: String,
     findings: Vec<FindingV1>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RevisionContextPayload {
-    changed_paths: Vec<String>,
-    latest_validation: Option<ingot_domain::revision_context::RevisionContextResultSummary>,
-    latest_review: Option<ingot_domain::revision_context::RevisionContextResultSummary>,
-    accepted_result_refs: Vec<ingot_domain::revision_context::RevisionContextAcceptedResultRef>,
-    operator_notes_excerpt: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -372,10 +363,17 @@ pub fn backlog_finding(
         approval_policy,
         policy_snapshot: source_revision.policy_snapshot.clone(),
         template_map_snapshot: source_revision.template_map_snapshot.clone(),
-        seed_commit_oid: Some(finding.source_subject_head_commit_oid.clone()),
-        seed_target_commit_oid: match finding.source_subject_kind {
-            FindingSubjectKind::Integrated => finding.source_subject_base_commit_oid.clone(),
-            FindingSubjectKind::Candidate => source_revision.seed_target_commit_oid.clone(),
+        seed: AuthoringBaseSeed::Explicit {
+            seed_commit_oid: finding.source_subject_head_commit_oid.clone(),
+            seed_target_commit_oid: match finding.source_subject_kind {
+                FindingSubjectKind::Integrated => finding
+                    .source_subject_base_commit_oid
+                    .clone()
+                    .unwrap_or_default(),
+                FindingSubjectKind::Candidate => {
+                    source_revision.seed.seed_target_commit_oid().to_owned()
+                }
+            },
         },
         supersedes_revision_id: None,
         created_at,
@@ -395,24 +393,16 @@ pub fn backlog_finding(
 
 pub fn parse_revision_context_summary(
     context: Option<&ingot_domain::revision_context::RevisionContext>,
-) -> Result<Option<ingot_domain::revision_context::RevisionContextSummary>, UseCaseError> {
-    let Some(context) = context else {
-        return Ok(None);
-    };
-
-    let payload: RevisionContextPayload = serde_json::from_value(context.payload.clone())
-        .map_err(|err| UseCaseError::ProtocolViolation(err.to_string()))?;
-
-    Ok(Some(
-        ingot_domain::revision_context::RevisionContextSummary {
-            updated_at: context.updated_at,
-            changed_paths: payload.changed_paths,
-            latest_validation: payload.latest_validation,
-            latest_review: payload.latest_review,
-            accepted_result_refs: payload.accepted_result_refs,
-            operator_notes_excerpt: payload.operator_notes_excerpt,
-        },
-    ))
+) -> Option<ingot_domain::revision_context::RevisionContextSummary> {
+    let context = context?;
+    Some(ingot_domain::revision_context::RevisionContextSummary {
+        updated_at: context.updated_at,
+        changed_paths: context.payload.changed_paths.clone(),
+        latest_validation: context.payload.latest_validation.clone(),
+        latest_review: context.payload.latest_review.clone(),
+        accepted_result_refs: context.payload.accepted_result_refs.clone(),
+        operator_notes_excerpt: context.payload.operator_notes_excerpt.clone(),
+    })
 }
 
 fn validate_validation_report(
@@ -698,20 +688,19 @@ mod tests {
         let context = ingot_domain::revision_context::RevisionContext {
             item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
             schema_version: "revision_context:v1".into(),
-            payload: serde_json::json!({
-                "changed_paths": ["src/lib.rs"],
-                "latest_validation": null,
-                "latest_review": null,
-                "accepted_result_refs": [],
-                "operator_notes_excerpt": "note"
-            }),
+            payload: ingot_domain::revision_context::RevisionContextPayload {
+                authoring_head_commit_oid: None,
+                changed_paths: vec!["src/lib.rs".into()],
+                latest_validation: None,
+                latest_review: None,
+                accepted_result_refs: vec![],
+                operator_notes_excerpt: Some("note".into()),
+            },
             updated_from_job_id: None,
             updated_at: Utc::now(),
         };
 
-        let summary = parse_revision_context_summary(Some(&context))
-            .unwrap()
-            .expect("summary");
+        let summary = parse_revision_context_summary(Some(&context)).expect("summary");
 
         assert_eq!(summary.updated_at, context.updated_at);
         assert_eq!(summary.changed_paths, vec!["src/lib.rs".to_string()]);

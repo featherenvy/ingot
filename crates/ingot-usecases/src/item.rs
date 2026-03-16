@@ -3,7 +3,7 @@ use ingot_domain::item::{
     ApprovalState, Classification, Escalation, Item, Lifecycle, Origin, ParkingState, Priority,
 };
 use ingot_domain::project::Project;
-use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
+use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use ingot_workflow::step::DELIVERY_V1_STEPS;
 use serde_json::{Map, Value, json};
 
@@ -24,8 +24,7 @@ pub struct CreateItemInput {
     pub approval_policy: ApprovalPolicy,
     pub candidate_rework_budget: u32,
     pub integration_rework_budget: u32,
-    pub seed_commit_oid: Option<String>,
-    pub seed_target_commit_oid: Option<String>,
+    pub seed: AuthoringBaseSeed,
 }
 
 pub fn create_manual_item(
@@ -47,8 +46,7 @@ pub fn create_manual_item(
         approval_policy,
         candidate_rework_budget,
         integration_rework_budget,
-        seed_commit_oid,
-        seed_target_commit_oid,
+        seed,
     } = input;
     let approval_state = approval_state_for_policy(approval_policy);
 
@@ -85,8 +83,7 @@ pub fn create_manual_item(
             integration_rework_budget,
         ),
         template_map_snapshot: default_template_map_snapshot(),
-        seed_commit_oid,
-        seed_target_commit_oid,
+        seed,
         supersedes_revision_id: None,
         created_at,
     };
@@ -163,7 +160,7 @@ mod tests {
     use ingot_domain::ids::ProjectId;
     use ingot_domain::item::{ApprovalState, Classification, Priority};
     use ingot_domain::project::Project;
-    use ingot_domain::revision::ApprovalPolicy;
+    use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -199,8 +196,10 @@ mod tests {
                 approval_policy: ApprovalPolicy::Required,
                 candidate_rework_budget: 3,
                 integration_rework_budget: 4,
-                seed_commit_oid: Some("seed".into()),
-                seed_target_commit_oid: Some("target".into()),
+                seed: AuthoringBaseSeed::Explicit {
+                    seed_commit_oid: "seed".into(),
+                    seed_target_commit_oid: "target".into(),
+                },
             },
             created_at,
         );
@@ -209,8 +208,8 @@ mod tests {
         assert_eq!(revision.item_id, item.id);
         assert_eq!(revision.revision_no, 1);
         assert_eq!(revision.target_ref, "refs/heads/main");
-        assert_eq!(revision.seed_commit_oid.as_deref(), Some("seed"));
-        assert_eq!(revision.seed_target_commit_oid.as_deref(), Some("target"));
+        assert_eq!(revision.seed.seed_commit_oid(), Some("seed"));
+        assert_eq!(revision.seed.seed_target_commit_oid(), "target");
         assert_eq!(revision.policy_snapshot["candidate_rework_budget"], 3);
         assert_eq!(revision.policy_snapshot["integration_rework_budget"], 4);
         assert_eq!(

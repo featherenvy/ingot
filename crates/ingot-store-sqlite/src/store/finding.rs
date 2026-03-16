@@ -212,8 +212,8 @@ impl Database {
         .bind(encode_enum(&linked_revision.approval_policy)?)
         .bind(serde_json::to_string(&linked_revision.policy_snapshot).map_err(json_err)?)
         .bind(serde_json::to_string(&linked_revision.template_map_snapshot).map_err(json_err)?)
-        .bind(&linked_revision.seed_commit_oid)
-        .bind(linked_revision.seed_target_commit_oid.as_deref())
+        .bind(linked_revision.seed.seed_commit_oid())
+        .bind(linked_revision.seed.seed_target_commit_oid())
         .bind(
             linked_revision
                 .supersedes_revision_id

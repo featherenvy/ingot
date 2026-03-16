@@ -49,7 +49,7 @@ pub fn current_authoring_head_for_revision(
         })
         .max_by_key(|(sort_key, _)| *sort_key)
         .map(|(_, commit_oid)| commit_oid)
-        .or_else(|| revision.seed_commit_oid.clone())
+        .or_else(|| revision.seed.seed_commit_oid().map(ToOwned::to_owned))
 }
 
 /// Returns the effective authoring head for a revision, considering both completed jobs
@@ -72,8 +72,8 @@ pub fn effective_authoring_base_commit_oid(
     revision: &ItemRevision,
     workspace: Option<&Workspace>,
 ) -> Option<String> {
-    if let Some(seed_commit_oid) = revision.seed_commit_oid.clone() {
-        return Some(seed_commit_oid);
+    if let Some(seed_commit_oid) = revision.seed.seed_commit_oid() {
+        return Some(seed_commit_oid.to_owned());
     }
 
     workspace.and_then(|ws| ws.state.base_commit_oid().map(ToOwned::to_owned))

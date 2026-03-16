@@ -47,7 +47,7 @@ pub enum ConvergenceState {
         completed_at: DateTime<Utc>,
     },
     Prepared {
-        integration_workspace_id: Option<WorkspaceId>,
+        integration_workspace_id: WorkspaceId,
         input_target_commit_oid: String,
         prepared_commit_oid: String,
         completed_at: Option<DateTime<Utc>>,
@@ -113,12 +113,12 @@ impl ConvergenceState {
             | Self::Conflicted {
                 integration_workspace_id,
                 ..
-            } => Some(*integration_workspace_id),
-            Self::Prepared {
+            }
+            | Self::Prepared {
                 integration_workspace_id,
                 ..
-            }
-            | Self::Finalized {
+            } => Some(*integration_workspace_id),
+            Self::Finalized {
                 integration_workspace_id,
                 ..
             }
@@ -225,11 +225,7 @@ impl ConvergenceState {
                 integration_workspace_id,
                 input_target_commit_oid,
                 ..
-            } => (
-                integration_workspace_id
-                    .expect("prepared convergence missing workspace for transition"),
-                input_target_commit_oid,
-            ),
+            } => (integration_workspace_id, input_target_commit_oid),
             Self::Finalized {
                 integration_workspace_id,
                 input_target_commit_oid,
@@ -282,8 +278,11 @@ impl ConvergenceState {
                 integration_workspace_id,
                 input_target_commit_oid,
                 ..
-            }
-            | Self::Finalized {
+            } => (
+                Some(integration_workspace_id),
+                Some(input_target_commit_oid),
+            ),
+            Self::Finalized {
                 integration_workspace_id,
                 input_target_commit_oid,
                 ..
@@ -369,7 +368,7 @@ impl Convergence {
         let (integration_workspace_id, input_target_commit_oid) =
             self.take_state().into_required_transition_context();
         self.state = ConvergenceState::Prepared {
-            integration_workspace_id: Some(integration_workspace_id),
+            integration_workspace_id,
             input_target_commit_oid,
             prepared_commit_oid: prepared_oid,
             completed_at,
@@ -384,7 +383,7 @@ impl Convergence {
                 prepared_commit_oid,
                 completed_at: existing_completed_at,
             } => ConvergenceState::Finalized {
-                integration_workspace_id,
+                integration_workspace_id: Some(integration_workspace_id),
                 input_target_commit_oid,
                 prepared_commit_oid,
                 final_target_commit_oid: final_oid,
@@ -485,7 +484,10 @@ impl TryFrom<ConvergenceWire> for Convergence {
                 completed_at: required_convergence_field("completed_at", w.completed_at)?,
             },
             ConvergenceStatus::Prepared => ConvergenceState::Prepared {
-                integration_workspace_id: w.integration_workspace_id,
+                integration_workspace_id: required_convergence_field(
+                    "integration_workspace_id",
+                    w.integration_workspace_id,
+                )?,
                 input_target_commit_oid: required_convergence_field(
                     "input_target_commit_oid",
                     w.input_target_commit_oid,
@@ -630,7 +632,7 @@ mod tests {
     #[test]
     fn deserialize_rejects_prepared_without_prepared_commit_oid() {
         let convergence = base_convergence(ConvergenceState::Prepared {
-            integration_workspace_id: Some(WorkspaceId::new()),
+            integration_workspace_id: WorkspaceId::new(),
             input_target_commit_oid: "base".into(),
             prepared_commit_oid: "prep".into(),
             completed_at: Some(Utc::now()),
@@ -721,7 +723,7 @@ mod tests {
                 completed_at: Utc::now(),
             }),
             base_convergence(ConvergenceState::Prepared {
-                integration_workspace_id: Some(WorkspaceId::new()),
+                integration_workspace_id: WorkspaceId::new(),
                 input_target_commit_oid: "base".into(),
                 prepared_commit_oid: "prep".into(),
                 completed_at: Some(Utc::now()),

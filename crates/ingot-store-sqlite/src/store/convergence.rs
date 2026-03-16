@@ -279,7 +279,11 @@ fn map_convergence(row: &SqliteRow) -> Result<Convergence, RepositoryError> {
             completed_at: required_convergence_field("completed_at", &status_str, completed_at)?,
         },
         ConvergenceStatus::Prepared => ConvergenceState::Prepared {
-            integration_workspace_id,
+            integration_workspace_id: required_convergence_field(
+                "integration_workspace_id",
+                &status_str,
+                integration_workspace_id,
+            )?,
             input_target_commit_oid: required_convergence_field(
                 "input_target_commit_oid",
                 &status_str,
@@ -337,4 +341,143 @@ fn map_convergence(row: &SqliteRow) -> Result<Convergence, RepositoryError> {
         created_at: row.try_get("created_at").map_err(db_err)?,
         state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId, WorkspaceId};
+    use ingot_domain::workspace::WorkspaceKind;
+    use ingot_test_support::fixtures::{
+        ItemBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
+    };
+    use ingot_test_support::sqlite::temp_db_path;
+
+    use crate::Database;
+    use crate::store::test_fixtures::PersistFixture;
+
+    struct ConvergenceTestContext {
+        db: Database,
+        project_id: ProjectId,
+        item_id: ItemId,
+        revision_id: ItemRevisionId,
+        source_workspace_id: WorkspaceId,
+    }
+
+    async fn migrated_test_db(prefix: &str) -> Database {
+        let path = temp_db_path(prefix);
+        let db = Database::connect(&path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+        db
+    }
+
+    async fn prepare_test_context(prefix: &str) -> ConvergenceTestContext {
+        let db = migrated_test_db(prefix).await;
+
+        let project = ProjectBuilder::new("/tmp/test")
+            .name("Test")
+            .build()
+            .persist(&db)
+            .await
+            .expect("create project");
+        let revision = RevisionBuilder::new(ItemId::new()).build();
+        let item = ItemBuilder::new(project.id, revision.id)
+            .id(revision.item_id)
+            .build();
+        let (item, revision) = (item, revision)
+            .persist(&db)
+            .await
+            .expect("create item with revision");
+        let source_workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Integration)
+            .created_for_revision_id(revision.id)
+            .build()
+            .persist(&db)
+            .await
+            .expect("create source workspace");
+
+        ConvergenceTestContext {
+            db,
+            project_id: project.id,
+            item_id: item.id,
+            revision_id: revision.id,
+            source_workspace_id: source_workspace.id,
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_convergence_requires_integration_workspace_in_schema() {
+        let ConvergenceTestContext {
+            db,
+            project_id,
+            item_id,
+            revision_id,
+            source_workspace_id,
+        } = prepare_test_context("ingot-store-convergence").await;
+
+        let error = sqlx::query(
+            "INSERT INTO convergences (
+                id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
+                source_head_commit_oid, target_ref, strategy, status, input_target_commit_oid,
+                prepared_commit_oid
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(ConvergenceId::new().to_string())
+        .bind(project_id.to_string())
+        .bind(item_id.to_string())
+        .bind(revision_id.to_string())
+        .bind(source_workspace_id.to_string())
+        .bind(Option::<String>::None)
+        .bind("head")
+        .bind("refs/heads/main")
+        .bind("rebase_then_fast_forward")
+        .bind("prepared")
+        .bind("base")
+        .bind("prepared")
+        .execute(&db.pool)
+        .await
+        .expect_err("prepared convergence without integration workspace should fail");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("CHECK constraint failed"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_convergence_allows_missing_integration_workspace_in_schema() {
+        let ConvergenceTestContext {
+            db,
+            project_id,
+            item_id,
+            revision_id,
+            source_workspace_id,
+        } = prepare_test_context("ingot-store-convergence").await;
+        let convergence_id = ConvergenceId::new();
+
+        sqlx::query(
+            "INSERT INTO convergences (
+                id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
+                source_head_commit_oid, target_ref, strategy, status
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(convergence_id.to_string())
+        .bind(project_id.to_string())
+        .bind(item_id.to_string())
+        .bind(revision_id.to_string())
+        .bind(source_workspace_id.to_string())
+        .bind(Option::<String>::None)
+        .bind("head")
+        .bind("refs/heads/main")
+        .bind("rebase_then_fast_forward")
+        .bind("queued")
+        .execute(&db.pool)
+        .await
+        .expect("queued convergence without integration workspace should persist");
+
+        let convergence = db
+            .get_convergence(convergence_id)
+            .await
+            .expect("load queued convergence");
+        assert_eq!(convergence.state.integration_workspace_id(), None);
+    }
 }

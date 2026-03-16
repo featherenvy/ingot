@@ -3187,8 +3187,8 @@ impl JobDispatcher {
             );
         let changed_paths = if let Some(ref head) = authoring_head {
             let base = revision
-                .seed_commit_oid
-                .as_deref()
+                .seed
+                .seed_commit_oid()
                 .or_else(|| {
                     authoring_workspace
                         .as_ref()

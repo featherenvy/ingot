@@ -3,7 +3,8 @@ use ingot_domain::item::Item;
 use ingot_domain::job::{Job, JobStatus, OutputArtifactKind, PhaseKind};
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::revision_context::{
-    RevisionContext, RevisionContextAcceptedResultRef, RevisionContextResultSummary,
+    RevisionContext, RevisionContextAcceptedResultRef, RevisionContextPayload,
+    RevisionContextResultSummary,
 };
 
 pub fn rebuild_revision_context(
@@ -24,14 +25,14 @@ pub fn rebuild_revision_context(
     RevisionContext {
         item_revision_id: revision.id,
         schema_version: "revision_context:v1".into(),
-        payload: serde_json::json!({
-            "authoring_head_commit_oid": authoring_head_commit_oid,
-            "changed_paths": changed_paths,
-            "latest_validation": latest_summary(&revision_jobs, PhaseKind::Validate),
-            "latest_review": latest_summary(&revision_jobs, PhaseKind::Review),
-            "accepted_result_refs": accepted_result_refs(&revision_jobs),
-            "operator_notes_excerpt": item.operator_notes.as_deref().map(excerpt_operator_notes),
-        }),
+        payload: RevisionContextPayload {
+            authoring_head_commit_oid,
+            changed_paths,
+            latest_validation: latest_summary(&revision_jobs, PhaseKind::Validate),
+            latest_review: latest_summary(&revision_jobs, PhaseKind::Review),
+            accepted_result_refs: accepted_result_refs(&revision_jobs),
+            operator_notes_excerpt: item.operator_notes.as_deref().map(excerpt_operator_notes),
+        },
         updated_from_job_id,
         updated_at,
     }
@@ -114,7 +115,7 @@ mod tests {
     use ingot_domain::item::{
         ApprovalState, Classification, Escalation, Item, Lifecycle, Origin, ParkingState, Priority,
     };
-    use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
+    use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -153,16 +154,14 @@ mod tests {
             approval_policy: ApprovalPolicy::Required,
             policy_snapshot: json!({}),
             template_map_snapshot: json!({}),
-            seed_commit_oid: None,
-            seed_target_commit_oid: Some("target".into()),
+            seed: AuthoringBaseSeed::Implicit {
+                seed_target_commit_oid: "target".into(),
+            },
             supersedes_revision_id: None,
             created_at: now,
         };
 
         let context = rebuild_revision_context(&item, &revision, &[], None, vec![], None, now);
-        assert_eq!(
-            context.payload["authoring_head_commit_oid"],
-            serde_json::Value::Null
-        );
+        assert_eq!(context.payload.authoring_head_commit_oid, None);
     }
 }

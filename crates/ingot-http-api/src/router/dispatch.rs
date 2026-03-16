@@ -198,10 +198,10 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
     if job.step_id == step::INVESTIGATE_ITEM
         && (base_commit_oid.is_none() || head_commit_oid.is_none())
     {
-        if let Some(seed_commit_oid) = revision.seed_commit_oid.clone() {
+        if let Some(seed_commit_oid) = revision.seed.seed_commit_oid() {
             job.job_input = ingot_domain::job::JobInput::candidate_subject(
-                seed_commit_oid.clone(),
-                seed_commit_oid,
+                seed_commit_oid.to_owned(),
+                seed_commit_oid.to_owned(),
             );
             return Ok(None);
         }

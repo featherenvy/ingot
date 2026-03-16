@@ -35,21 +35,14 @@ pub(super) async fn create_item(
         .map_err(git_to_internal)?
         .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.clone()))?;
 
-    let seed_commit_oid = if let Some(seed_commit_oid) = request.seed_commit_oid {
-        ensure_reachable_seed(repo_path, "seed_commit_oid", &seed_commit_oid).await?;
-        Some(seed_commit_oid)
-    } else {
-        None
-    };
-
-    let seed_target_commit_oid = if let Some(seed_target_commit_oid) =
-        request.seed_target_commit_oid
-    {
-        ensure_reachable_seed(repo_path, "seed_target_commit_oid", &seed_target_commit_oid).await?;
-        Some(seed_target_commit_oid)
-    } else {
-        Some(resolved_target_head)
-    };
+    let seed_commit_oid = validate_seed_commit_oid(repo_path, request.seed_commit_oid).await?;
+    let seed_target_commit_oid = resolve_seed_target_commit_oid(
+        repo_path,
+        request.seed_target_commit_oid,
+        resolved_target_head,
+    )
+    .await?;
+    let seed = AuthoringBaseSeed::from_parts(seed_commit_oid, seed_target_commit_oid);
 
     let (item, revision) = create_manual_item(
         &project,
@@ -67,8 +60,7 @@ pub(super) async fn create_item(
                 .unwrap_or(configured_approval_policy),
             candidate_rework_budget: config.defaults.candidate_rework_budget,
             integration_rework_budget: config.defaults.integration_rework_budget,
-            seed_commit_oid,
-            seed_target_commit_oid,
+            seed,
         },
         Utc::now(),
     );
@@ -607,7 +599,7 @@ pub(super) async fn load_item_detail(
         .get_revision_context(item.current_revision_id)
         .await
         .map_err(repo_to_internal)?;
-    let revision_context_summary = parse_revision_context_summary(revision_context.as_ref())?;
+    let revision_context_summary = parse_revision_context_summary(revision_context.as_ref());
     let evaluation =
         Evaluator::new().evaluate(&item, &current_revision, &jobs, &findings, &convergences);
     let queue = load_queue_status(state, &item, &current_revision, &project, &evaluation).await?;
@@ -877,6 +869,34 @@ pub(super) async fn ensure_reachable_seed(
     Ok(())
 }
 
+pub(super) async fn validate_seed_commit_oid(
+    repo_path: &FsPath,
+    seed_commit_oid: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    match seed_commit_oid {
+        Some(seed_commit_oid) => {
+            ensure_reachable_seed(repo_path, "seed_commit_oid", &seed_commit_oid).await?;
+            Ok(Some(seed_commit_oid))
+        }
+        None => Ok(None),
+    }
+}
+
+pub(super) async fn resolve_seed_target_commit_oid(
+    repo_path: &FsPath,
+    seed_target_commit_oid: Option<String>,
+    default_seed_target_commit_oid: String,
+) -> Result<String, ApiError> {
+    match seed_target_commit_oid {
+        Some(seed_target_commit_oid) => {
+            ensure_reachable_seed(repo_path, "seed_target_commit_oid", &seed_target_commit_oid)
+                .await?;
+            Ok(seed_target_commit_oid)
+        }
+        None => Ok(default_seed_target_commit_oid),
+    }
+}
+
 pub(super) fn ensure_item_open_idle(item: &Item) -> Result<(), ApiError> {
     if !item.lifecycle.is_open() {
         return Err(UseCaseError::ItemNotOpen.into());
@@ -990,22 +1010,26 @@ pub(super) async fn build_superseding_revision(
         .map_err(git_to_internal)?
         .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.clone()))?;
 
-    let seed_commit_oid = if let Some(seed_commit_oid) = request.seed_commit_oid {
-        ensure_reachable_seed(repo_path, "seed_commit_oid", &seed_commit_oid).await?;
-        Some(seed_commit_oid)
-    } else {
-        current_authoring_head_for_revision_with_workspace(state, current_revision, jobs)
+    let requested_seed_commit_oid =
+        validate_seed_commit_oid(repo_path, request.seed_commit_oid).await?;
+    let seed_commit_oid = match requested_seed_commit_oid {
+        Some(seed_commit_oid) => Some(seed_commit_oid),
+        None => current_authoring_head_for_revision_with_workspace(state, current_revision, jobs)
             .await?
-            .or_else(|| current_revision.seed_commit_oid.clone())
+            .or_else(|| {
+                current_revision
+                    .seed
+                    .seed_commit_oid()
+                    .map(ToOwned::to_owned)
+            }),
     };
-    let seed_target_commit_oid = if let Some(seed_target_commit_oid) =
-        request.seed_target_commit_oid
-    {
-        ensure_reachable_seed(repo_path, "seed_target_commit_oid", &seed_target_commit_oid).await?;
-        Some(seed_target_commit_oid)
-    } else {
-        Some(derived_target_head)
-    };
+    let seed_target_commit_oid = resolve_seed_target_commit_oid(
+        repo_path,
+        request.seed_target_commit_oid,
+        derived_target_head,
+    )
+    .await?;
+    let seed = AuthoringBaseSeed::from_parts(seed_commit_oid, seed_target_commit_oid);
     let approval_policy = request
         .approval_policy
         .unwrap_or(current_revision.approval_policy);
@@ -1026,8 +1050,7 @@ pub(super) async fn build_superseding_revision(
         approval_policy,
         policy_snapshot,
         template_map_snapshot: default_template_map_snapshot(),
-        seed_commit_oid,
-        seed_target_commit_oid,
+        seed,
         supersedes_revision_id: Some(current_revision.id),
         created_at: Utc::now(),
     })

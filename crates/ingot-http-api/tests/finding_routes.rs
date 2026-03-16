@@ -20,7 +20,8 @@ async fn triaging_final_integrated_finding_enters_pending_approval() {
     let revision_id = "rev_11111111111111111111111111111111";
     let job_id = "job_11111111111111111111111111111111";
     let convergence_id = "conv_11111111111111111111111111111111";
-    let workspace_id = "wrk_11111111111111111111111111111111";
+    let source_workspace_id = "wrk_11111111111111111111111111111111";
+    let integration_workspace_id = "wrk_11111111111111111111111111111112";
     let finding_id = "fnd_11111111111111111111111111111111";
 
     sqlx::query(
@@ -100,7 +101,7 @@ async fn triaging_final_integrated_finding_enters_pending_approval() {
             status, current_job_id, created_at, updated_at
          ) VALUES (?, ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', NULL, ?, ?, 'ephemeral', 'ready', NULL, ?, ?)",
     )
-    .bind(workspace_id)
+    .bind(source_workspace_id)
     .bind(project_id)
     .bind(repo.join("workspace").display().to_string())
     .bind(revision_id)
@@ -112,17 +113,36 @@ async fn triaging_final_integrated_finding_enters_pending_approval() {
     .await
     .expect("insert workspace");
     sqlx::query(
+        "INSERT INTO workspaces (
+            id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
+            target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
+            status, current_job_id, created_at, updated_at
+         ) VALUES (?, ?, 'integration', 'worktree', ?, ?, NULL, 'refs/heads/main', NULL, ?, ?, 'ephemeral', 'ready', NULL, ?, ?)",
+    )
+    .bind(integration_workspace_id)
+    .bind(project_id)
+    .bind(repo.join("integration-workspace").display().to_string())
+    .bind(revision_id)
+    .bind(&head)
+    .bind(&head)
+    .bind(TS)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert integration workspace");
+    sqlx::query(
         "INSERT INTO convergences (
             id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
             source_head_commit_oid, target_ref, strategy, status, input_target_commit_oid,
             prepared_commit_oid, final_target_commit_oid, conflict_summary, created_at, completed_at
-         ) VALUES (?, ?, ?, ?, ?, NULL, ?, 'refs/heads/main', 'rebase_then_fast_forward', 'prepared', ?, ?, NULL, NULL, ?, NULL)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'refs/heads/main', 'rebase_then_fast_forward', 'prepared', ?, ?, NULL, NULL, ?, NULL)",
     )
     .bind(convergence_id)
     .bind(project_id)
     .bind(item_id)
     .bind(revision_id)
-    .bind(workspace_id)
+    .bind(source_workspace_id)
+    .bind(integration_workspace_id)
     .bind(&head)
     .bind(&head)
     .bind(&head)

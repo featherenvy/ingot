@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use ingot_domain::ids;
-use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
+use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -17,8 +17,7 @@ pub struct RevisionBuilder {
     approval_policy: ApprovalPolicy,
     policy_snapshot: serde_json::Value,
     template_map_snapshot: serde_json::Value,
-    seed_commit_oid: Option<String>,
-    seed_target_commit_oid: Option<String>,
+    seed: AuthoringBaseSeed,
     created_at: DateTime<Utc>,
 }
 
@@ -40,8 +39,9 @@ impl RevisionBuilder {
             approval_policy: ApprovalPolicy::Required,
             policy_snapshot: json!({}),
             template_map_snapshot: json!({}),
-            seed_commit_oid: None,
-            seed_target_commit_oid: None,
+            seed: AuthoringBaseSeed::Implicit {
+                seed_target_commit_oid: "target-head".into(),
+            },
             created_at: default_timestamp(),
         }
     }
@@ -63,8 +63,10 @@ impl RevisionBuilder {
 
     pub fn explicit_seed(mut self, commit_oid: impl Into<String>) -> Self {
         let commit_oid = commit_oid.into();
-        self.seed_commit_oid = Some(commit_oid.clone());
-        self.seed_target_commit_oid = Some(commit_oid);
+        self.seed = AuthoringBaseSeed::Explicit {
+            seed_commit_oid: commit_oid.clone(),
+            seed_target_commit_oid: commit_oid,
+        };
         self
     }
 
@@ -73,13 +75,23 @@ impl RevisionBuilder {
         self
     }
 
+    pub fn seed(mut self, seed: AuthoringBaseSeed) -> Self {
+        self.seed = seed;
+        self
+    }
+
     pub fn seed_commit_oid(mut self, commit_oid: Option<impl Into<String>>) -> Self {
-        self.seed_commit_oid = commit_oid.map(Into::into);
+        let seed_target = self.seed.seed_target_commit_oid().to_owned();
+        self.seed = AuthoringBaseSeed::from_parts(commit_oid.map(Into::into), seed_target);
         self
     }
 
     pub fn seed_target_commit_oid(mut self, commit_oid: Option<impl Into<String>>) -> Self {
-        self.seed_target_commit_oid = commit_oid.map(Into::into);
+        let seed_commit = self.seed.seed_commit_oid().map(ToOwned::to_owned);
+        let seed_target = commit_oid
+            .map(Into::into)
+            .unwrap_or_else(|| self.seed.seed_target_commit_oid().to_owned());
+        self.seed = AuthoringBaseSeed::from_parts(seed_commit, seed_target);
         self
     }
 
@@ -100,8 +112,7 @@ impl RevisionBuilder {
             approval_policy: self.approval_policy,
             policy_snapshot: self.policy_snapshot,
             template_map_snapshot: self.template_map_snapshot,
-            seed_commit_oid: self.seed_commit_oid,
-            seed_target_commit_oid: self.seed_target_commit_oid,
+            seed: self.seed,
             supersedes_revision_id: None,
             created_at: self.created_at,
         }

@@ -1,6 +1,6 @@
 use ingot_domain::ids::{ItemId, ItemRevisionId};
 use ingot_domain::ports::{RepositoryError, RevisionContextRepository, RevisionRepository};
-use ingot_domain::revision::ItemRevision;
+use ingot_domain::revision::{AuthoringBaseSeed, ItemRevision};
 use ingot_domain::revision_context::RevisionContext;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
@@ -59,8 +59,8 @@ impl Database {
         .bind(encode_enum(&revision.approval_policy)?)
         .bind(serde_json::to_string(&revision.policy_snapshot).map_err(json_err)?)
         .bind(serde_json::to_string(&revision.template_map_snapshot).map_err(json_err)?)
-        .bind(revision.seed_commit_oid.as_deref())
-        .bind(revision.seed_target_commit_oid.as_deref())
+        .bind(revision.seed.seed_commit_oid())
+        .bind(revision.seed.seed_target_commit_oid())
         .bind(revision.supersedes_revision_id.map(|id| id.to_string()))
         .bind(revision.created_at)
         .execute(&self.pool)
@@ -135,6 +135,15 @@ impl RevisionContextRepository for Database {
 }
 
 fn map_revision(row: &SqliteRow) -> Result<ItemRevision, RepositoryError> {
+    let seed_commit_oid: Option<String> = row.try_get("seed_commit_oid").map_err(db_err)?;
+    let seed_target_commit_oid: String = row
+        .try_get::<Option<String>, _>("seed_target_commit_oid")
+        .map_err(db_err)?
+        .ok_or_else(|| {
+            RepositoryError::Conflict("seed_target_commit_oid must not be NULL".into())
+        })?;
+    let seed = AuthoringBaseSeed::from_parts(seed_commit_oid, seed_target_commit_oid);
+
     Ok(ItemRevision {
         id: parse_id(row.try_get("id").map_err(db_err)?)?,
         item_id: parse_id(row.try_get("item_id").map_err(db_err)?)?,
@@ -146,8 +155,7 @@ fn map_revision(row: &SqliteRow) -> Result<ItemRevision, RepositoryError> {
         approval_policy: parse_enum(row.try_get("approval_policy").map_err(db_err)?)?,
         policy_snapshot: parse_json(row.try_get("policy_snapshot").map_err(db_err)?)?,
         template_map_snapshot: parse_json(row.try_get("template_map_snapshot").map_err(db_err)?)?,
-        seed_commit_oid: row.try_get("seed_commit_oid").map_err(db_err)?,
-        seed_target_commit_oid: row.try_get("seed_target_commit_oid").map_err(db_err)?,
+        seed,
         supersedes_revision_id: row
             .try_get::<Option<String>, _>("supersedes_revision_id")
             .map_err(db_err)?

@@ -31,10 +31,20 @@ pub struct RevisionContextSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionContextPayload {
+    pub authoring_head_commit_oid: Option<String>,
+    pub changed_paths: Vec<String>,
+    pub latest_validation: Option<RevisionContextResultSummary>,
+    pub latest_review: Option<RevisionContextResultSummary>,
+    pub accepted_result_refs: Vec<RevisionContextAcceptedResultRef>,
+    pub operator_notes_excerpt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevisionContext {
     pub item_revision_id: ItemRevisionId,
     pub schema_version: String,
-    pub payload: serde_json::Value,
+    pub payload: RevisionContextPayload,
     pub updated_from_job_id: Option<JobId>,
     pub updated_at: DateTime<Utc>,
 }

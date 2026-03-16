@@ -286,9 +286,19 @@ async fn reconcile_startup_marks_finalized_target_ref_git_operation_reconciled()
         .await
         .expect("create workspace");
 
+    let integration_workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Integration)
+        .created_for_revision_id(revision.id)
+        .base_commit_oid(&base_commit)
+        .head_commit_oid(&new_head)
+        .created_at(created_at)
+        .build();
+    db.create_workspace(&integration_workspace)
+        .await
+        .expect("create integration workspace");
+
     let convergence = ConvergenceBuilder::new(project.id, item_id, revision_id)
         .source_workspace_id(workspace.id)
-        .no_integration_workspace_id()
+        .integration_workspace_id(integration_workspace.id)
         .source_head_commit_oid(new_head.clone())
         .input_target_commit_oid(base_commit.clone())
         .prepared_commit_oid(new_head.clone())
@@ -425,9 +435,19 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
         .await
         .expect("create source workspace");
 
+    let integration_workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Integration)
+        .created_for_revision_id(revision.id)
+        .base_commit_oid(&base_commit)
+        .head_commit_oid(&prepared_commit)
+        .created_at(created_at)
+        .build();
+    db.create_workspace(&integration_workspace)
+        .await
+        .expect("create integration workspace");
+
     let convergence = ConvergenceBuilder::new(project.id, item_id, revision_id)
         .source_workspace_id(source_workspace.id)
-        .no_integration_workspace_id()
+        .integration_workspace_id(integration_workspace.id)
         .source_head_commit_oid(prepared_commit.clone())
         .input_target_commit_oid(base_commit.clone())
         .prepared_commit_oid(prepared_commit.clone())
@@ -564,9 +584,19 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
         .await
         .expect("create source workspace");
 
+    let integration_workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Integration)
+        .created_for_revision_id(revision.id)
+        .base_commit_oid(&base_commit)
+        .head_commit_oid(&prepared_commit)
+        .created_at(created_at)
+        .build();
+    db.create_workspace(&integration_workspace)
+        .await
+        .expect("create integration workspace");
+
     let convergence = ConvergenceBuilder::new(project.id, item_id, revision_id)
         .source_workspace_id(source_workspace.id)
-        .no_integration_workspace_id()
+        .integration_workspace_id(integration_workspace.id)
         .source_head_commit_oid(prepared_commit.clone())
         .input_target_commit_oid(base_commit.clone())
         .prepared_commit_oid(prepared_commit.clone())

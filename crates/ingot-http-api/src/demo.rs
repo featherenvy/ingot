@@ -11,6 +11,7 @@ use ingot_domain::ids::ProjectId;
 use ingot_domain::item::{Classification, Priority};
 use ingot_domain::ports::ProjectMutationLockPort;
 use ingot_domain::project::Project;
+use ingot_domain::revision::AuthoringBaseSeed;
 use ingot_git::commands::resolve_ref_oid;
 use ingot_usecases::UseCaseError;
 use ingot_usecases::item::{CreateItemInput, create_manual_item, normalize_target_ref};
@@ -194,8 +195,9 @@ pub async fn create_demo_project(
                 approval_policy: configured_approval_policy,
                 candidate_rework_budget: config.defaults.candidate_rework_budget,
                 integration_rework_budget: config.defaults.integration_rework_budget,
-                seed_commit_oid: None,
-                seed_target_commit_oid: Some(resolved_target_head.clone()),
+                seed: AuthoringBaseSeed::Implicit {
+                    seed_target_commit_oid: resolved_target_head.clone(),
+                },
             },
             Utc::now(),
         );

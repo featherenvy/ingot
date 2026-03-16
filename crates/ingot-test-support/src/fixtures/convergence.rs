@@ -135,7 +135,9 @@ impl ConvergenceBuilder {
                 completed_at: self.completed_at.unwrap_or_else(Utc::now),
             },
             ConvergenceStatus::Prepared => ConvergenceState::Prepared {
-                integration_workspace_id: self.integration_workspace_id,
+                integration_workspace_id: self
+                    .integration_workspace_id
+                    .expect("Prepared convergence requires integration_workspace_id"),
                 input_target_commit_oid: self
                     .input_target_commit_oid
                     .unwrap_or_else(|| "base".into()),

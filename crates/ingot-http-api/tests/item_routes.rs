@@ -497,7 +497,7 @@ async fn resume_route_returns_success_when_projected_review_auto_dispatch_cannot
             id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
             approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
             seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', NULL, NULL, NULL, ?)",
+         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', NULL, 'target-head', NULL, ?)",
     )
     .bind(revision_id.as_str())
     .bind(item_id.as_str())
@@ -1138,11 +1138,28 @@ async fn revise_route_cancels_current_lane_state() {
     )
     .await;
     sqlx::query(
+        "INSERT INTO workspaces (
+            id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
+            target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
+            status, current_job_id, created_at, updated_at
+         ) VALUES ('wrk_00000000000000000000000000000157', ?, 'integration', 'worktree', ?, ?, NULL, 'refs/heads/main', 'refs/ingot/workspaces/revise-integration', ?, ?, 'ephemeral', 'ready', NULL, ?, ?)",
+    )
+    .bind(&project_id)
+    .bind(repo.join("revise-integration").display().to_string())
+    .bind(&revision_id)
+    .bind(&head)
+    .bind(&head)
+    .bind(TS)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert integration workspace");
+    sqlx::query(
         "INSERT INTO convergences (
             id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
             source_head_commit_oid, target_ref, strategy, status, input_target_commit_oid,
             prepared_commit_oid, final_target_commit_oid, conflict_summary, created_at, completed_at
-         ) VALUES (?, ?, ?, ?, 'wrk_00000000000000000000000000000057', NULL, ?, 'refs/heads/main', 'rebase_then_fast_forward', 'prepared', ?, ?, NULL, NULL, ?, NULL)",
+         ) VALUES (?, ?, ?, ?, 'wrk_00000000000000000000000000000057', 'wrk_00000000000000000000000000000157', ?, 'refs/heads/main', 'rebase_then_fast_forward', 'prepared', ?, ?, NULL, NULL, ?, NULL)",
     )
     .bind(&convergence_id)
     .bind(&project_id)

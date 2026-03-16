@@ -851,12 +851,13 @@ async fn complete_route_rejects_stale_prepared_convergence_after_target_moves() 
             id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
             source_head_commit_oid, target_ref, strategy, status, input_target_commit_oid,
             prepared_commit_oid, final_target_commit_oid, conflict_summary, created_at, completed_at
-         ) VALUES (?, ?, ?, ?, ?, NULL, ?, 'refs/heads/main', 'rebase_then_fast_forward', 'prepared', ?, ?, NULL, NULL, ?, NULL)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'refs/heads/main', 'rebase_then_fast_forward', 'prepared', ?, ?, NULL, NULL, ?, NULL)",
     )
     .bind(&convergence_id)
     .bind(&project_id)
     .bind(&item_id)
     .bind(&revision_id)
+    .bind(&workspace_id)
     .bind(&workspace_id)
     .bind(&initial_target)
     .bind(&initial_target)
@@ -1294,7 +1295,7 @@ async fn complete_route_recovers_projected_review_after_warning_only_dispatch_fa
             id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
             approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
             seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', NULL, NULL, NULL, ?)",
+         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', NULL, 'target-head', NULL, ?)",
     )
     .bind(&revision_id)
     .bind(&item_id)

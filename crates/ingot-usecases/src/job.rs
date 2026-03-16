@@ -718,7 +718,7 @@ fn job_input_for_step(
     jobs: &[Job],
     convergences: &[Convergence],
 ) -> JobInput {
-    let seed_head = revision.seed_commit_oid.clone();
+    let seed_head = revision.seed.seed_commit_oid().map(ToOwned::to_owned);
     let current_head = current_authoring_head(jobs, revision);
     let previous_head = previous_authoring_head(jobs, revision);
     let prepared_convergence = selected_prepared_convergence(revision.id, convergences);
@@ -833,7 +833,7 @@ fn current_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<Strin
     successful_commit_oids(jobs, revision)
         .last()
         .cloned()
-        .or_else(|| revision.seed_commit_oid.clone())
+        .or_else(|| revision.seed.seed_commit_oid().map(ToOwned::to_owned))
 }
 
 fn previous_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<String> {
@@ -843,7 +843,7 @@ fn previous_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<Stri
         .rev()
         .nth(1)
         .cloned()
-        .or_else(|| revision.seed_commit_oid.clone())
+        .or_else(|| revision.seed.seed_commit_oid().map(ToOwned::to_owned))
 }
 
 fn successful_commit_oids(jobs: &[Job], revision: &ItemRevision) -> Vec<String> {

@@ -188,7 +188,39 @@ CREATE TABLE IF NOT EXISTS convergences (
     final_target_commit_oid TEXT,
     conflict_summary TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    completed_at TEXT
+    completed_at TEXT,
+    CHECK (
+        status != 'running'
+        OR (integration_workspace_id IS NOT NULL AND input_target_commit_oid IS NOT NULL)
+    ),
+    CHECK (
+        status != 'conflicted'
+        OR (
+            integration_workspace_id IS NOT NULL
+            AND input_target_commit_oid IS NOT NULL
+            AND conflict_summary IS NOT NULL
+            AND completed_at IS NOT NULL
+        )
+    ),
+    CHECK (
+        status != 'prepared'
+        OR (
+            integration_workspace_id IS NOT NULL
+            AND input_target_commit_oid IS NOT NULL
+            AND prepared_commit_oid IS NOT NULL
+        )
+    ),
+    CHECK (
+        status != 'finalized'
+        OR (
+            input_target_commit_oid IS NOT NULL
+            AND prepared_commit_oid IS NOT NULL
+            AND final_target_commit_oid IS NOT NULL
+            AND completed_at IS NOT NULL
+        )
+    ),
+    CHECK (status != 'failed' OR completed_at IS NOT NULL),
+    CHECK (status != 'cancelled' OR completed_at IS NOT NULL)
 );
 
 CREATE INDEX idx_convergences_revision ON convergences(item_revision_id);
