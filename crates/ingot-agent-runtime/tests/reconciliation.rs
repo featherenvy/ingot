@@ -337,12 +337,7 @@ async fn reconcile_startup_marks_finalized_target_ref_git_operation_reconciled()
     );
     assert_eq!(
         updated_convergence.state.final_target_commit_oid(),
-        Some(
-            operation
-                .commit_oid
-                .as_deref()
-                .expect("operation commit oid")
-        )
+        Some(operation.commit_oid().expect("operation commit oid"))
     );
 
     let updated_item = db.get_item(item.id).await.expect("item");

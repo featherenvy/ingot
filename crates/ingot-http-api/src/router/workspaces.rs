@@ -44,16 +44,14 @@ pub(super) async fn reset_workspace_route(
     let mut operation = GitOperation {
         id: ingot_domain::ids::GitOperationId::new(),
         project_id,
-        operation_kind: OperationKind::ResetWorkspace,
-        entity_type: GitEntityType::Workspace,
         entity_id: workspace.id.to_string(),
-        workspace_id: Some(workspace.id),
-        ref_name: workspace.workspace_ref.clone(),
-        expected_old_oid: workspace.state.head_commit_oid().map(ToOwned::to_owned),
-        new_oid: Some(expected_head.clone()),
-        commit_oid: None,
+        payload: OperationPayload::ResetWorkspace {
+            workspace_id: workspace.id,
+            ref_name: workspace.workspace_ref.clone(),
+            expected_old_oid: workspace.state.head_commit_oid().map(ToOwned::to_owned),
+            new_oid: expected_head.clone(),
+        },
         status: GitOperationStatus::Planned,
-        metadata: None,
         created_at: now,
         completed_at: None,
     };
@@ -68,7 +66,7 @@ pub(super) async fn reset_workspace_route(
         ActivityEventType::GitOperationPlanned,
         "git_operation",
         operation.id,
-        serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
+        serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
     )
     .await?;
 
@@ -197,19 +195,21 @@ pub(super) async fn remove_workspace_route(
             .is_some();
         if mirror_ref_exists {
             let now = Utc::now();
+            let expected_old_oid = workspace
+                .state
+                .head_commit_oid()
+                .map(ToOwned::to_owned)
+                .unwrap_or_default();
             let mut operation = GitOperation {
                 id: ingot_domain::ids::GitOperationId::new(),
                 project_id,
-                operation_kind: OperationKind::RemoveWorkspaceRef,
-                entity_type: GitEntityType::Workspace,
                 entity_id: workspace.id.to_string(),
-                workspace_id: Some(workspace.id),
-                ref_name: Some(workspace_ref.into()),
-                expected_old_oid: workspace.state.head_commit_oid().map(ToOwned::to_owned),
-                new_oid: None,
-                commit_oid: None,
+                payload: OperationPayload::RemoveWorkspaceRef {
+                    workspace_id: workspace.id,
+                    ref_name: workspace_ref.into(),
+                    expected_old_oid,
+                },
                 status: GitOperationStatus::Planned,
-                metadata: None,
                 created_at: now,
                 completed_at: None,
             };
@@ -224,7 +224,7 @@ pub(super) async fn remove_workspace_route(
                 ActivityEventType::GitOperationPlanned,
                 "git_operation",
                 operation.id,
-                serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
+                serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
             )
             .await?;
             delete_ref(paths.mirror_git_dir.as_path(), workspace_ref)

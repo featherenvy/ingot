@@ -3,8 +3,8 @@ use std::fs;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use chrono::Utc;
-use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
-use ingot_domain::ids::{GitOperationId, ProjectId};
+use ingot_domain::git_operation::{GitOperation, GitOperationStatus, OperationPayload};
+use ingot_domain::ids::{GitOperationId, ProjectId, WorkspaceId};
 use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
 };
@@ -1174,16 +1174,18 @@ async fn revise_route_cancels_current_lane_state() {
     db.create_git_operation(&GitOperation {
         id: GitOperationId::new(),
         project_id: parse_id::<ProjectId>(&project_id),
-        operation_kind: OperationKind::PrepareConvergenceCommit,
-        entity_type: GitEntityType::Convergence,
         entity_id: convergence_id.clone(),
-        workspace_id: None,
-        ref_name: Some("refs/ingot/workspaces/revise-source".into()),
-        expected_old_oid: Some(head.clone()),
-        new_oid: Some(head.clone()),
-        commit_oid: Some(head.clone()),
+        payload: OperationPayload::PrepareConvergenceCommit {
+            workspace_id: "wrk_00000000000000000000000000000057"
+                .parse::<WorkspaceId>()
+                .unwrap(),
+            ref_name: Some("refs/ingot/workspaces/revise-source".into()),
+            expected_old_oid: head.clone(),
+            new_oid: Some(head.clone()),
+            commit_oid: Some(head.clone()),
+            replay_metadata: None,
+        },
         status: GitOperationStatus::Applied,
-        metadata: None,
         created_at: Utc::now(),
         completed_at: None,
     })
@@ -1192,16 +1194,15 @@ async fn revise_route_cancels_current_lane_state() {
     db.create_git_operation(&GitOperation {
         id: GitOperationId::new(),
         project_id: parse_id::<ProjectId>(&project_id),
-        operation_kind: OperationKind::FinalizeTargetRef,
-        entity_type: GitEntityType::Convergence,
         entity_id: convergence_id.clone(),
-        workspace_id: None,
-        ref_name: Some("refs/heads/main".into()),
-        expected_old_oid: Some(head.clone()),
-        new_oid: Some(head.clone()),
-        commit_oid: Some(head.clone()),
+        payload: OperationPayload::FinalizeTargetRef {
+            workspace_id: None,
+            ref_name: "refs/heads/main".into(),
+            expected_old_oid: head.clone(),
+            new_oid: head.clone(),
+            commit_oid: Some(head.clone()),
+        },
         status: GitOperationStatus::Applied,
-        metadata: None,
         created_at: Utc::now(),
         completed_at: None,
     })

@@ -343,16 +343,13 @@ pub(super) async fn plan_and_apply_investigation_ref(
     let mut operation = GitOperation {
         id: ingot_domain::ids::GitOperationId::new(),
         project_id,
-        operation_kind: OperationKind::CreateInvestigationRef,
-        entity_type: GitEntityType::Job,
         entity_id,
-        workspace_id: None,
-        ref_name: Some(ref_name.into()),
-        expected_old_oid: None,
-        new_oid: Some(commit_oid.into()),
-        commit_oid: Some(commit_oid.into()),
+        payload: OperationPayload::CreateInvestigationRef {
+            ref_name: ref_name.into(),
+            new_oid: commit_oid.into(),
+            commit_oid: Some(commit_oid.into()),
+        },
         status: GitOperationStatus::Planned,
-        metadata: None,
         created_at: Utc::now(),
         completed_at: None,
     };
@@ -367,7 +364,7 @@ pub(super) async fn plan_and_apply_investigation_ref(
         ActivityEventType::GitOperationPlanned,
         "git_operation",
         operation.id,
-        serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
+        serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
     )
     .await?;
     let project = state
@@ -430,16 +427,12 @@ pub(super) async fn maybe_cleanup_investigation_ref(
     let mut operation = GitOperation {
         id: ingot_domain::ids::GitOperationId::new(),
         project_id,
-        operation_kind: OperationKind::RemoveInvestigationRef,
-        entity_type: GitEntityType::Job,
         entity_id: finding.source_job_id.to_string(),
-        workspace_id: None,
-        ref_name: Some(ref_name.clone()),
-        expected_old_oid: Some(existing_oid),
-        new_oid: None,
-        commit_oid: None,
+        payload: OperationPayload::RemoveInvestigationRef {
+            ref_name: ref_name.clone(),
+            expected_old_oid: existing_oid,
+        },
         status: GitOperationStatus::Planned,
-        metadata: None,
         created_at: Utc::now(),
         completed_at: None,
     };
@@ -454,7 +447,7 @@ pub(super) async fn maybe_cleanup_investigation_ref(
         ActivityEventType::GitOperationPlanned,
         "git_operation",
         operation.id,
-        serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
+        serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
     )
     .await?;
     delete_ref(paths.mirror_git_dir.as_path(), &ref_name)
@@ -672,9 +665,7 @@ mod tests {
     use std::path::PathBuf;
 
     use chrono::Utc;
-    use ingot_domain::git_operation::{
-        GitEntityType, GitOperation, GitOperationStatus, OperationKind,
-    };
+    use ingot_domain::git_operation::{GitOperation, GitOperationStatus, OperationPayload};
     use ingot_domain::ids::{
         GitOperationId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId,
     };
@@ -1082,16 +1073,13 @@ mod tests {
             .create_git_operation(&GitOperation {
                 id: GitOperationId::new(),
                 project_id: project.id,
-                operation_kind: OperationKind::CreateInvestigationRef,
-                entity_type: GitEntityType::Job,
                 entity_id: JobId::from_uuid(Uuid::now_v7()).to_string(),
-                workspace_id: None,
-                ref_name: Some(investigation_ref.clone()),
-                expected_old_oid: None,
-                new_oid: Some(head.clone()),
-                commit_oid: Some(head.clone()),
+                payload: OperationPayload::CreateInvestigationRef {
+                    ref_name: investigation_ref.clone(),
+                    new_oid: head.clone(),
+                    commit_oid: Some(head.clone()),
+                },
                 status: GitOperationStatus::Applied,
-                metadata: None,
                 created_at: Utc::now(),
                 completed_at: Some(Utc::now()),
             })
@@ -1191,16 +1179,13 @@ mod tests {
             .create_git_operation(&GitOperation {
                 id: GitOperationId::new(),
                 project_id: project.id,
-                operation_kind: OperationKind::CreateInvestigationRef,
-                entity_type: GitEntityType::Job,
                 entity_id: JobId::from_uuid(Uuid::now_v7()).to_string(),
-                workspace_id: None,
-                ref_name: Some(investigation_ref.clone()),
-                expected_old_oid: None,
-                new_oid: Some("deadbeef".repeat(5)),
-                commit_oid: Some("deadbeef".repeat(5)),
+                payload: OperationPayload::CreateInvestigationRef {
+                    ref_name: investigation_ref.clone(),
+                    new_oid: "deadbeef".repeat(5),
+                    commit_oid: Some("deadbeef".repeat(5)),
+                },
                 status: GitOperationStatus::Applied,
-                metadata: None,
                 created_at: Utc::now(),
                 completed_at: Some(Utc::now()),
             })

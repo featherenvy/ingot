@@ -59,7 +59,7 @@ pub(super) async fn refresh_project_mirror(
         .into_iter()
         .any(|operation| {
             operation.project_id == project.id
-                && operation.operation_kind == OperationKind::FinalizeTargetRef
+                && operation.operation_kind() == OperationKind::FinalizeTargetRef
         });
     if !(has_unresolved_finalize && paths.mirror_git_dir.exists()) {
         ensure_mirror(&paths).await.map_err(git_to_internal)?;

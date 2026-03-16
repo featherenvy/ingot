@@ -1,5 +1,8 @@
 use chrono::{DateTime, Utc};
-use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
+use ingot_domain::git_operation::{
+    ConvergenceReplayMetadata, GitEntityType, GitOperation, GitOperationStatus, OperationKind,
+    OperationPayload,
+};
 use ingot_domain::ids;
 
 use super::timestamps::default_timestamp;
@@ -8,7 +11,7 @@ pub struct GitOperationBuilder {
     id: ids::GitOperationId,
     project_id: ids::ProjectId,
     operation_kind: OperationKind,
-    entity_type: GitEntityType,
+    _entity_type: GitEntityType,
     entity_id: String,
     workspace_id: Option<ids::WorkspaceId>,
     ref_name: Option<String>,
@@ -32,7 +35,7 @@ impl GitOperationBuilder {
             id: ids::GitOperationId::new(),
             project_id,
             operation_kind,
-            entity_type,
+            _entity_type: entity_type,
             entity_id: entity_id.into(),
             workspace_id: None,
             ref_name: None,
@@ -97,19 +100,85 @@ impl GitOperationBuilder {
     }
 
     pub fn build(self) -> GitOperation {
+        let replay_metadata = self.metadata.and_then(|metadata| {
+            serde_json::from_value::<ConvergenceReplayMetadata>(metadata).ok()
+        });
+
+        let payload = match self.operation_kind {
+            OperationKind::CreateJobCommit => OperationPayload::CreateJobCommit {
+                workspace_id: self
+                    .workspace_id
+                    .expect("CreateJobCommit requires workspace_id"),
+                ref_name: self.ref_name.expect("CreateJobCommit requires ref_name"),
+                expected_old_oid: self
+                    .expected_old_oid
+                    .expect("CreateJobCommit requires expected_old_oid"),
+                new_oid: self.new_oid,
+                commit_oid: self.commit_oid,
+            },
+            OperationKind::PrepareConvergenceCommit => OperationPayload::PrepareConvergenceCommit {
+                workspace_id: self
+                    .workspace_id
+                    .expect("PrepareConvergenceCommit requires workspace_id"),
+                ref_name: self.ref_name,
+                expected_old_oid: self
+                    .expected_old_oid
+                    .expect("PrepareConvergenceCommit requires expected_old_oid"),
+                new_oid: self.new_oid,
+                commit_oid: self.commit_oid,
+                replay_metadata,
+            },
+            OperationKind::FinalizeTargetRef => OperationPayload::FinalizeTargetRef {
+                workspace_id: self.workspace_id,
+                ref_name: self.ref_name.expect("FinalizeTargetRef requires ref_name"),
+                expected_old_oid: self
+                    .expected_old_oid
+                    .expect("FinalizeTargetRef requires expected_old_oid"),
+                new_oid: self.new_oid.expect("FinalizeTargetRef requires new_oid"),
+                commit_oid: self.commit_oid,
+            },
+            OperationKind::CreateInvestigationRef => OperationPayload::CreateInvestigationRef {
+                ref_name: self
+                    .ref_name
+                    .expect("CreateInvestigationRef requires ref_name"),
+                new_oid: self
+                    .new_oid
+                    .expect("CreateInvestigationRef requires new_oid"),
+                commit_oid: self.commit_oid,
+            },
+            OperationKind::RemoveInvestigationRef => OperationPayload::RemoveInvestigationRef {
+                ref_name: self
+                    .ref_name
+                    .expect("RemoveInvestigationRef requires ref_name"),
+                expected_old_oid: self
+                    .expected_old_oid
+                    .expect("RemoveInvestigationRef requires expected_old_oid"),
+            },
+            OperationKind::ResetWorkspace => OperationPayload::ResetWorkspace {
+                workspace_id: self
+                    .workspace_id
+                    .expect("ResetWorkspace requires workspace_id"),
+                ref_name: self.ref_name,
+                expected_old_oid: self.expected_old_oid,
+                new_oid: self.new_oid.expect("ResetWorkspace requires new_oid"),
+            },
+            OperationKind::RemoveWorkspaceRef => OperationPayload::RemoveWorkspaceRef {
+                workspace_id: self
+                    .workspace_id
+                    .expect("RemoveWorkspaceRef requires workspace_id"),
+                ref_name: self.ref_name.expect("RemoveWorkspaceRef requires ref_name"),
+                expected_old_oid: self
+                    .expected_old_oid
+                    .expect("RemoveWorkspaceRef requires expected_old_oid"),
+            },
+        };
+
         GitOperation {
             id: self.id,
             project_id: self.project_id,
-            operation_kind: self.operation_kind,
-            entity_type: self.entity_type,
             entity_id: self.entity_id,
-            workspace_id: self.workspace_id,
-            ref_name: self.ref_name,
-            expected_old_oid: self.expected_old_oid,
-            new_oid: self.new_oid,
-            commit_oid: self.commit_oid,
+            payload,
             status: self.status,
-            metadata: self.metadata,
             created_at: self.created_at,
             completed_at: self.completed_at,
         }

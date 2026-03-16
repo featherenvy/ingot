@@ -176,15 +176,15 @@ where
             .into_iter()
             .filter(|operation| {
                 operation.project_id == project_id
-                    && operation.entity_type == GitEntityType::Convergence
+                    && operation.entity_type() == GitEntityType::Convergence
                     && cancelled_ids.iter().any(|id| id == &operation.entity_id)
                     && matches!(
-                        operation.operation_kind,
+                        operation.operation_kind(),
                         OperationKind::PrepareConvergenceCommit | OperationKind::FinalizeTargetRef
                     )
             })
         {
-            match operation.operation_kind {
+            match operation.operation_kind() {
                 OperationKind::PrepareConvergenceCommit => {
                     operation.status = GitOperationStatus::Reconciled;
                     operation.completed_at = Some(Utc::now());
@@ -196,7 +196,7 @@ where
                             event_type: ActivityEventType::GitOperationReconciled,
                             entity_type: "git_operation".into(),
                             entity_id: operation.id.to_string(),
-                            payload: serde_json::json!({ "operation_kind": operation.operation_kind }),
+                            payload: serde_json::json!({ "operation_kind": operation.operation_kind() }),
                             created_at: Utc::now(),
                         })
                         .await?;

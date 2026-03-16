@@ -1,4 +1,4 @@
-use ingot_domain::git_operation::GitOperation;
+use ingot_domain::git_operation::{GitOperation, GitOperationWire};
 use ingot_domain::ports::{GitOperationRepository, RepositoryError};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
@@ -13,33 +13,33 @@ impl Database {
         &self,
         operation: &GitOperation,
     ) -> Result<(), RepositoryError> {
+        let wire = GitOperationWire::from(operation);
         sqlx::query(
             "INSERT INTO git_operations (
                 id, project_id, operation_kind, entity_type, entity_id, workspace_id, ref_name,
                 expected_old_oid, new_oid, commit_oid, status, metadata, created_at, completed_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(operation.id.to_string())
-        .bind(operation.project_id.to_string())
-        .bind(encode_enum(&operation.operation_kind)?)
-        .bind(encode_enum(&operation.entity_type)?)
-        .bind(&operation.entity_id)
-        .bind(operation.workspace_id.map(|id| id.to_string()))
-        .bind(operation.ref_name.as_deref())
-        .bind(operation.expected_old_oid.as_deref())
-        .bind(operation.new_oid.as_deref())
-        .bind(operation.commit_oid.as_deref())
-        .bind(encode_enum(&operation.status)?)
+        .bind(wire.id.to_string())
+        .bind(wire.project_id.to_string())
+        .bind(encode_enum(&wire.operation_kind)?)
+        .bind(encode_enum(&wire.entity_type)?)
+        .bind(&wire.entity_id)
+        .bind(wire.workspace_id.map(|id| id.to_string()))
+        .bind(wire.ref_name.as_deref())
+        .bind(wire.expected_old_oid.as_deref())
+        .bind(wire.new_oid.as_deref())
+        .bind(wire.commit_oid.as_deref())
+        .bind(encode_enum(&wire.status)?)
         .bind(
-            operation
-                .metadata
+            wire.metadata
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()
                 .map_err(json_err)?,
         )
-        .bind(operation.created_at)
-        .bind(operation.completed_at)
+        .bind(wire.created_at)
+        .bind(wire.completed_at)
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -51,28 +51,28 @@ impl Database {
         &self,
         operation: &GitOperation,
     ) -> Result<(), RepositoryError> {
+        let wire = GitOperationWire::from(operation);
         let result = sqlx::query(
             "UPDATE git_operations
              SET workspace_id = ?, ref_name = ?, expected_old_oid = ?, new_oid = ?, commit_oid = ?,
                  status = ?, metadata = ?, completed_at = ?
              WHERE id = ?",
         )
-        .bind(operation.workspace_id.map(|id| id.to_string()))
-        .bind(operation.ref_name.as_deref())
-        .bind(operation.expected_old_oid.as_deref())
-        .bind(operation.new_oid.as_deref())
-        .bind(operation.commit_oid.as_deref())
-        .bind(encode_enum(&operation.status)?)
+        .bind(wire.workspace_id.map(|id| id.to_string()))
+        .bind(wire.ref_name.as_deref())
+        .bind(wire.expected_old_oid.as_deref())
+        .bind(wire.new_oid.as_deref())
+        .bind(wire.commit_oid.as_deref())
+        .bind(encode_enum(&wire.status)?)
         .bind(
-            operation
-                .metadata
+            wire.metadata
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()
                 .map_err(json_err)?,
         )
-        .bind(operation.completed_at)
-        .bind(operation.id.to_string())
+        .bind(wire.completed_at)
+        .bind(wire.id.to_string())
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -114,9 +114,8 @@ impl GitOperationRepository for Database {
     }
 }
 
-#[allow(dead_code)]
 fn map_git_operation(row: &SqliteRow) -> Result<GitOperation, RepositoryError> {
-    Ok(GitOperation {
+    let wire = GitOperationWire {
         id: parse_id(row.try_get("id").map_err(db_err)?)?,
         project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
         operation_kind: parse_enum(row.try_get("operation_kind").map_err(db_err)?)?,
@@ -139,5 +138,7 @@ fn map_git_operation(row: &SqliteRow) -> Result<GitOperation, RepositoryError> {
             .transpose()?,
         created_at: row.try_get("created_at").map_err(db_err)?,
         completed_at: row.try_get("completed_at").map_err(db_err)?,
-    })
+    };
+    GitOperation::try_from(wire)
+        .map_err(|e| RepositoryError::Conflict(format!("invalid git operation: {e}")))
 }

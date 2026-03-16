@@ -21,7 +21,9 @@ use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
 use ingot_domain::convergence::{Convergence, ConvergenceStatus, PrepareFailureKind};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::FindingTriageState;
-use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
+use ingot_domain::git_operation::{
+    ConvergenceReplayMetadata, GitOperation, GitOperationStatus, OperationKind, OperationPayload,
+};
 use ingot_domain::harness::{HarnessCommand, HarnessProfile, HarnessProfileError};
 use ingot_domain::ids::{GitOperationId, WorkspaceId};
 use ingot_domain::item::{
@@ -526,7 +528,7 @@ impl JobDispatcher {
             .into_iter()
             .any(|operation| {
                 operation.project_id == project.id
-                    && operation.operation_kind == OperationKind::FinalizeTargetRef
+                    && operation.operation_kind() == OperationKind::FinalizeTargetRef
             });
         if !(has_unresolved_finalize && paths.mirror_git_dir.exists()) {
             ensure_mirror(&paths).await?;
@@ -713,59 +715,42 @@ impl JobDispatcher {
             let project = self.db.get_project(operation.project_id).await?;
             let paths = self.refresh_project_mirror(&project).await?;
             let repo_path = paths.mirror_git_dir.as_path();
-            if operation.operation_kind == OperationKind::FinalizeTargetRef {
+            if operation.operation_kind() == OperationKind::FinalizeTargetRef {
                 made_progress |= self
                     .reconcile_finalize_target_ref_operation(&project, &mut operation, &paths)
                     .await?;
                 continue;
             }
-            let reconciled = match operation.operation_kind {
-                OperationKind::FinalizeTargetRef => unreachable!("handled above"),
-                OperationKind::CreateJobCommit | OperationKind::PrepareConvergenceCommit => {
-                    if let Some(commit_oid) = operation
-                        .commit_oid
-                        .as_deref()
-                        .or(operation.new_oid.as_deref())
-                    {
+            let reconciled = match &operation.payload {
+                OperationPayload::FinalizeTargetRef { .. } => unreachable!("handled above"),
+                OperationPayload::CreateJobCommit { .. }
+                | OperationPayload::PrepareConvergenceCommit { .. } => {
+                    if let Some(commit_oid) = operation.effective_commit_oid() {
                         ingot_git::commands::commit_exists(repo_path, commit_oid).await?
                     } else {
                         false
                     }
                 }
-                OperationKind::CreateInvestigationRef => {
-                    if let (Some(ref_name), Some(expected_oid)) =
-                        (operation.ref_name.as_deref(), operation.new_oid.as_deref())
-                    {
-                        resolve_ref_oid(repo_path, ref_name).await?.as_deref() == Some(expected_oid)
-                    } else {
-                        false
-                    }
+                OperationPayload::CreateInvestigationRef {
+                    ref_name, new_oid, ..
+                } => {
+                    resolve_ref_oid(repo_path, ref_name).await?.as_deref() == Some(new_oid.as_str())
                 }
-                OperationKind::RemoveWorkspaceRef => {
-                    if let Some(ref_name) = operation.ref_name.as_deref() {
-                        resolve_ref_oid(repo_path, ref_name).await?.is_none()
-                    } else {
-                        false
-                    }
+                OperationPayload::RemoveWorkspaceRef { ref_name, .. } => {
+                    resolve_ref_oid(repo_path, ref_name).await?.is_none()
                 }
-                OperationKind::RemoveInvestigationRef => {
-                    if let Some(ref_name) = operation.ref_name.as_deref() {
-                        resolve_ref_oid(repo_path, ref_name).await?.is_none()
-                    } else {
-                        false
-                    }
+                OperationPayload::RemoveInvestigationRef { ref_name, .. } => {
+                    resolve_ref_oid(repo_path, ref_name).await?.is_none()
                 }
-                OperationKind::ResetWorkspace => {
-                    if let (Some(workspace_id), Some(expected_oid)) =
-                        (operation.workspace_id, operation.new_oid.as_deref())
-                    {
-                        let workspace = self.db.get_workspace(workspace_id).await?;
-                        match head_oid(Path::new(&workspace.path)).await {
-                            Ok(actual_head) => actual_head == expected_oid,
-                            Err(_) => false,
-                        }
-                    } else {
-                        false
+                OperationPayload::ResetWorkspace {
+                    workspace_id,
+                    new_oid,
+                    ..
+                } => {
+                    let workspace = self.db.get_workspace(*workspace_id).await?;
+                    match head_oid(Path::new(&workspace.path)).await {
+                        Ok(actual_head) => actual_head == new_oid.as_str(),
+                        Err(_) => false,
                     }
                 }
             };
@@ -796,7 +781,7 @@ impl JobDispatcher {
             ActivityEventType::GitOperationReconciled,
             "git_operation",
             operation.id.to_string(),
-            serde_json::json!({ "operation_kind": operation.operation_kind }),
+            serde_json::json!({ "operation_kind": operation.operation_kind() }),
         )
         .await?;
         Ok(())
@@ -877,7 +862,7 @@ impl JobDispatcher {
         &self,
         operation: &GitOperation,
     ) -> Result<(), RuntimeError> {
-        match operation.operation_kind {
+        match operation.operation_kind() {
             OperationKind::CreateJobCommit => self.adopt_create_job_commit(operation).await,
             OperationKind::FinalizeTargetRef => self.adopt_finalized_target_ref(operation).await,
             OperationKind::PrepareConvergenceCommit => {
@@ -897,9 +882,8 @@ impl JobDispatcher {
             .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
         let mut job = self.db.get_job(job_id).await?;
         let commit_oid = operation
-            .commit_oid
-            .clone()
-            .or(operation.new_oid.clone())
+            .effective_commit_oid()
+            .map(ToOwned::to_owned)
             .ok_or_else(|| {
                 RuntimeError::InvalidState("reconciled create_job_commit missing commit oid".into())
             })?;
@@ -918,7 +902,7 @@ impl JobDispatcher {
         );
         self.db.update_job(&job).await?;
 
-        if let Some(workspace_id) = operation.workspace_id.or(job.state.workspace_id()) {
+        if let Some(workspace_id) = operation.workspace_id().or(job.state.workspace_id()) {
             let mut workspace = self.db.get_workspace(workspace_id).await?;
             let now = Utc::now();
             workspace.set_head_commit_oid(commit_oid, now);
@@ -960,9 +944,9 @@ impl JobDispatcher {
         let mut convergence = self.db.get_convergence(convergence_id).await?;
         if convergence.state.status() != ConvergenceStatus::Finalized {
             let final_oid = operation
-                .new_oid
-                .clone()
-                .or(operation.commit_oid.clone())
+                .new_oid()
+                .or(operation.commit_oid())
+                .map(ToOwned::to_owned)
                 .ok_or_else(|| {
                     RuntimeError::InvalidState(
                         "reconciled finalize_target_ref missing commit oid".into(),
@@ -1036,9 +1020,8 @@ impl JobDispatcher {
         }
         if convergence.state.status() != ConvergenceStatus::Prepared {
             let prepared_oid = operation
-                .commit_oid
-                .clone()
-                .or(operation.new_oid.clone())
+                .effective_commit_oid()
+                .map(ToOwned::to_owned)
                 .ok_or_else(|| {
                     RuntimeError::InvalidState(
                         "reconciled prepare_convergence_commit missing commit oid".into(),
@@ -1051,7 +1034,7 @@ impl JobDispatcher {
         if let Some(workspace_id) = convergence.state.integration_workspace_id() {
             let mut workspace = self.db.get_workspace(workspace_id).await?;
             let now = Utc::now();
-            let head_commit_oid = operation.commit_oid.clone().or(operation.new_oid.clone());
+            let head_commit_oid = operation.effective_commit_oid().map(ToOwned::to_owned);
             workspace.mark_ready_with_head(
                 head_commit_oid.unwrap_or_else(|| {
                     workspace
@@ -1082,14 +1065,12 @@ impl JobDispatcher {
         let item = self.db.get_item(convergence.item_id).await?;
         let revision = self.db.get_revision(convergence.item_revision_id).await?;
         let target_ref = operation
-            .ref_name
-            .as_deref()
-            .unwrap_or(convergence.target_ref.as_str());
-        let target_ref = target_ref.to_string();
+            .ref_name()
+            .unwrap_or(convergence.target_ref.as_str())
+            .to_string();
         let prepared_commit_oid = operation
-            .new_oid
-            .as_deref()
-            .or(operation.commit_oid.as_deref())
+            .new_oid()
+            .or(operation.commit_oid())
             .ok_or_else(|| RuntimeError::InvalidState("finalize operation missing new oid".into()))?
             .to_string();
         Ok(!matches!(
@@ -1120,26 +1101,22 @@ impl JobDispatcher {
             .await?
             .into_iter()
             .find(|operation| {
-                operation.operation_kind == OperationKind::FinalizeTargetRef
-                    && operation.entity_type == GitEntityType::Convergence
+                operation.operation_kind() == OperationKind::FinalizeTargetRef
                     && operation.entity_id == entity_id
             }))
     }
 
     async fn adopt_reset_workspace(&self, operation: &GitOperation) -> Result<(), RuntimeError> {
-        let Some(workspace_id) = operation.workspace_id else {
+        let Some(workspace_id) = operation.workspace_id() else {
             return Ok(());
         };
         let mut workspace = self.db.get_workspace(workspace_id).await?;
         let now = Utc::now();
         workspace.mark_ready_with_head(
-            operation.new_oid.clone().unwrap_or_else(|| {
-                workspace
-                    .state
-                    .head_commit_oid()
-                    .unwrap_or_default()
-                    .to_owned()
-            }),
+            operation
+                .new_oid()
+                .unwrap_or_else(|| workspace.state.head_commit_oid().unwrap_or_default())
+                .to_owned(),
             now,
         );
         self.db.update_workspace(&workspace).await?;
@@ -1150,13 +1127,13 @@ impl JobDispatcher {
         &self,
         operation: &GitOperation,
     ) -> Result<(), RuntimeError> {
-        let Some(workspace_id) = operation.workspace_id else {
+        let Some(workspace_id) = operation.workspace_id() else {
             return Ok(());
         };
         let mut workspace = self.db.get_workspace(workspace_id).await?;
         let now = Utc::now();
         workspace.mark_abandoned(now);
-        if operation.ref_name.is_some() {
+        if operation.ref_name().is_some() {
             workspace.workspace_ref = None;
         }
         workspace.updated_at = now;
@@ -1357,16 +1334,13 @@ impl JobDispatcher {
             let mut operation = GitOperation {
                 id: GitOperationId::new(),
                 project_id: project.id,
-                operation_kind: OperationKind::RemoveWorkspaceRef,
-                entity_type: GitEntityType::Workspace,
                 entity_id: workspace.id.to_string(),
-                workspace_id: Some(workspace.id),
-                ref_name: Some(workspace_ref.into()),
-                expected_old_oid: Some(current_oid),
-                new_oid: None,
-                commit_oid: None,
+                payload: OperationPayload::RemoveWorkspaceRef {
+                    workspace_id: workspace.id,
+                    ref_name: workspace_ref.into(),
+                    expected_old_oid: current_oid,
+                },
                 status: GitOperationStatus::Planned,
-                metadata: None,
                 created_at: Utc::now(),
                 completed_at: None,
             };
@@ -1376,7 +1350,7 @@ impl JobDispatcher {
                 ActivityEventType::GitOperationPlanned,
                 "git_operation",
                 operation.id.to_string(),
-                serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
+                serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
             )
             .await?;
             delete_ref(repo_path.as_path(), workspace_ref).await?;
@@ -2172,16 +2146,15 @@ impl JobDispatcher {
             let operation = GitOperation {
                 id: GitOperationId::new(),
                 project_id,
-                operation_kind: OperationKind::FinalizeTargetRef,
-                entity_type: GitEntityType::Convergence,
                 entity_id: convergence.id.to_string(),
-                workspace_id: convergence.state.integration_workspace_id(),
-                ref_name: Some(convergence.target_ref.clone()),
-                expected_old_oid: Some(input_target_commit_oid.clone()),
-                new_oid: Some(prepared_commit_oid.clone()),
-                commit_oid: Some(prepared_commit_oid.clone()),
+                payload: OperationPayload::FinalizeTargetRef {
+                    workspace_id: convergence.state.integration_workspace_id(),
+                    ref_name: convergence.target_ref.clone(),
+                    expected_old_oid: input_target_commit_oid.clone(),
+                    new_oid: prepared_commit_oid.clone(),
+                    commit_oid: Some(prepared_commit_oid.clone()),
+                },
                 status: GitOperationStatus::Planned,
-                metadata: None,
                 created_at: Utc::now(),
                 completed_at: None,
             };
@@ -2191,7 +2164,7 @@ impl JobDispatcher {
                 ActivityEventType::GitOperationPlanned,
                 "git_operation",
                 operation.id.to_string(),
-                serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
+                serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
             )
             .await?;
             operation
@@ -2340,10 +2313,12 @@ impl JobDispatcher {
 
         operation.status = GitOperationStatus::Failed;
         operation.completed_at = Some(Utc::now());
-        operation.metadata = Some(serde_json::json!({
-            "source_commit_oids": source_commit_oids,
-            "prepared_commit_oids": prepared_commit_oids,
-        }));
+        operation
+            .payload
+            .set_replay_metadata(ConvergenceReplayMetadata {
+                source_commit_oids: source_commit_oids.to_vec(),
+                prepared_commit_oids: prepared_commit_oids.to_vec(),
+            });
         self.db.update_git_operation(operation).await?;
 
         let event_type = match failure_kind {
@@ -2501,19 +2476,19 @@ impl JobDispatcher {
         let mut operation = GitOperation {
             id: GitOperationId::new(),
             project_id: project.id,
-            operation_kind: OperationKind::PrepareConvergenceCommit,
-            entity_type: GitEntityType::Convergence,
             entity_id: convergence.id.to_string(),
-            workspace_id: Some(integration_workspace.id),
-            ref_name: integration_workspace.workspace_ref.clone(),
-            expected_old_oid: Some(input_target_commit_oid.clone()),
-            new_oid: None,
-            commit_oid: None,
+            payload: OperationPayload::PrepareConvergenceCommit {
+                workspace_id: integration_workspace.id,
+                ref_name: integration_workspace.workspace_ref.clone(),
+                expected_old_oid: input_target_commit_oid.clone(),
+                new_oid: None,
+                commit_oid: None,
+                replay_metadata: Some(ConvergenceReplayMetadata {
+                    source_commit_oids: source_commit_oids.clone(),
+                    prepared_commit_oids: vec![],
+                }),
+            },
             status: GitOperationStatus::Planned,
-            metadata: Some(serde_json::json!({
-                "source_commit_oids": source_commit_oids,
-                "prepared_commit_oids": [],
-            })),
             created_at: now,
             completed_at: None,
         };
@@ -2523,7 +2498,7 @@ impl JobDispatcher {
             ActivityEventType::GitOperationPlanned,
             "git_operation",
             operation.id.to_string(),
-            serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
+            serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
         )
         .await?;
 
@@ -2664,12 +2639,15 @@ impl JobDispatcher {
         convergence.transition_to_prepared(prepared_tip.clone(), Some(Utc::now()));
         self.db.update_convergence(&convergence).await?;
 
-        operation.new_oid = Some(prepared_tip.clone());
-        operation.commit_oid = Some(prepared_tip.clone());
-        operation.metadata = Some(serde_json::json!({
-            "source_commit_oids": source_commit_oids,
-            "prepared_commit_oids": prepared_commit_oids,
-        }));
+        operation
+            .payload
+            .set_convergence_commit_result(prepared_tip.clone());
+        operation
+            .payload
+            .set_replay_metadata(ConvergenceReplayMetadata {
+                source_commit_oids,
+                prepared_commit_oids,
+            });
         self.mark_git_operation_reconciled(&mut operation).await?;
 
         let mut all_convergences = convergences.to_vec();
@@ -2871,16 +2849,15 @@ impl JobDispatcher {
         let mut operation = GitOperation {
             id: GitOperationId::new(),
             project_id: prepared.project.id,
-            operation_kind: OperationKind::CreateJobCommit,
-            entity_type: GitEntityType::Job,
             entity_id: prepared.job.id.to_string(),
-            workspace_id: Some(prepared.workspace.id),
-            ref_name: Some(workspace_ref.clone()),
-            expected_old_oid: Some(prepared.original_head_commit_oid.clone()),
-            new_oid: None,
-            commit_oid: None,
+            payload: OperationPayload::CreateJobCommit {
+                workspace_id: prepared.workspace.id,
+                ref_name: workspace_ref.clone(),
+                expected_old_oid: prepared.original_head_commit_oid.clone(),
+                new_oid: None,
+                commit_oid: None,
+            },
             status: GitOperationStatus::Planned,
-            metadata: None,
             created_at: now,
             completed_at: None,
         };
@@ -2890,7 +2867,7 @@ impl JobDispatcher {
             ActivityEventType::GitOperationPlanned,
             "git_operation",
             operation.id.to_string(),
-            serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
+            serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
         )
         .await?;
 
@@ -2914,8 +2891,7 @@ impl JobDispatcher {
         .await?;
         git(repo_path, &["update-ref", &workspace_ref, &commit_oid]).await?;
 
-        operation.new_oid = Some(commit_oid.clone());
-        operation.commit_oid = Some(commit_oid.clone());
+        operation.payload.set_job_commit_result(commit_oid.clone());
         operation.status = GitOperationStatus::Applied;
         operation.completed_at = Some(Utc::now());
         self.db.update_git_operation(&operation).await?;

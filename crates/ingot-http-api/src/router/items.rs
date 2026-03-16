@@ -1196,19 +1196,33 @@ pub(super) async fn prepare_convergence_workspace(
     )
     .await?;
 
+    let source_base_commit_oid = effective_authoring_base_commit_oid(state, revision)
+        .await?
+        .ok_or_else(|| {
+            ApiError::UseCase(UseCaseError::Internal(
+                "convergence requires a bound authoring base commit".into(),
+            ))
+        })?;
+    let source_commit_oids =
+        list_commits_oldest_first(repo_path, &source_base_commit_oid, source_head_commit_oid)
+            .await
+            .map_err(git_to_internal)?;
     let mut operation = GitOperation {
         id: ingot_domain::ids::GitOperationId::new(),
         project_id: project.id,
-        operation_kind: OperationKind::PrepareConvergenceCommit,
-        entity_type: GitEntityType::Convergence,
         entity_id: convergence.id.to_string(),
-        workspace_id: Some(integration_workspace.id),
-        ref_name: integration_workspace.workspace_ref.clone(),
-        expected_old_oid: Some(input_target_commit_oid.clone()),
-        new_oid: None,
-        commit_oid: None,
+        payload: OperationPayload::PrepareConvergenceCommit {
+            workspace_id: integration_workspace.id,
+            ref_name: integration_workspace.workspace_ref.clone(),
+            expected_old_oid: input_target_commit_oid.clone(),
+            new_oid: None,
+            commit_oid: None,
+            replay_metadata: Some(ConvergenceReplayMetadata {
+                source_commit_oids: source_commit_oids.clone(),
+                prepared_commit_oids: vec![],
+            }),
+        },
         status: GitOperationStatus::Planned,
-        metadata: None,
         created_at: now,
         completed_at: None,
     };
@@ -1223,30 +1237,9 @@ pub(super) async fn prepare_convergence_workspace(
         ActivityEventType::GitOperationPlanned,
         "git_operation",
         operation.id,
-        serde_json::json!({ "operation_kind": operation.operation_kind, "entity_id": operation.entity_id }),
+        serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
     )
     .await?;
-
-    let source_base_commit_oid = effective_authoring_base_commit_oid(state, revision)
-        .await?
-        .ok_or_else(|| {
-            ApiError::UseCase(UseCaseError::Internal(
-                "convergence requires a bound authoring base commit".into(),
-            ))
-        })?;
-    let source_commit_oids =
-        list_commits_oldest_first(repo_path, &source_base_commit_oid, source_head_commit_oid)
-            .await
-            .map_err(git_to_internal)?;
-    operation.metadata = Some(serde_json::json!({
-        "source_commit_oids": source_commit_oids,
-        "prepared_commit_oids": [],
-    }));
-    state
-        .db
-        .update_git_operation(&operation)
-        .await
-        .map_err(repo_to_internal)?;
 
     let integration_workspace_dir = PathBuf::from(&integration_workspace.path);
     let mut prepared_tip = input_target_commit_oid.clone();
@@ -1289,10 +1282,12 @@ pub(super) async fn prepare_convergence_workspace(
 
             operation.status = GitOperationStatus::Failed;
             operation.completed_at = Some(Utc::now());
-            operation.metadata = Some(serde_json::json!({
-                "source_commit_oids": source_commit_oids,
-                "prepared_commit_oids": prepared_commit_oids,
-            }));
+            operation
+                .payload
+                .set_replay_metadata(ConvergenceReplayMetadata {
+                    source_commit_oids: source_commit_oids.clone(),
+                    prepared_commit_oids: prepared_commit_oids.clone(),
+                });
             let _ = state.db.update_git_operation(&operation).await;
 
             return Err(ApiError::Conflict {
@@ -1326,10 +1321,12 @@ pub(super) async fn prepare_convergence_workspace(
 
                 operation.status = GitOperationStatus::Failed;
                 operation.completed_at = Some(Utc::now());
-                operation.metadata = Some(serde_json::json!({
-                    "source_commit_oids": source_commit_oids,
-                    "prepared_commit_oids": prepared_commit_oids,
-                }));
+                operation
+                    .payload
+                    .set_replay_metadata(ConvergenceReplayMetadata {
+                        source_commit_oids: source_commit_oids.clone(),
+                        prepared_commit_oids: prepared_commit_oids.clone(),
+                    });
                 let _ = state.db.update_git_operation(&operation).await;
 
                 let _ = append_activity(
@@ -1384,10 +1381,12 @@ pub(super) async fn prepare_convergence_workspace(
 
                 operation.status = GitOperationStatus::Failed;
                 operation.completed_at = Some(Utc::now());
-                operation.metadata = Some(serde_json::json!({
-                    "source_commit_oids": source_commit_oids,
-                    "prepared_commit_oids": prepared_commit_oids,
-                }));
+                operation
+                    .payload
+                    .set_replay_metadata(ConvergenceReplayMetadata {
+                        source_commit_oids: source_commit_oids.clone(),
+                        prepared_commit_oids: prepared_commit_oids.clone(),
+                    });
                 let _ = state.db.update_git_operation(&operation).await;
 
                 let _ = append_activity(
@@ -1434,10 +1433,12 @@ pub(super) async fn prepare_convergence_workspace(
 
                 operation.status = GitOperationStatus::Failed;
                 operation.completed_at = Some(Utc::now());
-                operation.metadata = Some(serde_json::json!({
-                    "source_commit_oids": source_commit_oids,
-                    "prepared_commit_oids": prepared_commit_oids,
-                }));
+                operation
+                    .payload
+                    .set_replay_metadata(ConvergenceReplayMetadata {
+                        source_commit_oids: source_commit_oids.clone(),
+                        prepared_commit_oids: prepared_commit_oids.clone(),
+                    });
                 let _ = state.db.update_git_operation(&operation).await;
 
                 let _ = append_activity(
@@ -1480,14 +1481,17 @@ pub(super) async fn prepare_convergence_workspace(
         .await
         .map_err(repo_to_internal)?;
 
-    operation.new_oid = Some(prepared_tip.clone());
-    operation.commit_oid = Some(prepared_tip);
+    operation
+        .payload
+        .set_convergence_commit_result(prepared_tip);
+    operation
+        .payload
+        .set_replay_metadata(ConvergenceReplayMetadata {
+            source_commit_oids,
+            prepared_commit_oids,
+        });
     operation.status = GitOperationStatus::Applied;
     operation.completed_at = Some(Utc::now());
-    operation.metadata = Some(serde_json::json!({
-        "source_commit_oids": source_commit_oids,
-        "prepared_commit_oids": prepared_commit_oids,
-    }));
     state
         .db
         .update_git_operation(&operation)

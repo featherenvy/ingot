@@ -38,7 +38,9 @@ use ingot_domain::agent::{Agent, AgentStatus};
 use ingot_domain::convergence::Convergence;
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::{Finding, FindingTriageState};
-use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
+use ingot_domain::git_operation::{
+    ConvergenceReplayMetadata, GitOperation, GitOperationStatus, OperationPayload,
+};
 use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::item::{
     ApprovalState, Classification, DoneReason, Escalation, EscalationReason, Item, Lifecycle,
