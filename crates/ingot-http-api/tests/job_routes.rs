@@ -1472,5 +1472,8 @@ async fn complete_route_recovers_projected_review_after_warning_only_dispatch_fa
         .into_iter()
         .next()
         .expect("updated convergence");
-    assert_eq!(updated_convergence.status, ConvergenceStatus::Failed);
+    assert_eq!(
+        updated_convergence.state.status(),
+        ConvergenceStatus::Failed
+    );
 }

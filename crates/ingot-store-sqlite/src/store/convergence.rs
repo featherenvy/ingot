@@ -1,4 +1,4 @@
-use ingot_domain::convergence::Convergence;
+use ingot_domain::convergence::{Convergence, ConvergenceState, ConvergenceStatus};
 use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId};
 use ingot_domain::ports::{ConvergenceRepository, RepositoryError};
 use sqlx::Row;
@@ -56,6 +56,8 @@ impl Database {
         &self,
         convergence: &Convergence,
     ) -> Result<(), RepositoryError> {
+        let state = &convergence.state;
+
         sqlx::query(
             "INSERT INTO convergences (
                 id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
@@ -68,17 +70,17 @@ impl Database {
         .bind(convergence.item_id.to_string())
         .bind(convergence.item_revision_id.to_string())
         .bind(convergence.source_workspace_id.to_string())
-        .bind(convergence.integration_workspace_id.map(|id| id.to_string()))
+        .bind(state.integration_workspace_id().map(|id| id.to_string()))
         .bind(&convergence.source_head_commit_oid)
         .bind(&convergence.target_ref)
         .bind(encode_enum(&convergence.strategy)?)
-        .bind(encode_enum(&convergence.status)?)
-        .bind(convergence.input_target_commit_oid.as_deref())
-        .bind(convergence.prepared_commit_oid.as_deref())
-        .bind(convergence.final_target_commit_oid.as_deref())
-        .bind(convergence.conflict_summary.as_deref())
+        .bind(encode_enum(&state.status())?)
+        .bind(state.input_target_commit_oid())
+        .bind(state.prepared_commit_oid())
+        .bind(state.final_target_commit_oid())
+        .bind(state.conflict_summary())
         .bind(convergence.created_at)
-        .bind(convergence.completed_at)
+        .bind(state.completed_at())
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -90,6 +92,8 @@ impl Database {
         &self,
         convergence: &Convergence,
     ) -> Result<(), RepositoryError> {
+        let state = &convergence.state;
+
         let result = sqlx::query(
             "UPDATE convergences
              SET integration_workspace_id = ?, source_head_commit_oid = ?, target_ref = ?, strategy = ?,
@@ -97,16 +101,16 @@ impl Database {
                  conflict_summary = ?, completed_at = ?
              WHERE id = ?",
         )
-        .bind(convergence.integration_workspace_id.map(|id| id.to_string()))
+        .bind(state.integration_workspace_id().map(|id| id.to_string()))
         .bind(&convergence.source_head_commit_oid)
         .bind(&convergence.target_ref)
         .bind(encode_enum(&convergence.strategy)?)
-        .bind(encode_enum(&convergence.status)?)
-        .bind(convergence.input_target_commit_oid.as_deref())
-        .bind(convergence.prepared_commit_oid.as_deref())
-        .bind(convergence.final_target_commit_oid.as_deref())
-        .bind(convergence.conflict_summary.as_deref())
-        .bind(convergence.completed_at)
+        .bind(encode_enum(&state.status())?)
+        .bind(state.input_target_commit_oid())
+        .bind(state.prepared_commit_oid())
+        .bind(state.final_target_commit_oid())
+        .bind(state.conflict_summary())
+        .bind(state.completed_at())
         .bind(convergence.id.to_string())
         .execute(&self.pool)
         .await
@@ -212,28 +216,125 @@ impl ConvergenceRepository for Database {
     }
 }
 
+fn required_convergence_field<T>(
+    field: &'static str,
+    status: &str,
+    value: Option<T>,
+) -> Result<T, RepositoryError> {
+    value.ok_or_else(|| {
+        RepositoryError::Database(
+            format!("convergence {field} is required for status {status}").into(),
+        )
+    })
+}
+
 fn map_convergence(row: &SqliteRow) -> Result<Convergence, RepositoryError> {
+    let status: ConvergenceStatus = parse_enum(row.try_get("status").map_err(db_err)?)?;
+    let status_str = row.try_get::<String, _>("status").map_err(db_err)?;
+
+    let integration_workspace_id: Option<ingot_domain::ids::WorkspaceId> = row
+        .try_get::<Option<String>, _>("integration_workspace_id")
+        .map_err(db_err)?
+        .map(parse_id)
+        .transpose()?;
+    let input_target_commit_oid: Option<String> =
+        row.try_get("input_target_commit_oid").map_err(db_err)?;
+    let prepared_commit_oid: Option<String> = row.try_get("prepared_commit_oid").map_err(db_err)?;
+    let final_target_commit_oid: Option<String> =
+        row.try_get("final_target_commit_oid").map_err(db_err)?;
+    let conflict_summary: Option<String> = row.try_get("conflict_summary").map_err(db_err)?;
+    let completed_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get("completed_at").map_err(db_err)?;
+
+    let state = match status {
+        ConvergenceStatus::Queued => ConvergenceState::Queued,
+        ConvergenceStatus::Running => ConvergenceState::Running {
+            integration_workspace_id: required_convergence_field(
+                "integration_workspace_id",
+                &status_str,
+                integration_workspace_id,
+            )?,
+            input_target_commit_oid: required_convergence_field(
+                "input_target_commit_oid",
+                &status_str,
+                input_target_commit_oid,
+            )?,
+        },
+        ConvergenceStatus::Conflicted => ConvergenceState::Conflicted {
+            integration_workspace_id: required_convergence_field(
+                "integration_workspace_id",
+                &status_str,
+                integration_workspace_id,
+            )?,
+            input_target_commit_oid: required_convergence_field(
+                "input_target_commit_oid",
+                &status_str,
+                input_target_commit_oid,
+            )?,
+            conflict_summary: required_convergence_field(
+                "conflict_summary",
+                &status_str,
+                conflict_summary,
+            )?,
+            completed_at: required_convergence_field("completed_at", &status_str, completed_at)?,
+        },
+        ConvergenceStatus::Prepared => ConvergenceState::Prepared {
+            integration_workspace_id,
+            input_target_commit_oid: required_convergence_field(
+                "input_target_commit_oid",
+                &status_str,
+                input_target_commit_oid,
+            )?,
+            prepared_commit_oid: required_convergence_field(
+                "prepared_commit_oid",
+                &status_str,
+                prepared_commit_oid,
+            )?,
+            completed_at,
+        },
+        ConvergenceStatus::Finalized => ConvergenceState::Finalized {
+            integration_workspace_id,
+            input_target_commit_oid: required_convergence_field(
+                "input_target_commit_oid",
+                &status_str,
+                input_target_commit_oid,
+            )?,
+            prepared_commit_oid: required_convergence_field(
+                "prepared_commit_oid",
+                &status_str,
+                prepared_commit_oid,
+            )?,
+            final_target_commit_oid: required_convergence_field(
+                "final_target_commit_oid",
+                &status_str,
+                final_target_commit_oid,
+            )?,
+            completed_at: required_convergence_field("completed_at", &status_str, completed_at)?,
+        },
+        ConvergenceStatus::Failed => ConvergenceState::Failed {
+            integration_workspace_id,
+            input_target_commit_oid,
+            conflict_summary,
+            completed_at: required_convergence_field("completed_at", &status_str, completed_at)?,
+        },
+        ConvergenceStatus::Cancelled => ConvergenceState::Cancelled {
+            integration_workspace_id,
+            input_target_commit_oid,
+            completed_at: required_convergence_field("completed_at", &status_str, completed_at)?,
+        },
+    };
+
     Ok(Convergence {
         id: parse_id(row.try_get("id").map_err(db_err)?)?,
         project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
         item_id: parse_id(row.try_get("item_id").map_err(db_err)?)?,
         item_revision_id: parse_id(row.try_get("item_revision_id").map_err(db_err)?)?,
         source_workspace_id: parse_id(row.try_get("source_workspace_id").map_err(db_err)?)?,
-        integration_workspace_id: row
-            .try_get::<Option<String>, _>("integration_workspace_id")
-            .map_err(db_err)?
-            .map(parse_id)
-            .transpose()?,
         source_head_commit_oid: row.try_get("source_head_commit_oid").map_err(db_err)?,
         target_ref: row.try_get("target_ref").map_err(db_err)?,
         strategy: parse_enum(row.try_get("strategy").map_err(db_err)?)?,
-        status: parse_enum(row.try_get("status").map_err(db_err)?)?,
-        input_target_commit_oid: row.try_get("input_target_commit_oid").map_err(db_err)?,
-        prepared_commit_oid: row.try_get("prepared_commit_oid").map_err(db_err)?,
-        final_target_commit_oid: row.try_get("final_target_commit_oid").map_err(db_err)?,
         target_head_valid: None,
-        conflict_summary: row.try_get("conflict_summary").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
-        completed_at: row.try_get("completed_at").map_err(db_err)?,
+        state,
     })
 }

@@ -218,9 +218,12 @@ async fn reconcile_startup_fails_inflight_convergences_and_marks_workspace_stale
             .into_iter()
             .next()
             .expect("convergence");
-    assert_eq!(updated_convergence.status, ConvergenceStatus::Failed);
     assert_eq!(
-        updated_convergence.conflict_summary.as_deref(),
+        updated_convergence.state.status(),
+        ConvergenceStatus::Failed
+    );
+    assert_eq!(
+        updated_convergence.state.conflict_summary(),
         Some("startup_recovery_required")
     );
 
@@ -322,9 +325,12 @@ async fn reconcile_startup_marks_finalized_target_ref_git_operation_reconciled()
         .get_convergence(convergence.id)
         .await
         .expect("convergence");
-    assert_eq!(updated_convergence.status, ConvergenceStatus::Finalized);
     assert_eq!(
-        updated_convergence.final_target_commit_oid.as_deref(),
+        updated_convergence.state.status(),
+        ConvergenceStatus::Finalized
+    );
+    assert_eq!(
+        updated_convergence.state.final_target_commit_oid(),
         Some(
             operation
                 .commit_oid
@@ -601,8 +607,8 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
     .new_oid(prepared_commit)
     .commit_oid(
         convergence
-            .prepared_commit_oid
-            .clone()
+            .state
+            .prepared_commit_oid()
             .expect("prepared oid"),
     )
     .status(GitOperationStatus::Applied)
@@ -639,7 +645,10 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
         .get_convergence(convergence.id)
         .await
         .expect("convergence");
-    assert_eq!(updated_convergence.status, ConvergenceStatus::Prepared);
+    assert_eq!(
+        updated_convergence.state.status(),
+        ConvergenceStatus::Prepared
+    );
     let queue_entries = db
         .list_queue_entries_by_item(item.id)
         .await
@@ -754,13 +763,16 @@ async fn reconcile_startup_adopts_prepared_convergence_from_git_operation() {
         .get_convergence(convergence.id)
         .await
         .expect("convergence");
-    assert_eq!(updated_convergence.status, ConvergenceStatus::Prepared);
-    assert!(updated_convergence.prepared_commit_oid.is_some());
+    assert_eq!(
+        updated_convergence.state.status(),
+        ConvergenceStatus::Prepared
+    );
+    assert!(updated_convergence.state.prepared_commit_oid().is_some());
     let updated_workspace = db.get_workspace(workspace.id).await.expect("workspace");
     assert_eq!(updated_workspace.status, WorkspaceStatus::Ready);
     assert_eq!(
-        updated_workspace.head_commit_oid,
-        updated_convergence.prepared_commit_oid
+        updated_workspace.head_commit_oid.as_deref(),
+        updated_convergence.state.prepared_commit_oid()
     );
     let unresolved = db
         .list_unresolved_git_operations()
@@ -877,7 +889,10 @@ async fn reconcile_startup_does_not_resurrect_cancelled_convergence_from_prepare
         .get_convergence(convergence.id)
         .await
         .expect("convergence");
-    assert_eq!(updated_convergence.status, ConvergenceStatus::Cancelled);
+    assert_eq!(
+        updated_convergence.state.status(),
+        ConvergenceStatus::Cancelled
+    );
     let updated_workspace = db.get_workspace(workspace.id).await.expect("workspace");
     assert_eq!(updated_workspace.status, WorkspaceStatus::Abandoned);
     let unresolved = db

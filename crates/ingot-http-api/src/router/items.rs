@@ -681,13 +681,22 @@ pub(super) async fn read_optional_json(
 pub(super) fn convergence_response(convergence: Convergence) -> ConvergenceResponse {
     ConvergenceResponse {
         id: convergence.id.to_string(),
-        status: serde_json::to_value(convergence.status)
+        status: serde_json::to_value(convergence.state.status())
             .ok()
             .and_then(|value| value.as_str().map(ToOwned::to_owned))
             .unwrap_or_else(|| "unknown".into()),
-        input_target_commit_oid: convergence.input_target_commit_oid,
-        prepared_commit_oid: convergence.prepared_commit_oid,
-        final_target_commit_oid: convergence.final_target_commit_oid,
+        input_target_commit_oid: convergence
+            .state
+            .input_target_commit_oid()
+            .map(ToOwned::to_owned),
+        prepared_commit_oid: convergence
+            .state
+            .prepared_commit_oid()
+            .map(ToOwned::to_owned),
+        final_target_commit_oid: convergence
+            .state
+            .final_target_commit_oid()
+            .map(ToOwned::to_owned),
         target_head_valid: convergence.target_head_valid.unwrap_or(true),
     }
 }
@@ -712,7 +721,7 @@ pub(super) fn overlay_evaluation_with_queue_state(
 ) -> Evaluation {
     let has_prepared_convergence = convergences.iter().any(|convergence| {
         convergence.item_revision_id == revision.id
-            && convergence.status == ingot_domain::convergence::ConvergenceStatus::Prepared
+            && convergence.state.status() == ingot_domain::convergence::ConvergenceStatus::Prepared
     });
 
     if queue.state.is_some()
@@ -1162,18 +1171,15 @@ pub(super) async fn prepare_convergence_workspace(
         item_id: item.id,
         item_revision_id: revision.id,
         source_workspace_id: source_workspace.id,
-        integration_workspace_id: Some(integration_workspace.id),
         source_head_commit_oid: source_head_commit_oid.into(),
         target_ref: revision.target_ref.clone(),
         strategy: ingot_domain::convergence::ConvergenceStrategy::RebaseThenFastForward,
-        status: ingot_domain::convergence::ConvergenceStatus::Running,
-        input_target_commit_oid: Some(input_target_commit_oid.clone()),
-        prepared_commit_oid: None,
-        final_target_commit_oid: None,
         target_head_valid: Some(true),
-        conflict_summary: None,
         created_at: now,
-        completed_at: None,
+        state: ingot_domain::convergence::ConvergenceState::Running {
+            integration_workspace_id: integration_workspace.id,
+            input_target_commit_oid: input_target_commit_oid.clone(),
+        },
     };
     state
         .db
@@ -1255,9 +1261,7 @@ pub(super) async fn prepare_convergence_workspace(
             integration_workspace.updated_at = Utc::now();
             let _ = state.db.update_workspace(&integration_workspace).await;
 
-            convergence.status = ingot_domain::convergence::ConvergenceStatus::Conflicted;
-            convergence.conflict_summary = Some(error.to_string());
-            convergence.completed_at = Some(Utc::now());
+            convergence.transition_to_conflicted(error.to_string(), Utc::now());
             let _ = state.db.update_convergence(&convergence).await;
             let mut escalated_item = item.clone();
             escalated_item.escalation = Escalation::OperatorRequired {
@@ -1312,9 +1316,7 @@ pub(super) async fn prepare_convergence_workspace(
                 integration_workspace.updated_at = Utc::now();
                 let _ = state.db.update_workspace(&integration_workspace).await;
 
-                convergence.status = ingot_domain::convergence::ConvergenceStatus::Failed;
-                convergence.conflict_summary = Some(error.to_string());
-                convergence.completed_at = Some(Utc::now());
+                convergence.transition_to_failed(Some(error.to_string()), Utc::now());
                 let _ = state.db.update_convergence(&convergence).await;
 
                 let mut escalated_item = item.clone();
@@ -1373,9 +1375,7 @@ pub(super) async fn prepare_convergence_workspace(
                 integration_workspace.updated_at = Utc::now();
                 let _ = state.db.update_workspace(&integration_workspace).await;
 
-                convergence.status = ingot_domain::convergence::ConvergenceStatus::Failed;
-                convergence.conflict_summary = Some(error.to_string());
-                convergence.completed_at = Some(Utc::now());
+                convergence.transition_to_failed(Some(error.to_string()), Utc::now());
                 let _ = state.db.update_convergence(&convergence).await;
 
                 let mut escalated_item = item.clone();
@@ -1426,9 +1426,7 @@ pub(super) async fn prepare_convergence_workspace(
                 integration_workspace.updated_at = Utc::now();
                 let _ = state.db.update_workspace(&integration_workspace).await;
 
-                convergence.status = ingot_domain::convergence::ConvergenceStatus::Failed;
-                convergence.conflict_summary = Some(error.to_string());
-                convergence.completed_at = Some(Utc::now());
+                convergence.transition_to_failed(Some(error.to_string()), Utc::now());
                 let _ = state.db.update_convergence(&convergence).await;
 
                 let mut escalated_item = item.clone();
@@ -1481,9 +1479,7 @@ pub(super) async fn prepare_convergence_workspace(
         .await
         .map_err(repo_to_internal)?;
 
-    convergence.status = ingot_domain::convergence::ConvergenceStatus::Prepared;
-    convergence.prepared_commit_oid = Some(prepared_tip.clone());
-    convergence.completed_at = Some(Utc::now());
+    convergence.transition_to_prepared(prepared_tip.clone(), Some(Utc::now()));
     state
         .db
         .update_convergence(&convergence)
@@ -1554,7 +1550,6 @@ mod tests {
 
     use super::compute_target_head_valid;
     use chrono::Utc;
-    use ingot_domain::convergence::Convergence;
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
     use ingot_test_support::fixtures::ConvergenceBuilder;
     use ingot_test_support::git::{
@@ -1579,24 +1574,20 @@ mod tests {
         support_write_file(path, contents);
     }
 
-    fn test_prepared_convergence() -> Convergence {
-        ConvergenceBuilder::new(
+    #[tokio::test]
+    async fn target_head_valid_tracks_ref_movement() {
+        let repo = temp_git_repo();
+        let first = git_output(&repo, &["rev-parse", "HEAD"]);
+        let mut convergence = ConvergenceBuilder::new(
             ProjectId::from_uuid(Uuid::nil()),
             ItemId::from_uuid(Uuid::nil()),
             ItemRevisionId::from_uuid(Uuid::nil()),
         )
         .target_head_valid(true)
         .created_at(Utc::now())
-        .build()
-    }
-
-    #[tokio::test]
-    async fn target_head_valid_tracks_ref_movement() {
-        let repo = temp_git_repo();
-        let first = git_output(&repo, &["rev-parse", "HEAD"]);
-        let mut convergence = test_prepared_convergence();
+        .input_target_commit_oid(first.clone())
+        .build();
         convergence.target_ref = "refs/heads/main".into();
-        convergence.input_target_commit_oid = Some(first.clone());
 
         let valid = compute_target_head_valid(&repo, &convergence)
             .await

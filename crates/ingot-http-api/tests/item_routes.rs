@@ -104,7 +104,7 @@ async fn create_item_route_derives_initial_revision_with_null_seed_commit() {
         "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
          VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
     )
-    .bind(&project_id)
+    .bind(project_id.as_str())
     .bind(repo.display().to_string())
     .bind(TS)
     .bind(TS)
@@ -172,7 +172,7 @@ async fn create_item_route_rejects_non_branch_target_ref() {
         "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
          VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
     )
-    .bind(&project_id)
+    .bind(project_id.as_str())
     .bind(repo.display().to_string())
     .bind(TS)
     .bind(TS)
@@ -218,7 +218,7 @@ async fn create_item_route_rejects_git_invalid_branch_name() {
         "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
          VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
     )
-    .bind(&project_id)
+    .bind(project_id.as_str())
     .bind(repo.display().to_string())
     .bind(TS)
     .bind(TS)
@@ -267,7 +267,7 @@ async fn defer_and_resume_routes_toggle_parking_state() {
         "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
          VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
     )
-    .bind(&project_id)
+    .bind(project_id.as_str())
     .bind(repo.display().to_string())
     .bind(TS)
     .bind(TS)
@@ -281,9 +281,9 @@ async fn defer_and_resume_routes_toggle_parking_state() {
             priority, labels, created_at, updated_at
          ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
     )
-    .bind(&item_id)
-    .bind(&project_id)
-    .bind(&revision_id)
+    .bind(item_id.as_str())
+    .bind(project_id.as_str())
+    .bind(revision_id.as_str())
     .bind(TS)
     .bind(TS)
     .execute(&db.pool)
@@ -296,8 +296,8 @@ async fn defer_and_resume_routes_toggle_parking_state() {
             seed_target_commit_oid, supersedes_revision_id, created_at
          ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{\"workflow_version\":\"delivery:v1\",\"approval_policy\":\"required\",\"candidate_rework_budget\":7,\"integration_rework_budget\":8}', '{\"author_initial\":\"author-initial\"}', ?, ?, NULL, ?)",
     )
-    .bind(&revision_id)
-    .bind(&item_id)
+    .bind(revision_id.as_str())
+    .bind(item_id.as_str())
     .bind(&head)
     .bind(&head)
     .bind(TS)
@@ -356,7 +356,7 @@ async fn resume_route_auto_dispatches_projected_review_job() {
         "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
          VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
     )
-    .bind(&project_id)
+    .bind(project_id.as_str())
     .bind(repo.display().to_string())
     .bind(TS)
     .bind(TS)
@@ -370,9 +370,9 @@ async fn resume_route_auto_dispatches_projected_review_job() {
             priority, labels, created_at, updated_at
          ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'deferred', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
     )
-    .bind(&item_id)
-    .bind(&project_id)
-    .bind(&revision_id)
+    .bind(item_id.as_str())
+    .bind(project_id.as_str())
+    .bind(revision_id.as_str())
     .bind(TS)
     .bind(TS)
     .execute(&db.pool)
@@ -385,8 +385,8 @@ async fn resume_route_auto_dispatches_projected_review_job() {
             seed_target_commit_oid, supersedes_revision_id, created_at
          ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, ?)",
     )
-    .bind(&revision_id)
-    .bind(&item_id)
+    .bind(revision_id.as_str())
+    .bind(item_id.as_str())
     .bind(&seed_head)
     .bind(&seed_head)
     .bind(TS)
@@ -396,10 +396,10 @@ async fn resume_route_auto_dispatches_projected_review_job() {
     insert_test_job_row(
         &db,
         TestJobInsert {
-            id: &author_job_id,
-            project_id: &project_id,
-            item_id: &item_id,
-            item_revision_id: &revision_id,
+            id: author_job_id.as_str(),
+            project_id: project_id.as_str(),
+            item_id: item_id.as_str(),
+            item_revision_id: revision_id.as_str(),
             step_id: "author_initial",
             status: JobStatus::Completed,
             outcome_class: Some(OutcomeClass::Clean),
@@ -415,10 +415,10 @@ async fn resume_route_auto_dispatches_projected_review_job() {
             started_at: Some("2026-03-12T00:00:00Z"),
             ended_at: Some("2026-03-12T00:01:00Z"),
             ..TestJobInsert::new(
-                &author_job_id,
-                &project_id,
-                &item_id,
-                &revision_id,
+                author_job_id.as_str(),
+                project_id.as_str(),
+                item_id.as_str(),
+                revision_id.as_str(),
                 "author_initial",
             )
         },
@@ -470,7 +470,7 @@ async fn resume_route_returns_success_when_projected_review_auto_dispatch_cannot
         "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
          VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
     )
-    .bind(&project_id)
+    .bind(project_id.as_str())
     .bind(repo.display().to_string())
     .bind(TS)
     .bind(TS)
@@ -484,9 +484,9 @@ async fn resume_route_returns_success_when_projected_review_auto_dispatch_cannot
             priority, labels, created_at, updated_at
          ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'deferred', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
     )
-    .bind(&item_id)
-    .bind(&project_id)
-    .bind(&revision_id)
+    .bind(item_id.as_str())
+    .bind(project_id.as_str())
+    .bind(revision_id.as_str())
     .bind(TS)
     .bind(TS)
     .execute(&db.pool)
@@ -499,8 +499,8 @@ async fn resume_route_returns_success_when_projected_review_auto_dispatch_cannot
             seed_target_commit_oid, supersedes_revision_id, created_at
          ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', NULL, NULL, NULL, ?)",
     )
-    .bind(&revision_id)
-    .bind(&item_id)
+    .bind(revision_id.as_str())
+    .bind(item_id.as_str())
     .bind(TS)
     .execute(&db.pool)
     .await
@@ -508,10 +508,10 @@ async fn resume_route_returns_success_when_projected_review_auto_dispatch_cannot
     insert_test_job_row(
         &db,
         TestJobInsert {
-            id: &author_job_id,
-            project_id: &project_id,
-            item_id: &item_id,
-            item_revision_id: &revision_id,
+            id: author_job_id.as_str(),
+            project_id: project_id.as_str(),
+            item_id: item_id.as_str(),
+            item_revision_id: revision_id.as_str(),
             step_id: "author_initial",
             status: JobStatus::Completed,
             outcome_class: Some(OutcomeClass::Clean),
@@ -526,10 +526,10 @@ async fn resume_route_returns_success_when_projected_review_auto_dispatch_cannot
             started_at: Some("2026-03-12T00:00:00Z"),
             ended_at: Some("2026-03-12T00:01:00Z"),
             ..TestJobInsert::new(
-                &author_job_id,
-                &project_id,
-                &item_id,
-                &revision_id,
+                author_job_id.as_str(),
+                project_id.as_str(),
+                item_id.as_str(),
+                revision_id.as_str(),
                 "author_initial",
             )
         },
@@ -611,7 +611,7 @@ async fn defer_route_cancels_lane_head_and_clears_granted() {
         "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
          VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
     )
-    .bind(&project_id)
+    .bind(project_id.as_str())
     .bind(repo.display().to_string())
     .bind(TS)
     .bind(TS)
@@ -625,9 +625,9 @@ async fn defer_route_cancels_lane_head_and_clears_granted() {
             priority, labels, created_at, updated_at
          ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'granted', 'operator_required', 'checkout_sync_blocked', ?, 'manual', NULL, 'major', '[]', ?, ?)",
     )
-    .bind(&item_id)
-    .bind(&project_id)
-    .bind(&revision_id)
+    .bind(item_id.as_str())
+    .bind(project_id.as_str())
+    .bind(revision_id.as_str())
     .bind(TS)
     .bind(TS)
     .execute(&db.pool)
@@ -640,8 +640,8 @@ async fn defer_route_cancels_lane_head_and_clears_granted() {
             seed_target_commit_oid, supersedes_revision_id, created_at
          ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, ?)",
     )
-    .bind(&revision_id)
-    .bind(&item_id)
+    .bind(revision_id.as_str())
+    .bind(item_id.as_str())
     .bind(&head)
     .bind(&head)
     .bind(TS)
@@ -655,12 +655,12 @@ async fn defer_route_cancels_lane_head_and_clears_granted() {
             status, current_job_id, created_at, updated_at
          ) VALUES ('wrk_00000000000000000000000000000056', ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', 'refs/ingot/workspaces/defer-source', ?, ?, 'persistent', 'busy', ?, ?, ?)",
     )
-    .bind(&project_id)
+    .bind(project_id.as_str())
     .bind(repo.join("defer-source").display().to_string())
-    .bind(&revision_id)
+    .bind(revision_id.as_str())
     .bind(&head)
     .bind(&head)
-    .bind(&running_job_id)
+    .bind(running_job_id.as_str())
     .bind(TS)
     .bind(TS)
     .execute(&db.pool)
@@ -669,10 +669,10 @@ async fn defer_route_cancels_lane_head_and_clears_granted() {
     insert_test_job_row(
         &db,
         TestJobInsert {
-            id: &running_job_id,
-            project_id: &project_id,
-            item_id: &item_id,
-            item_revision_id: &revision_id,
+            id: running_job_id.as_str(),
+            project_id: project_id.as_str(),
+            item_id: item_id.as_str(),
+            item_revision_id: revision_id.as_str(),
             step_id: "author_initial",
             status: JobStatus::Running,
             phase_kind: PhaseKind::Author,
@@ -685,10 +685,10 @@ async fn defer_route_cancels_lane_head_and_clears_granted() {
             job_input: TestJobInput::AuthoringHead(&head),
             created_at: "2026-03-12T00:00:00Z",
             ..TestJobInsert::new(
-                &running_job_id,
-                &project_id,
-                &item_id,
-                &revision_id,
+                running_job_id.as_str(),
+                project_id.as_str(),
+                item_id.as_str(),
+                revision_id.as_str(),
                 "author_initial",
             )
         },
@@ -793,7 +793,7 @@ async fn defer_route_refreshes_revision_context_summary_after_cancelling_jobs() 
         "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
          VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
     )
-    .bind(&project_id)
+    .bind(project_id)
     .bind(repo.display().to_string())
     .bind(TS)
     .bind(TS)
@@ -807,9 +807,9 @@ async fn defer_route_refreshes_revision_context_summary_after_cancelling_jobs() 
             priority, labels, created_at, updated_at
          ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
     )
-    .bind(&item_id)
-    .bind(&project_id)
-    .bind(&revision_id)
+    .bind(item_id)
+    .bind(project_id)
+    .bind(revision_id)
     .bind(TS)
     .bind(TS)
     .execute(&db.pool)
@@ -822,8 +822,8 @@ async fn defer_route_refreshes_revision_context_summary_after_cancelling_jobs() 
             seed_target_commit_oid, supersedes_revision_id, created_at
          ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, ?)",
     )
-    .bind(&revision_id)
-    .bind(&item_id)
+    .bind(revision_id)
+    .bind(item_id)
     .bind(&head)
     .bind(&head)
     .bind(TS)
@@ -838,12 +838,12 @@ async fn defer_route_refreshes_revision_context_summary_after_cancelling_jobs() 
          ) VALUES (?, ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', 'refs/ingot/workspaces/defer-refresh', ?, ?, 'persistent', 'busy', ?, ?, ?)",
     )
     .bind(workspace_id)
-    .bind(&project_id)
+    .bind(project_id)
     .bind(repo.join("defer-refresh").display().to_string())
-    .bind(&revision_id)
+    .bind(revision_id)
     .bind(&head)
     .bind(&head)
-    .bind(&running_job_id)
+    .bind(running_job_id)
     .bind(TS)
     .bind(TS)
     .execute(&db.pool)
@@ -852,10 +852,10 @@ async fn defer_route_refreshes_revision_context_summary_after_cancelling_jobs() 
     insert_test_job_row(
         &db,
         TestJobInsert {
-            id: &running_job_id,
-            project_id: &project_id,
-            item_id: &item_id,
-            item_revision_id: &revision_id,
+            id: running_job_id,
+            project_id,
+            item_id,
+            item_revision_id: revision_id,
             step_id: "review_candidate_initial",
             status: JobStatus::Running,
             phase_kind: PhaseKind::Review,
@@ -868,10 +868,10 @@ async fn defer_route_refreshes_revision_context_summary_after_cancelling_jobs() 
             job_input: TestJobInput::CandidateSubject(&head, &head),
             created_at: "2026-03-12T00:00:00Z",
             ..TestJobInsert::new(
-                &running_job_id,
-                &project_id,
-                &item_id,
-                &revision_id,
+                running_job_id,
+                project_id,
+                item_id,
+                revision_id,
                 "review_candidate_initial",
             )
         },
@@ -882,9 +882,9 @@ async fn defer_route_refreshes_revision_context_summary_after_cancelling_jobs() 
             item_revision_id, schema_version, payload, updated_from_job_id, updated_at
          ) VALUES (?, 'revision_context:v1', ?, ?, ?)",
     )
-    .bind(&revision_id)
+    .bind(revision_id)
     .bind(stale_revision_context.to_string())
-    .bind(&running_job_id)
+    .bind(running_job_id)
     .bind(Utc::now())
     .execute(&db.pool)
     .await
@@ -1112,10 +1112,10 @@ async fn revise_route_cancels_current_lane_state() {
     insert_test_job_row(
         &db,
         TestJobInsert {
-            id: &running_job_id,
-            project_id: &project_id,
-            item_id: &item_id,
-            item_revision_id: &revision_id,
+            id: running_job_id.as_str(),
+            project_id: project_id.as_str(),
+            item_id: item_id.as_str(),
+            item_revision_id: revision_id.as_str(),
             step_id: "author_initial",
             status: JobStatus::Running,
             phase_kind: PhaseKind::Author,
@@ -1128,10 +1128,10 @@ async fn revise_route_cancels_current_lane_state() {
             job_input: TestJobInput::AuthoringHead(&head),
             created_at: "2026-03-12T00:00:00Z",
             ..TestJobInsert::new(
-                &running_job_id,
-                &project_id,
-                &item_id,
-                &revision_id,
+                running_job_id.as_str(),
+                project_id.as_str(),
+                item_id.as_str(),
+                revision_id.as_str(),
                 "author_initial",
             )
         },
@@ -1613,11 +1613,28 @@ async fn dismiss_route_cancels_lane_state() {
     .await
     .expect("insert source workspace");
     sqlx::query(
+        "INSERT INTO workspaces (
+            id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
+            target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
+            status, current_job_id, created_at, updated_at
+         ) VALUES ('wrk_00000000000000000000000000000060', ?, 'integration', 'worktree', ?, ?, 'wrk_00000000000000000000000000000059', 'refs/heads/main', 'refs/ingot/workspaces/dismiss-integration', ?, ?, 'persistent', 'busy', NULL, ?, ?)",
+    )
+    .bind(&project_id)
+    .bind(repo.join("dismiss-integration").display().to_string())
+    .bind(&revision_id)
+    .bind(&head)
+    .bind(&head)
+    .bind(TS)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert integration workspace");
+    sqlx::query(
         "INSERT INTO convergences (
             id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
             source_head_commit_oid, target_ref, strategy, status, input_target_commit_oid,
             prepared_commit_oid, final_target_commit_oid, conflict_summary, created_at, completed_at
-         ) VALUES (?, ?, ?, ?, 'wrk_00000000000000000000000000000059', NULL, ?, 'refs/heads/main', 'rebase_then_fast_forward', 'running', ?, ?, NULL, NULL, ?, NULL)",
+         ) VALUES (?, ?, ?, ?, 'wrk_00000000000000000000000000000059', 'wrk_00000000000000000000000000000060', ?, 'refs/heads/main', 'rebase_then_fast_forward', 'running', ?, ?, NULL, NULL, ?, NULL)",
     )
     .bind(&convergence_id)
     .bind(&project_id)

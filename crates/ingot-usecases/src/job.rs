@@ -742,28 +742,28 @@ fn job_input_for_step(
         | step::VALIDATE_AFTER_INTEGRATION_REPAIR => {
             job_input_from_range(seed_head, current_head, false)
         }
-        step::INVESTIGATE_ITEM => {
-            if let Some(prepared_convergence) = prepared_convergence {
-                job_input_from_range(
-                    prepared_convergence.input_target_commit_oid.clone(),
-                    prepared_convergence.prepared_commit_oid.clone(),
-                    false,
-                )
-            } else {
-                job_input_from_range(seed_head, current_head, false)
-            }
-        }
+        step::INVESTIGATE_ITEM => prepared_convergence
+            .map(|convergence| job_input_from_prepared_convergence(convergence, false))
+            .unwrap_or_else(|| job_input_from_range(seed_head, current_head, false)),
         step::VALIDATE_INTEGRATED => prepared_convergence
-            .map(|convergence| {
-                job_input_from_range(
-                    convergence.input_target_commit_oid.clone(),
-                    convergence.prepared_commit_oid.clone(),
-                    true,
-                )
-            })
+            .map(|convergence| job_input_from_prepared_convergence(convergence, true))
             .unwrap_or(JobInput::None),
         _ => JobInput::None,
     }
+}
+
+fn job_input_from_prepared_convergence(convergence: &Convergence, integrated: bool) -> JobInput {
+    job_input_from_range(
+        convergence
+            .state
+            .input_target_commit_oid()
+            .map(ToOwned::to_owned),
+        convergence
+            .state
+            .prepared_commit_oid()
+            .map(ToOwned::to_owned),
+        integrated,
+    )
 }
 
 fn job_input_from_range(
@@ -810,7 +810,7 @@ fn ensure_no_active_execution(
     if convergences.iter().any(|convergence| {
         convergence.item_revision_id == revision_id
             && matches!(
-                convergence.status,
+                convergence.state.status(),
                 ConvergenceStatus::Queued | ConvergenceStatus::Running
             )
     }) {
@@ -888,7 +888,7 @@ fn selected_prepared_convergence(
 ) -> Option<&Convergence> {
     convergences.iter().find(|convergence| {
         convergence.item_revision_id == revision_id
-            && convergence.status == ConvergenceStatus::Prepared
+            && convergence.state.status() == ConvergenceStatus::Prepared
     })
 }
 
@@ -910,7 +910,7 @@ fn prepared_convergence_guard(
         return Err(UseCaseError::PreparedConvergenceMissing.into());
     };
 
-    let Some(expected_target_oid) = prepared_convergence.input_target_commit_oid.as_deref() else {
+    let Some(expected_target_oid) = prepared_convergence.state.input_target_commit_oid() else {
         return Err(UseCaseError::PreparedConvergenceStale.into());
     };
 
@@ -1246,12 +1246,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_sets_pending_approval_for_clean_integrated_validation() {
-        let mut context = test_context(test_job(
+        let context = test_context(test_job(
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
         // outcome_class is derived from the command, not the job state
-        context.convergences[0].input_target_commit_oid = Some("target".into());
         let repository = FakeRepository::new(context);
         let git = FakeGitPort::default();
         let service = CompleteJobService::new(repository.clone(), git, FakeProjectLocks::default());
@@ -1290,12 +1289,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_rejects_clean_integrated_validation_when_target_ref_has_moved() {
-        let mut context = test_context(test_job(
+        let context = test_context(test_job(
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
         // outcome_class is derived from the command, not the job state
-        context.convergences[0].input_target_commit_oid = Some("target".into());
         let repository = FakeRepository::new(context);
         let git = FakeGitPort::default().with_hold_error(TargetRefHoldError::Stale);
         let service = CompleteJobService::new(repository, git, FakeProjectLocks::default());
@@ -1312,12 +1310,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_holds_target_ref_through_transaction_apply() {
-        let mut context = test_context(test_job(
+        let context = test_context(test_job(
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
         // outcome_class is derived from the command, not the job state
-        context.convergences[0].input_target_commit_oid = Some("target".into());
         let hold_active = Arc::new(AtomicBool::new(false));
         let hold_released = Arc::new(AtomicBool::new(false));
         let repository =
@@ -1339,12 +1336,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_fails_when_target_ref_hold_release_fails_after_apply() {
-        let mut context = test_context(test_job(
+        let context = test_context(test_job(
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
         // outcome_class is derived from the command, not the job state
-        context.convergences[0].input_target_commit_oid = Some("target".into());
         let hold_active = Arc::new(AtomicBool::new(false));
         let hold_released = Arc::new(AtomicBool::new(false));
         let repository =
@@ -1373,12 +1369,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_returns_apply_error_when_apply_and_release_hold_both_fail() {
-        let mut context = test_context(test_job(
+        let context = test_context(test_job(
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
         // outcome_class is derived from the command, not the job state
-        context.convergences[0].input_target_commit_oid = Some("target".into());
         let release_calls = Arc::new(AtomicUsize::new(0));
         let repository = FakeRepository::new(context)
             .with_apply_error(RepositoryError::Conflict("job_revision_stale".into()));
@@ -1403,12 +1398,11 @@ mod tests {
 
     #[tokio::test]
     async fn completion_retry_after_post_commit_hold_release_failure_returns_job_not_active() {
-        let mut context = test_context(test_job(
+        let context = test_context(test_job(
             "validate_integrated",
             OutputArtifactKind::ValidationReport,
         ));
         // outcome_class is derived from the command, not the job state
-        context.convergences[0].input_target_commit_oid = Some("target".into());
         let repository = FakeRepository::new(context);
         let git = FakeGitPort::default()
             .with_release_error(GitPortError::Internal("release timed out".into()));

@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
-use ingot_domain::convergence::{Convergence, ConvergenceStatus, ConvergenceStrategy};
+use ingot_domain::convergence::{
+    Convergence, ConvergenceState, ConvergenceStatus, ConvergenceStrategy,
+};
 use ingot_domain::ids;
 
 use super::timestamps::default_timestamp;
@@ -112,24 +114,74 @@ impl ConvergenceBuilder {
     }
 
     pub fn build(self) -> Convergence {
+        let state = match self.status {
+            ConvergenceStatus::Queued => ConvergenceState::Queued,
+            ConvergenceStatus::Running => ConvergenceState::Running {
+                integration_workspace_id: self
+                    .integration_workspace_id
+                    .expect("Running convergence requires integration_workspace_id"),
+                input_target_commit_oid: self
+                    .input_target_commit_oid
+                    .unwrap_or_else(|| "base".into()),
+            },
+            ConvergenceStatus::Conflicted => ConvergenceState::Conflicted {
+                integration_workspace_id: self
+                    .integration_workspace_id
+                    .expect("Conflicted convergence requires integration_workspace_id"),
+                input_target_commit_oid: self
+                    .input_target_commit_oid
+                    .unwrap_or_else(|| "base".into()),
+                conflict_summary: self.conflict_summary.unwrap_or_else(|| "conflict".into()),
+                completed_at: self.completed_at.unwrap_or_else(Utc::now),
+            },
+            ConvergenceStatus::Prepared => ConvergenceState::Prepared {
+                integration_workspace_id: self.integration_workspace_id,
+                input_target_commit_oid: self
+                    .input_target_commit_oid
+                    .unwrap_or_else(|| "base".into()),
+                prepared_commit_oid: self
+                    .prepared_commit_oid
+                    .expect("Prepared convergence requires prepared_commit_oid"),
+                completed_at: self.completed_at,
+            },
+            ConvergenceStatus::Finalized => ConvergenceState::Finalized {
+                integration_workspace_id: self.integration_workspace_id,
+                input_target_commit_oid: self
+                    .input_target_commit_oid
+                    .unwrap_or_else(|| "base".into()),
+                prepared_commit_oid: self
+                    .prepared_commit_oid
+                    .unwrap_or_else(|| "prepared".into()),
+                final_target_commit_oid: self
+                    .final_target_commit_oid
+                    .expect("Finalized convergence requires final_target_commit_oid"),
+                completed_at: self.completed_at.unwrap_or_else(Utc::now),
+            },
+            ConvergenceStatus::Failed => ConvergenceState::Failed {
+                integration_workspace_id: self.integration_workspace_id,
+                input_target_commit_oid: self.input_target_commit_oid,
+                conflict_summary: self.conflict_summary,
+                completed_at: self.completed_at.unwrap_or_else(Utc::now),
+            },
+            ConvergenceStatus::Cancelled => ConvergenceState::Cancelled {
+                integration_workspace_id: self.integration_workspace_id,
+                input_target_commit_oid: self.input_target_commit_oid,
+                completed_at: self.completed_at.unwrap_or_else(Utc::now),
+            },
+        };
+
         Convergence {
             id: self.id,
             project_id: self.project_id,
             item_id: self.item_id,
             item_revision_id: self.item_revision_id,
             source_workspace_id: self.source_workspace_id,
-            integration_workspace_id: self.integration_workspace_id,
             source_head_commit_oid: self.source_head_commit_oid,
             target_ref: self.target_ref,
             strategy: self.strategy,
-            status: self.status,
-            input_target_commit_oid: self.input_target_commit_oid,
-            prepared_commit_oid: self.prepared_commit_oid,
-            final_target_commit_oid: self.final_target_commit_oid,
             target_head_valid: self.target_head_valid,
-            conflict_summary: self.conflict_summary,
             created_at: self.created_at,
-            completed_at: self.completed_at,
+            state,
         }
     }
 }

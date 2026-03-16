@@ -581,12 +581,12 @@ fn classify_subject(job: &Job, convergences: &[Convergence]) -> FindingSubjectKi
 
     let matches_integrated_subject = convergences.iter().any(|convergence| {
         matches!(
-            convergence.status,
+            convergence.state.status(),
             ConvergenceStatus::Prepared | ConvergenceStatus::Finalized
         ) && convergence.item_revision_id == job.item_revision_id
-            && convergence.input_target_commit_oid.as_deref() == Some(base_commit_oid)
-            && (convergence.prepared_commit_oid.as_deref() == Some(head_commit_oid)
-                || convergence.final_target_commit_oid.as_deref() == Some(head_commit_oid))
+            && convergence.state.input_target_commit_oid() == Some(base_commit_oid)
+            && (convergence.state.prepared_commit_oid() == Some(head_commit_oid)
+                || convergence.state.final_target_commit_oid() == Some(head_commit_oid))
     });
 
     if matches_integrated_subject {

@@ -167,7 +167,10 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
         .into_iter()
         .next()
         .expect("convergence");
-    assert_eq!(updated_convergence.status, ConvergenceStatus::Finalized);
+    assert_eq!(
+        updated_convergence.state.status(),
+        ConvergenceStatus::Finalized
+    );
     assert_eq!(
         git_output(&repo, &["rev-parse", "refs/heads/main"]),
         prepared_commit
@@ -329,7 +332,10 @@ async fn tick_auto_finalizes_granted_prepared_convergence_even_when_commit_exist
         .get_convergence(convergence.id)
         .await
         .expect("convergence");
-    assert_eq!(updated_convergence.status, ConvergenceStatus::Finalized);
+    assert_eq!(
+        updated_convergence.state.status(),
+        ConvergenceStatus::Finalized
+    );
     let updated_item = db.get_item(item.id).await.expect("item");
     assert!(updated_item.lifecycle.is_done());
     assert_eq!(updated_item.approval_state, ApprovalState::Approved);
@@ -451,9 +457,12 @@ async fn tick_invalidates_stale_prepared_convergence() {
             .into_iter()
             .next()
             .expect("convergence");
-    assert_eq!(updated_convergence.status, ConvergenceStatus::Failed);
     assert_eq!(
-        updated_convergence.conflict_summary.as_deref(),
+        updated_convergence.state.status(),
+        ConvergenceStatus::Failed
+    );
+    assert_eq!(
+        updated_convergence.state.conflict_summary(),
         Some("target_ref_moved")
     );
     let updated_workspace =
@@ -565,7 +574,10 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
         .get_convergence(convergence.id)
         .await
         .expect("convergence");
-    assert_eq!(updated_convergence.status, ConvergenceStatus::Finalized);
+    assert_eq!(
+        updated_convergence.state.status(),
+        ConvergenceStatus::Finalized
+    );
     let updated_item = db.get_item(item.id).await.expect("item");
     assert!(updated_item.lifecycle.is_done());
     let queue_entries = db
@@ -697,7 +709,7 @@ async fn tick_reprepares_granted_lane_head_without_prepared_convergence() {
     assert!(
         convergences
             .iter()
-            .any(|convergence| convergence.status == ConvergenceStatus::Prepared)
+            .any(|convergence| convergence.state.status() == ConvergenceStatus::Prepared)
     );
     let jobs = h.db.list_jobs_by_item(item.id).await.expect("jobs");
     assert!(
@@ -869,13 +881,13 @@ async fn tick_reprepare_of_already_integrated_patch_does_not_leave_running_busy_
     assert!(
         convergences
             .iter()
-            .any(|convergence| convergence.status == ConvergenceStatus::Prepared),
+            .any(|convergence| convergence.state.status() == ConvergenceStatus::Prepared),
         "reprepare should leave a prepared convergence rather than a running one"
     );
     assert!(
         !convergences
             .iter()
-            .any(|convergence| convergence.status == ConvergenceStatus::Running),
+            .any(|convergence| convergence.state.status() == ConvergenceStatus::Running),
         "empty replay must not strand a running convergence"
     );
     let workspaces = db
@@ -1004,7 +1016,7 @@ async fn fail_prepare_convergence_attempt_marks_non_conflict_failures_as_step_fa
             std::slice::from_ref(&seed_commit),
             &[],
             "non-conflict failure".into(),
-            ConvergenceStatus::Failed,
+            ingot_domain::convergence::PrepareFailureKind::Failed,
         )
         .await
         .expect("fail prepare attempt");

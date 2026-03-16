@@ -386,7 +386,7 @@ where
 
                 let prepared_convergence = state.convergences.iter().find(|convergence| {
                     convergence.item_revision_id == state.revision.id
-                        && convergence.status == ConvergenceStatus::Prepared
+                        && convergence.state.status() == ConvergenceStatus::Prepared
                 });
 
                 if let Some(queue_entry) = state.queue_entry.as_ref() {
@@ -515,7 +515,7 @@ where
         .iter()
         .find(|convergence| {
             convergence.item_revision_id == revision.id
-                && convergence.status == ConvergenceStatus::Prepared
+                && convergence.state.status() == ConvergenceStatus::Prepared
         })
         .cloned()
     {
@@ -523,12 +523,10 @@ where
         None => return Ok(false),
     };
 
-    convergence.status = ConvergenceStatus::Failed;
-    convergence.conflict_summary = Some("target_ref_moved".into());
-    convergence.completed_at = Some(Utc::now());
+    convergence.transition_to_failed(Some("target_ref_moved".into()), Utc::now());
     convergence_repo.update(&convergence).await?;
 
-    if let Some(workspace_id) = convergence.integration_workspace_id {
+    if let Some(workspace_id) = convergence.state.integration_workspace_id() {
         let mut workspace = workspace_repo.get(workspace_id).await?;
         workspace.status = WorkspaceStatus::Stale;
         workspace.current_job_id = None;
@@ -901,7 +899,6 @@ mod tests {
     async fn finalize_runs_for_granted_prepared_head() {
         let mut state = project_state("idle");
         state.items[0].item.approval_state = ApprovalState::Granted;
-        state.items[0].convergences[0].status = ConvergenceStatus::Prepared;
 
         let port = FakePort::with_projects(vec![state]);
         let service = ConvergenceService::new(port.clone());

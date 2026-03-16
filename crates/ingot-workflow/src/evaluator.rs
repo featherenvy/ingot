@@ -241,14 +241,14 @@ impl Evaluator {
             .find(|job| job.state.is_active());
         let active_convergence = current_revision_convergences.iter().copied().find(|conv| {
             matches!(
-                conv.status,
+                conv.state.status(),
                 ConvergenceStatus::Queued | ConvergenceStatus::Running
             )
         });
         let prepared_convergence = current_revision_convergences
             .iter()
             .copied()
-            .find(|conv| conv.status == ConvergenceStatus::Prepared);
+            .find(|conv| conv.state.status() == ConvergenceStatus::Prepared);
 
         let closure_terminal_jobs = closure_terminal_jobs(&current_revision_jobs);
         let has_terminal_closure_job = !closure_terminal_jobs.is_empty();

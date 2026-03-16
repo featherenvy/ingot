@@ -18,7 +18,7 @@ use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
 use ingot_domain::activity::{Activity, ActivityEventType};
 use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
-use ingot_domain::convergence::{Convergence, ConvergenceStatus};
+use ingot_domain::convergence::{Convergence, ConvergenceStatus, PrepareFailureKind};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::FindingTriageState;
 use ingot_domain::git_operation::{GitEntityType, GitOperation, GitOperationStatus, OperationKind};
@@ -958,16 +958,22 @@ impl JobDispatcher {
             .parse::<ingot_domain::ids::ConvergenceId>()
             .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
         let mut convergence = self.db.get_convergence(convergence_id).await?;
-        if convergence.status != ConvergenceStatus::Finalized {
-            convergence.status = ConvergenceStatus::Finalized;
-            convergence.final_target_commit_oid =
-                operation.new_oid.clone().or(operation.commit_oid.clone());
-            convergence.completed_at.get_or_insert_with(Utc::now);
+        if convergence.state.status() != ConvergenceStatus::Finalized {
+            let final_oid = operation
+                .new_oid
+                .clone()
+                .or(operation.commit_oid.clone())
+                .ok_or_else(|| {
+                    RuntimeError::InvalidState(
+                        "reconciled finalize_target_ref missing commit oid".into(),
+                    )
+                })?;
+            convergence.transition_to_finalized(final_oid, Utc::now());
             self.db.update_convergence(&convergence).await?;
         }
 
         let project = self.db.get_project(convergence.project_id).await?;
-        if let Some(workspace_id) = convergence.integration_workspace_id {
+        if let Some(workspace_id) = convergence.state.integration_workspace_id() {
             let workspace = self.db.get_workspace(workspace_id).await?;
             if workspace.status != WorkspaceStatus::Abandoned {
                 self.finalize_integration_workspace_after_close(&project, &workspace)
@@ -1023,20 +1029,26 @@ impl JobDispatcher {
             .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
         let mut convergence = self.db.get_convergence(convergence_id).await?;
         if matches!(
-            convergence.status,
+            convergence.state.status(),
             ConvergenceStatus::Cancelled | ConvergenceStatus::Failed | ConvergenceStatus::Finalized
         ) {
             return Ok(());
         }
-        if convergence.status != ConvergenceStatus::Prepared {
-            convergence.status = ConvergenceStatus::Prepared;
-            convergence.prepared_commit_oid =
-                operation.commit_oid.clone().or(operation.new_oid.clone());
-            convergence.completed_at.get_or_insert_with(Utc::now);
+        if convergence.state.status() != ConvergenceStatus::Prepared {
+            let prepared_oid = operation
+                .commit_oid
+                .clone()
+                .or(operation.new_oid.clone())
+                .ok_or_else(|| {
+                    RuntimeError::InvalidState(
+                        "reconciled prepare_convergence_commit missing commit oid".into(),
+                    )
+                })?;
+            convergence.transition_to_prepared(prepared_oid, Some(Utc::now()));
             self.db.update_convergence(&convergence).await?;
         }
 
-        if let Some(workspace_id) = convergence.integration_workspace_id {
+        if let Some(workspace_id) = convergence.state.integration_workspace_id() {
             let mut workspace = self.db.get_workspace(workspace_id).await?;
             workspace.head_commit_oid = operation.commit_oid.clone().or(operation.new_oid.clone());
             workspace.status = WorkspaceStatus::Ready;
@@ -1229,17 +1241,15 @@ impl JobDispatcher {
                 .await;
             let mut convergence = convergence;
             if !matches!(
-                convergence.status,
+                convergence.state.status(),
                 ConvergenceStatus::Queued | ConvergenceStatus::Running
             ) {
                 continue;
             }
-            convergence.status = ConvergenceStatus::Failed;
-            convergence.conflict_summary = Some("startup_recovery_required".into());
-            convergence.completed_at = Some(Utc::now());
+            convergence.transition_to_failed(Some("startup_recovery_required".into()), Utc::now());
             self.db.update_convergence(&convergence).await?;
 
-            if let Some(workspace_id) = convergence.integration_workspace_id {
+            if let Some(workspace_id) = convergence.state.integration_workspace_id() {
                 let mut workspace = self.db.get_workspace(workspace_id).await?;
                 workspace.current_job_id = None;
                 workspace.status = WorkspaceStatus::Stale;
@@ -1738,7 +1748,7 @@ impl JobDispatcher {
         self.db
             .find_prepared_convergence_for_revision(revision_id)
             .await?
-            .and_then(|convergence| convergence.integration_workspace_id)
+            .and_then(|convergence| convergence.state.integration_workspace_id())
             .ok_or_else(|| {
                 RuntimeError::InvalidState(
                     "integration jobs require a provisioned integration workspace".into(),
@@ -2137,16 +2147,18 @@ impl JobDispatcher {
             .into_iter()
             .find(|convergence| {
                 convergence.item_revision_id == revision.id
-                    && convergence.status == ConvergenceStatus::Prepared
+                    && convergence.state.status() == ConvergenceStatus::Prepared
             })
             .ok_or_else(|| RuntimeError::InvalidState("prepared convergence missing".into()))?;
         let prepared_commit_oid = convergence
-            .prepared_commit_oid
-            .clone()
+            .state
+            .prepared_commit_oid()
+            .map(ToOwned::to_owned)
             .ok_or_else(|| RuntimeError::InvalidState("prepared commit missing".into()))?;
         let input_target_commit_oid = convergence
-            .input_target_commit_oid
-            .clone()
+            .state
+            .input_target_commit_oid()
+            .map(ToOwned::to_owned)
             .ok_or_else(|| RuntimeError::InvalidState("input target commit missing".into()))?;
 
         let mut operation = if let Some(operation) = self
@@ -2161,7 +2173,7 @@ impl JobDispatcher {
                 operation_kind: OperationKind::FinalizeTargetRef,
                 entity_type: GitEntityType::Convergence,
                 entity_id: convergence.id.to_string(),
-                workspace_id: convergence.integration_workspace_id,
+                workspace_id: convergence.state.integration_workspace_id(),
                 ref_name: Some(convergence.target_ref.clone()),
                 expected_old_oid: Some(input_target_commit_oid.clone()),
                 new_oid: Some(prepared_commit_oid.clone()),
@@ -2288,21 +2300,26 @@ impl JobDispatcher {
         source_commit_oids: &[String],
         prepared_commit_oids: &[String],
         summary: String,
-        status: ConvergenceStatus,
+        failure_kind: PrepareFailureKind,
     ) -> Result<(), RuntimeError> {
         integration_workspace.status = WorkspaceStatus::Error;
         integration_workspace.current_job_id = None;
         integration_workspace.updated_at = Utc::now();
         self.db.update_workspace(integration_workspace).await?;
 
-        convergence.status = status;
-        convergence.conflict_summary = Some(summary.clone());
-        convergence.completed_at = Some(Utc::now());
+        match failure_kind {
+            PrepareFailureKind::Conflicted => {
+                convergence.transition_to_conflicted(summary.clone(), Utc::now());
+            }
+            PrepareFailureKind::Failed => {
+                convergence.transition_to_failed(Some(summary.clone()), Utc::now());
+            }
+        }
         self.db.update_convergence(convergence).await?;
 
-        let escalation_reason = match status {
-            ConvergenceStatus::Conflicted => EscalationReason::ConvergenceConflict,
-            _ => EscalationReason::StepFailed,
+        let escalation_reason = match failure_kind {
+            PrepareFailureKind::Conflicted => EscalationReason::ConvergenceConflict,
+            PrepareFailureKind::Failed => EscalationReason::StepFailed,
         };
         let mut escalated_item = self.db.get_item(item.id).await?;
         escalated_item.approval_state = match revision.approval_policy {
@@ -2329,9 +2346,9 @@ impl JobDispatcher {
         }));
         self.db.update_git_operation(operation).await?;
 
-        let event_type = match status {
-            ConvergenceStatus::Conflicted => ActivityEventType::ConvergenceConflicted,
-            _ => ActivityEventType::ConvergenceFailed,
+        let event_type = match failure_kind {
+            PrepareFailureKind::Conflicted => ActivityEventType::ConvergenceConflicted,
+            PrepareFailureKind::Failed => ActivityEventType::ConvergenceFailed,
         };
         self.append_activity(
             project.id,
@@ -2388,7 +2405,7 @@ impl JobDispatcher {
         }
 
         if convergences.iter().any(|convergence| {
-            convergence.item_revision_id == revision.id && convergence.status.is_active()
+            convergence.item_revision_id == revision.id && convergence.state.is_active()
         }) {
             return Ok(());
         }
@@ -2454,18 +2471,15 @@ impl JobDispatcher {
             item_id: item.id,
             item_revision_id: revision.id,
             source_workspace_id: source_workspace.id,
-            integration_workspace_id: Some(integration_workspace.id),
             source_head_commit_oid: source_head_commit_oid.clone(),
             target_ref: revision.target_ref.clone(),
             strategy: ingot_domain::convergence::ConvergenceStrategy::RebaseThenFastForward,
-            status: ConvergenceStatus::Running,
-            input_target_commit_oid: Some(input_target_commit_oid.clone()),
-            prepared_commit_oid: None,
-            final_target_commit_oid: None,
             target_head_valid: Some(true),
-            conflict_summary: None,
             created_at: now,
-            completed_at: None,
+            state: ingot_domain::convergence::ConvergenceState::Running {
+                integration_workspace_id: integration_workspace.id,
+                input_target_commit_oid: input_target_commit_oid.clone(),
+            },
         };
         self.db.create_convergence(&convergence).await?;
         self.append_activity(
@@ -2533,7 +2547,7 @@ impl JobDispatcher {
                     &source_commit_oids,
                     &prepared_commit_oids,
                     error.to_string(),
-                    ConvergenceStatus::Conflicted,
+                    PrepareFailureKind::Conflicted,
                 )
                 .await?;
                 return Ok(());
@@ -2554,7 +2568,7 @@ impl JobDispatcher {
                             &source_commit_oids,
                             &prepared_commit_oids,
                             error.to_string(),
-                            ConvergenceStatus::Failed,
+                            PrepareFailureKind::Failed,
                         )
                         .await?;
                         return Ok(());
@@ -2578,7 +2592,7 @@ impl JobDispatcher {
                         &source_commit_oids,
                         &prepared_commit_oids,
                         error.to_string(),
-                        ConvergenceStatus::Failed,
+                        PrepareFailureKind::Failed,
                     )
                     .await?;
                     return Ok(());
@@ -2610,7 +2624,7 @@ impl JobDispatcher {
                         &source_commit_oids,
                         &prepared_commit_oids,
                         error.to_string(),
-                        ConvergenceStatus::Failed,
+                        PrepareFailureKind::Failed,
                     )
                     .await?;
                     return Ok(());
@@ -2634,7 +2648,7 @@ impl JobDispatcher {
                         &source_commit_oids,
                         &prepared_commit_oids,
                         error.to_string(),
-                        ConvergenceStatus::Failed,
+                        PrepareFailureKind::Failed,
                     )
                     .await?;
                     return Ok(());
@@ -2649,9 +2663,7 @@ impl JobDispatcher {
         integration_workspace.updated_at = Utc::now();
         self.db.update_workspace(&integration_workspace).await?;
 
-        convergence.status = ConvergenceStatus::Prepared;
-        convergence.prepared_commit_oid = Some(prepared_tip.clone());
-        convergence.completed_at = Some(Utc::now());
+        convergence.transition_to_prepared(prepared_tip.clone(), Some(Utc::now()));
         self.db.update_convergence(&convergence).await?;
 
         operation.new_oid = Some(prepared_tip.clone());
@@ -2667,7 +2679,7 @@ impl JobDispatcher {
         let validation_dispatch_jobs = if current_item.approval_state == ApprovalState::Granted
             && !convergences.iter().any(|existing| {
                 existing.item_revision_id == revision.id
-                    && existing.status == ConvergenceStatus::Prepared
+                    && existing.state.status() == ConvergenceStatus::Prepared
             }) {
             jobs.iter()
                 .filter(|job| {

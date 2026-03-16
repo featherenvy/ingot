@@ -184,6 +184,11 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 .find_active_queue_entry_for_revision(revision.id)
                 .await
                 .map_err(UseCaseError::Repository)?;
+            let prepared_convergence = convergences.iter().find(|convergence| {
+                convergence.item_revision_id == revision.id
+                    && convergence.state.status()
+                        == ingot_domain::convergence::ConvergenceStatus::Prepared
+            });
 
             Ok(ingot_usecases::convergence::ConvergenceApprovalContext {
                 item,
@@ -193,24 +198,13 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 has_active_convergence: convergences.iter().any(|convergence| {
                     convergence.item_revision_id == revision.id
                         && matches!(
-                            convergence.status,
+                            convergence.state.status(),
                             ingot_domain::convergence::ConvergenceStatus::Queued
                                 | ingot_domain::convergence::ConvergenceStatus::Running
                         )
                 }),
-                prepared_convergence_id: convergences
-                    .iter()
-                    .filter(|convergence| convergence.item_revision_id == revision.id)
-                    .find(|convergence| {
-                        convergence.status == ingot_domain::convergence::ConvergenceStatus::Prepared
-                    })
-                    .map(|convergence| convergence.id),
-                prepared_target_valid: convergences
-                    .iter()
-                    .filter(|convergence| convergence.item_revision_id == revision.id)
-                    .find(|convergence| {
-                        convergence.status == ingot_domain::convergence::ConvergenceStatus::Prepared
-                    })
+                prepared_convergence_id: prepared_convergence.map(|convergence| convergence.id),
+                prepared_target_valid: prepared_convergence
                     .and_then(|convergence| convergence.target_head_valid)
                     .unwrap_or(false),
                 queue_entry,
@@ -273,7 +267,7 @@ impl ConvergenceCommandPort for HttpConvergencePort {
             let has_active_convergence = convergences.iter().any(|convergence| {
                 convergence.item_revision_id == revision.id
                     && matches!(
-                        convergence.status,
+                        convergence.state.status(),
                         ingot_domain::convergence::ConvergenceStatus::Queued
                             | ingot_domain::convergence::ConvergenceStatus::Running
                     )

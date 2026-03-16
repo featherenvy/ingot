@@ -135,19 +135,18 @@ where
         .filter(|convergence| {
             convergence.item_revision_id == revision.id
                 && matches!(
-                    convergence.status,
+                    convergence.state.status(),
                     ConvergenceStatus::Queued
                         | ConvergenceStatus::Running
                         | ConvergenceStatus::Prepared
                 )
         })
     {
-        convergence.status = ConvergenceStatus::Cancelled;
-        convergence.completed_at = Some(Utc::now());
+        convergence.transition_to_cancelled(Utc::now());
         convergence_repo.update(&convergence).await?;
         result.cancelled_convergence_ids.push(convergence.id);
 
-        if let Some(workspace_id) = convergence.integration_workspace_id {
+        if let Some(workspace_id) = convergence.state.integration_workspace_id() {
             let workspace = workspace_repo.get(workspace_id).await?;
             if workspace.status != WorkspaceStatus::Abandoned {
                 let mut abandoned_workspace = workspace;
