@@ -1,8 +1,6 @@
+use crate::convergence::{Convergence, ConvergenceState, ConvergenceStatus, ConvergenceStrategy};
+use crate::ids;
 use chrono::{DateTime, Utc};
-use ingot_domain::convergence::{
-    Convergence, ConvergenceState, ConvergenceStatus, ConvergenceStrategy,
-};
-use ingot_domain::ids;
 
 use super::timestamps::default_timestamp;
 

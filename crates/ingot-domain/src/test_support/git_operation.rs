@@ -1,9 +1,9 @@
-use chrono::{DateTime, Utc};
-use ingot_domain::git_operation::{
+use crate::git_operation::{
     ConvergenceReplayMetadata, GitEntityType, GitOperation, GitOperationStatus, OperationKind,
     OperationPayload,
 };
-use ingot_domain::ids;
+use crate::ids;
+use chrono::{DateTime, Utc};
 
 use super::timestamps::default_timestamp;
 

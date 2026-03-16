@@ -1,9 +1,9 @@
-use chrono::{DateTime, Utc};
-use ingot_domain::ids;
-use ingot_domain::workspace::{
+use crate::ids;
+use crate::workspace::{
     RetentionPolicy, Workspace, WorkspaceCommitState, WorkspaceKind, WorkspaceState,
     WorkspaceStatus, WorkspaceStrategy,
 };
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::timestamps::default_timestamp;

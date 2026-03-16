@@ -484,6 +484,8 @@ impl<'de> Deserialize<'de> for GitOperation {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::{GitOperationBuilder, default_timestamp};
+
     use super::*;
 
     fn test_project_id() -> ProjectId {
@@ -672,21 +674,19 @@ mod tests {
 
     #[test]
     fn wire_round_trip_create_job_commit() {
-        let op = GitOperation {
-            id: GitOperationId::new(),
-            project_id: test_project_id(),
-            entity_id: "job-1".into(),
-            payload: OperationPayload::CreateJobCommit {
-                workspace_id: test_workspace_id(),
-                ref_name: "refs/ingot/workspaces/auth".into(),
-                expected_old_oid: "aaa".into(),
-                new_oid: Some("bbb".into()),
-                commit_oid: Some("bbb".into()),
-            },
-            status: GitOperationStatus::Applied,
-            created_at: Utc::now(),
-            completed_at: None,
-        };
+        let op = GitOperationBuilder::new(
+            test_project_id(),
+            OperationKind::CreateJobCommit,
+            GitEntityType::Job,
+            "job-1",
+        )
+        .workspace_id(test_workspace_id())
+        .ref_name("refs/ingot/workspaces/auth")
+        .expected_old_oid("aaa")
+        .new_oid("bbb")
+        .commit_oid("bbb")
+        .created_at(default_timestamp())
+        .build();
 
         let json = serde_json::to_string(&op).unwrap();
         let restored: GitOperation = serde_json::from_str(&json).unwrap();
@@ -700,25 +700,23 @@ mod tests {
 
     #[test]
     fn wire_round_trip_prepare_convergence_with_metadata() {
-        let op = GitOperation {
-            id: GitOperationId::new(),
-            project_id: test_project_id(),
-            entity_id: "conv-1".into(),
-            payload: OperationPayload::PrepareConvergenceCommit {
-                workspace_id: test_workspace_id(),
-                ref_name: Some("refs/ingot/workspaces/int".into()),
-                expected_old_oid: "old".into(),
-                new_oid: Some("tip".into()),
-                commit_oid: Some("tip".into()),
-                replay_metadata: Some(ConvergenceReplayMetadata {
-                    source_commit_oids: vec!["s1".into(), "s2".into()],
-                    prepared_commit_oids: vec!["p1".into(), "p2".into()],
-                }),
-            },
-            status: GitOperationStatus::Applied,
-            created_at: Utc::now(),
-            completed_at: None,
-        };
+        let op = GitOperationBuilder::new(
+            test_project_id(),
+            OperationKind::PrepareConvergenceCommit,
+            GitEntityType::Convergence,
+            "conv-1",
+        )
+        .workspace_id(test_workspace_id())
+        .ref_name("refs/ingot/workspaces/int")
+        .expected_old_oid("old")
+        .new_oid("tip")
+        .commit_oid("tip")
+        .metadata(serde_json::json!({
+            "source_commit_oids": ["s1", "s2"],
+            "prepared_commit_oids": ["p1", "p2"]
+        }))
+        .created_at(default_timestamp())
+        .build();
 
         let json = serde_json::to_string(&op).unwrap();
         let restored: GitOperation = serde_json::from_str(&json).unwrap();
@@ -753,7 +751,7 @@ mod tests {
             commit_oid: None,
             status: GitOperationStatus::Planned,
             metadata: None,
-            created_at: Utc::now(),
+            created_at: default_timestamp(),
             completed_at: None,
         };
         assert!(GitOperation::try_from(wire).is_err());

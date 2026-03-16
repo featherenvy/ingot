@@ -25,6 +25,27 @@ fn write_harness_toml(repo_path: &Path, contents: &str) {
     std::fs::write(ingot_dir.join("harness.toml"), contents).expect("write harness.toml");
 }
 
+fn make_runtime_workspace(
+    project_id: ingot_domain::ids::ProjectId,
+    kind: WorkspaceKind,
+    workspace_id: ingot_domain::ids::WorkspaceId,
+    path: &Path,
+    revision_id: ingot_domain::ids::ItemRevisionId,
+    workspace_ref: impl Into<String>,
+    base_commit_oid: impl Into<String>,
+    head_commit_oid: impl Into<String>,
+) -> ingot_domain::workspace::Workspace {
+    WorkspaceBuilder::new(project_id, kind)
+        .id(workspace_id)
+        .path(path.display().to_string())
+        .created_for_revision_id(revision_id)
+        .workspace_ref(workspace_ref)
+        .base_commit_oid(base_commit_oid)
+        .head_commit_oid(head_commit_oid)
+        .created_at(default_timestamp())
+        .build()
+}
+
 async fn create_authoring_validation_workspace(
     h: &TestHarness,
     revision_id: ingot_domain::ids::ItemRevisionId,
@@ -43,26 +64,16 @@ async fn create_authoring_validation_workspace(
     )
     .await
     .expect("provision authoring workspace");
-    let workspace = ingot_domain::workspace::Workspace {
-        id: workspace_id,
-        project_id: h.project.id,
-        kind: WorkspaceKind::Authoring,
-        strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
-        path: provisioned.workspace_path.display().to_string(),
-        created_for_revision_id: Some(revision_id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some(provisioned.workspace_ref),
-        retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-        state: ingot_domain::workspace::WorkspaceState::Ready {
-            commits: ingot_domain::workspace::WorkspaceCommitState {
-                base_commit_oid: base_commit_oid.to_string(),
-                head_commit_oid: provisioned.head_commit_oid,
-            },
-        },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-    };
+    let workspace = make_runtime_workspace(
+        h.project.id,
+        WorkspaceKind::Authoring,
+        workspace_id,
+        provisioned.workspace_path.as_path(),
+        revision_id,
+        provisioned.workspace_ref,
+        base_commit_oid,
+        provisioned.head_commit_oid,
+    );
     h.db.create_workspace(&workspace)
         .await
         .expect("create authoring workspace");
@@ -727,26 +738,16 @@ async fn daemon_only_validation_job_executes_on_tick() {
 
     // Create an authoring workspace so the harness validation can resolve it
     let workspace_id = ingot_domain::ids::WorkspaceId::new();
-    let workspace = ingot_domain::workspace::Workspace {
-        id: workspace_id,
-        project_id: h.project.id,
-        kind: WorkspaceKind::Authoring,
-        strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
-        path: h.repo_path.display().to_string(),
-        created_for_revision_id: Some(revision_id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some(format!("refs/ingot/workspaces/{workspace_id}")),
-        retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-        state: ingot_domain::workspace::WorkspaceState::Ready {
-            commits: ingot_domain::workspace::WorkspaceCommitState {
-                base_commit_oid: seed_commit.clone(),
-                head_commit_oid: candidate_head.clone(),
-            },
-        },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-    };
+    let workspace = make_runtime_workspace(
+        h.project.id,
+        WorkspaceKind::Authoring,
+        workspace_id,
+        &h.repo_path,
+        revision_id,
+        format!("refs/ingot/workspaces/{workspace_id}"),
+        seed_commit.clone(),
+        candidate_head.clone(),
+    );
     h.db.create_workspace(&workspace)
         .await
         .expect("create authoring workspace");
@@ -812,26 +813,16 @@ async fn harness_validation_with_commands_produces_findings_on_failure() {
 
     // Create authoring workspace
     let workspace_id = ingot_domain::ids::WorkspaceId::new();
-    let workspace = ingot_domain::workspace::Workspace {
-        id: workspace_id,
-        project_id: h.project.id,
-        kind: WorkspaceKind::Authoring,
-        strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
-        path: h.repo_path.display().to_string(),
-        created_for_revision_id: Some(revision_id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some(format!("refs/ingot/workspaces/{workspace_id}")),
-        retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-        state: ingot_domain::workspace::WorkspaceState::Ready {
-            commits: ingot_domain::workspace::WorkspaceCommitState {
-                base_commit_oid: seed_commit.clone(),
-                head_commit_oid: candidate_head.clone(),
-            },
-        },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-    };
+    let workspace = make_runtime_workspace(
+        h.project.id,
+        WorkspaceKind::Authoring,
+        workspace_id,
+        &h.repo_path,
+        revision_id,
+        format!("refs/ingot/workspaces/{workspace_id}"),
+        seed_commit.clone(),
+        candidate_head.clone(),
+    );
     h.db.create_workspace(&workspace)
         .await
         .expect("create authoring workspace");
@@ -1460,26 +1451,16 @@ async fn daemon_validation_resyncs_integration_workspace_before_running_harness(
     )
     .await
     .expect("provision integration workspace");
-    let workspace = ingot_domain::workspace::Workspace {
-        id: workspace_id,
-        project_id: h.project.id,
-        kind: WorkspaceKind::Integration,
-        strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
-        path: provisioned.workspace_path.display().to_string(),
-        created_for_revision_id: Some(revision_id),
-        parent_workspace_id: None,
-        target_ref: Some("refs/heads/main".into()),
-        workspace_ref: Some(provisioned.workspace_ref),
-        retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-        state: ingot_domain::workspace::WorkspaceState::Ready {
-            commits: ingot_domain::workspace::WorkspaceCommitState {
-                base_commit_oid: seed_commit.clone(),
-                head_commit_oid: provisioned.head_commit_oid,
-            },
-        },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-    };
+    let workspace = make_runtime_workspace(
+        h.project.id,
+        WorkspaceKind::Integration,
+        workspace_id,
+        provisioned.workspace_path.as_path(),
+        revision_id,
+        provisioned.workspace_ref,
+        seed_commit.clone(),
+        provisioned.head_commit_oid,
+    );
     h.db.create_workspace(&workspace)
         .await
         .expect("create integration workspace");

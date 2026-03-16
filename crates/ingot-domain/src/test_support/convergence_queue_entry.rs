@@ -1,6 +1,6 @@
+use crate::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
+use crate::ids;
 use chrono::{DateTime, Utc};
-use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
-use ingot_domain::ids;
 
 use super::timestamps::default_timestamp;
 

@@ -387,35 +387,26 @@ pub struct Finding {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::{FindingBuilder, default_timestamp};
+
     use super::*;
 
     fn base_finding(triage: FindingTriage) -> Finding {
-        Finding {
-            id: FindingId::new(),
-            project_id: ProjectId::new(),
-            source_item_id: ItemId::new(),
-            source_item_revision_id: ItemRevisionId::new(),
-            source_job_id: JobId::new(),
-            source_step_id: "review_candidate_initial".into(),
-            source_report_schema_version: "review_report:v1".into(),
-            source_finding_key: "f-1".into(),
-            source_subject_kind: FindingSubjectKind::Candidate,
-            source_subject_base_commit_oid: Some("base".into()),
-            source_subject_head_commit_oid: "head".into(),
-            code: "BUG001".into(),
-            severity: FindingSeverity::High,
-            summary: "summary".into(),
-            paths: vec!["src/lib.rs".into()],
-            evidence: serde_json::json!(["evidence"]),
-            created_at: Utc::now(),
-            triage,
-        }
+        let mut finding = FindingBuilder::new(
+            ProjectId::new(),
+            ItemId::new(),
+            ItemRevisionId::new(),
+            JobId::new(),
+        )
+        .build();
+        finding.triage = triage;
+        finding
     }
 
     #[test]
     fn deserialize_rejects_fix_now_without_triaged_at() {
         let finding = base_finding(FindingTriage::FixNow {
-            triaged_at: Utc::now(),
+            triaged_at: default_timestamp(),
         });
         let mut value = serde_json::to_value(finding).expect("serialize");
         value
@@ -434,7 +425,7 @@ mod tests {
     fn deserialize_rejects_wont_fix_without_triage_note() {
         let finding = base_finding(FindingTriage::WontFix {
             triage_note: "reason".into(),
-            triaged_at: Utc::now(),
+            triaged_at: default_timestamp(),
         });
         let mut value = serde_json::to_value(finding).expect("serialize");
         value
@@ -454,7 +445,7 @@ mod tests {
         let finding = base_finding(FindingTriage::Backlog {
             linked_item_id: ItemId::new(),
             triage_note: None,
-            triaged_at: Utc::now(),
+            triaged_at: default_timestamp(),
         });
         let mut value = serde_json::to_value(finding).expect("serialize");
         value
@@ -474,7 +465,7 @@ mod tests {
         let finding = base_finding(FindingTriage::Duplicate {
             linked_item_id: ItemId::new(),
             triage_note: None,
-            triaged_at: Utc::now(),
+            triaged_at: default_timestamp(),
         });
         let mut value = serde_json::to_value(finding).expect("serialize");
         value
@@ -493,7 +484,7 @@ mod tests {
     fn deserialize_rejects_needs_investigation_without_triage_note() {
         let finding = base_finding(FindingTriage::NeedsInvestigation {
             triage_note: "investigate".into(),
-            triaged_at: Utc::now(),
+            triaged_at: default_timestamp(),
         });
         let mut value = serde_json::to_value(finding).expect("serialize");
         value
@@ -514,34 +505,34 @@ mod tests {
         let variants = vec![
             base_finding(FindingTriage::Untriaged),
             base_finding(FindingTriage::FixNow {
-                triaged_at: Utc::now(),
+                triaged_at: default_timestamp(),
             }),
             base_finding(FindingTriage::WontFix {
                 triage_note: "reason".into(),
-                triaged_at: Utc::now(),
+                triaged_at: default_timestamp(),
             }),
             base_finding(FindingTriage::Backlog {
                 linked_item_id: item_id,
                 triage_note: Some("note".into()),
-                triaged_at: Utc::now(),
+                triaged_at: default_timestamp(),
             }),
             base_finding(FindingTriage::Backlog {
                 linked_item_id: item_id,
                 triage_note: None,
-                triaged_at: Utc::now(),
+                triaged_at: default_timestamp(),
             }),
             base_finding(FindingTriage::Duplicate {
                 linked_item_id: item_id,
                 triage_note: None,
-                triaged_at: Utc::now(),
+                triaged_at: default_timestamp(),
             }),
             base_finding(FindingTriage::DismissedInvalid {
                 triage_note: "invalid".into(),
-                triaged_at: Utc::now(),
+                triaged_at: default_timestamp(),
             }),
             base_finding(FindingTriage::NeedsInvestigation {
                 triage_note: "investigate".into(),
-                triaged_at: Utc::now(),
+                triaged_at: default_timestamp(),
             }),
         ];
 

@@ -781,31 +781,21 @@ impl Job {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use crate::test_support::{JobBuilder, default_timestamp};
     use serde_json::json;
 
     use super::*;
 
     fn base_job(state: JobState) -> Job {
-        Job {
-            id: JobId::new(),
-            project_id: ProjectId::new(),
-            item_id: ItemId::new(),
-            item_revision_id: ItemRevisionId::new(),
-            step_id: "author_initial".into(),
-            semantic_attempt_no: 1,
-            retry_no: 0,
-            supersedes_job_id: None,
-            phase_kind: PhaseKind::Author,
-            workspace_kind: WorkspaceKind::Authoring,
-            execution_permission: ExecutionPermission::MayMutate,
-            context_policy: ContextPolicy::Fresh,
-            phase_template_slug: "template".into(),
-            output_artifact_kind: OutputArtifactKind::None,
-            job_input: JobInput::None,
-            created_at: Utc::now(),
-            state,
-        }
+        let mut job = JobBuilder::new(
+            ProjectId::new(),
+            ItemId::new(),
+            ItemRevisionId::new(),
+            "author_initial",
+        )
+        .build();
+        job.state = state;
+        job
     }
 
     #[test]
@@ -833,9 +823,9 @@ mod tests {
             lease: JobLease {
                 process_pid: Some(42),
                 lease_owner_id: "lease-owner".into(),
-                heartbeat_at: Utc::now(),
-                lease_expires_at: Utc::now(),
-                started_at: Utc::now(),
+                heartbeat_at: default_timestamp(),
+                lease_expires_at: default_timestamp(),
+                started_at: default_timestamp(),
             },
         }))
         .expect("serialize running job");
@@ -855,9 +845,9 @@ mod tests {
     fn deserialize_rejects_completed_jobs_without_outcome_class() {
         let mut value = serde_json::to_value(base_job(JobState::Completed {
             assignment: None,
-            started_at: Some(Utc::now()),
+            started_at: Some(default_timestamp()),
             outcome_class: OutcomeClass::Findings,
-            ended_at: Utc::now(),
+            ended_at: default_timestamp(),
             output_commit_oid: None,
             result_schema_version: None,
             result_payload: Some(json!({ "outcome": "findings" })),

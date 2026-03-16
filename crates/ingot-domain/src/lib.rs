@@ -15,3 +15,6 @@ pub mod revision;
 pub mod revision_context;
 pub mod template;
 pub mod workspace;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;

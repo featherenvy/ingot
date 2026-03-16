@@ -584,25 +584,16 @@ pub enum PrepareFailureKind {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use crate::test_support::{ConvergenceBuilder, default_timestamp};
 
     use super::*;
     use crate::ids::*;
 
     fn base_convergence(state: ConvergenceState) -> Convergence {
-        Convergence {
-            id: ConvergenceId::new(),
-            project_id: ProjectId::new(),
-            item_id: ItemId::new(),
-            item_revision_id: ItemRevisionId::new(),
-            source_workspace_id: WorkspaceId::new(),
-            source_head_commit_oid: "head".into(),
-            target_ref: "refs/heads/main".into(),
-            strategy: ConvergenceStrategy::RebaseThenFastForward,
-            created_at: Utc::now(),
-            target_head_valid: None,
-            state,
-        }
+        let mut convergence =
+            ConvergenceBuilder::new(ProjectId::new(), ItemId::new(), ItemRevisionId::new()).build();
+        convergence.state = state;
+        convergence
     }
 
     fn running_state() -> ConvergenceState {
@@ -635,7 +626,7 @@ mod tests {
             integration_workspace_id: WorkspaceId::new(),
             input_target_commit_oid: "base".into(),
             prepared_commit_oid: "prep".into(),
-            completed_at: Some(Utc::now()),
+            completed_at: Some(default_timestamp()),
         });
         let mut value = serde_json::to_value(convergence).expect("serialize");
         value.as_object_mut().unwrap().remove("prepared_commit_oid");
@@ -655,7 +646,7 @@ mod tests {
             input_target_commit_oid: "base".into(),
             prepared_commit_oid: "prep".into(),
             final_target_commit_oid: "final".into(),
-            completed_at: Utc::now(),
+            completed_at: default_timestamp(),
         });
         let mut value = serde_json::to_value(convergence).expect("serialize");
         value
@@ -677,7 +668,7 @@ mod tests {
             integration_workspace_id: WorkspaceId::new(),
             input_target_commit_oid: "base".into(),
             conflict_summary: "oops".into(),
-            completed_at: Utc::now(),
+            completed_at: default_timestamp(),
         });
         let mut value = serde_json::to_value(convergence).expect("serialize");
         value.as_object_mut().unwrap().remove("conflict_summary");
@@ -696,7 +687,7 @@ mod tests {
             integration_workspace_id: None,
             input_target_commit_oid: None,
             conflict_summary: None,
-            completed_at: Utc::now(),
+            completed_at: default_timestamp(),
         });
         let mut value = serde_json::to_value(convergence).expect("serialize");
         value
@@ -720,31 +711,31 @@ mod tests {
                 integration_workspace_id: WorkspaceId::new(),
                 input_target_commit_oid: "base".into(),
                 conflict_summary: "conflict!".into(),
-                completed_at: Utc::now(),
+                completed_at: default_timestamp(),
             }),
             base_convergence(ConvergenceState::Prepared {
                 integration_workspace_id: WorkspaceId::new(),
                 input_target_commit_oid: "base".into(),
                 prepared_commit_oid: "prep".into(),
-                completed_at: Some(Utc::now()),
+                completed_at: Some(default_timestamp()),
             }),
             base_convergence(ConvergenceState::Finalized {
                 integration_workspace_id: Some(WorkspaceId::new()),
                 input_target_commit_oid: "base".into(),
                 prepared_commit_oid: "prep".into(),
                 final_target_commit_oid: "final".into(),
-                completed_at: Utc::now(),
+                completed_at: default_timestamp(),
             }),
             base_convergence(ConvergenceState::Failed {
                 integration_workspace_id: Some(WorkspaceId::new()),
                 input_target_commit_oid: Some("base".into()),
                 conflict_summary: Some("fail".into()),
-                completed_at: Utc::now(),
+                completed_at: default_timestamp(),
             }),
             base_convergence(ConvergenceState::Cancelled {
                 integration_workspace_id: Some(WorkspaceId::new()),
                 input_target_commit_oid: Some("base".into()),
-                completed_at: Utc::now(),
+                completed_at: default_timestamp(),
             }),
         ];
 

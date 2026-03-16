@@ -1,8 +1,8 @@
 use std::path::Path;
 
+use crate::ids;
+use crate::project::Project;
 use chrono::{DateTime, Utc};
-use ingot_domain::ids;
-use ingot_domain::project::Project;
 
 use super::timestamps::default_timestamp;
 

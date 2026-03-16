@@ -1,10 +1,10 @@
-use chrono::{DateTime, Utc};
-use ingot_domain::ids;
-use ingot_domain::job::{
+use crate::ids;
+use crate::job::{
     ContextPolicy, ExecutionPermission, Job, JobAssignment, JobInput, JobLease, JobState,
     JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind, TerminalStatus,
 };
-use ingot_domain::workspace::WorkspaceKind;
+use crate::workspace::WorkspaceKind;
+use chrono::{DateTime, Utc};
 
 use super::timestamps::default_timestamp;
 
@@ -294,16 +294,16 @@ impl JobBuilder {
 
 #[cfg(test)]
 mod tests {
-    use ingot_domain::job::JobInput;
+    use crate::job::JobInput;
 
     use super::super::timestamps::default_timestamp;
     use super::JobBuilder;
 
     #[test]
     fn job_builder_constructs_candidate_subject_jobs() {
-        let project_id = ingot_domain::ids::ProjectId::new();
-        let item_id = ingot_domain::ids::ItemId::new();
-        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let project_id = crate::ids::ProjectId::new();
+        let item_id = crate::ids::ItemId::new();
+        let revision_id = crate::ids::ItemRevisionId::new();
         let job = JobBuilder::new(project_id, item_id, revision_id, "review_candidate_initial")
             .job_input(JobInput::candidate_subject("base", "head"))
             .created_at(default_timestamp())

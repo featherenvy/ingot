@@ -35,19 +35,19 @@ mod tests {
     use super::ensure_default_agent_with;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use ingot_agent_adapters::registry::bootstrap_codex_agent_with;
     use ingot_domain::agent::AgentStatus;
-    use ingot_store_sqlite::Database;
+    use ingot_test_support::git::unique_temp_path;
+    use ingot_test_support::sqlite::migrated_test_db;
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[tokio::test]
     async fn ensure_default_agent_creates_bootstrap_agent_when_registry_is_empty() {
-        let root = temp_test_root("runtime-bootstrap");
-        let db = open_db(&root).await;
+        let root = unique_temp_path("runtime-bootstrap");
+        let db = migrated_test_db("runtime-bootstrap").await;
         let fake_codex = write_fake_codex_cli(&root);
 
         ensure_default_agent_with(
@@ -67,8 +67,8 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_default_agent_is_idempotent_when_agents_already_exist() {
-        let root = temp_test_root("runtime-bootstrap-idempotent");
-        let db = open_db(&root).await;
+        let root = unique_temp_path("runtime-bootstrap-idempotent");
+        let db = migrated_test_db("runtime-bootstrap-idempotent").await;
         let fake_codex = write_fake_codex_cli(&root);
         let fake_codex_path = fake_codex.to_string_lossy().to_string();
 
@@ -88,8 +88,8 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_default_agent_persists_unavailable_agent_when_probe_fails() {
-        let root = temp_test_root("runtime-bootstrap-failed-probe");
-        let db = open_db(&root).await;
+        let root = unique_temp_path("runtime-bootstrap-failed-probe");
+        let db = migrated_test_db("runtime-bootstrap-failed-probe").await;
         let fake_codex = write_bad_codex_cli(&root);
 
         ensure_default_agent_with(
@@ -112,16 +112,8 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    async fn open_db(root: &Path) -> Database {
-        fs::create_dir_all(root).expect("create test root");
-        let db = Database::connect(&root.join("ingot.db"))
-            .await
-            .expect("connect db");
-        db.migrate().await.expect("migrate db");
-        db
-    }
-
     fn write_fake_codex_cli(root: &Path) -> PathBuf {
+        fs::create_dir_all(root).expect("create test root");
         let path = root.join("fake-codex.sh");
         fs::write(
             &path,
@@ -142,6 +134,7 @@ mod tests {
     }
 
     fn write_bad_codex_cli(root: &Path) -> PathBuf {
+        fs::create_dir_all(root).expect("create test root");
         let path = root.join("fake-codex-bad.sh");
         fs::write(&path, "#!/bin/sh\necho '--json'\n").expect("write bad fake codex");
 
@@ -155,13 +148,5 @@ mod tests {
         }
 
         path
-    }
-
-    fn temp_test_root(label: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("ingot-{label}-{unique}"))
     }
 }

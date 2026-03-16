@@ -1,8 +1,8 @@
-use chrono::{DateTime, Utc};
-use ingot_domain::finding::{
+use crate::finding::{
     Finding, FindingSeverity, FindingSubjectKind, FindingTriage, FindingTriageState,
 };
-use ingot_domain::ids;
+use crate::ids;
+use chrono::{DateTime, Utc};
 use serde_json::json;
 
 use super::timestamps::default_timestamp;

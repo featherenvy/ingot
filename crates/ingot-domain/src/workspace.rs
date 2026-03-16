@@ -562,24 +562,17 @@ pub struct Workspace {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::WorkspaceBuilder;
+
     use super::*;
 
     fn base_workspace(state: WorkspaceState) -> Workspace {
-        Workspace {
-            id: WorkspaceId::new(),
-            project_id: ProjectId::new(),
-            kind: WorkspaceKind::Authoring,
-            strategy: WorkspaceStrategy::Worktree,
-            path: "/tmp/test".into(),
-            created_for_revision_id: None,
-            parent_workspace_id: None,
-            target_ref: Some("refs/heads/main".into()),
-            workspace_ref: Some("refs/ingot/workspaces/test".into()),
-            retention_policy: RetentionPolicy::Persistent,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            state,
-        }
+        let mut workspace = WorkspaceBuilder::new(ProjectId::new(), WorkspaceKind::Authoring)
+            .path("/tmp/test")
+            .workspace_ref("refs/ingot/workspaces/test")
+            .build();
+        workspace.state = state;
+        workspace
     }
 
     fn ready_commits() -> WorkspaceCommitState {

@@ -1,6 +1,6 @@
+use crate::ids;
+use crate::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use chrono::{DateTime, Utc};
-use ingot_domain::ids;
-use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use serde_json::json;
 use uuid::Uuid;
 

@@ -1,5 +1,5 @@
-use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
-use ingot_domain::ids;
+use crate::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
+use crate::ids;
 
 pub struct AgentBuilder {
     id: ids::AgentId,

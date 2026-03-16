@@ -1,9 +1,9 @@
-use chrono::{DateTime, Utc};
-use ingot_domain::ids;
-use ingot_domain::item::{
+use crate::ids;
+use crate::item::{
     ApprovalState, Classification, DoneReason, Escalation, EscalationReason, Item, Lifecycle,
     Origin, ParkingState, Priority, ResolutionSource,
 };
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::timestamps::default_timestamp;
