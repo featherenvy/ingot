@@ -5,19 +5,30 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use ingot_domain::ids::{JobId, WorkspaceId};
+use ingot_domain::convergence::Convergence;
+use ingot_domain::finding::Finding;
+use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
+use ingot_domain::item::Item;
 use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, Job, JobAssignment, JobInput, JobLease, JobState,
     JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind, TerminalStatus,
 };
+use ingot_domain::ports::RepositoryError;
+use ingot_domain::project::Project;
+use ingot_domain::revision::ItemRevision;
 use ingot_domain::workspace::{
     RetentionPolicy, Workspace, WorkspaceKind, WorkspaceState, WorkspaceStatus, WorkspaceStrategy,
 };
 use ingot_store_sqlite::Database;
+use ingot_test_support::fixtures::{
+    ConvergenceBuilder, FindingBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
+    WorkspaceBuilder, default_timestamp,
+};
 pub use ingot_test_support::fixtures::{DEFAULT_TEST_TIMESTAMP, parse_timestamp};
 pub use ingot_test_support::git::{git_output, run_git as git, temp_git_repo, write_file};
 pub use ingot_test_support::reports::clean_validation_report;
@@ -169,130 +180,295 @@ fn into_test_job_input(input: TestJobInput<'_>) -> JobInput {
     }
 }
 
+pub trait PersistFixture: Sized {
+    async fn persist(self, db: &Database) -> Result<Self, RepositoryError>;
+}
+
+impl PersistFixture for Project {
+    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
+        db.create_project(&self).await?;
+        Ok(self)
+    }
+}
+
+impl PersistFixture for Item {
+    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
+        db.create_item(&self).await?;
+        Ok(self)
+    }
+}
+
+impl PersistFixture for ItemRevision {
+    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
+        db.create_revision(&self).await?;
+        Ok(self)
+    }
+}
+
+impl PersistFixture for (Item, ItemRevision) {
+    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
+        db.create_item_with_revision(&self.0, &self.1).await?;
+        Ok(self)
+    }
+}
+
+impl PersistFixture for Workspace {
+    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
+        db.create_workspace(&self).await?;
+        Ok(self)
+    }
+}
+
+impl PersistFixture for Convergence {
+    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
+        db.create_convergence(&self).await?;
+        Ok(self)
+    }
+}
+
+impl PersistFixture for Finding {
+    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
+        db.create_finding(&self).await?;
+        Ok(self)
+    }
+}
+
+impl PersistFixture for Job {
+    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
+        if let Some(workspace_id) = self.state.workspace_id() {
+            if db.get_workspace(workspace_id).await.is_err() {
+                let mut workspace = WorkspaceBuilder::new(self.project_id, self.workspace_kind)
+                    .id(workspace_id)
+                    .created_for_revision_id(self.item_revision_id)
+                    .path(
+                        std::env::temp_dir()
+                            .join(format!("ingot-http-api-workspace-{workspace_id}"))
+                            .display()
+                            .to_string(),
+                    )
+                    .created_at(self.created_at);
+                workspace = if self.state.is_active() {
+                    workspace
+                        .status(WorkspaceStatus::Busy)
+                        .current_job_id(self.id)
+                } else {
+                    workspace.status(WorkspaceStatus::Ready)
+                };
+                let workspace = workspace.build();
+                db.create_workspace(&workspace).await?;
+            }
+        }
+        db.create_job(&self).await?;
+        Ok(self)
+    }
+}
+
+pub fn test_project_builder(path: impl AsRef<Path>, id: &str) -> ProjectBuilder {
+    ProjectBuilder::new(path)
+        .id(parse_id::<ProjectId>(id))
+        .created_at(default_timestamp())
+}
+
+pub fn test_item_builder(project_id: &str, revision_id: &str, item_id: &str) -> ItemBuilder {
+    ItemBuilder::new(
+        parse_id::<ProjectId>(project_id),
+        parse_id::<ItemRevisionId>(revision_id),
+    )
+    .id(parse_id::<ItemId>(item_id))
+    .created_at(default_timestamp())
+}
+
+pub fn test_revision_builder(item_id: &str, revision_id: &str) -> RevisionBuilder {
+    RevisionBuilder::new(parse_id::<ItemId>(item_id))
+        .id(parse_id::<ItemRevisionId>(revision_id))
+        .created_at(default_timestamp())
+}
+
+pub fn test_workspace_builder(
+    project_id: &str,
+    kind: WorkspaceKind,
+    workspace_id: &str,
+) -> WorkspaceBuilder {
+    WorkspaceBuilder::new(parse_id::<ProjectId>(project_id), kind)
+        .id(parse_id::<WorkspaceId>(workspace_id))
+        .created_at(default_timestamp())
+}
+
+pub fn test_convergence_builder(
+    project_id: &str,
+    item_id: &str,
+    revision_id: &str,
+    convergence_id: &str,
+) -> ConvergenceBuilder {
+    ConvergenceBuilder::new(
+        parse_id::<ProjectId>(project_id),
+        parse_id::<ItemId>(item_id),
+        parse_id::<ItemRevisionId>(revision_id),
+    )
+    .id(parse_id(convergence_id))
+    .created_at(default_timestamp())
+}
+
+pub fn test_finding_builder(
+    project_id: &str,
+    item_id: &str,
+    revision_id: &str,
+    job_id: &str,
+    finding_id: &str,
+) -> FindingBuilder {
+    FindingBuilder::new(
+        parse_id::<ProjectId>(project_id),
+        parse_id::<ItemId>(item_id),
+        parse_id::<ItemRevisionId>(revision_id),
+        parse_id::<JobId>(job_id),
+    )
+    .id(parse_id(finding_id))
+    .created_at(default_timestamp())
+}
+
+pub async fn persist_test_project(
+    db: &Database,
+    path: impl AsRef<Path>,
+    project_id: &str,
+) -> Project {
+    test_project_builder(path, project_id)
+        .name("Test")
+        .build()
+        .persist(db)
+        .await
+        .expect("persist test project")
+}
+
+pub async fn persist_test_change(
+    db: &Database,
+    path: impl AsRef<Path>,
+    project_id: &str,
+    item_id: &str,
+    revision_id: &str,
+    configure_item: impl FnOnce(ItemBuilder) -> ItemBuilder,
+    configure_revision: impl FnOnce(RevisionBuilder) -> RevisionBuilder,
+) -> (Project, Item, ItemRevision) {
+    let project = persist_test_project(db, path, project_id).await;
+    let revision = configure_revision(test_revision_builder(item_id, revision_id)).build();
+    let item = configure_item(test_item_builder(project_id, revision_id, item_id)).build();
+    let (item, revision) = (item, revision)
+        .persist(db)
+        .await
+        .expect("persist test item with revision");
+    (project, item, revision)
+}
+
+pub async fn persist_test_workspace(
+    db: &Database,
+    project_id: &str,
+    kind: WorkspaceKind,
+    workspace_id: &str,
+    configure_workspace: impl FnOnce(WorkspaceBuilder) -> WorkspaceBuilder,
+) -> Workspace {
+    configure_workspace(test_workspace_builder(project_id, kind, workspace_id))
+        .build()
+        .persist(db)
+        .await
+        .expect("persist test workspace")
+}
+
+pub async fn persist_test_convergence(
+    db: &Database,
+    project_id: &str,
+    item_id: &str,
+    revision_id: &str,
+    convergence_id: &str,
+    configure_convergence: impl FnOnce(ConvergenceBuilder) -> ConvergenceBuilder,
+) -> Convergence {
+    configure_convergence(test_convergence_builder(
+        project_id,
+        item_id,
+        revision_id,
+        convergence_id,
+    ))
+    .build()
+    .persist(db)
+    .await
+    .expect("persist test convergence")
+}
+
+pub async fn persist_test_finding(
+    db: &Database,
+    project_id: &str,
+    item_id: &str,
+    revision_id: &str,
+    job_id: &str,
+    finding_id: &str,
+    configure_finding: impl FnOnce(FindingBuilder) -> FindingBuilder,
+) -> Finding {
+    configure_finding(test_finding_builder(
+        project_id,
+        item_id,
+        revision_id,
+        job_id,
+        finding_id,
+    ))
+    .build()
+    .persist(db)
+    .await
+    .expect("persist test finding")
+}
+
 pub async fn insert_test_job_row(db: &Database, row: TestJobInsert<'_>) {
     let workspace_id = row.workspace_id.map(parse_id::<WorkspaceId>).or_else(|| {
         matches!(row.status, JobStatus::Assigned | JobStatus::Running).then(WorkspaceId::new)
     });
-    let assignment = workspace_id.map(|workspace_id| JobAssignment {
-        workspace_id,
-        agent_id: None,
-        prompt_snapshot: None,
-        phase_template_digest: None,
-    });
-
-    let state = match row.status {
-        JobStatus::Queued => JobState::Queued,
-        JobStatus::Assigned => JobState::Assigned(assignment.expect("assigned workspace")),
-        JobStatus::Running => {
-            let now = Utc::now();
-            JobState::Running {
-                assignment: assignment.expect("running workspace"),
-                lease: JobLease {
-                    process_pid: None,
-                    lease_owner_id: "test".into(),
-                    heartbeat_at: now,
-                    lease_expires_at: now + chrono::Duration::seconds(1800),
-                    started_at: row.started_at.map(parse_test_ts).unwrap_or(now),
-                },
-            }
-        }
-        JobStatus::Completed => JobState::Completed {
-            assignment,
-            started_at: row.started_at.map(parse_test_ts),
-            outcome_class: row.outcome_class.unwrap_or(OutcomeClass::Clean),
-            ended_at: row.ended_at.map(parse_test_ts).unwrap_or_else(Utc::now),
-            output_commit_oid: row.output_commit_oid.map(ToOwned::to_owned),
-            result_schema_version: row.result_schema_version.map(ToOwned::to_owned),
-            result_payload: row.result_payload.clone(),
-        },
-        JobStatus::Failed => JobState::Terminated {
-            terminal_status: TerminalStatus::Failed,
-            assignment,
-            started_at: row.started_at.map(parse_test_ts),
-            outcome_class: row.outcome_class,
-            ended_at: row.ended_at.map(parse_test_ts).unwrap_or_else(Utc::now),
-            error_code: row.error_code.map(ToOwned::to_owned),
-            error_message: row.error_message.map(ToOwned::to_owned),
-        },
-        JobStatus::Cancelled => JobState::Terminated {
-            terminal_status: TerminalStatus::Cancelled,
-            assignment,
-            started_at: row.started_at.map(parse_test_ts),
-            outcome_class: row.outcome_class,
-            ended_at: row.ended_at.map(parse_test_ts).unwrap_or_else(Utc::now),
-            error_code: row.error_code.map(ToOwned::to_owned),
-            error_message: row.error_message.map(ToOwned::to_owned),
-        },
-        JobStatus::Expired => JobState::Terminated {
-            terminal_status: TerminalStatus::Expired,
-            assignment,
-            started_at: row.started_at.map(parse_test_ts),
-            outcome_class: row.outcome_class,
-            ended_at: row.ended_at.map(parse_test_ts).unwrap_or_else(Utc::now),
-            error_code: row.error_code.map(ToOwned::to_owned),
-            error_message: row.error_message.map(ToOwned::to_owned),
-        },
-        JobStatus::Superseded => JobState::Terminated {
-            terminal_status: TerminalStatus::Superseded,
-            assignment,
-            started_at: row.started_at.map(parse_test_ts),
-            outcome_class: row.outcome_class,
-            ended_at: row.ended_at.map(parse_test_ts).unwrap_or_else(Utc::now),
-            error_code: row.error_code.map(ToOwned::to_owned),
-            error_message: row.error_message.map(ToOwned::to_owned),
-        },
-    };
-    let job = Job {
-        id: parse_id(row.id),
-        project_id: parse_id(row.project_id),
-        item_id: parse_id(row.item_id),
-        item_revision_id: parse_id(row.item_revision_id),
-        step_id: row.step_id.into(),
-        semantic_attempt_no: row.semantic_attempt_no,
-        retry_no: row.retry_no,
-        supersedes_job_id: row.supersedes_job_id.map(parse_id::<JobId>),
-        phase_kind: row.phase_kind,
-        workspace_kind: row.workspace_kind,
-        execution_permission: row.execution_permission,
-        context_policy: row.context_policy,
-        phase_template_slug: row.phase_template_slug.into(),
-        output_artifact_kind: row.output_artifact_kind,
-        job_input: into_test_job_input(row.job_input),
-        created_at: parse_test_ts(row.created_at),
-        state,
-    };
-    if let Some(workspace_id) = job.state.workspace_id() {
-        let state = if job.state.is_active() {
-            WorkspaceState::Busy {
-                commits: ingot_domain::workspace::WorkspaceCommitState::empty(),
-                current_job_id: job.id,
-            }
-        } else {
-            WorkspaceState::Ready {
-                commits: ingot_domain::workspace::WorkspaceCommitState::empty(),
-            }
-        };
-        let workspace = Workspace {
-            id: workspace_id,
-            project_id: job.project_id,
-            kind: job.workspace_kind,
-            retention_policy: RetentionPolicy::Persistent,
-            strategy: WorkspaceStrategy::Worktree,
-            created_for_revision_id: Some(job.item_revision_id),
-            parent_workspace_id: None,
-            path: std::env::temp_dir()
-                .join(format!("ingot-http-api-workspace-{workspace_id}"))
-                .display()
-                .to_string(),
-            workspace_ref: None,
-            target_ref: None,
-            state,
-            updated_at: job.created_at,
-            created_at: job.created_at,
-        };
-        let _ = db.create_workspace(&workspace).await;
+    let created_at = parse_test_ts(row.created_at);
+    let mut job = JobBuilder::new(
+        parse_id::<ProjectId>(row.project_id),
+        parse_id::<ItemId>(row.item_id),
+        parse_id::<ItemRevisionId>(row.item_revision_id),
+        row.step_id,
+    )
+    .id(parse_id::<JobId>(row.id))
+    .retry_no(row.retry_no)
+    .status(row.status)
+    .phase_kind(row.phase_kind)
+    .workspace_kind(row.workspace_kind)
+    .execution_permission(row.execution_permission)
+    .context_policy(row.context_policy)
+    .phase_template_slug(row.phase_template_slug)
+    .job_input(into_test_job_input(row.job_input))
+    .output_artifact_kind(row.output_artifact_kind)
+    .created_at(created_at);
+    if let Some(supersedes_job_id) = row.supersedes_job_id {
+        job = job.supersedes_job_id(parse_id::<JobId>(supersedes_job_id));
     }
-    db.create_job(&job).await.expect("insert test job");
+    if let Some(workspace_id) = workspace_id {
+        job = job.workspace_id(workspace_id);
+    }
+    if let Some(outcome_class) = row.outcome_class {
+        job = job.outcome_class(outcome_class);
+    }
+    if let Some(output_commit_oid) = row.output_commit_oid {
+        job = job.output_commit_oid(output_commit_oid);
+    }
+    if let Some(result_schema_version) = row.result_schema_version {
+        job = job.result_schema_version(result_schema_version);
+    }
+    if let Some(result_payload) = row.result_payload.clone() {
+        job = job.result_payload(result_payload);
+    }
+    if let Some(error_code) = row.error_code {
+        job = job.error_code(error_code);
+    }
+    if let Some(error_message) = row.error_message {
+        job = job.error_message(error_message);
+    }
+    if let Some(started_at) = row.started_at {
+        job = job.started_at(parse_test_ts(started_at));
+    }
+    if let Some(ended_at) = row.ended_at {
+        job = job.ended_at(parse_test_ts(ended_at));
+    }
+    let mut job = job.build();
+    job.semantic_attempt_no = row.semantic_attempt_no;
+    job.persist(db).await.expect("insert test job");
 }
 
 pub async fn seeded_route_test_app() -> (PathBuf, Database, String, String, String) {
@@ -305,64 +481,36 @@ pub async fn seeded_route_test_app() -> (PathBuf, Database, String, String, Stri
     let job_id = "job_00000000000000000000000000000000".to_string();
     let workspace_id = "wrk_00000000000000000000000000000000".to_string();
 
-    sqlx::query(
-        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
-    )
-    .bind(&project_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert project");
+    test_project_builder(&repo, &project_id)
+        .name("Test")
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert project");
 
-    sqlx::query(
-        "INSERT INTO items (
-            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
-            priority, labels, created_at, updated_at
-         ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
-    )
-    .bind(&item_id)
-    .bind(&project_id)
-    .bind(&revision_id)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert item");
+    let revision = test_revision_builder(&item_id, &revision_id)
+        .seed(ingot_domain::revision::AuthoringBaseSeed::Explicit {
+            seed_commit_oid: "base".into(),
+            seed_target_commit_oid: "target".into(),
+        })
+        .build();
+    let item = test_item_builder(&project_id, &revision_id, &item_id).build();
+    (item, revision)
+        .persist(&db)
+        .await
+        .expect("insert item with revision");
 
-    sqlx::query(
-        "INSERT INTO item_revisions (
-            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-            seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', 'base', 'target', NULL, ?)",
-    )
-    .bind(&revision_id)
-    .bind(&item_id)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert revision");
-
-    sqlx::query(
-        "INSERT INTO workspaces (
-            id, project_id, kind, status, retention_policy,
-            created_for_revision_id, current_job_id, base_commit_oid, head_commit_oid, path, created_at, updated_at
-         ) VALUES (?, ?, 'authoring', 'busy', 'persistent', ?, ?, 'base', 'head', ?, ?, ?)",
-    )
-    .bind(&workspace_id)
-    .bind(&project_id)
-    .bind(&revision_id)
-    .bind(&job_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert workspace");
+    test_workspace_builder(&project_id, WorkspaceKind::Authoring, &workspace_id)
+        .created_for_revision_id(parse_id::<ItemRevisionId>(&revision_id))
+        .status(WorkspaceStatus::Busy)
+        .current_job_id(parse_id::<JobId>(&job_id))
+        .base_commit_oid("base")
+        .head_commit_oid("head")
+        .path(repo.display().to_string())
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert workspace");
 
     insert_test_job_row(
         &db,

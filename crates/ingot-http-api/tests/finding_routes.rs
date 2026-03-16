@@ -1,8 +1,12 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use ingot_domain::finding::{FindingSubjectKind, FindingTriageState};
+use ingot_domain::item::{Classification, Origin};
 use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
 };
+use ingot_domain::revision::AuthoringBaseSeed;
+use ingot_domain::workspace::RetentionPolicy;
 use ingot_domain::workspace::WorkspaceKind;
 use tower::ServiceExt;
 
@@ -24,47 +28,20 @@ async fn triaging_final_integrated_finding_enters_pending_approval() {
     let integration_workspace_id = "wrk_11111111111111111111111111111112";
     let finding_id = "fnd_11111111111111111111111111111111";
 
-    sqlx::query(
-        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
-    )
-    .bind(project_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert project");
-    sqlx::query(
-        "INSERT INTO items (
-            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
-            priority, labels, created_at, updated_at
-         ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
-    )
-    .bind(item_id)
-    .bind(project_id)
-    .bind(revision_id)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert item");
-    sqlx::query(
-        "INSERT INTO item_revisions (
-            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-            seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, ?)",
-    )
-    .bind(revision_id)
-    .bind(item_id)
-    .bind(&head)
-    .bind(&head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert revision");
+    test_project_builder(&repo, project_id)
+        .name("Test")
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert project");
+    let item = test_item_builder(project_id, revision_id, item_id).build();
+    let revision = test_revision_builder(item_id, revision_id)
+        .seed(AuthoringBaseSeed::Explicit {
+            seed_commit_oid: head.clone(),
+            seed_target_commit_oid: head.clone(),
+        })
+        .build();
+    (item, revision).persist(&db).await.expect("insert item");
     insert_test_job_row(
         &db,
         TestJobInsert {
@@ -94,81 +71,53 @@ async fn triaging_final_integrated_finding_enters_pending_approval() {
         },
     )
     .await;
-    sqlx::query(
-        "INSERT INTO workspaces (
-            id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
-            target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
-            status, current_job_id, created_at, updated_at
-         ) VALUES (?, ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', NULL, ?, ?, 'ephemeral', 'ready', NULL, ?, ?)",
+    test_workspace_builder(project_id, WorkspaceKind::Authoring, source_workspace_id)
+        .created_for_revision_id(parse_id(revision_id))
+        .path(repo.join("workspace").display().to_string())
+        .retention_policy(RetentionPolicy::Ephemeral)
+        .base_commit_oid(&head)
+        .head_commit_oid(&head)
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert workspace");
+    test_workspace_builder(
+        project_id,
+        WorkspaceKind::Integration,
+        integration_workspace_id,
     )
-    .bind(source_workspace_id)
-    .bind(project_id)
-    .bind(repo.join("workspace").display().to_string())
-    .bind(revision_id)
-    .bind(&head)
-    .bind(&head)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert workspace");
-    sqlx::query(
-        "INSERT INTO workspaces (
-            id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
-            target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
-            status, current_job_id, created_at, updated_at
-         ) VALUES (?, ?, 'integration', 'worktree', ?, ?, NULL, 'refs/heads/main', NULL, ?, ?, 'ephemeral', 'ready', NULL, ?, ?)",
-    )
-    .bind(integration_workspace_id)
-    .bind(project_id)
-    .bind(repo.join("integration-workspace").display().to_string())
-    .bind(revision_id)
-    .bind(&head)
-    .bind(&head)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
+    .created_for_revision_id(parse_id(revision_id))
+    .path(repo.join("integration-workspace").display().to_string())
+    .retention_policy(RetentionPolicy::Ephemeral)
+    .base_commit_oid(&head)
+    .head_commit_oid(&head)
+    .build()
+    .persist(&db)
     .await
     .expect("insert integration workspace");
-    sqlx::query(
-        "INSERT INTO convergences (
-            id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
-            source_head_commit_oid, target_ref, strategy, status, input_target_commit_oid,
-            prepared_commit_oid, final_target_commit_oid, conflict_summary, created_at, completed_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'refs/heads/main', 'rebase_then_fast_forward', 'prepared', ?, ?, NULL, NULL, ?, NULL)",
-    )
-    .bind(convergence_id)
-    .bind(project_id)
-    .bind(item_id)
-    .bind(revision_id)
-    .bind(source_workspace_id)
-    .bind(integration_workspace_id)
-    .bind(&head)
-    .bind(&head)
-    .bind(&head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert convergence");
-    sqlx::query(
-        "INSERT INTO findings (
-            id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
-            source_report_schema_version, source_finding_key, source_subject_kind,
-            source_subject_base_commit_oid, source_subject_head_commit_oid, code, severity, summary,
-            paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
-         ) VALUES (?, ?, ?, ?, ?, 'validate_integrated', 'validation_report:v1', 'finding-1', 'integrated', ?, ?, 'BUG001', 'high', 'summary', '[]', '[]', 'untriaged', NULL, NULL, ?, NULL)",
-    )
-    .bind(finding_id)
-    .bind(project_id)
-    .bind(item_id)
-    .bind(revision_id)
-    .bind(job_id)
-    .bind(&head)
-    .bind(&head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert finding");
+    test_convergence_builder(project_id, item_id, revision_id, convergence_id)
+        .source_workspace_id(parse_id(source_workspace_id))
+        .integration_workspace_id(parse_id(integration_workspace_id))
+        .source_head_commit_oid(&head)
+        .input_target_commit_oid(&head)
+        .prepared_commit_oid(&head)
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert convergence");
+    test_finding_builder(project_id, item_id, revision_id, job_id, finding_id)
+        .source_step_id("validate_integrated")
+        .source_report_schema_version("validation_report:v1")
+        .source_finding_key("finding-1")
+        .source_subject_kind(FindingSubjectKind::Integrated)
+        .source_subject_base_commit_oid(Some(&head))
+        .source_subject_head_commit_oid(&head)
+        .paths(vec![])
+        .evidence(serde_json::json!([]))
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert finding");
 
     let response = test_router(db.clone())
         .oneshot(
@@ -218,47 +167,20 @@ async fn backlog_triage_rejects_self_linked_item() {
     let finding_id = "fnd_22222222222222222222222222222222";
     let job_id = "job_22222222222222222222222222222222";
 
-    sqlx::query(
-        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
-    )
-    .bind(project_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert project");
-    sqlx::query(
-        "INSERT INTO items (
-            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
-            priority, labels, created_at, updated_at
-         ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
-    )
-    .bind(item_id)
-    .bind(project_id)
-    .bind(revision_id)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert item");
-    sqlx::query(
-        "INSERT INTO item_revisions (
-            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-            seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, ?)",
-    )
-    .bind(revision_id)
-    .bind(item_id)
-    .bind(&head)
-    .bind(&head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert revision");
+    test_project_builder(&repo, project_id)
+        .name("Test")
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert project");
+    let item = test_item_builder(project_id, revision_id, item_id).build();
+    let revision = test_revision_builder(item_id, revision_id)
+        .seed(AuthoringBaseSeed::Explicit {
+            seed_commit_oid: head.clone(),
+            seed_target_commit_oid: head.clone(),
+        })
+        .build();
+    (item, revision).persist(&db).await.expect("insert item");
     insert_test_job_row(
         &db,
         TestJobInsert {
@@ -288,25 +210,16 @@ async fn backlog_triage_rejects_self_linked_item() {
         },
     )
     .await;
-    sqlx::query(
-        "INSERT INTO findings (
-            id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
-            source_report_schema_version, source_finding_key, source_subject_kind,
-            source_subject_base_commit_oid, source_subject_head_commit_oid, code, severity, summary,
-            paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
-         ) VALUES (?, ?, ?, ?, ?, 'review_candidate_initial', 'review_report:v1', 'finding-1', 'candidate', ?, ?, 'BUG001', 'high', 'summary', '[]', '[]', 'untriaged', NULL, NULL, ?, NULL)",
-    )
-    .bind(finding_id)
-    .bind(project_id)
-    .bind(item_id)
-    .bind(revision_id)
-    .bind(job_id)
-    .bind(&head)
-    .bind(&head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert finding");
+    test_finding_builder(project_id, item_id, revision_id, job_id, finding_id)
+        .source_finding_key("finding-1")
+        .source_subject_base_commit_oid(Some(&head))
+        .source_subject_head_commit_oid(&head)
+        .paths(vec![])
+        .evidence(serde_json::json!([]))
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert finding");
 
     let response = test_router(db.clone())
         .oneshot(
@@ -343,47 +256,20 @@ async fn retriaging_backlog_created_item_clears_origin_backlink() {
     let linked_item_id = "itm_44444444444444444444444444444444";
     let linked_revision_id = "rev_44444444444444444444444444444444";
 
-    sqlx::query(
-        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
-    )
-    .bind(project_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert project");
-    sqlx::query(
-        "INSERT INTO items (
-            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
-            priority, labels, created_at, updated_at
-         ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
-    )
-    .bind(item_id)
-    .bind(project_id)
-    .bind(revision_id)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert item");
-    sqlx::query(
-        "INSERT INTO item_revisions (
-            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-            seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, ?)",
-    )
-    .bind(revision_id)
-    .bind(item_id)
-    .bind(&head)
-    .bind(&head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert revision");
+    test_project_builder(&repo, project_id)
+        .name("Test")
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert project");
+    let item = test_item_builder(project_id, revision_id, item_id).build();
+    let revision = test_revision_builder(item_id, revision_id)
+        .seed(AuthoringBaseSeed::Explicit {
+            seed_commit_oid: head.clone(),
+            seed_target_commit_oid: head.clone(),
+        })
+        .build();
+    (item, revision).persist(&db).await.expect("insert item");
     insert_test_job_row(
         &db,
         TestJobInsert {
@@ -413,66 +299,37 @@ async fn retriaging_backlog_created_item_clears_origin_backlink() {
         },
     )
     .await;
-    sqlx::query(
-        "INSERT INTO findings (
-            id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
-            source_report_schema_version, source_finding_key, source_subject_kind,
-            source_subject_base_commit_oid, source_subject_head_commit_oid, code, severity, summary,
-            paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
-         ) VALUES (?, ?, ?, ?, ?, 'review_candidate_initial', 'review_report:v1', 'finding-1', 'candidate', ?, ?, 'BUG001', 'high', 'summary', '[]', '[]', 'untriaged', NULL, NULL, ?, NULL)",
-    )
-    .bind(finding_id)
-    .bind(project_id)
-    .bind(item_id)
-    .bind(revision_id)
-    .bind(job_id)
-    .bind(&head)
-    .bind(&head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert finding");
-    sqlx::query(
-        "INSERT INTO items (
-            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
-            priority, labels, created_at, updated_at
-         ) VALUES (?, ?, 'bug', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'promoted_finding', ?, 'major', '[]', ?, ?)",
-    )
-    .bind(linked_item_id)
-    .bind(project_id)
-    .bind(linked_revision_id)
-    .bind(finding_id)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert linked item");
-    sqlx::query(
-        "INSERT INTO item_revisions (
-            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-            seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Bug', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, ?)",
-    )
-    .bind(linked_revision_id)
-    .bind(linked_item_id)
-    .bind(&head)
-    .bind(&head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert linked revision");
-    sqlx::query(
-        "UPDATE findings
-         SET triage_state = 'backlog', linked_item_id = ?, triaged_at = '2026-03-12T00:01:00Z'
-         WHERE id = ?",
-    )
-    .bind(linked_item_id)
-    .bind(finding_id)
-    .execute(&db.pool)
-    .await
-    .expect("mark finding backlog");
+    let mut linked_item = test_item_builder(project_id, linked_revision_id, linked_item_id).build();
+    linked_item.classification = Classification::Bug;
+    let linked_revision = test_revision_builder(linked_item_id, linked_revision_id)
+        .seed(AuthoringBaseSeed::Explicit {
+            seed_commit_oid: head.clone(),
+            seed_target_commit_oid: head.clone(),
+        })
+        .build();
+    let (mut linked_item, _) = (linked_item, linked_revision)
+        .persist(&db)
+        .await
+        .expect("insert linked revision");
+    test_finding_builder(project_id, item_id, revision_id, job_id, finding_id)
+        .source_finding_key("finding-1")
+        .source_subject_base_commit_oid(Some(&head))
+        .source_subject_head_commit_oid(&head)
+        .paths(vec![])
+        .evidence(serde_json::json!([]))
+        .triage_state(FindingTriageState::Backlog)
+        .linked_item_id(parse_id(linked_item_id))
+        .triaged_at(parse_timestamp("2026-03-12T00:01:00Z"))
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert finding");
+    linked_item.origin = Origin::PromotedFinding {
+        finding_id: parse_id(finding_id),
+    };
+    db.update_item(&linked_item)
+        .await
+        .expect("mark linked item as promoted");
 
     let response = test_router(db.clone())
         .oneshot(

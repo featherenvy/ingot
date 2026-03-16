@@ -7,6 +7,7 @@ use ingot_domain::ids::ProjectId;
 use ingot_domain::project::Project;
 use ingot_git::GitJobCompletionPort;
 use ingot_git::project_repo::project_repo_paths;
+use ingot_test_support::fixtures::ProjectBuilder;
 use ingot_test_support::sqlite::migrated_test_db;
 use ingot_usecases::{CompleteJobService, ProjectLocks};
 use uuid::Uuid;
@@ -38,13 +39,9 @@ pub(super) async fn test_app_state() -> AppState {
 }
 
 pub(super) fn test_project(path: PathBuf) -> Project {
-    Project {
-        id: ProjectId::from_uuid(Uuid::nil()),
-        name: "Test".into(),
-        path: path.display().to_string(),
-        default_branch: "main".into(),
-        color: "#000000".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    }
+    ProjectBuilder::new(path)
+        .id(ProjectId::from_uuid(Uuid::nil()))
+        .name("Test")
+        .created_at(Utc::now())
+        .build()
 }

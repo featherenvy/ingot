@@ -525,7 +525,7 @@ mod tests {
     use chrono::Utc;
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
     use ingot_domain::item::ApprovalState;
-    use ingot_test_support::fixtures::{ItemBuilder, RevisionBuilder};
+    use ingot_test_support::fixtures::{ItemBuilder, ProjectBuilder, RevisionBuilder};
     use ingot_test_support::git::{
         git_output as support_git_output, temp_git_repo as support_temp_git_repo,
     };
@@ -560,24 +560,17 @@ mod tests {
         let state = test_app_state().await;
         let repo_a = temp_git_repo();
         let repo_b = temp_git_repo();
-        let project_a = Project {
-            id: ProjectId::new(),
-            name: "A".into(),
-            path: repo_a.display().to_string(),
-            default_branch: "main".into(),
-            color: "#000".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        let project_b = Project {
-            id: ProjectId::new(),
-            name: "B".into(),
-            path: repo_b.display().to_string(),
-            default_branch: "main".into(),
-            color: "#111".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
+        let project_a = ProjectBuilder::new(&repo_a)
+            .id(ProjectId::new())
+            .name("A")
+            .created_at(Utc::now())
+            .build();
+        let mut project_b = ProjectBuilder::new(&repo_b)
+            .id(ProjectId::new())
+            .name("B")
+            .created_at(Utc::now())
+            .build();
+        project_b.color = "#111".into();
         state
             .db
             .create_project(&project_a)

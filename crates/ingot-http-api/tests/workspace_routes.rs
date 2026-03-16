@@ -3,6 +3,7 @@ use std::process::Command;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ingot_domain::ids::ProjectId;
+use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind, WorkspaceStatus};
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
 use ingot_http_api::build_router_with_project_locks_and_state_root;
 use ingot_usecases::ProjectLocks;
@@ -42,35 +43,24 @@ async fn reset_workspace_route_restores_authoring_workspace_head() {
     let project_id = "prj_00000000000000000000000000000044".to_string();
     let workspace_id = "wrk_00000000000000000000000000000044".to_string();
 
-    sqlx::query(
-        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
-    )
-    .bind(&project_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert project");
+    test_project_builder(&repo, &project_id)
+        .name("Test")
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert project");
 
-    sqlx::query(
-        "INSERT INTO workspaces (
-            id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
-            target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
-            status, current_job_id, created_at, updated_at
-         ) VALUES (?, ?, 'authoring', 'worktree', ?, NULL, NULL, 'refs/heads/main', 'refs/ingot/workspaces/wrk_reset_test', ?, ?, 'persistent', 'ready', NULL, ?, ?)",
-    )
-    .bind(&workspace_id)
-    .bind(&project_id)
-    .bind(workspace_path.display().to_string())
-    .bind(&base_commit_oid)
-    .bind(&base_commit_oid)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert workspace");
+    test_workspace_builder(&project_id, WorkspaceKind::Authoring, &workspace_id)
+        .path(workspace_path.display().to_string())
+        .workspace_ref("refs/ingot/workspaces/wrk_reset_test")
+        .base_commit_oid(&base_commit_oid)
+        .head_commit_oid(&base_commit_oid)
+        .retention_policy(RetentionPolicy::Persistent)
+        .status(WorkspaceStatus::Ready)
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert workspace");
 
     let app = test_router(db.clone());
     let response = app
@@ -133,35 +123,23 @@ async fn remove_workspace_route_deletes_abandoned_workspace_ref_and_path() {
         ],
     );
 
-    sqlx::query(
-        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
-    )
-    .bind(&project_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert project");
+    test_project_builder(&repo, &project_id)
+        .name("Test")
+        .build()
+        .persist(&db)
+        .await
+        .expect("insert project");
 
-    sqlx::query(
-        "INSERT INTO workspaces (
-            id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
-            target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
-            status, current_job_id, created_at, updated_at
-         ) VALUES (?, ?, 'review', 'worktree', ?, NULL, NULL, NULL, 'refs/ingot/workspaces/wrk_remove_test', ?, ?, 'ephemeral', 'abandoned', NULL, ?, ?)",
-    )
-    .bind(&workspace_id)
-    .bind(&project_id)
-    .bind(workspace_path.display().to_string())
-    .bind(&head_commit_oid)
-    .bind(&head_commit_oid)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert workspace");
+    let mut workspace = test_workspace_builder(&project_id, WorkspaceKind::Review, &workspace_id)
+        .path(workspace_path.display().to_string())
+        .workspace_ref("refs/ingot/workspaces/wrk_remove_test")
+        .base_commit_oid(&head_commit_oid)
+        .head_commit_oid(&head_commit_oid)
+        .retention_policy(RetentionPolicy::Ephemeral)
+        .status(WorkspaceStatus::Abandoned)
+        .build();
+    workspace.target_ref = None;
+    workspace.persist(&db).await.expect("insert workspace");
 
     let app = build_router_with_project_locks_and_state_root(
         db.clone(),

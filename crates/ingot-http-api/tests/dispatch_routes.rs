@@ -2,11 +2,14 @@ use std::path::PathBuf;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
+use ingot_domain::finding::FindingSeverity;
 use ingot_domain::ids::ProjectId;
+use ingot_domain::item::ParkingState;
 use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
 };
-use ingot_domain::workspace::WorkspaceKind;
+use ingot_domain::revision::AuthoringBaseSeed;
+use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind};
 use ingot_git::commands::resolve_ref_oid;
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
 use ingot_http_api::build_router_with_project_locks_and_state_root;
@@ -27,49 +30,20 @@ async fn dispatch_item_job_route_creates_queued_author_initial_job_and_workspace
     let item_id = "itm_00000000000000000000000000000031".to_string();
     let revision_id = "rev_00000000000000000000000000000031".to_string();
 
-    sqlx::query(
-        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
+    persist_test_change(
+        &db,
+        &repo,
+        &project_id,
+        &item_id,
+        &revision_id,
+        |item| item,
+        |revision| {
+            revision
+                .explicit_seed(&seed_head)
+                .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
+        },
     )
-    .bind(&project_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert project");
-
-    sqlx::query(
-        "INSERT INTO items (
-            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
-            priority, labels, created_at, updated_at
-         ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
-    )
-    .bind(&item_id)
-    .bind(&project_id)
-    .bind(&revision_id)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert item");
-
-    sqlx::query(
-        "INSERT INTO item_revisions (
-            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-            seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{\"author_initial\":\"author-initial\"}', ?, ?, NULL, ?)",
-    )
-    .bind(&revision_id)
-    .bind(&item_id)
-    .bind(&seed_head)
-    .bind(&seed_head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert revision");
+    .await;
 
     let app = test_router(db.clone());
     let response = app
@@ -165,49 +139,22 @@ async fn dispatch_item_job_route_binds_implicit_author_initial_from_target_head(
     let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
     let state_root = std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
 
-    sqlx::query(
-        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
+    persist_test_change(
+        &db,
+        &repo,
+        &project_id,
+        &item_id,
+        &revision_id,
+        |item| item,
+        |revision| {
+            revision
+                .seed(AuthoringBaseSeed::Implicit {
+                    seed_target_commit_oid: target_head.clone(),
+                })
+                .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
+        },
     )
-    .bind(&project_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert project");
-
-    sqlx::query(
-        "INSERT INTO items (
-            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
-            priority, labels, created_at, updated_at
-         ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
-    )
-    .bind(&item_id)
-    .bind(&project_id)
-    .bind(&revision_id)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert item");
-
-    sqlx::query(
-        "INSERT INTO item_revisions (
-            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-            seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{\"author_initial\":\"author-initial\"}', ?, ?, NULL, ?)",
-    )
-    .bind(&revision_id)
-    .bind(&item_id)
-    .bind(Option::<String>::None)
-    .bind(&target_head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert revision");
+    .await;
 
     let app = build_router_with_project_locks_and_state_root(
         db.clone(),
@@ -285,64 +232,32 @@ async fn resume_route_implicit_revision_queues_incremental_review_from_bound_wor
     let revision_id = "rev_00000000000000000000000000000094".to_string();
     let author_job_id = "job_00000000000000000000000000000094".to_string();
 
-    sqlx::query(
-        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
+    persist_test_project(&db, &repo, &project_id).await;
+    let mut item = test_item_builder(&project_id, &revision_id, &item_id).build();
+    item.parking_state = ParkingState::Deferred;
+    let revision = test_revision_builder(&item_id, &revision_id)
+        .seed(AuthoringBaseSeed::Implicit {
+            seed_target_commit_oid: bound_base.clone(),
+        })
+        .build();
+    (item, revision).persist(&db).await.expect("insert item");
+    persist_test_workspace(
+        &db,
+        &project_id,
+        WorkspaceKind::Authoring,
+        "wrk_00000000000000000000000000000094",
+        |workspace| {
+            workspace
+                .created_for_revision_id(parse_id::<ingot_domain::ids::ItemRevisionId>(
+                    &revision_id,
+                ))
+                .path(repo.join("auth-ws").display().to_string())
+                .workspace_ref("refs/ingot/workspaces/wrk_00000000000000000000000000000094")
+                .base_commit_oid(&bound_base)
+                .head_commit_oid(&authored_head)
+        },
     )
-    .bind(&project_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert project");
-    sqlx::query(
-        "INSERT INTO items (
-            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
-            priority, labels, created_at, updated_at
-         ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'deferred', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
-    )
-    .bind(&item_id)
-    .bind(&project_id)
-    .bind(&revision_id)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert item");
-    sqlx::query(
-        "INSERT INTO item_revisions (
-            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-            seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, ?)",
-    )
-    .bind(&revision_id)
-    .bind(&item_id)
-    .bind(Option::<String>::None)
-    .bind(&bound_base)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert revision");
-    sqlx::query(
-        "INSERT INTO workspaces (
-            id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
-            target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
-            status, current_job_id, created_at, updated_at
-         ) VALUES ('wrk_00000000000000000000000000000094', ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', 'refs/ingot/workspaces/wrk_00000000000000000000000000000094', ?, ?, 'persistent', 'ready', NULL, ?, ?)",
-    )
-    .bind(&project_id)
-    .bind(repo.join("auth-ws").display().to_string())
-    .bind(&revision_id)
-    .bind(&bound_base)
-    .bind(&authored_head)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert authoring workspace");
+    .await;
     insert_test_job_row(
         &db,
         TestJobInsert {
@@ -414,47 +329,20 @@ async fn investigate_item_dispatch_creates_and_triage_removes_anchor_ref() {
     let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
     let state_root = std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
 
-    sqlx::query(
-        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
+    persist_test_change(
+        &db,
+        &repo,
+        &project_id,
+        &item_id,
+        &revision_id,
+        |item| item,
+        |revision| {
+            revision.seed(AuthoringBaseSeed::Implicit {
+                seed_target_commit_oid: target_head.clone(),
+            })
+        },
     )
-    .bind(&project_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert project");
-    sqlx::query(
-        "INSERT INTO items (
-            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
-            priority, labels, created_at, updated_at
-         ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
-    )
-    .bind(&item_id)
-    .bind(&project_id)
-    .bind(&revision_id)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert item");
-    sqlx::query(
-        "INSERT INTO item_revisions (
-            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-            seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, ?)",
-    )
-    .bind(&revision_id)
-    .bind(&item_id)
-    .bind(Option::<String>::None)
-    .bind(&target_head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert revision");
+    .await;
 
     let app = build_router_with_project_locks_and_state_root(
         db.clone(),
@@ -504,25 +392,26 @@ async fn investigate_item_dispatch_creates_and_triage_removes_anchor_ref() {
         Some(target_head.as_str())
     );
 
-    sqlx::query(
-        "INSERT INTO findings (
-            id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
-            source_report_schema_version, source_finding_key, source_subject_kind,
-            source_subject_base_commit_oid, source_subject_head_commit_oid, code, severity,
-            summary, paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
-         ) VALUES (?, ?, ?, ?, ?, 'investigate_item', 'finding_report:v1', 'finding-1', 'candidate', ?, ?, 'BUG001', 'medium', 'summary', '[]', '[]', 'untriaged', NULL, NULL, ?, NULL)",
+    persist_test_finding(
+        &db,
+        &project_id,
+        &item_id,
+        &revision_id,
+        job_id,
+        &finding_id,
+        |finding| {
+            finding
+                .source_step_id("investigate_item")
+                .source_report_schema_version("finding_report:v1")
+                .source_finding_key("finding-1")
+                .source_subject_base_commit_oid(Some(&target_head))
+                .source_subject_head_commit_oid(&target_head)
+                .severity(FindingSeverity::Medium)
+                .paths(vec![])
+                .evidence(serde_json::json!([]))
+        },
     )
-    .bind(&finding_id)
-    .bind(&project_id)
-    .bind(&item_id)
-    .bind(&revision_id)
-    .bind(job_id)
-    .bind(&target_head)
-    .bind(&target_head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert finding");
+    .await;
 
     let triage_response = app
         .oneshot(
@@ -585,66 +474,37 @@ async fn investigate_item_dispatch_uses_existing_authoring_workspace_subject() {
         ],
     );
 
-    sqlx::query(
-        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
+    persist_test_change(
+        &db,
+        &repo,
+        &project_id,
+        &item_id,
+        &revision_id,
+        |item| item,
+        |revision| {
+            revision.seed(AuthoringBaseSeed::Implicit {
+                seed_target_commit_oid: bound_base.clone(),
+            })
+        },
     )
-    .bind(&project_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert project");
-    sqlx::query(
-        "INSERT INTO items (
-            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
-            priority, labels, created_at, updated_at
-         ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
+    .await;
+    persist_test_workspace(
+        &db,
+        &project_id,
+        WorkspaceKind::Authoring,
+        &workspace_id,
+        |workspace| {
+            workspace
+                .created_for_revision_id(parse_id::<ingot_domain::ids::ItemRevisionId>(
+                    &revision_id,
+                ))
+                .path(workspace_path.display().to_string())
+                .workspace_ref(format!("refs/ingot/workspaces/{workspace_id}"))
+                .base_commit_oid(&bound_base)
+                .head_commit_oid(&bound_head)
+        },
     )
-    .bind(&item_id)
-    .bind(&project_id)
-    .bind(&revision_id)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert item");
-    sqlx::query(
-        "INSERT INTO item_revisions (
-            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-            seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, ?)",
-    )
-    .bind(&revision_id)
-    .bind(&item_id)
-    .bind(Option::<String>::None)
-    .bind(&bound_base)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert revision");
-    sqlx::query(
-        "INSERT INTO workspaces (
-            id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
-            target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
-            status, current_job_id, created_at, updated_at
-         ) VALUES (?, ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', ?, ?, ?, 'persistent', 'ready', NULL, ?, ?)",
-    )
-    .bind(&workspace_id)
-    .bind(&project_id)
-    .bind(workspace_path.display().to_string())
-    .bind(&revision_id)
-    .bind(format!("refs/ingot/workspaces/{workspace_id}"))
-    .bind(&bound_base)
-    .bind(&bound_head)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert workspace");
+    .await;
 
     let app = build_router_with_project_locks_and_state_root(
         db.clone(),
@@ -706,69 +566,38 @@ async fn dispatch_item_job_route_reuses_existing_authoring_workspace_for_revisio
     let workspace_path =
         std::env::temp_dir().join(format!("ingot-authoring-existing-{}", Uuid::now_v7()));
 
-    sqlx::query(
-        "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-         VALUES (?, 'Test', ?, 'main', '#000', ?, ?)",
+    persist_test_change(
+        &db,
+        &repo,
+        &project_id,
+        &item_id,
+        &revision_id,
+        |item| item,
+        |revision| {
+            revision
+                .explicit_seed(&seed_head)
+                .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
+        },
     )
-    .bind(&project_id)
-    .bind(repo.display().to_string())
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert project");
-
-    sqlx::query(
-        "INSERT INTO items (
-            id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-            approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
-            priority, labels, created_at, updated_at
-         ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
+    .await;
+    persist_test_workspace(
+        &db,
+        &project_id,
+        WorkspaceKind::Authoring,
+        &workspace_id,
+        |workspace| {
+            workspace
+                .created_for_revision_id(parse_id::<ingot_domain::ids::ItemRevisionId>(
+                    &revision_id,
+                ))
+                .path(workspace_path.display().to_string())
+                .workspace_ref(format!("refs/ingot/workspaces/{workspace_id}"))
+                .base_commit_oid(&seed_head)
+                .head_commit_oid(&seed_head)
+                .retention_policy(RetentionPolicy::Ephemeral)
+        },
     )
-    .bind(&item_id)
-    .bind(&project_id)
-    .bind(&revision_id)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert item");
-
-    sqlx::query(
-        "INSERT INTO item_revisions (
-            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-            seed_target_commit_oid, supersedes_revision_id, created_at
-         ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{\"author_initial\":\"author-initial\"}', ?, ?, NULL, ?)",
-    )
-    .bind(&revision_id)
-    .bind(&item_id)
-    .bind(&seed_head)
-    .bind(&seed_head)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert revision");
-
-    sqlx::query(
-        "INSERT INTO workspaces (
-            id, project_id, kind, strategy, path, created_for_revision_id, parent_workspace_id,
-            target_ref, workspace_ref, base_commit_oid, head_commit_oid, retention_policy,
-            status, current_job_id, created_at, updated_at
-         ) VALUES (?, ?, 'authoring', 'worktree', ?, ?, NULL, 'refs/heads/main', ?, ?, ?, 'ephemeral', 'ready', NULL, ?, ?)",
-    )
-    .bind(&workspace_id)
-    .bind(&project_id)
-    .bind(workspace_path.display().to_string())
-    .bind(&revision_id)
-    .bind(format!("refs/ingot/workspaces/{workspace_id}"))
-    .bind(&seed_head)
-    .bind(&seed_head)
-    .bind(TS)
-    .bind(TS)
-    .execute(&db.pool)
-    .await
-    .expect("insert workspace");
+    .await;
 
     let app = test_router(db.clone());
     let response = app

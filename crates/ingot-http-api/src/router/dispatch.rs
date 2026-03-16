@@ -670,11 +670,11 @@ mod tests {
         GitOperationId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId,
     };
     use ingot_domain::job::{ExecutionPermission, Job, JobInput, OutputArtifactKind, PhaseKind};
-    use ingot_domain::workspace::{Workspace, WorkspaceKind};
+    use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
     use ingot_git::commands::resolve_ref_oid;
     use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
     use ingot_test_support::fixtures::{
-        DEFAULT_TEST_TIMESTAMP, ItemBuilder, JobBuilder, RevisionBuilder,
+        DEFAULT_TEST_TIMESTAMP, ItemBuilder, JobBuilder, RevisionBuilder, WorkspaceBuilder,
     };
     use ingot_test_support::git::{
         git_output as support_git_output, run_git as support_git,
@@ -803,28 +803,23 @@ mod tests {
             .create_item_with_revision(&item, &revision)
             .await
             .expect("create item with revision");
-        let partial_workspace = Workspace {
-            id: WorkspaceId::from_uuid(Uuid::now_v7()),
-            project_id: project.id,
-            kind: WorkspaceKind::Authoring,
-            strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
-            path: state
-                .state_root
-                .join(format!("partial-workspace-{}", Uuid::now_v7()))
-                .display()
-                .to_string(),
-            created_for_revision_id: Some(revision.id),
-            parent_workspace_id: None,
-            target_ref: Some("refs/heads/main".into()),
-            workspace_ref: Some(format!(
+        let partial_workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
+            .id(WorkspaceId::from_uuid(Uuid::now_v7()))
+            .created_for_revision_id(revision.id)
+            .path(
+                state
+                    .state_root
+                    .join(format!("partial-workspace-{}", Uuid::now_v7()))
+                    .display()
+                    .to_string(),
+            )
+            .workspace_ref(format!(
                 "refs/ingot/workspaces/{}",
                 WorkspaceId::from_uuid(Uuid::now_v7())
-            )),
-            retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-            state: ingot_domain::workspace::WorkspaceState::Provisioning { commits: None },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
+            ))
+            .status(WorkspaceStatus::Provisioning)
+            .created_at(Utc::now())
+            .build();
         state
             .db
             .create_workspace(&partial_workspace)
@@ -892,28 +887,23 @@ mod tests {
             .create_item_with_revision(&item, &revision)
             .await
             .expect("create item with revision");
-        let partial_workspace = Workspace {
-            id: WorkspaceId::from_uuid(Uuid::now_v7()),
-            project_id: project.id,
-            kind: WorkspaceKind::Authoring,
-            strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
-            path: state
-                .state_root
-                .join(format!("partial-review-workspace-{}", Uuid::now_v7()))
-                .display()
-                .to_string(),
-            created_for_revision_id: Some(revision.id),
-            parent_workspace_id: None,
-            target_ref: Some("refs/heads/main".into()),
-            workspace_ref: Some(format!(
+        let partial_workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
+            .id(WorkspaceId::from_uuid(Uuid::now_v7()))
+            .created_for_revision_id(revision.id)
+            .path(
+                state
+                    .state_root
+                    .join(format!("partial-review-workspace-{}", Uuid::now_v7()))
+                    .display()
+                    .to_string(),
+            )
+            .workspace_ref(format!(
                 "refs/ingot/workspaces/{}",
                 WorkspaceId::from_uuid(Uuid::now_v7())
-            )),
-            retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-            state: ingot_domain::workspace::WorkspaceState::Provisioning { commits: None },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
+            ))
+            .status(WorkspaceStatus::Provisioning)
+            .created_at(Utc::now())
+            .build();
         state
             .db
             .create_workspace(&partial_workspace)
@@ -1034,26 +1024,15 @@ mod tests {
                 &workspace_ref,
             ],
         );
-        let workspace = Workspace {
-            id: workspace_id,
-            project_id: project.id,
-            kind: WorkspaceKind::Authoring,
-            strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
-            path: workspace_path.display().to_string(),
-            created_for_revision_id: None,
-            parent_workspace_id: None,
-            target_ref: Some("refs/heads/main".into()),
-            workspace_ref: Some(workspace_ref.clone()),
-            retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-            state: ingot_domain::workspace::WorkspaceState::Ready {
-                commits: ingot_domain::workspace::WorkspaceCommitState {
-                    base_commit_oid: head.clone(),
-                    head_commit_oid: head.clone(),
-                },
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
+        let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
+            .id(workspace_id)
+            .path(workspace_path.display().to_string())
+            .workspace_ref(workspace_ref.clone())
+            .base_commit_oid(head.clone())
+            .head_commit_oid(head.clone())
+            .status(WorkspaceStatus::Ready)
+            .created_at(Utc::now())
+            .build();
         state
             .db
             .create_workspace(&workspace)
@@ -1137,33 +1116,24 @@ mod tests {
             .await
             .expect("create project");
 
-        let workspace = Workspace {
-            id: WorkspaceId::from_uuid(Uuid::now_v7()),
-            project_id: project.id,
-            kind: WorkspaceKind::Authoring,
-            strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
-            path: state
-                .state_root
-                .join(format!("orphaned-workspace-{}", Uuid::now_v7()))
-                .display()
-                .to_string(),
-            created_for_revision_id: None,
-            parent_workspace_id: None,
-            target_ref: Some("refs/heads/main".into()),
-            workspace_ref: Some(format!(
+        let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
+            .id(WorkspaceId::from_uuid(Uuid::now_v7()))
+            .path(
+                state
+                    .state_root
+                    .join(format!("orphaned-workspace-{}", Uuid::now_v7()))
+                    .display()
+                    .to_string(),
+            )
+            .workspace_ref(format!(
                 "refs/ingot/workspaces/{}",
                 WorkspaceId::from_uuid(Uuid::now_v7())
-            )),
-            retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-            state: ingot_domain::workspace::WorkspaceState::Ready {
-                commits: ingot_domain::workspace::WorkspaceCommitState {
-                    base_commit_oid: "deadbeef".repeat(5),
-                    head_commit_oid: "deadbeef".repeat(5),
-                },
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
+            ))
+            .base_commit_oid("deadbeef".repeat(5))
+            .head_commit_oid("deadbeef".repeat(5))
+            .status(WorkspaceStatus::Ready)
+            .created_at(Utc::now())
+            .build();
         state
             .db
             .create_workspace(&workspace)
@@ -1282,26 +1252,15 @@ mod tests {
                 &workspace_ref,
             ],
         );
-        let workspace = Workspace {
-            id: workspace_id,
-            project_id: project.id,
-            kind: WorkspaceKind::Authoring,
-            strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
-            path: workspace_path.display().to_string(),
-            created_for_revision_id: None,
-            parent_workspace_id: None,
-            target_ref: Some("refs/heads/main".into()),
-            workspace_ref: Some(workspace_ref.clone()),
-            retention_policy: ingot_domain::workspace::RetentionPolicy::Persistent,
-            state: ingot_domain::workspace::WorkspaceState::Ready {
-                commits: ingot_domain::workspace::WorkspaceCommitState {
-                    base_commit_oid: head.clone(),
-                    head_commit_oid: head.clone(),
-                },
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
+        let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
+            .id(workspace_id)
+            .path(workspace_path.display().to_string())
+            .workspace_ref(workspace_ref.clone())
+            .base_commit_oid(head.clone())
+            .head_commit_oid(head.clone())
+            .status(WorkspaceStatus::Ready)
+            .created_at(Utc::now())
+            .build();
         state
             .db
             .create_workspace(&workspace)
