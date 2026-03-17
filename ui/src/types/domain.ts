@@ -5,7 +5,7 @@ export type LifecycleState = 'open' | 'done'
 export type ParkingState = 'active' | 'deferred'
 export type DoneReason = 'completed' | 'dismissed' | 'invalidated'
 export type ResolutionSource = 'system_command' | 'approval_command' | 'manual_command'
-export type ApprovalState = 'not_required' | 'not_requested' | 'pending' | 'granted' | 'approved'
+export type ApprovalState = 'not_required' | 'not_requested' | 'pending' | 'approved'
 export type EscalationState = 'none' | 'operator_required'
 export type EscalationReason =
   | 'candidate_rework_budget_exhausted'

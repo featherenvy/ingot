@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::Path;
 use std::process::Output;
 
@@ -9,6 +10,13 @@ pub enum GitCommandError {
     CommandFailed(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalizeTargetRefOutcome {
+    AlreadyFinalized,
+    UpdatedNow,
+    Stale,
 }
 
 /// Run a git command in the given working directory.
@@ -143,6 +151,56 @@ pub async fn compare_and_swap_ref(
     Ok(())
 }
 
+pub async fn finalize_target_ref(
+    repo_path: &Path,
+    ref_name: &str,
+    new_oid: &str,
+    expected_old_oid: &str,
+) -> Result<FinalizeTargetRefOutcome, GitCommandError> {
+    finalize_target_ref_with(
+        || resolve_ref_oid(repo_path, ref_name),
+        || compare_and_swap_ref(repo_path, ref_name, new_oid, expected_old_oid),
+        new_oid,
+        expected_old_oid,
+    )
+    .await
+}
+
+async fn finalize_target_ref_with<Resolve, ResolveFut, Cas, CasFut>(
+    mut resolve_ref: Resolve,
+    compare_and_swap: Cas,
+    new_oid: &str,
+    expected_old_oid: &str,
+) -> Result<FinalizeTargetRefOutcome, GitCommandError>
+where
+    Resolve: FnMut() -> ResolveFut,
+    ResolveFut: Future<Output = Result<Option<String>, GitCommandError>>,
+    Cas: FnOnce() -> CasFut,
+    CasFut: Future<Output = Result<(), GitCommandError>>,
+{
+    let current_target_oid = resolve_ref().await?;
+    if current_target_oid.as_deref() == Some(new_oid) {
+        return Ok(FinalizeTargetRefOutcome::AlreadyFinalized);
+    }
+    if current_target_oid.as_deref() != Some(expected_old_oid) {
+        return Ok(FinalizeTargetRefOutcome::Stale);
+    }
+
+    match compare_and_swap().await {
+        Ok(()) => Ok(FinalizeTargetRefOutcome::UpdatedNow),
+        Err(error) => {
+            let current_target_oid = resolve_ref().await?;
+            if current_target_oid.as_deref() == Some(new_oid) {
+                Ok(FinalizeTargetRefOutcome::AlreadyFinalized)
+            } else if current_target_oid.as_deref() != Some(expected_old_oid) {
+                Ok(FinalizeTargetRefOutcome::Stale)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 pub async fn update_ref(
     repo_path: &Path,
     ref_name: &str,
@@ -168,7 +226,14 @@ pub async fn check_ref_format(ref_name: &str) -> Result<bool, GitCommandError> {
 
 #[cfg(test)]
 mod tests {
-    use super::check_ref_format;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{
+        FinalizeTargetRefOutcome, GitCommandError, check_ref_format, finalize_target_ref,
+        finalize_target_ref_with, resolve_ref_oid,
+    };
+    use ingot_test_support::git::{git_output, run_git as git_sync, temp_git_repo};
 
     #[tokio::test]
     async fn check_ref_format_accepts_valid_head_refs() {
@@ -226,5 +291,122 @@ mod tests {
                 "{invalid_ref} should be rejected by git check-ref-format"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn finalize_target_ref_reports_already_finalized_when_ref_is_at_new_oid() {
+        let repo = temp_git_repo("ingot-git-finalize-ref");
+        let base_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("tracked.txt"), "prepared").expect("write prepared");
+        git_sync(&repo, &["add", "tracked.txt"]);
+        git_sync(&repo, &["commit", "-m", "prepared"]);
+        let prepared_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        let outcome = finalize_target_ref(
+            &repo,
+            "refs/heads/main",
+            &prepared_commit_oid,
+            &base_commit_oid,
+        )
+        .await
+        .expect("finalize target ref");
+
+        assert_eq!(outcome, FinalizeTargetRefOutcome::AlreadyFinalized);
+    }
+
+    #[tokio::test]
+    async fn finalize_target_ref_updates_ref_when_target_is_at_expected_old_oid() {
+        let repo = temp_git_repo("ingot-git-finalize-ref");
+        let base_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("tracked.txt"), "prepared").expect("write prepared");
+        git_sync(&repo, &["add", "tracked.txt"]);
+        git_sync(&repo, &["commit", "-m", "prepared"]);
+        let prepared_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+        git_sync(&repo, &["reset", "--hard", &base_commit_oid]);
+
+        let outcome = finalize_target_ref(
+            &repo,
+            "refs/heads/main",
+            &prepared_commit_oid,
+            &base_commit_oid,
+        )
+        .await
+        .expect("finalize target ref");
+
+        assert_eq!(outcome, FinalizeTargetRefOutcome::UpdatedNow);
+        assert_eq!(
+            resolve_ref_oid(&repo, "refs/heads/main")
+                .await
+                .expect("resolve main"),
+            Some(prepared_commit_oid)
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_target_ref_reports_stale_when_ref_has_moved_elsewhere() {
+        let repo = temp_git_repo("ingot-git-finalize-ref");
+        let base_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("tracked.txt"), "prepared").expect("write prepared");
+        git_sync(&repo, &["add", "tracked.txt"]);
+        git_sync(&repo, &["commit", "-m", "prepared"]);
+        let prepared_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+        git_sync(&repo, &["reset", "--hard", &base_commit_oid]);
+        std::fs::write(repo.join("tracked.txt"), "moved").expect("write moved");
+        git_sync(&repo, &["add", "tracked.txt"]);
+        git_sync(&repo, &["commit", "-m", "moved"]);
+
+        let outcome = finalize_target_ref(
+            &repo,
+            "refs/heads/main",
+            &prepared_commit_oid,
+            &base_commit_oid,
+        )
+        .await
+        .expect("finalize target ref");
+
+        assert_eq!(outcome, FinalizeTargetRefOutcome::Stale);
+    }
+
+    #[tokio::test]
+    async fn finalize_target_ref_reports_already_finalized_when_cas_loses_race_to_new_oid() {
+        let resolve_calls = Arc::new(AtomicUsize::new(0));
+        let resolve_calls_for_closure = resolve_calls.clone();
+        let outcome = finalize_target_ref_with(
+            move || {
+                let resolve_calls = resolve_calls_for_closure.clone();
+                async move {
+                    let call_no = resolve_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(match call_no {
+                        0 => Some("base".to_string()),
+                        1 => Some("prepared".to_string()),
+                        _ => unreachable!("only two resolve calls expected"),
+                    })
+                }
+            },
+            || async { Err(GitCommandError::CommandFailed("stale old oid".into())) },
+            "prepared",
+            "base",
+        )
+        .await
+        .expect("finalize target ref");
+
+        assert_eq!(outcome, FinalizeTargetRefOutcome::AlreadyFinalized);
+        assert_eq!(resolve_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn finalize_target_ref_preserves_cas_error_when_ref_is_still_at_expected_old_oid() {
+        let outcome = finalize_target_ref_with(
+            || async { Ok(Some("base".to_string())) },
+            || async { Err(GitCommandError::CommandFailed("update-ref failed".into())) },
+            "prepared",
+            "base",
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            Err(GitCommandError::CommandFailed(message)) if message == "update-ref failed"
+        ));
     }
 }

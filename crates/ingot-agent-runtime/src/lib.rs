@@ -43,7 +43,8 @@ use ingot_domain::workspace::{
 };
 use ingot_git::GitJobCompletionPort;
 use ingot_git::commands::{
-    GitCommandError, compare_and_swap_ref, delete_ref, git, head_oid, resolve_ref_oid,
+    FinalizeTargetRefOutcome, GitCommandError, delete_ref,
+    finalize_target_ref as finalize_target_ref_in_repo, git, head_oid, resolve_ref_oid,
 };
 use ingot_git::commit::{
     ConvergenceCommitTrailers, JobCommitTrailers, abort_cherry_pick, cherry_pick_no_commit,
@@ -56,7 +57,9 @@ use ingot_git::project_repo::{
 };
 use ingot_store_sqlite::{Database, FinishJobNonSuccessParams, StartJobExecutionParams};
 use ingot_usecases::convergence::{
-    ConvergenceSystemActionPort, SystemActionItemState, SystemActionProjectState,
+    CheckoutFinalizationReadiness, ConvergenceSystemActionPort, FinalizePreparedTrigger,
+    FinalizeTargetRefResult, PreparedConvergenceFinalizePort, SystemActionItemState,
+    SystemActionProjectState, finalize_prepared_convergence,
 };
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
 use ingot_usecases::reconciliation::ReconciliationPort;
@@ -156,6 +159,11 @@ struct RuntimeConvergencePort {
 }
 
 #[derive(Clone)]
+struct RuntimeFinalizePort {
+    dispatcher: JobDispatcher,
+}
+
+#[derive(Clone)]
 struct RuntimeReconciliationPort {
     dispatcher: JobDispatcher,
 }
@@ -188,6 +196,15 @@ fn usecase_from_runtime_error(error: RuntimeError) -> ingot_usecases::UseCaseErr
         RuntimeError::Repository(error) => ingot_usecases::UseCaseError::Repository(error),
         other => ingot_usecases::UseCaseError::Internal(other.to_string()),
     }
+}
+
+async fn drain_until_idle<F, Fut>(mut step: F) -> Result<(), RuntimeError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<bool, RuntimeError>>,
+{
+    while step().await? {}
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -405,35 +422,233 @@ impl ConvergenceSystemActionPort for RuntimeConvergencePort {
         }
     }
 
-    fn reconcile_checkout_sync_ready(
-        &self,
-        project: &Project,
-        item_id: ingot_domain::ids::ItemId,
-        revision: &ItemRevision,
-    ) -> impl Future<Output = Result<bool, ingot_usecases::UseCaseError>> + Send {
-        let dispatcher = self.dispatcher.clone();
-        let project = project.clone();
-        let revision = revision.clone();
-        async move {
-            dispatcher
-                .reconcile_checkout_sync_state(&project, item_id, &revision)
-                .await
-                .map(|status| status == CheckoutSyncStatus::Ready)
-                .map_err(usecase_from_runtime_error)
-        }
-    }
-
     fn auto_finalize_prepared_convergence(
         &self,
         project_id: ingot_domain::ids::ProjectId,
         item_id: ingot_domain::ids::ItemId,
-    ) -> impl Future<Output = Result<(), ingot_usecases::UseCaseError>> + Send {
+    ) -> impl Future<Output = Result<bool, ingot_usecases::UseCaseError>> + Send {
         let dispatcher = self.dispatcher.clone();
         async move {
             dispatcher
                 .auto_finalize_prepared_convergence(project_id, item_id)
                 .await
                 .map_err(usecase_from_runtime_error)
+        }
+    }
+}
+
+impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
+    fn find_or_create_finalize_operation(
+        &self,
+        operation: &GitOperation,
+    ) -> impl Future<Output = Result<GitOperation, ingot_usecases::UseCaseError>> + Send {
+        let dispatcher = self.dispatcher.clone();
+        let operation = operation.clone();
+        async move {
+            let convergence_id = operation
+                .entity_id
+                .parse::<ingot_domain::ids::ConvergenceId>()
+                .map_err(|error| ingot_usecases::UseCaseError::Internal(error.to_string()))?;
+            if let Some(existing) = dispatcher
+                .db
+                .find_unresolved_finalize_for_convergence(convergence_id)
+                .await
+                .map_err(ingot_usecases::UseCaseError::Repository)?
+            {
+                return Ok(existing);
+            }
+
+            match dispatcher.db.create_git_operation(&operation).await {
+                Ok(()) => {
+                    dispatcher
+                        .append_activity(
+                            operation.project_id,
+                            ActivityEventType::GitOperationPlanned,
+                            "git_operation",
+                            operation.id.to_string(),
+                            serde_json::json!({
+                                "operation_kind": operation.operation_kind(),
+                                "entity_id": operation.entity_id,
+                            }),
+                        )
+                        .await
+                        .map_err(usecase_from_runtime_error)?;
+                    Ok(operation)
+                }
+                Err(RepositoryError::Conflict(_)) => dispatcher
+                    .db
+                    .find_unresolved_finalize_for_convergence(convergence_id)
+                    .await
+                    .map_err(ingot_usecases::UseCaseError::Repository)?
+                    .ok_or_else(|| {
+                        ingot_usecases::UseCaseError::Internal(
+                            "finalize git operation conflict without existing row".into(),
+                        )
+                    }),
+                Err(other) => Err(ingot_usecases::UseCaseError::Repository(other)),
+            }
+        }
+    }
+
+    fn finalize_target_ref(
+        &self,
+        project: &Project,
+        convergence: &Convergence,
+    ) -> impl Future<Output = Result<FinalizeTargetRefResult, ingot_usecases::UseCaseError>> + Send
+    {
+        let dispatcher = self.dispatcher.clone();
+        let project = project.clone();
+        let convergence = convergence.clone();
+        async move {
+            let paths = dispatcher
+                .refresh_project_mirror(&project)
+                .await
+                .map_err(usecase_from_runtime_error)?;
+            let prepared_commit_oid = convergence
+                .state
+                .prepared_commit_oid()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    ingot_usecases::UseCaseError::Internal("prepared commit missing".into())
+                })?;
+            let input_target_commit_oid = convergence
+                .state
+                .input_target_commit_oid()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    ingot_usecases::UseCaseError::Internal("input target commit missing".into())
+                })?;
+            match finalize_target_ref_in_repo(
+                paths.mirror_git_dir.as_path(),
+                &convergence.target_ref,
+                &prepared_commit_oid,
+                &input_target_commit_oid,
+            )
+            .await
+            .map_err(|error| usecase_from_runtime_error(RuntimeError::from(error)))?
+            {
+                FinalizeTargetRefOutcome::AlreadyFinalized => {
+                    Ok(FinalizeTargetRefResult::AlreadyFinalized)
+                }
+                FinalizeTargetRefOutcome::UpdatedNow => Ok(FinalizeTargetRefResult::UpdatedNow),
+                FinalizeTargetRefOutcome::Stale => Ok(FinalizeTargetRefResult::Stale),
+            }
+        }
+    }
+
+    fn checkout_finalization_readiness(
+        &self,
+        project: &Project,
+        item: &ingot_domain::item::Item,
+        revision: &ItemRevision,
+        prepared_commit_oid: &str,
+    ) -> impl Future<Output = Result<CheckoutFinalizationReadiness, ingot_usecases::UseCaseError>> + Send
+    {
+        let dispatcher = self.dispatcher.clone();
+        let project = project.clone();
+        let revision = revision.clone();
+        let prepared_commit_oid = prepared_commit_oid.to_string();
+        async move {
+            match dispatcher
+                .reconcile_checkout_sync_state(&project, item.id, &revision)
+                .await
+                .map_err(usecase_from_runtime_error)?
+            {
+                CheckoutSyncStatus::Blocked { message, .. } => {
+                    Ok(CheckoutFinalizationReadiness::Blocked { message })
+                }
+                CheckoutSyncStatus::Ready => match checkout_finalization_status(
+                    Path::new(&project.path),
+                    &revision.target_ref,
+                    &prepared_commit_oid,
+                )
+                .await
+                .map_err(|error| usecase_from_runtime_error(RuntimeError::from(error)))?
+                {
+                    CheckoutFinalizationStatus::Blocked { message, .. } => {
+                        Ok(CheckoutFinalizationReadiness::Blocked { message })
+                    }
+                    CheckoutFinalizationStatus::NeedsSync => {
+                        Ok(CheckoutFinalizationReadiness::NeedsSync)
+                    }
+                    CheckoutFinalizationStatus::Synced => Ok(CheckoutFinalizationReadiness::Synced),
+                },
+            }
+        }
+    }
+
+    fn sync_checkout_to_prepared_commit(
+        &self,
+        project: &Project,
+        revision: &ItemRevision,
+        prepared_commit_oid: &str,
+    ) -> impl Future<Output = Result<(), ingot_usecases::UseCaseError>> + Send {
+        let dispatcher = self.dispatcher.clone();
+        let project = project.clone();
+        let revision = revision.clone();
+        let prepared_commit_oid = prepared_commit_oid.to_string();
+        async move {
+            let paths = dispatcher
+                .refresh_project_mirror(&project)
+                .await
+                .map_err(usecase_from_runtime_error)?;
+            sync_checkout_to_commit(
+                Path::new(&project.path),
+                paths.mirror_git_dir.as_path(),
+                &revision.target_ref,
+                &prepared_commit_oid,
+            )
+            .await
+            .map_err(|error| usecase_from_runtime_error(RuntimeError::from(error)))?;
+            Ok(())
+        }
+    }
+
+    fn update_git_operation(
+        &self,
+        operation: &GitOperation,
+    ) -> impl Future<Output = Result<(), ingot_usecases::UseCaseError>> + Send {
+        let dispatcher = self.dispatcher.clone();
+        let operation = operation.clone();
+        async move {
+            dispatcher
+                .db
+                .update_git_operation(&operation)
+                .await
+                .map_err(ingot_usecases::UseCaseError::Repository)?;
+            Ok(())
+        }
+    }
+
+    fn apply_successful_finalization(
+        &self,
+        _trigger: FinalizePreparedTrigger,
+        project: &Project,
+        item: &ingot_domain::item::Item,
+        _revision: &ItemRevision,
+        convergence: &Convergence,
+        _queue_entry: &ConvergenceQueueEntry,
+        operation: &GitOperation,
+    ) -> impl Future<Output = Result<(), ingot_usecases::UseCaseError>> + Send {
+        let dispatcher = self.dispatcher.clone();
+        let convergence = convergence.clone();
+        let operation = operation.clone();
+        async move {
+            dispatcher
+                .adopt_finalized_target_ref(&operation)
+                .await
+                .map_err(usecase_from_runtime_error)?;
+            dispatcher
+                .append_activity(
+                    project.id,
+                    ActivityEventType::ConvergenceFinalized,
+                    "convergence",
+                    convergence.id.to_string(),
+                    serde_json::json!({ "item_id": item.id }),
+                )
+                .await
+                .map_err(usecase_from_runtime_error)?;
+            Ok(())
         }
     }
 }
@@ -554,13 +769,7 @@ impl JobDispatcher {
         .reconcile_startup()
         .await
         .map_err(usecase_to_runtime_error)?;
-        while ConvergenceService::new(RuntimeConvergencePort {
-            dispatcher: self.clone(),
-        })
-        .tick_system_actions()
-        .await
-        .map_err(usecase_to_runtime_error)?
-        {}
+        drain_until_idle(|| self.tick_system_action()).await?;
         let _ = self.recover_projected_review_jobs().await?;
         Ok(())
     }
@@ -1088,22 +1297,6 @@ impl JobDispatcher {
             .await?,
             FinalizeCompletionOutcome::Blocked
         ))
-    }
-
-    async fn find_unresolved_finalize_operation_for_convergence(
-        &self,
-        convergence_id: ingot_domain::ids::ConvergenceId,
-    ) -> Result<Option<GitOperation>, RuntimeError> {
-        let entity_id = convergence_id.to_string();
-        Ok(self
-            .db
-            .list_unresolved_git_operations()
-            .await?
-            .into_iter()
-            .find(|operation| {
-                operation.operation_kind() == OperationKind::FinalizeTargetRef
-                    && operation.entity_id == entity_id
-            }))
     }
 
     async fn adopt_reset_workspace(&self, operation: &GitOperation) -> Result<(), RuntimeError> {
@@ -2077,7 +2270,7 @@ impl JobDispatcher {
         &self,
         project_id: ingot_domain::ids::ProjectId,
         item_id: ingot_domain::ids::ItemId,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<bool, RuntimeError> {
         let _guard = self
             .project_locks
             .acquire_project_mutation(project_id)
@@ -2102,21 +2295,13 @@ impl JobDispatcher {
             .map(|entry| entry.status != ConvergenceQueueEntryStatus::Head)
             .unwrap_or(true)
         {
-            return Ok(());
+            return Ok(false);
         }
-        if item.approval_state != ApprovalState::Granted
-            && !(revision.approval_policy == ingot_domain::revision::ApprovalPolicy::NotRequired
-                && evaluation.next_recommended_action
-                    == RecommendedAction::FinalizePreparedConvergence)
-        {
-            return Ok(());
-        }
-        if self
-            .reconcile_checkout_sync_state(&project, item.id, &revision)
-            .await?
-            != CheckoutSyncStatus::Ready
-        {
-            return Ok(());
+        let should_auto_finalize = revision.approval_policy
+            == ingot_domain::revision::ApprovalPolicy::NotRequired
+            && evaluation.next_recommended_action == RecommendedAction::FinalizePreparedConvergence;
+        if !should_auto_finalize {
+            return Ok(false);
         }
 
         let convergence = convergences
@@ -2136,89 +2321,36 @@ impl JobDispatcher {
             .input_target_commit_oid()
             .map(ToOwned::to_owned)
             .ok_or_else(|| RuntimeError::InvalidState("input target commit missing".into()))?;
-
-        let mut operation = if let Some(operation) = self
-            .find_unresolved_finalize_operation_for_convergence(convergence.id)
-            .await?
-        {
-            operation
-        } else {
-            let operation = GitOperation {
-                id: GitOperationId::new(),
-                project_id,
-                entity_id: convergence.id.to_string(),
-                payload: OperationPayload::FinalizeTargetRef {
-                    workspace_id: convergence.state.integration_workspace_id(),
-                    ref_name: convergence.target_ref.clone(),
-                    expected_old_oid: input_target_commit_oid.clone(),
-                    new_oid: prepared_commit_oid.clone(),
-                    commit_oid: Some(prepared_commit_oid.clone()),
-                },
-                status: GitOperationStatus::Planned,
-                created_at: Utc::now(),
-                completed_at: None,
-            };
-            self.db.create_git_operation(&operation).await?;
-            self.append_activity(
-                project_id,
-                ActivityEventType::GitOperationPlanned,
-                "git_operation",
-                operation.id.to_string(),
-                serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
-            )
-            .await?;
-            operation
-        };
-
         let current_target_oid =
             resolve_ref_oid(paths.mirror_git_dir.as_path(), &convergence.target_ref).await?;
-        if current_target_oid.as_deref() != Some(prepared_commit_oid.as_str()) {
-            compare_and_swap_ref(
-                paths.mirror_git_dir.as_path(),
-                &convergence.target_ref,
-                &prepared_commit_oid,
-                &input_target_commit_oid,
-            )
-            .await?;
+        let target_valid = current_target_oid.as_deref() == Some(prepared_commit_oid.as_str())
+            || current_target_oid.as_deref() == Some(input_target_commit_oid.as_str());
+        if !target_valid {
+            return Ok(false);
         }
 
-        let outcome = self
-            .complete_finalize_target_ref_operation(
-                FinalizeOperationContext {
-                    project: &project,
-                    item_id: item.id,
-                    revision: &revision,
-                    mirror_target_ref: &convergence.target_ref,
-                    prepared_commit_oid: &prepared_commit_oid,
-                    paths: &paths,
-                },
-                &mut operation,
-            )
-            .await?;
-        if outcome != FinalizeCompletionOutcome::Completed {
-            return Ok(());
-        }
-        self.append_activity(
-            project_id,
-            ActivityEventType::ConvergenceFinalized,
-            "convergence",
-            convergence.id.to_string(),
-            serde_json::json!({ "item_id": item.id }),
+        match finalize_prepared_convergence(
+            &RuntimeFinalizePort {
+                dispatcher: self.clone(),
+            },
+            FinalizePreparedTrigger::SystemCommand,
+            &project,
+            &item,
+            &revision,
+            &convergence,
+            queue_entry
+                .as_ref()
+                .expect("queue head already validated for auto-finalize"),
         )
-        .await?;
-        if revision.approval_policy == ingot_domain::revision::ApprovalPolicy::Required {
-            self.append_activity(
-                project_id,
-                ActivityEventType::CheckoutSyncCleared,
-                "item",
-                item.id.to_string(),
-                serde_json::json!({ "reason": "finalized" }),
-            )
-            .await?;
+        .await
+        {
+            Ok(()) => {}
+            Err(ingot_usecases::UseCaseError::ProtocolViolation(_)) => return Ok(false),
+            Err(error) => return Err(usecase_to_runtime_error(error)),
         }
 
         info!(item_id = %item.id, convergence_id = %convergence.id, "auto-finalized prepared convergence");
-        Ok(())
+        Ok(true)
     }
 
     async fn invalidate_prepared_convergence(
@@ -2652,25 +2784,10 @@ impl JobDispatcher {
 
         let mut all_convergences = convergences.to_vec();
         all_convergences.push(convergence.clone());
-        let validation_dispatch_jobs = if current_item.approval_state == ApprovalState::Granted
-            && !convergences.iter().any(|existing| {
-                existing.item_revision_id == revision.id
-                    && existing.state.status() == ConvergenceStatus::Prepared
-            }) {
-            jobs.iter()
-                .filter(|job| {
-                    !(job.item_revision_id == revision.id
-                        && job.step_id == step::VALIDATE_INTEGRATED)
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
-            jobs.to_vec()
-        };
-        let mut validation_job = dispatch_job(
+        let validation_job = dispatch_job(
             &current_item,
             revision,
-            &validation_dispatch_jobs,
+            jobs,
             findings,
             &all_convergences,
             DispatchJobCommand {
@@ -2678,25 +2795,6 @@ impl JobDispatcher {
             },
         )
         .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
-        if current_item.approval_state == ApprovalState::Granted {
-            let latest_validate_job = jobs
-                .iter()
-                .filter(|job| {
-                    job.item_revision_id == revision.id && job.step_id == step::VALIDATE_INTEGRATED
-                })
-                .max_by_key(|job| {
-                    (
-                        (job.semantic_attempt_no, job.retry_no),
-                        job.state.ended_at(),
-                        job.created_at,
-                    )
-                });
-            if let Some(latest_validate_job) = latest_validate_job {
-                validation_job.semantic_attempt_no = latest_validate_job.semantic_attempt_no + 1;
-                validation_job.retry_no = 0;
-                validation_job.supersedes_job_id = Some(latest_validate_job.id);
-            }
-        }
         self.db.create_job(&validation_job).await?;
         self.append_activity(
             project.id,
@@ -4452,6 +4550,8 @@ fn is_closure_relevant_job(job: &Job) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn commit_and_report_schemas_require_every_declared_property() {
@@ -4474,6 +4574,85 @@ mod tests {
             schema_property(&validation_schema, "extensions"),
             Some(nullable_closed_extensions_schema())
         );
+    }
+
+    #[tokio::test]
+    async fn drain_until_idle_stops_after_first_idle_result() {
+        let script = Arc::new(Mutex::new(VecDeque::from([Ok(false)])));
+        let calls = Arc::new(Mutex::new(0usize));
+
+        drain_until_idle({
+            let script = Arc::clone(&script);
+            let calls = Arc::clone(&calls);
+            move || {
+                *calls.lock().expect("calls lock") += 1;
+                let next = script
+                    .lock()
+                    .expect("script lock")
+                    .pop_front()
+                    .expect("scripted result");
+                std::future::ready(next)
+            }
+        })
+        .await
+        .expect("drain should stop");
+
+        assert_eq!(*calls.lock().expect("calls lock"), 1);
+        assert!(script.lock().expect("script lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_until_idle_retries_until_idle_result() {
+        let script = Arc::new(Mutex::new(VecDeque::from([Ok(true), Ok(true), Ok(false)])));
+        let calls = Arc::new(Mutex::new(0usize));
+
+        drain_until_idle({
+            let script = Arc::clone(&script);
+            let calls = Arc::clone(&calls);
+            move || {
+                *calls.lock().expect("calls lock") += 1;
+                let next = script
+                    .lock()
+                    .expect("script lock")
+                    .pop_front()
+                    .expect("scripted result");
+                std::future::ready(next)
+            }
+        })
+        .await
+        .expect("drain should stop");
+
+        assert_eq!(*calls.lock().expect("calls lock"), 3);
+        assert!(script.lock().expect("script lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_until_idle_returns_first_error() {
+        let script = Arc::new(Mutex::new(VecDeque::from([
+            Ok(true),
+            Err(RuntimeError::InvalidState("boom".into())),
+        ])));
+        let calls = Arc::new(Mutex::new(0usize));
+
+        let error = drain_until_idle({
+            let script = Arc::clone(&script);
+            let calls = Arc::clone(&calls);
+            move || {
+                *calls.lock().expect("calls lock") += 1;
+                let next = script
+                    .lock()
+                    .expect("script lock")
+                    .pop_front()
+                    .expect("scripted result");
+                std::future::ready(next)
+            }
+        })
+        .await
+        .expect_err("drain should surface error");
+
+        assert!(matches!(error, RuntimeError::InvalidState(message) if message == "boom"));
+        assert_eq!(*calls.lock().expect("calls lock"), 2);
+        assert!(script.lock().expect("script lock").is_empty());
     }
 
     fn assert_schema_requires_all_properties(schema: &serde_json::Value) {

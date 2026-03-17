@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use ingot_agent_runtime::{DispatcherConfig, JobDispatcher};
 use ingot_domain::item::{ApprovalState, Escalation, EscalationReason, ResolutionSource};
@@ -12,7 +13,6 @@ use ingot_git::commands::{head_oid, resolve_ref_oid};
 use ingot_usecases::ProjectLocks;
 
 mod common;
-use chrono::Duration as ChronoDuration;
 use common::*;
 use ingot_domain::activity::ActivityEventType;
 use ingot_domain::convergence::ConvergenceStatus;
@@ -22,8 +22,189 @@ use ingot_test_support::fixtures::{
     GitOperationBuilder, JobBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
 };
 use ingot_test_support::git::unique_temp_path;
+use tokio::time::timeout;
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
 use ingot_workflow::{Evaluator, RecommendedAction, step};
+
+struct BlockedAutoFinalizeFixture {
+    db: ingot_store_sqlite::Database,
+    dispatcher: JobDispatcher,
+    item_id: ingot_domain::ids::ItemId,
+    convergence_id: ingot_domain::ids::ConvergenceId,
+    integration_workspace_path: std::path::PathBuf,
+}
+
+async fn blocked_auto_finalize_fixture() -> BlockedAutoFinalizeFixture {
+    let repo = temp_git_repo("ingot-runtime-repo");
+    let base_commit = head_oid(&repo).await.expect("base head");
+    std::fs::write(repo.join("tracked.txt"), "prepared").expect("write file");
+    git_sync(&repo, &["add", "tracked.txt"]);
+    git_sync(&repo, &["commit", "-m", "prepared"]);
+    let prepared_commit = head_oid(&repo).await.expect("prepared head");
+    git_sync(&repo, &["reset", "--hard", &base_commit]);
+    git_sync(&repo, &["checkout", "-b", "feature"]);
+    let integration_workspace_path = unique_temp_path("ingot-runtime-integration-blocked");
+
+    let db = migrated_test_db("ingot-runtime-finalize-blocked-auto").await;
+    let state_root = unique_temp_path("ingot-runtime-finalize-blocked-auto-state");
+    let dispatcher = JobDispatcher::with_runner(
+        db.clone(),
+        ProjectLocks::default(),
+        DispatcherConfig::new(state_root.clone()),
+        Arc::new(FakeRunner),
+    );
+
+    let created_at = default_timestamp();
+    let project = ProjectBuilder::new(&repo).created_at(created_at).build();
+    db.create_project(&project).await.expect("create project");
+    let paths = ensure_test_mirror(state_root.as_path(), &project).await;
+    git_sync(
+        &paths.mirror_git_dir,
+        &[
+            "update-ref",
+            "refs/ingot/workspaces/wrk_integration_blocked",
+            &prepared_commit,
+        ],
+    );
+    git_sync(
+        &paths.mirror_git_dir,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            integration_workspace_path.to_str().expect("workspace path"),
+            "refs/ingot/workspaces/wrk_integration_blocked",
+        ],
+    );
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .approval_state(ApprovalState::NotRequired)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .approval_policy(ApprovalPolicy::NotRequired)
+        .explicit_seed(&base_commit)
+        .build();
+    db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let integration_workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Integration)
+        .path(integration_workspace_path.display().to_string())
+        .workspace_ref("refs/ingot/workspaces/wrk_integration_blocked")
+        .created_for_revision_id(revision.id)
+        .base_commit_oid(base_commit.clone())
+        .head_commit_oid(prepared_commit.clone())
+        .created_at(created_at)
+        .build();
+    db.create_workspace(&integration_workspace)
+        .await
+        .expect("create workspace");
+    let source_workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
+        .created_for_revision_id(revision.id)
+        .base_commit_oid(base_commit.clone())
+        .head_commit_oid(prepared_commit.clone())
+        .created_at(created_at)
+        .build();
+    db.create_workspace(&source_workspace)
+        .await
+        .expect("create source workspace");
+
+    let validate_job = JobBuilder::new(project.id, item_id, revision_id, "validate_integrated")
+        .status(JobStatus::Completed)
+        .outcome_class(OutcomeClass::Clean)
+        .phase_kind(PhaseKind::Validate)
+        .workspace_id(integration_workspace.id)
+        .workspace_kind(WorkspaceKind::Integration)
+        .execution_permission(ExecutionPermission::MustNotMutate)
+        .context_policy(ContextPolicy::ResumeContext)
+        .phase_template_slug("validate-integrated")
+        .job_input(JobInput::integrated_subject(
+            base_commit.clone(),
+            prepared_commit.clone(),
+        ))
+        .output_artifact_kind(OutputArtifactKind::ValidationReport)
+        .result_schema_version("validation_report:v1")
+        .result_payload(serde_json::json!({
+            "outcome": "clean",
+            "summary": "integrated clean",
+            "checks": [],
+            "findings": []
+        }))
+        .created_at(created_at)
+        .started_at(created_at)
+        .ended_at(created_at)
+        .build();
+    db.create_job(&validate_job).await.expect("create job");
+
+    let convergence = ConvergenceBuilder::new(project.id, item_id, revision_id)
+        .source_workspace_id(source_workspace.id)
+        .integration_workspace_id(integration_workspace.id)
+        .source_head_commit_oid(prepared_commit.clone())
+        .input_target_commit_oid(base_commit.clone())
+        .prepared_commit_oid(prepared_commit.clone())
+        .target_head_valid(true)
+        .created_at(created_at)
+        .build();
+    db.create_convergence(&convergence)
+        .await
+        .expect("create convergence");
+    db.create_queue_entry(
+        &ConvergenceQueueEntryBuilder::new(project.id, item.id, revision.id)
+            .created_at(created_at)
+            .build(),
+    )
+    .await
+    .expect("insert queue entry");
+
+    BlockedAutoFinalizeFixture {
+        db,
+        dispatcher,
+        item_id,
+        convergence_id: convergence.id,
+        integration_workspace_path,
+    }
+}
+
+async fn assert_blocked_auto_finalize_state(fixture: &BlockedAutoFinalizeFixture) {
+    let updated_item = fixture.db.get_item(fixture.item_id).await.expect("item");
+    assert!(updated_item.lifecycle.is_open());
+    assert!(matches!(
+        updated_item.escalation,
+        Escalation::OperatorRequired {
+            reason: EscalationReason::CheckoutSyncBlocked
+        }
+    ));
+    let updated_convergence = fixture
+        .db
+        .get_convergence(fixture.convergence_id)
+        .await
+        .expect("convergence");
+    assert_eq!(
+        updated_convergence.state.status(),
+        ConvergenceStatus::Prepared
+    );
+    let queue_entries = fixture
+        .db
+        .list_queue_entries_by_item(fixture.item_id)
+        .await
+        .expect("list queue entries");
+    assert_eq!(queue_entries[0].status, ConvergenceQueueEntryStatus::Head);
+    let unresolved = fixture
+        .db
+        .list_unresolved_git_operations()
+        .await
+        .expect("list unresolved");
+    assert_eq!(unresolved.len(), 1, "blocked finalize should stay unresolved");
+    assert_eq!(
+        unresolved[0].operation_kind(),
+        OperationKind::FinalizeTargetRef
+    );
+    assert!(fixture.integration_workspace_path.exists());
+}
 
 #[tokio::test]
 async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
@@ -203,7 +384,35 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
 }
 
 #[tokio::test]
-async fn tick_auto_finalizes_granted_prepared_convergence_even_when_commit_exists_only_in_mirror() {
+async fn reconcile_startup_does_not_spin_when_auto_finalize_is_blocked() {
+    let fixture = blocked_auto_finalize_fixture().await;
+
+    timeout(Duration::from_secs(10), fixture.dispatcher.reconcile_startup())
+        .await
+        .expect("startup should not hang")
+        .expect("reconcile startup");
+
+    assert_blocked_auto_finalize_state(&fixture).await;
+}
+
+#[tokio::test]
+async fn tick_reports_no_progress_when_auto_finalize_is_blocked() {
+    let fixture = blocked_auto_finalize_fixture().await;
+
+    assert!(
+        !fixture
+            .dispatcher
+            .tick()
+            .await
+            .expect("blocked auto-finalize should not report progress")
+    );
+
+    assert_blocked_auto_finalize_state(&fixture).await;
+}
+
+#[tokio::test]
+async fn tick_auto_finalizes_not_required_prepared_convergence_even_when_commit_exists_only_in_mirror()
+ {
     let repo = temp_git_repo("ingot-runtime-repo");
     let base_commit = head_oid(&repo).await.expect("base head");
     let db = migrated_test_db("ingot-runtime-finalize-mirror-only").await;
@@ -242,10 +451,11 @@ async fn tick_auto_finalizes_granted_prepared_convergence_even_when_commit_exist
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let item = ItemBuilder::new(project.id, revision_id)
         .id(item_id)
-        .approval_state(ApprovalState::Granted)
+        .approval_state(ApprovalState::NotRequired)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
+        .approval_policy(ingot_domain::revision::ApprovalPolicy::NotRequired)
         .explicit_seed(&base_commit)
         .build();
     db.create_item_with_revision(&item, &revision)
@@ -338,7 +548,7 @@ async fn tick_auto_finalizes_granted_prepared_convergence_even_when_commit_exist
     );
     let updated_item = db.get_item(item.id).await.expect("item");
     assert!(updated_item.lifecycle.is_done());
-    assert_eq!(updated_item.approval_state, ApprovalState::Approved);
+    assert_eq!(updated_item.approval_state, ApprovalState::NotRequired);
     let queue_entries = db
         .list_queue_entries_by_item(item.id)
         .await
@@ -505,10 +715,11 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let item = ItemBuilder::new(project.id, revision_id)
         .id(item_id)
-        .approval_state(ApprovalState::Granted)
+        .approval_state(ApprovalState::NotRequired)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
+        .approval_policy(ingot_domain::revision::ApprovalPolicy::NotRequired)
         .explicit_seed(&base_commit)
         .build();
     db.create_item_with_revision(&item, &revision)
@@ -609,328 +820,6 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
 }
 
 #[tokio::test]
-async fn tick_reprepares_granted_lane_head_without_prepared_convergence() {
-    let h = TestHarness::new(Arc::new(FakeRunner)).await;
-
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
-    let item_id = ingot_domain::ids::ItemId::new();
-    let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let item = ItemBuilder::new(h.project.id, revision_id)
-        .id(item_id)
-        .approval_state(ApprovalState::Granted)
-        .build();
-    let revision = RevisionBuilder::new(item_id)
-        .id(revision_id)
-        .explicit_seed(&seed_commit)
-        .build();
-    h.db.create_item_with_revision(&item, &revision)
-        .await
-        .expect("create item");
-
-    let created_at = default_timestamp();
-    let authoring_workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
-        .created_for_revision_id(revision.id)
-        .base_commit_oid(seed_commit.clone())
-        .head_commit_oid(seed_commit.clone())
-        .created_at(created_at)
-        .build();
-    h.db.create_workspace(&authoring_workspace)
-        .await
-        .expect("create workspace");
-
-    let candidate_validate_job = JobBuilder::new(
-        h.project.id,
-        item_id,
-        revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
-    )
-    .status(JobStatus::Completed)
-    .outcome_class(OutcomeClass::Clean)
-    .phase_kind(PhaseKind::Validate)
-    .workspace_kind(WorkspaceKind::Authoring)
-    .execution_permission(ExecutionPermission::MustNotMutate)
-    .context_policy(ContextPolicy::ResumeContext)
-    .phase_template_slug("validate-candidate")
-    .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        seed_commit.clone(),
-    ))
-    .output_artifact_kind(OutputArtifactKind::ValidationReport)
-    .result_schema_version("validation_report:v1")
-    .result_payload(serde_json::json!({
-        "outcome": "clean",
-        "summary": "integrated clean",
-        "checks": [],
-        "findings": []
-    }))
-    .created_at(created_at)
-    .started_at(created_at)
-    .ended_at(created_at)
-    .build();
-    h.db.create_job(&candidate_validate_job)
-        .await
-        .expect("create candidate validation");
-    let stale_validate_job = JobBuilder::new(
-        h.project.id,
-        item_id,
-        revision_id,
-        step::VALIDATE_INTEGRATED,
-    )
-    .status(JobStatus::Completed)
-    .outcome_class(OutcomeClass::Clean)
-    .phase_kind(PhaseKind::Validate)
-    .workspace_kind(WorkspaceKind::Integration)
-    .execution_permission(ExecutionPermission::MustNotMutate)
-    .context_policy(ContextPolicy::ResumeContext)
-    .phase_template_slug("validate-integrated")
-    .job_input(JobInput::integrated_subject(
-        seed_commit.clone(),
-        seed_commit.clone(),
-    ))
-    .output_artifact_kind(OutputArtifactKind::ValidationReport)
-    .result_schema_version("validation_report:v1")
-    .result_payload(serde_json::json!({
-        "outcome": "clean",
-        "summary": "integrated clean",
-        "checks": [],
-        "findings": []
-    }))
-    .created_at(created_at)
-    .started_at(created_at)
-    .ended_at(created_at + ChronoDuration::seconds(1))
-    .build();
-    h.db.create_job(&stale_validate_job)
-        .await
-        .expect("create stale validation");
-    h.db.create_queue_entry(
-        &ConvergenceQueueEntryBuilder::new(h.project.id, item_id, revision.id)
-            .created_at(created_at)
-            .build(),
-    )
-    .await
-    .expect("insert queue entry");
-
-    assert!(h.dispatcher.tick().await.expect("tick should reprepare"));
-
-    let convergences =
-        h.db.list_convergences_by_item(item.id)
-            .await
-            .expect("list convergences");
-    assert!(
-        convergences
-            .iter()
-            .any(|convergence| convergence.state.status() == ConvergenceStatus::Prepared)
-    );
-    let jobs = h.db.list_jobs_by_item(item.id).await.expect("jobs");
-    assert!(
-        jobs.iter().any(|job| {
-            job.step_id == step::VALIDATE_INTEGRATED
-                && job.state.is_active()
-                && job.item_revision_id == revision.id
-        }),
-        "reprepare should dispatch a fresh integrated validation job"
-    );
-    let unresolved =
-        h.db.list_unresolved_git_operations()
-            .await
-            .expect("list unresolved");
-    assert!(
-        unresolved.is_empty(),
-        "successful reprepare should reconcile its git operation"
-    );
-}
-
-#[tokio::test]
-async fn tick_reprepare_of_already_integrated_patch_does_not_leave_running_busy_planned_state() {
-    let repo = temp_git_repo("ingot-runtime-repo");
-    let seed_commit = head_oid(&repo).await.expect("seed head");
-    std::fs::write(repo.join("tracked.txt"), "already integrated").expect("write change");
-    git_sync(&repo, &["add", "tracked.txt"]);
-    git_sync(&repo, &["commit", "-m", "already integrated"]);
-    let source_commit = head_oid(&repo).await.expect("source commit");
-
-    let db = migrated_test_db("ingot-runtime-empty-reprepare").await;
-    let dispatcher = JobDispatcher::with_runner(
-        db.clone(),
-        ProjectLocks::default(),
-        DispatcherConfig::new(unique_temp_path("ingot-runtime-empty-reprepare-state")),
-        Arc::new(FakeRunner),
-    );
-
-    let created_at = default_timestamp();
-    let project = ProjectBuilder::new(&repo).created_at(created_at).build();
-    db.create_project(&project).await.expect("create project");
-
-    let item_id = ingot_domain::ids::ItemId::new();
-    let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let item = ItemBuilder::new(project.id, revision_id)
-        .id(item_id)
-        .approval_state(ApprovalState::Granted)
-        .build();
-    let revision = RevisionBuilder::new(item_id)
-        .id(revision_id)
-        .explicit_seed(&seed_commit)
-        .build();
-    db.create_item_with_revision(&item, &revision)
-        .await
-        .expect("create item");
-
-    let authoring_workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
-        .created_for_revision_id(revision.id)
-        .base_commit_oid(seed_commit.clone())
-        .head_commit_oid(source_commit.clone())
-        .created_at(created_at)
-        .build();
-    db.create_workspace(&authoring_workspace)
-        .await
-        .expect("create workspace");
-
-    let author_job = JobBuilder::new(project.id, item_id, revision_id, step::AUTHOR_INITIAL)
-        .status(JobStatus::Completed)
-        .outcome_class(OutcomeClass::Clean)
-        .phase_kind(PhaseKind::Author)
-        .workspace_id(authoring_workspace.id)
-        .workspace_kind(WorkspaceKind::Authoring)
-        .execution_permission(ExecutionPermission::MayMutate)
-        .context_policy(ContextPolicy::Fresh)
-        .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(seed_commit.clone()))
-        .output_artifact_kind(OutputArtifactKind::Commit)
-        .output_commit_oid(source_commit.clone())
-        .result_schema_version("commit_summary:v1")
-        .result_payload(serde_json::json!({
-            "summary": "already integrated",
-            "validation": null
-        }))
-        .created_at(created_at)
-        .started_at(created_at)
-        .ended_at(created_at)
-        .build();
-    db.create_job(&author_job).await.expect("create author job");
-
-    let candidate_validate_job = JobBuilder::new(
-        project.id,
-        item_id,
-        revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
-    )
-    .status(JobStatus::Completed)
-    .outcome_class(OutcomeClass::Clean)
-    .phase_kind(PhaseKind::Validate)
-    .workspace_id(authoring_workspace.id)
-    .workspace_kind(WorkspaceKind::Authoring)
-    .execution_permission(ExecutionPermission::MustNotMutate)
-    .context_policy(ContextPolicy::ResumeContext)
-    .phase_template_slug("validate-candidate")
-    .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        source_commit.clone(),
-    ))
-    .output_artifact_kind(OutputArtifactKind::ValidationReport)
-    .result_schema_version("validation_report:v1")
-    .result_payload(serde_json::json!({
-        "outcome": "clean",
-        "summary": "candidate clean",
-        "checks": [],
-        "findings": []
-    }))
-    .created_at(created_at)
-    .started_at(created_at)
-    .ended_at(created_at)
-    .build();
-    db.create_job(&candidate_validate_job)
-        .await
-        .expect("create candidate validation");
-    let stale_validate_job =
-        JobBuilder::new(project.id, item_id, revision_id, step::VALIDATE_INTEGRATED)
-            .status(JobStatus::Completed)
-            .outcome_class(OutcomeClass::Clean)
-            .phase_kind(PhaseKind::Validate)
-            .workspace_kind(WorkspaceKind::Integration)
-            .execution_permission(ExecutionPermission::MustNotMutate)
-            .context_policy(ContextPolicy::ResumeContext)
-            .phase_template_slug("validate-integrated")
-            .job_input(JobInput::integrated_subject(
-                seed_commit.clone(),
-                source_commit.clone(),
-            ))
-            .output_artifact_kind(OutputArtifactKind::ValidationReport)
-            .result_schema_version("validation_report:v1")
-            .result_payload(serde_json::json!({
-                "outcome": "clean",
-                "summary": "integrated clean",
-                "checks": [],
-                "findings": []
-            }))
-            .created_at(created_at)
-            .started_at(created_at)
-            .ended_at(created_at + ChronoDuration::seconds(1))
-            .build();
-    db.create_job(&stale_validate_job)
-        .await
-        .expect("create stale validation");
-    db.create_queue_entry(
-        &ConvergenceQueueEntryBuilder::new(project.id, item_id, revision.id)
-            .created_at(created_at)
-            .build(),
-    )
-    .await
-    .expect("insert queue entry");
-
-    assert!(
-        dispatcher
-            .tick()
-            .await
-            .expect("tick should reprepare cleanly")
-    );
-
-    let convergences = db
-        .list_convergences_by_item(item.id)
-        .await
-        .expect("list convergences");
-    assert!(
-        convergences
-            .iter()
-            .any(|convergence| convergence.state.status() == ConvergenceStatus::Prepared),
-        "reprepare should leave a prepared convergence rather than a running one"
-    );
-    assert!(
-        !convergences
-            .iter()
-            .any(|convergence| convergence.state.status() == ConvergenceStatus::Running),
-        "empty replay must not strand a running convergence"
-    );
-    let workspaces = db
-        .list_workspaces_by_item(item.id)
-        .await
-        .expect("list workspaces");
-    assert!(
-        !workspaces.iter().any(|workspace| {
-            workspace.kind == WorkspaceKind::Integration
-                && workspace.state.status() == WorkspaceStatus::Busy
-        }),
-        "empty replay must not strand a busy integration workspace"
-    );
-    let unresolved = db
-        .list_unresolved_git_operations()
-        .await
-        .expect("list unresolved");
-    assert!(
-        unresolved.is_empty(),
-        "empty replay should not leave a planned convergence git operation behind"
-    );
-    let jobs = db.list_jobs_by_item(item.id).await.expect("jobs");
-    assert!(
-        jobs.iter().any(|job| {
-            job.step_id == step::VALIDATE_INTEGRATED
-                && job.state.is_active()
-                && job.item_revision_id == revision.id
-        }),
-        "reprepare should queue a fresh integrated validation job"
-    );
-}
-
-#[tokio::test]
 async fn fail_prepare_convergence_attempt_marks_non_conflict_failures_as_step_failed() {
     let h = TestHarness::new(Arc::new(FakeRunner)).await;
 
@@ -939,10 +828,11 @@ async fn fail_prepare_convergence_attempt_marks_non_conflict_failures_as_step_fa
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
-        .approval_state(ApprovalState::Granted)
+        .approval_state(ApprovalState::NotRequired)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
+        .approval_policy(ingot_domain::revision::ApprovalPolicy::NotRequired)
         .explicit_seed(&seed_commit)
         .build();
     h.db.create_item_with_revision(&item, &revision)

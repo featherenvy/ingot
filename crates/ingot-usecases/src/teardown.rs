@@ -667,6 +667,13 @@ mod tests {
         async fn find_unresolved(&self) -> Result<Vec<GitOperation>, RepositoryError> {
             Ok(vec![])
         }
+
+        async fn find_unresolved_finalize_for_convergence(
+            &self,
+            _convergence_id: ConvergenceId,
+        ) -> Result<Option<GitOperation>, RepositoryError> {
+            Ok(None)
+        }
     }
 
     #[derive(Clone, Default)]

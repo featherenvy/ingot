@@ -39,7 +39,6 @@ pub enum ApprovalState {
     NotRequired,
     NotRequested,
     Pending,
-    Granted,
     Approved,
 }
 

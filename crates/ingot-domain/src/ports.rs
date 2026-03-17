@@ -223,6 +223,10 @@ pub trait GitOperationRepository: Send + Sync {
     fn find_unresolved(
         &self,
     ) -> impl Future<Output = Result<Vec<GitOperation>, RepositoryError>> + Send;
+    fn find_unresolved_finalize_for_convergence(
+        &self,
+        convergence_id: ConvergenceId,
+    ) -> impl Future<Output = Result<Option<GitOperation>, RepositoryError>> + Send;
 }
 
 pub trait ActivityRepository: Send + Sync {

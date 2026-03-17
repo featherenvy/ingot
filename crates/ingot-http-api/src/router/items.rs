@@ -128,10 +128,8 @@ pub(super) async fn list_items(
             hydrate_convergence_validity(paths.mirror_git_dir.as_path(), convergences).await?;
         let evaluation =
             evaluator.evaluate(&item, &current_revision, &jobs, &findings, &convergences);
-        let queue =
-            load_queue_status(&state, &item, &current_revision, &project, &evaluation).await?;
+        let queue = load_queue_status(&state, &current_revision, &project, &evaluation).await?;
         let evaluation = overlay_evaluation_with_queue_state(
-            &item,
             &current_revision,
             &convergences,
             evaluation,
@@ -602,14 +600,9 @@ pub(super) async fn load_item_detail(
     let revision_context_summary = parse_revision_context_summary(revision_context.as_ref());
     let evaluation =
         Evaluator::new().evaluate(&item, &current_revision, &jobs, &findings, &convergences);
-    let queue = load_queue_status(state, &item, &current_revision, &project, &evaluation).await?;
-    let evaluation = overlay_evaluation_with_queue_state(
-        &item,
-        &current_revision,
-        &convergences,
-        evaluation,
-        &queue,
-    );
+    let queue = load_queue_status(state, &current_revision, &project, &evaluation).await?;
+    let evaluation =
+        overlay_evaluation_with_queue_state(&current_revision, &convergences, evaluation, &queue);
     let diagnostics = evaluation.diagnostics.clone();
 
     Ok(ItemDetailResponse {
@@ -705,7 +698,6 @@ pub(super) fn empty_queue_status() -> QueueStatusResponse {
 }
 
 pub(super) fn overlay_evaluation_with_queue_state(
-    item: &Item,
     revision: &ItemRevision,
     convergences: &[Convergence],
     mut evaluation: Evaluation,
@@ -724,21 +716,6 @@ pub(super) fn overlay_evaluation_with_queue_state(
 
     if queue.state.as_deref() == Some("queued") {
         set_awaiting_convergence_lane(&mut evaluation);
-    }
-
-    if item.approval_state == ApprovalState::Granted && has_prepared_convergence {
-        evaluation.next_recommended_action = if queue.checkout_sync_blocked {
-            RecommendedAction::ResolveCheckoutSync
-        } else {
-            RecommendedAction::FinalizePreparedConvergence
-        };
-        evaluation.dispatchable_step_id = None;
-        evaluation.allowed_actions = vec![];
-        evaluation.phase_status = Some(if queue.checkout_sync_blocked {
-            PhaseStatus::AwaitingConvergence
-        } else {
-            PhaseStatus::FinalizationReady
-        });
     }
 
     if queue.checkout_sync_blocked
@@ -766,7 +743,6 @@ fn set_awaiting_convergence_lane(evaluation: &mut Evaluation) {
 
 pub(super) async fn load_queue_status(
     state: &AppState,
-    item: &Item,
     revision: &ItemRevision,
     project: &Project,
     evaluation: &Evaluation,
@@ -809,9 +785,7 @@ pub(super) async fn load_queue_status(
     };
 
     let should_check_checkout = active_entry.status == ConvergenceQueueEntryStatus::Head
-        && (item.approval_state == ApprovalState::Granted
-            || evaluation.next_recommended_action
-                == RecommendedAction::FinalizePreparedConvergence);
+        && evaluation.next_recommended_action == RecommendedAction::FinalizePreparedConvergence;
     if should_check_checkout {
         match checkout_sync_status(FsPath::new(&project.path), &revision.target_ref)
             .await

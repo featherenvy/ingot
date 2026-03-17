@@ -4,10 +4,135 @@ use super::items::{
 use super::support::*;
 use super::types::*;
 use super::*;
+use ingot_git::commands::{
+    FinalizeTargetRefOutcome, finalize_target_ref as finalize_target_ref_in_repo,
+};
+use ingot_git::project_repo::{
+    CheckoutFinalizationStatus, CheckoutSyncStatus, checkout_finalization_status,
+    checkout_sync_status, sync_checkout_to_commit,
+};
+use ingot_usecases::convergence::{
+    ApprovalFinalizeReadiness, CheckoutFinalizationReadiness, FinalizePreparedTrigger,
+    FinalizeTargetRefResult, PreparedConvergenceFinalizePort,
+};
 
 #[derive(Clone)]
 pub(super) struct HttpConvergencePort {
     pub(super) state: AppState,
+}
+
+fn approval_finalize_readiness(
+    prepared_convergence: Option<Convergence>,
+    queue_entry: Option<ConvergenceQueueEntry>,
+    resolved_target_oid: Option<&str>,
+) -> ApprovalFinalizeReadiness {
+    let Some(convergence) = prepared_convergence else {
+        return ApprovalFinalizeReadiness::MissingPreparedConvergence;
+    };
+
+    let target_valid = convergence
+        .state
+        .input_target_commit_oid()
+        .zip(convergence.state.prepared_commit_oid())
+        .is_some_and(|(input_target_commit_oid, prepared_commit_oid)| {
+            resolved_target_oid == Some(input_target_commit_oid)
+                || resolved_target_oid == Some(prepared_commit_oid)
+        });
+    if !target_valid {
+        return ApprovalFinalizeReadiness::PreparedConvergenceStale;
+    }
+
+    let Some(queue_entry) = queue_entry else {
+        return ApprovalFinalizeReadiness::ConvergenceNotQueued;
+    };
+    if queue_entry.status != ConvergenceQueueEntryStatus::Head {
+        return ApprovalFinalizeReadiness::ConvergenceNotLaneHead;
+    }
+
+    ApprovalFinalizeReadiness::Ready {
+        convergence,
+        queue_entry,
+    }
+}
+
+async fn reconcile_checkout_sync_state_http(
+    state: &AppState,
+    project: &Project,
+    item_id: ItemId,
+    revision: &ItemRevision,
+) -> Result<CheckoutSyncStatus, UseCaseError> {
+    let mut item = state
+        .db
+        .get_item(item_id)
+        .await
+        .map_err(UseCaseError::Repository)?;
+    let status = checkout_sync_status(std::path::Path::new(&project.path), &revision.target_ref)
+        .await
+        .map_err(git_to_internal)
+        .map_err(api_to_usecase_error)?;
+    let checkout_sync_blocked = matches!(
+        item.escalation,
+        Escalation::OperatorRequired {
+            reason: EscalationReason::CheckoutSyncBlocked
+        }
+    );
+    match &status {
+        CheckoutSyncStatus::Ready => {
+            if checkout_sync_blocked {
+                item.escalation = Escalation::None;
+                item.updated_at = Utc::now();
+                state
+                    .db
+                    .update_item(&item)
+                    .await
+                    .map_err(UseCaseError::Repository)?;
+                append_activity(
+                    state,
+                    project.id,
+                    ActivityEventType::CheckoutSyncCleared,
+                    "item",
+                    item.id,
+                    serde_json::json!({}),
+                )
+                .await
+                .map_err(api_to_usecase_error)?;
+                append_activity(
+                    state,
+                    project.id,
+                    ActivityEventType::ItemEscalationCleared,
+                    "item",
+                    item.id,
+                    serde_json::json!({ "reason": "checkout_sync_ready" }),
+                )
+                .await
+                .map_err(api_to_usecase_error)?;
+            }
+        }
+        CheckoutSyncStatus::Blocked { message, .. } => {
+            if !checkout_sync_blocked {
+                item.escalation = Escalation::OperatorRequired {
+                    reason: EscalationReason::CheckoutSyncBlocked,
+                };
+                item.updated_at = Utc::now();
+                state
+                    .db
+                    .update_item(&item)
+                    .await
+                    .map_err(UseCaseError::Repository)?;
+                append_activity(
+                    state,
+                    project.id,
+                    ActivityEventType::CheckoutSyncBlocked,
+                    "item",
+                    item.id,
+                    serde_json::json!({ "message": message }),
+                )
+                .await
+                .map_err(api_to_usecase_error)?;
+            }
+        }
+    }
+    Ok(status)
 }
 
 impl ConvergenceCommandPort for HttpConvergencePort {
@@ -184,30 +309,43 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 .find_active_queue_entry_for_revision(revision.id)
                 .await
                 .map_err(UseCaseError::Repository)?;
-            let prepared_convergence = convergences.iter().find(|convergence| {
-                convergence.item_revision_id == revision.id
-                    && convergence.state.status()
-                        == ingot_domain::convergence::ConvergenceStatus::Prepared
+            let revision_id = revision.id;
+            let prepared_convergence = convergences
+                .iter()
+                .find(|convergence| {
+                    convergence.item_revision_id == revision_id
+                        && convergence.state.status()
+                            == ingot_domain::convergence::ConvergenceStatus::Prepared
+                })
+                .cloned();
+            let resolved_target_oid =
+                resolve_ref_oid(paths.mirror_git_dir.as_path(), &revision.target_ref)
+                    .await
+                    .map_err(git_to_internal)
+                    .map_err(api_to_usecase_error)?;
+            let has_active_job = jobs
+                .iter()
+                .any(|job| job.item_revision_id == revision_id && job.state.is_active());
+            let has_active_convergence = convergences.iter().any(|convergence| {
+                convergence.item_revision_id == revision_id
+                    && matches!(
+                        convergence.state.status(),
+                        ingot_domain::convergence::ConvergenceStatus::Queued
+                            | ingot_domain::convergence::ConvergenceStatus::Running
+                    )
             });
 
             Ok(ingot_usecases::convergence::ConvergenceApprovalContext {
+                project,
                 item,
-                has_active_job: jobs
-                    .iter()
-                    .any(|job| job.item_revision_id == revision.id && job.state.is_active()),
-                has_active_convergence: convergences.iter().any(|convergence| {
-                    convergence.item_revision_id == revision.id
-                        && matches!(
-                            convergence.state.status(),
-                            ingot_domain::convergence::ConvergenceStatus::Queued
-                                | ingot_domain::convergence::ConvergenceStatus::Running
-                        )
-                }),
-                prepared_convergence_id: prepared_convergence.map(|convergence| convergence.id),
-                prepared_target_valid: prepared_convergence
-                    .and_then(|convergence| convergence.target_head_valid)
-                    .unwrap_or(false),
-                queue_entry,
+                revision,
+                has_active_job,
+                has_active_convergence,
+                finalize_readiness: approval_finalize_readiness(
+                    prepared_convergence,
+                    queue_entry,
+                    resolved_target_oid.as_deref(),
+                ),
             })
         }
     }
@@ -345,6 +483,291 @@ impl ConvergenceCommandPort for HttpConvergencePort {
     }
 }
 
+impl PreparedConvergenceFinalizePort for HttpConvergencePort {
+    fn find_or_create_finalize_operation(
+        &self,
+        operation: &GitOperation,
+    ) -> impl std::future::Future<Output = Result<GitOperation, UseCaseError>> + Send {
+        let state = self.state.clone();
+        let operation = operation.clone();
+        async move {
+            if let Some(existing) = state
+                .db
+                .find_unresolved_finalize_for_convergence(
+                    operation
+                        .entity_id
+                        .parse::<ingot_domain::ids::ConvergenceId>()
+                        .map_err(|error| UseCaseError::Internal(error.to_string()))?,
+                )
+                .await
+                .map_err(UseCaseError::Repository)?
+            {
+                return Ok(existing);
+            }
+
+            match state.db.create_git_operation(&operation).await {
+                Ok(()) => {
+                    append_activity(
+                        &state,
+                        operation.project_id,
+                        ActivityEventType::GitOperationPlanned,
+                        "git_operation",
+                        operation.id,
+                        serde_json::json!({
+                            "operation_kind": operation.operation_kind(),
+                            "entity_id": operation.entity_id,
+                        }),
+                    )
+                    .await
+                    .map_err(api_to_usecase_error)?;
+                    Ok(operation)
+                }
+                Err(RepositoryError::Conflict(_)) => state
+                    .db
+                    .find_unresolved_finalize_for_convergence(
+                        operation
+                            .entity_id
+                            .parse::<ingot_domain::ids::ConvergenceId>()
+                            .map_err(|error| UseCaseError::Internal(error.to_string()))?,
+                    )
+                    .await
+                    .map_err(UseCaseError::Repository)?
+                    .ok_or_else(|| {
+                        UseCaseError::Internal(
+                            "finalize git operation conflict without existing row".into(),
+                        )
+                    }),
+                Err(other) => Err(UseCaseError::Repository(other)),
+            }
+        }
+    }
+
+    fn finalize_target_ref(
+        &self,
+        project: &Project,
+        convergence: &Convergence,
+    ) -> impl std::future::Future<Output = Result<FinalizeTargetRefResult, UseCaseError>> + Send
+    {
+        let state = self.state.clone();
+        let project = project.clone();
+        let convergence = convergence.clone();
+        async move {
+            let paths = refresh_project_mirror(&state, &project)
+                .await
+                .map_err(api_to_usecase_error)?;
+            let prepared_commit_oid = convergence
+                .state
+                .prepared_commit_oid()
+                .map(ToOwned::to_owned)
+                .ok_or(UseCaseError::PreparedConvergenceMissing)?;
+            let input_target_commit_oid = convergence
+                .state
+                .input_target_commit_oid()
+                .map(ToOwned::to_owned)
+                .ok_or(UseCaseError::PreparedConvergenceMissing)?;
+
+            match finalize_target_ref_in_repo(
+                paths.mirror_git_dir.as_path(),
+                &convergence.target_ref,
+                &prepared_commit_oid,
+                &input_target_commit_oid,
+            )
+            .await
+            .map_err(git_to_internal)
+            .map_err(api_to_usecase_error)?
+            {
+                FinalizeTargetRefOutcome::AlreadyFinalized => {
+                    Ok(FinalizeTargetRefResult::AlreadyFinalized)
+                }
+                FinalizeTargetRefOutcome::UpdatedNow => Ok(FinalizeTargetRefResult::UpdatedNow),
+                FinalizeTargetRefOutcome::Stale => Ok(FinalizeTargetRefResult::Stale),
+            }
+        }
+    }
+
+    fn checkout_finalization_readiness(
+        &self,
+        project: &Project,
+        item: &Item,
+        revision: &ItemRevision,
+        prepared_commit_oid: &str,
+    ) -> impl std::future::Future<Output = Result<CheckoutFinalizationReadiness, UseCaseError>> + Send
+    {
+        let state = self.state.clone();
+        let project = project.clone();
+        let item = item.clone();
+        let revision = revision.clone();
+        let prepared_commit_oid = prepared_commit_oid.to_string();
+        async move {
+            let readiness = match checkout_finalization_status(
+                std::path::Path::new(&project.path),
+                &revision.target_ref,
+                &prepared_commit_oid,
+            )
+            .await
+            .map_err(git_to_internal)
+            .map_err(api_to_usecase_error)?
+            {
+                CheckoutFinalizationStatus::Blocked { message, .. } => {
+                    CheckoutFinalizationReadiness::Blocked { message }
+                }
+                CheckoutFinalizationStatus::NeedsSync => CheckoutFinalizationReadiness::NeedsSync,
+                CheckoutFinalizationStatus::Synced => CheckoutFinalizationReadiness::Synced,
+            };
+            reconcile_checkout_sync_state_http(&state, &project, item.id, &revision).await?;
+            Ok(readiness)
+        }
+    }
+
+    fn sync_checkout_to_prepared_commit(
+        &self,
+        project: &Project,
+        revision: &ItemRevision,
+        prepared_commit_oid: &str,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        let state = self.state.clone();
+        let project = project.clone();
+        let revision = revision.clone();
+        let prepared_commit_oid = prepared_commit_oid.to_string();
+        async move {
+            let paths = refresh_project_mirror(&state, &project)
+                .await
+                .map_err(api_to_usecase_error)?;
+            sync_checkout_to_commit(
+                std::path::Path::new(&project.path),
+                paths.mirror_git_dir.as_path(),
+                &revision.target_ref,
+                &prepared_commit_oid,
+            )
+            .await
+            .map_err(git_to_internal)
+            .map_err(api_to_usecase_error)?;
+            Ok(())
+        }
+    }
+
+    fn update_git_operation(
+        &self,
+        operation: &GitOperation,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        let state = self.state.clone();
+        let operation = operation.clone();
+        async move {
+            state
+                .db
+                .update_git_operation(&operation)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            Ok(())
+        }
+    }
+
+    fn apply_successful_finalization(
+        &self,
+        trigger: FinalizePreparedTrigger,
+        project: &Project,
+        item: &Item,
+        _revision: &ItemRevision,
+        convergence: &Convergence,
+        queue_entry: &ConvergenceQueueEntry,
+        operation: &GitOperation,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        let state = self.state.clone();
+        let project = project.clone();
+        let mut item = item.clone();
+        let mut convergence = convergence.clone();
+        let mut queue_entry = queue_entry.clone();
+        let operation = operation.clone();
+        async move {
+            let now = Utc::now();
+            let final_commit_oid = operation
+                .new_oid()
+                .or(operation.commit_oid())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    UseCaseError::Internal(
+                        "reconciled finalize_target_ref missing final commit oid".into(),
+                    )
+                })?;
+
+            convergence.transition_to_finalized(final_commit_oid, now);
+            state
+                .db
+                .update_convergence(&convergence)
+                .await
+                .map_err(UseCaseError::Repository)?;
+
+            queue_entry.status = ConvergenceQueueEntryStatus::Released;
+            queue_entry.released_at = Some(now);
+            queue_entry.updated_at = now;
+            state
+                .db
+                .update_queue_entry(&queue_entry)
+                .await
+                .map_err(UseCaseError::Repository)?;
+
+            let (resolution_source, approval_state) = match trigger {
+                FinalizePreparedTrigger::ApprovalCommand => {
+                    (ResolutionSource::ApprovalCommand, ApprovalState::Approved)
+                }
+                FinalizePreparedTrigger::SystemCommand => {
+                    (ResolutionSource::SystemCommand, ApprovalState::NotRequired)
+                }
+            };
+            item.lifecycle = Lifecycle::Done {
+                reason: DoneReason::Completed,
+                source: resolution_source,
+                closed_at: now,
+            };
+            item.approval_state = approval_state;
+            item.escalation = Escalation::None;
+            item.updated_at = now;
+            state
+                .db
+                .update_item(&item)
+                .await
+                .map_err(UseCaseError::Repository)?;
+
+            if let Some(workspace_id) = convergence.state.integration_workspace_id() {
+                let mut workspace = state
+                    .db
+                    .get_workspace(workspace_id)
+                    .await
+                    .map_err(UseCaseError::Repository)?;
+                if workspace.state.status() != WorkspaceStatus::Abandoned {
+                    let mirror_git_dir = project_paths(&state, &project).mirror_git_dir;
+                    remove_workspace(
+                        mirror_git_dir.as_path(),
+                        std::path::Path::new(&workspace.path),
+                    )
+                    .await
+                    .map_err(workspace_to_api_error)
+                    .map_err(api_to_usecase_error)?;
+                    workspace.mark_abandoned(now);
+                    state
+                        .db
+                        .update_workspace(&workspace)
+                        .await
+                        .map_err(UseCaseError::Repository)?;
+                }
+            }
+
+            append_activity(
+                &state,
+                project.id,
+                ActivityEventType::ConvergenceFinalized,
+                "convergence",
+                convergence.id,
+                serde_json::json!({ "item_id": item.id }),
+            )
+            .await
+            .map_err(api_to_usecase_error)?;
+
+            Ok(())
+        }
+    }
+}
+
 impl ConvergenceSystemActionPort for HttpConvergencePort {
     async fn load_system_action_projects(
         &self,
@@ -381,22 +804,11 @@ impl ConvergenceSystemActionPort for HttpConvergencePort {
         ))
     }
 
-    async fn reconcile_checkout_sync_ready(
-        &self,
-        _project: &Project,
-        _item_id: ItemId,
-        _revision: &ItemRevision,
-    ) -> Result<bool, UseCaseError> {
-        Err(UseCaseError::Internal(
-            "http convergence port does not reconcile checkout sync".into(),
-        ))
-    }
-
     async fn auto_finalize_prepared_convergence(
         &self,
         _project_id: ProjectId,
         _item_id: ItemId,
-    ) -> Result<(), UseCaseError> {
+    ) -> Result<bool, UseCaseError> {
         Err(UseCaseError::Internal(
             "http convergence port does not auto-finalize convergence".into(),
         ))

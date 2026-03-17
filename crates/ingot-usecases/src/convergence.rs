@@ -5,7 +5,8 @@ use ingot_domain::activity::{Activity, ActivityEventType};
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::Finding;
-use ingot_domain::ids::{ActivityId, ConvergenceId, ItemId, ProjectId};
+use ingot_domain::git_operation::{GitOperation, GitOperationStatus, OperationPayload};
+use ingot_domain::ids::{ActivityId, ItemId, ProjectId};
 use ingot_domain::item::ApprovalState;
 use ingot_domain::job::Job;
 use ingot_domain::ports::ConvergenceQueuePrepareContext;
@@ -14,12 +15,12 @@ use ingot_domain::ports::{
     WorkspaceRepository,
 };
 use ingot_domain::project::Project;
-use ingot_domain::revision::ApprovalPolicy;
 use ingot_domain::revision::ItemRevision;
 
 use ingot_workflow::{Evaluator, RecommendedAction};
 
 use crate::UseCaseError;
+use crate::item::approval_state_for_policy;
 
 #[derive(Debug, Clone)]
 pub struct SystemActionItemState {
@@ -40,12 +41,44 @@ pub struct SystemActionProjectState {
 
 #[derive(Debug, Clone)]
 pub struct ConvergenceApprovalContext {
+    pub project: Project,
     pub item: ingot_domain::item::Item,
+    pub revision: ItemRevision,
     pub has_active_job: bool,
     pub has_active_convergence: bool,
-    pub prepared_convergence_id: Option<ConvergenceId>,
-    pub prepared_target_valid: bool,
-    pub queue_entry: Option<ConvergenceQueueEntry>,
+    pub finalize_readiness: ApprovalFinalizeReadiness,
+}
+
+#[derive(Debug, Clone)]
+pub enum ApprovalFinalizeReadiness {
+    MissingPreparedConvergence,
+    PreparedConvergenceStale,
+    ConvergenceNotQueued,
+    ConvergenceNotLaneHead,
+    Ready {
+        convergence: Convergence,
+        queue_entry: ConvergenceQueueEntry,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalizePreparedTrigger {
+    ApprovalCommand,
+    SystemCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckoutFinalizationReadiness {
+    Blocked { message: String },
+    NeedsSync,
+    Synced,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalizeTargetRefResult {
+    AlreadyFinalized,
+    UpdatedNow,
+    Stale,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -138,17 +171,54 @@ pub trait ConvergenceSystemActionPort: Send + Sync {
         item_id: ItemId,
     ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
 
-    fn reconcile_checkout_sync_ready(
-        &self,
-        project: &Project,
-        item_id: ItemId,
-        revision: &ItemRevision,
-    ) -> impl Future<Output = Result<bool, UseCaseError>> + Send;
-
     fn auto_finalize_prepared_convergence(
         &self,
         project_id: ProjectId,
         item_id: ItemId,
+    ) -> impl Future<Output = Result<bool, UseCaseError>> + Send;
+}
+
+pub trait PreparedConvergenceFinalizePort: Send + Sync {
+    fn find_or_create_finalize_operation(
+        &self,
+        operation: &GitOperation,
+    ) -> impl Future<Output = Result<GitOperation, UseCaseError>> + Send;
+
+    fn finalize_target_ref(
+        &self,
+        project: &Project,
+        convergence: &Convergence,
+    ) -> impl Future<Output = Result<FinalizeTargetRefResult, UseCaseError>> + Send;
+
+    fn checkout_finalization_readiness(
+        &self,
+        project: &Project,
+        item: &ingot_domain::item::Item,
+        revision: &ItemRevision,
+        prepared_commit_oid: &str,
+    ) -> impl Future<Output = Result<CheckoutFinalizationReadiness, UseCaseError>> + Send;
+
+    fn sync_checkout_to_prepared_commit(
+        &self,
+        project: &Project,
+        revision: &ItemRevision,
+        prepared_commit_oid: &str,
+    ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
+
+    fn update_git_operation(
+        &self,
+        operation: &GitOperation,
+    ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
+
+    fn apply_successful_finalization(
+        &self,
+        trigger: FinalizePreparedTrigger,
+        project: &Project,
+        item: &ingot_domain::item::Item,
+        revision: &ItemRevision,
+        convergence: &Convergence,
+        queue_entry: &ConvergenceQueueEntry,
+        operation: &GitOperation,
     ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
 }
 
@@ -163,9 +233,96 @@ impl<P> ConvergenceService<P> {
     }
 }
 
+pub async fn finalize_prepared_convergence<P>(
+    port: &P,
+    trigger: FinalizePreparedTrigger,
+    project: &Project,
+    item: &ingot_domain::item::Item,
+    revision: &ItemRevision,
+    convergence: &Convergence,
+    queue_entry: &ConvergenceQueueEntry,
+) -> Result<(), UseCaseError>
+where
+    P: PreparedConvergenceFinalizePort,
+{
+    let prepared_commit_oid = convergence
+        .state
+        .prepared_commit_oid()
+        .map(ToOwned::to_owned)
+        .ok_or(UseCaseError::PreparedConvergenceMissing)?;
+    let input_target_commit_oid = convergence
+        .state
+        .input_target_commit_oid()
+        .map(ToOwned::to_owned)
+        .ok_or(UseCaseError::PreparedConvergenceMissing)?;
+
+    let planned_operation = GitOperation {
+        id: ingot_domain::ids::GitOperationId::new(),
+        project_id: project.id,
+        entity_id: convergence.id.to_string(),
+        payload: OperationPayload::FinalizeTargetRef {
+            workspace_id: convergence.state.integration_workspace_id(),
+            ref_name: convergence.target_ref.clone(),
+            expected_old_oid: input_target_commit_oid,
+            new_oid: prepared_commit_oid.clone(),
+            commit_oid: Some(prepared_commit_oid.clone()),
+        },
+        status: GitOperationStatus::Planned,
+        created_at: Utc::now(),
+        completed_at: None,
+    };
+    let mut operation = port
+        .find_or_create_finalize_operation(&planned_operation)
+        .await?;
+
+    if port.finalize_target_ref(project, convergence).await? == FinalizeTargetRefResult::Stale {
+        operation.status = GitOperationStatus::Failed;
+        operation.completed_at = Some(Utc::now());
+        port.update_git_operation(&operation).await?;
+        return Err(UseCaseError::PreparedConvergenceStale);
+    }
+
+    if operation.status == GitOperationStatus::Planned {
+        operation.status = GitOperationStatus::Applied;
+        operation.completed_at = Some(Utc::now());
+        port.update_git_operation(&operation).await?;
+    }
+
+    match port
+        .checkout_finalization_readiness(project, item, revision, &prepared_commit_oid)
+        .await?
+    {
+        CheckoutFinalizationReadiness::Blocked { message } => {
+            return Err(UseCaseError::ProtocolViolation(message));
+        }
+        CheckoutFinalizationReadiness::NeedsSync => {
+            port.sync_checkout_to_prepared_commit(project, revision, &prepared_commit_oid)
+                .await?;
+        }
+        CheckoutFinalizationReadiness::Synced => {}
+    }
+
+    port.apply_successful_finalization(
+        trigger,
+        project,
+        item,
+        revision,
+        convergence,
+        queue_entry,
+        &operation,
+    )
+    .await?;
+
+    operation.status = GitOperationStatus::Reconciled;
+    operation.completed_at = Some(Utc::now());
+    port.update_git_operation(&operation).await?;
+
+    Ok(())
+}
+
 impl<P> ConvergenceService<P>
 where
-    P: ConvergenceCommandPort,
+    P: ConvergenceCommandPort + PreparedConvergenceFinalizePort,
 {
     pub async fn queue_prepare(
         &self,
@@ -261,41 +418,63 @@ where
         project_id: ProjectId,
         item_id: ItemId,
     ) -> Result<(), UseCaseError> {
-        let mut context = self.port.load_approval_context(project_id, item_id).await?;
-        if context.item.approval_state != ApprovalState::Pending {
+        let ConvergenceApprovalContext {
+            project,
+            item,
+            revision,
+            has_active_job,
+            has_active_convergence,
+            finalize_readiness,
+        } = self.port.load_approval_context(project_id, item_id).await?;
+
+        if item.approval_state != ApprovalState::Pending {
             return Err(UseCaseError::ApprovalNotPending);
         }
-        if context.has_active_job {
+        if has_active_job {
             return Err(UseCaseError::ActiveJobExists);
         }
-        if context.has_active_convergence {
+        if has_active_convergence {
             return Err(UseCaseError::ActiveConvergenceExists);
         }
-        let convergence_id = context
-            .prepared_convergence_id
-            .ok_or(UseCaseError::PreparedConvergenceMissing)?;
-        if !context.prepared_target_valid {
-            return Err(UseCaseError::PreparedConvergenceStale);
-        }
-        let queue_entry = context
-            .queue_entry
-            .ok_or(UseCaseError::ConvergenceNotQueued)?;
-        if queue_entry.status != ConvergenceQueueEntryStatus::Head {
-            return Err(UseCaseError::ConvergenceNotLaneHead);
-        }
+        let (convergence, queue_entry) = match finalize_readiness {
+            ApprovalFinalizeReadiness::MissingPreparedConvergence => {
+                return Err(UseCaseError::PreparedConvergenceMissing);
+            }
+            ApprovalFinalizeReadiness::PreparedConvergenceStale => {
+                return Err(UseCaseError::PreparedConvergenceStale);
+            }
+            ApprovalFinalizeReadiness::ConvergenceNotQueued => {
+                return Err(UseCaseError::ConvergenceNotQueued);
+            }
+            ApprovalFinalizeReadiness::ConvergenceNotLaneHead => {
+                return Err(UseCaseError::ConvergenceNotLaneHead);
+            }
+            ApprovalFinalizeReadiness::Ready {
+                convergence,
+                queue_entry,
+            } => (convergence, queue_entry),
+        };
 
-        context.item.approval_state = ApprovalState::Granted;
-        context.item.updated_at = Utc::now();
-        self.port.update_item(&context.item).await?;
+        finalize_prepared_convergence(
+            &self.port,
+            FinalizePreparedTrigger::ApprovalCommand,
+            &project,
+            &item,
+            &revision,
+            &convergence,
+            &queue_entry,
+        )
+        .await?;
+
         self.port
             .append_activity(&Activity {
                 id: ActivityId::new(),
                 project_id,
                 event_type: ActivityEventType::ApprovalApproved,
                 entity_type: "item".into(),
-                entity_id: context.item.id.to_string(),
+                entity_id: item.id.to_string(),
                 payload: serde_json::json!({
-                    "convergence_id": convergence_id,
+                    "convergence_id": convergence.id,
                     "queue_entry_id": queue_entry.id,
                 }),
                 created_at: Utc::now(),
@@ -314,10 +493,7 @@ where
             .port
             .load_reject_approval_context(project_id, item_id)
             .await?;
-        if !matches!(
-            context.item.approval_state,
-            ApprovalState::Pending | ApprovalState::Granted
-        ) {
+        if context.item.approval_state != ApprovalState::Pending {
             return Err(UseCaseError::ApprovalNotPending);
         }
         if context.has_active_job {
@@ -330,21 +506,12 @@ where
             .port
             .teardown_reject_approval(project_id, item_id)
             .await?;
-        if context.item.approval_state == ApprovalState::Pending
-            && !teardown.has_cancelled_convergence
-        {
-            return Err(UseCaseError::PreparedConvergenceMissing);
-        }
-        if context.item.approval_state == ApprovalState::Granted
-            && !teardown.has_cancelled_convergence
-            && !teardown.has_cancelled_queue_entry
-        {
+        if !teardown.has_cancelled_convergence {
             return Err(UseCaseError::PreparedConvergenceMissing);
         }
 
         context.item.current_revision_id = next_revision.id;
-        context.item.approval_state =
-            crate::item::approval_state_for_policy(next_revision.approval_policy);
+        context.item.approval_state = approval_state_for_policy(next_revision.approval_policy);
         context.item.escalation = ingot_domain::item::Escalation::None;
         context.item.updated_at = Utc::now();
         self.port
@@ -384,7 +551,7 @@ where
                     return Ok(true);
                 }
 
-                let prepared_convergence = state.convergences.iter().find(|convergence| {
+                let has_prepared_convergence = state.convergences.iter().any(|convergence| {
                     convergence.item_revision_id == state.revision.id
                         && convergence.state.status() == ConvergenceStatus::Prepared
                 });
@@ -392,10 +559,8 @@ where
                 if let Some(queue_entry) = state.queue_entry.as_ref() {
                     let should_prepare_queue_head = queue_entry.status
                         == ConvergenceQueueEntryStatus::Head
-                        && (evaluation.next_recommended_action
-                            == RecommendedAction::PrepareConvergence
-                            || (state.item.approval_state == ApprovalState::Granted
-                                && prepared_convergence.is_none()));
+                        && evaluation.next_recommended_action
+                            == RecommendedAction::PrepareConvergence;
 
                     if should_prepare_queue_head {
                         self.port
@@ -409,30 +574,23 @@ where
                     }
 
                     let should_finalize = queue_entry.status == ConvergenceQueueEntryStatus::Head
-                        && prepared_convergence.is_some()
-                        && (state.item.approval_state == ApprovalState::Granted
-                            || (state.revision.approval_policy
-                                == ingot_domain::revision::ApprovalPolicy::NotRequired
-                                && evaluation.next_recommended_action
-                                    == RecommendedAction::FinalizePreparedConvergence));
+                        && has_prepared_convergence
+                        && state.revision.approval_policy
+                            == ingot_domain::revision::ApprovalPolicy::NotRequired
+                        && evaluation.next_recommended_action
+                            == RecommendedAction::FinalizePreparedConvergence;
 
-                    if should_finalize
-                        && self
+                    if should_finalize {
+                        if self
                             .port
-                            .reconcile_checkout_sync_ready(
-                                &project_state.project,
-                                state.item_id,
-                                &state.revision,
-                            )
-                            .await?
-                    {
-                        self.port
                             .auto_finalize_prepared_convergence(
                                 project_state.project.id,
                                 state.item_id,
                             )
-                            .await?;
-                        return Ok(true);
+                            .await?
+                        {
+                            return Ok(true);
+                        }
                     }
                 }
             }
@@ -454,12 +612,11 @@ where
     A: ActivityRepository,
 {
     let entries = queue_repo.list_active_by_project(project_id).await?;
-    let mut lanes_with_heads = std::collections::HashSet::new();
-    for entry in &entries {
-        if entry.status == ConvergenceQueueEntryStatus::Head {
-            lanes_with_heads.insert(entry.target_ref.clone());
-        }
-    }
+    let mut lanes_with_heads = entries
+        .iter()
+        .filter(|entry| entry.status == ConvergenceQueueEntryStatus::Head)
+        .map(|entry| entry.target_ref.clone())
+        .collect::<std::collections::HashSet<_>>();
 
     let mut promoted = false;
     for entry in entries {
@@ -494,7 +651,7 @@ where
 
 /// Invalidate a prepared convergence whose target ref has moved.
 /// Pure DB: marks convergence as failed, sets integration workspace to Stale,
-/// resets approval state if not already granted, appends activity.
+/// resets approval state, appends activity.
 /// Returns true if a convergence was invalidated.
 pub async fn invalidate_prepared_convergence<C, W, IR, A>(
     convergence_repo: &C,
@@ -532,12 +689,7 @@ where
         workspace_repo.update(&workspace).await?;
     }
 
-    if item.approval_state != ApprovalState::Granted {
-        item.approval_state = match revision.approval_policy {
-            ApprovalPolicy::Required => ApprovalState::NotRequested,
-            ApprovalPolicy::NotRequired => ApprovalState::NotRequired,
-        };
-    }
+    item.approval_state = approval_state_for_policy(revision.approval_policy);
     item.updated_at = Utc::now();
     item_repo.update(item).await?;
 
@@ -563,8 +715,9 @@ mod tests {
 
     use chrono::Utc;
     use ingot_domain::activity::Activity;
-    use ingot_domain::convergence::ConvergenceStatus;
+    use ingot_domain::convergence::{Convergence, ConvergenceStatus};
     use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
+    use ingot_domain::git_operation::GitOperation;
     use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId};
     use ingot_domain::item::ApprovalState;
     use ingot_domain::job::Job;
@@ -578,36 +731,106 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ConvergenceApprovalContext, ConvergenceCommandPort, ConvergenceService,
-        ConvergenceSystemActionPort, RejectApprovalContext, RejectApprovalTeardown,
-        SystemActionItemState, SystemActionProjectState,
+        ApprovalFinalizeReadiness, CheckoutFinalizationReadiness, ConvergenceApprovalContext,
+        ConvergenceCommandPort, ConvergenceService, ConvergenceSystemActionPort,
+        FinalizePreparedTrigger, FinalizeTargetRefResult, PreparedConvergenceFinalizePort,
+        RejectApprovalContext, RejectApprovalTeardown, SystemActionItemState,
+        SystemActionProjectState,
     };
     use crate::UseCaseError;
 
-    #[derive(Default, Clone)]
+    #[derive(Clone)]
     struct FakePort {
         queue_prepare_context: Arc<Mutex<Option<ConvergenceQueuePrepareContext>>>,
+        approval_context: Arc<Mutex<Option<ConvergenceApprovalContext>>>,
         projects: Arc<Mutex<Vec<SystemActionProjectState>>>,
         calls: Arc<Mutex<Vec<String>>>,
-        checkout_sync_ready: bool,
+        auto_finalize_progress: bool,
+        checkout_finalization_readiness: CheckoutFinalizationReadiness,
+        finalize_target_ref_result: FinalizeTargetRefResult,
+        apply_successful_finalization_should_fail: bool,
     }
 
     impl FakePort {
+        fn default_approval_context() -> ConvergenceApprovalContext {
+            let nil = Uuid::nil();
+            ConvergenceApprovalContext {
+                project: ProjectBuilder::new(unique_temp_path("ingot-convergence-approve"))
+                    .id(ProjectId::from_uuid(nil))
+                    .build(),
+                item: ItemBuilder::new(ProjectId::from_uuid(nil), ItemRevisionId::from_uuid(nil))
+                    .id(ItemId::from_uuid(nil))
+                    .approval_state(ApprovalState::Pending)
+                    .build(),
+                revision: RevisionBuilder::new(ItemId::from_uuid(nil))
+                    .id(ItemRevisionId::from_uuid(nil))
+                    .explicit_seed("abc123")
+                    .build(),
+                has_active_job: false,
+                has_active_convergence: false,
+                finalize_readiness: ApprovalFinalizeReadiness::Ready {
+                    convergence: ingot_test_support::fixtures::ConvergenceBuilder::new(
+                        ProjectId::from_uuid(nil),
+                        ItemId::from_uuid(nil),
+                        ItemRevisionId::from_uuid(nil),
+                    )
+                    .id(ConvergenceId::from_uuid(Uuid::nil()))
+                    .status(ingot_domain::convergence::ConvergenceStatus::Prepared)
+                    .target_head_valid(true)
+                    .created_at(Utc::now())
+                    .build(),
+                    queue_entry: ConvergenceQueueEntry {
+                        id: ingot_domain::ids::ConvergenceQueueEntryId::from_uuid(Uuid::nil()),
+                        project_id: ProjectId::from_uuid(Uuid::nil()),
+                        item_id: ItemId::from_uuid(Uuid::nil()),
+                        item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
+                        target_ref: "refs/heads/main".into(),
+                        status: ConvergenceQueueEntryStatus::Head,
+                        head_acquired_at: Some(Utc::now()),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        released_at: None,
+                    },
+                },
+            }
+        }
+
         fn with_projects(projects: Vec<SystemActionProjectState>) -> Self {
             Self {
                 queue_prepare_context: Arc::new(Mutex::new(None)),
+                approval_context: Arc::new(Mutex::new(Some(Self::default_approval_context()))),
                 projects: Arc::new(Mutex::new(projects)),
                 calls: Arc::new(Mutex::new(Vec::new())),
-                checkout_sync_ready: true,
+                auto_finalize_progress: true,
+                checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
+                finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
+                apply_successful_finalization_should_fail: false,
             }
         }
 
         fn with_queue_prepare_context(context: ConvergenceQueuePrepareContext) -> Self {
             Self {
                 queue_prepare_context: Arc::new(Mutex::new(Some(context))),
+                approval_context: Arc::new(Mutex::new(Some(Self::default_approval_context()))),
                 projects: Arc::new(Mutex::new(Vec::new())),
                 calls: Arc::new(Mutex::new(Vec::new())),
-                checkout_sync_ready: true,
+                auto_finalize_progress: true,
+                checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
+                finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
+                apply_successful_finalization_should_fail: false,
+            }
+        }
+
+        fn with_approval_context(context: ConvergenceApprovalContext) -> Self {
+            Self {
+                queue_prepare_context: Arc::new(Mutex::new(None)),
+                approval_context: Arc::new(Mutex::new(Some(context))),
+                projects: Arc::new(Mutex::new(Vec::new())),
+                calls: Arc::new(Mutex::new(Vec::new())),
+                auto_finalize_progress: true,
+                checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
+                finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
+                apply_successful_finalization_should_fail: false,
             }
         }
 
@@ -672,29 +895,13 @@ mod tests {
             _project_id: ProjectId,
             _item_id: ItemId,
         ) -> impl Future<Output = Result<ConvergenceApprovalContext, UseCaseError>> + Send {
-            let nil = Uuid::nil();
-            ready(Ok(ConvergenceApprovalContext {
-                item: ItemBuilder::new(ProjectId::from_uuid(nil), ItemRevisionId::from_uuid(nil))
-                    .id(ItemId::from_uuid(nil))
-                    .approval_state(ApprovalState::Pending)
-                    .build(),
-                has_active_job: false,
-                has_active_convergence: false,
-                prepared_convergence_id: Some(ConvergenceId::from_uuid(Uuid::nil())),
-                prepared_target_valid: true,
-                queue_entry: Some(ConvergenceQueueEntry {
-                    id: ingot_domain::ids::ConvergenceQueueEntryId::from_uuid(Uuid::nil()),
-                    project_id: ProjectId::from_uuid(Uuid::nil()),
-                    item_id: ItemId::from_uuid(Uuid::nil()),
-                    item_revision_id: ItemRevisionId::from_uuid(Uuid::nil()),
-                    target_ref: "refs/heads/main".into(),
-                    status: ConvergenceQueueEntryStatus::Head,
-                    head_acquired_at: Some(Utc::now()),
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                    released_at: None,
-                }),
-            }))
+            ready(
+                self.approval_context
+                    .lock()
+                    .expect("approval context lock")
+                    .clone()
+                    .ok_or(UseCaseError::Internal("missing approval context".into())),
+            )
         }
 
         fn update_item(
@@ -717,7 +924,7 @@ mod tests {
             ready(Ok(RejectApprovalContext {
                 item: ItemBuilder::new(ProjectId::from_uuid(nil), ItemRevisionId::from_uuid(nil))
                     .id(ItemId::from_uuid(nil))
-                    .approval_state(ApprovalState::Granted)
+                    .approval_state(ApprovalState::Pending)
                     .build(),
                 has_active_job: false,
                 has_active_convergence: false,
@@ -730,7 +937,7 @@ mod tests {
             _item_id: ItemId,
         ) -> impl Future<Output = Result<RejectApprovalTeardown, UseCaseError>> + Send {
             ready(Ok(RejectApprovalTeardown {
-                has_cancelled_convergence: false,
+                has_cancelled_convergence: true,
                 has_cancelled_queue_entry: true,
                 first_cancelled_convergence_id: None,
                 first_cancelled_queue_entry_id: None,
@@ -794,25 +1001,101 @@ mod tests {
             ready(Ok(()))
         }
 
-        fn reconcile_checkout_sync_ready(
-            &self,
-            _project: &Project,
-            _item_id: ItemId,
-            _revision: &ItemRevision,
-        ) -> impl Future<Output = Result<bool, UseCaseError>> + Send {
-            ready(Ok(self.checkout_sync_ready))
-        }
-
         fn auto_finalize_prepared_convergence(
             &self,
             project_id: ProjectId,
             item_id: ItemId,
-        ) -> impl Future<Output = Result<(), UseCaseError>> + Send {
+        ) -> impl Future<Output = Result<bool, UseCaseError>> + Send {
             self.calls
                 .lock()
                 .expect("calls lock")
                 .push(format!("finalize:{project_id}:{item_id}"));
+            ready(Ok(self.auto_finalize_progress))
+        }
+    }
+
+    impl PreparedConvergenceFinalizePort for FakePort {
+        fn find_or_create_finalize_operation(
+            &self,
+            operation: &GitOperation,
+        ) -> impl Future<Output = Result<GitOperation, UseCaseError>> + Send {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(format!("find_or_create_op:{}", operation.entity_id));
+            ready(Ok(operation.clone()))
+        }
+
+        fn finalize_target_ref(
+            &self,
+            _project: &Project,
+            convergence: &Convergence,
+        ) -> impl Future<Output = Result<FinalizeTargetRefResult, UseCaseError>> + Send {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(format!("finalize_target_ref:{}", convergence.id));
+            ready(Ok(self.finalize_target_ref_result))
+        }
+
+        fn checkout_finalization_readiness(
+            &self,
+            _project: &Project,
+            item: &ingot_domain::item::Item,
+            _revision: &ItemRevision,
+            _prepared_commit_oid: &str,
+        ) -> impl Future<Output = Result<CheckoutFinalizationReadiness, UseCaseError>> + Send
+        {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(format!("checkout_readiness:{}", item.id));
+            ready(Ok(self.checkout_finalization_readiness.clone()))
+        }
+
+        fn sync_checkout_to_prepared_commit(
+            &self,
+            _project: &Project,
+            revision: &ItemRevision,
+            _prepared_commit_oid: &str,
+        ) -> impl Future<Output = Result<(), UseCaseError>> + Send {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(format!("sync_checkout:{}", revision.id));
             ready(Ok(()))
+        }
+
+        fn update_git_operation(
+            &self,
+            operation: &GitOperation,
+        ) -> impl Future<Output = Result<(), UseCaseError>> + Send {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(format!("update_op:{:?}", operation.status));
+            ready(Ok(()))
+        }
+
+        fn apply_successful_finalization(
+            &self,
+            trigger: FinalizePreparedTrigger,
+            _project: &Project,
+            item: &ingot_domain::item::Item,
+            _revision: &ItemRevision,
+            convergence: &Convergence,
+            _queue_entry: &ConvergenceQueueEntry,
+            _operation: &GitOperation,
+        ) -> impl Future<Output = Result<(), UseCaseError>> + Send {
+            self.calls.lock().expect("calls lock").push(format!(
+                "apply_successful_finalization:{trigger:?}:{}:{}",
+                item.id, convergence.id
+            ));
+            ready(if self.apply_successful_finalization_should_fail {
+                Err(UseCaseError::Internal("boom".into()))
+            } else {
+                Ok(())
+            })
         }
     }
 
@@ -894,11 +1177,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalize_runs_for_granted_prepared_head() {
-        let mut state = project_state("idle");
-        state.items[0].item.approval_state = ApprovalState::Granted;
+    async fn blocked_auto_finalize_does_not_count_as_progress() {
+        let port = FakePort {
+            auto_finalize_progress: false,
+            ..FakePort::with_projects(vec![project_state("finalize_prepared_convergence")])
+        };
+        let service = ConvergenceService::new(port.clone());
 
-        let port = FakePort::with_projects(vec![state]);
+        let made_progress = service
+            .tick_system_actions()
+            .await
+            .expect("tick system actions");
+
+        assert!(!made_progress);
+        let calls = port.calls();
+        assert!(calls.iter().any(|call| call.starts_with("finalize:")));
+        assert!(!calls.iter().any(|call| call.starts_with("prepare:")));
+    }
+
+    #[tokio::test]
+    async fn blocked_auto_finalize_allows_later_system_action_to_run() {
+        let port = FakePort {
+            auto_finalize_progress: false,
+            ..FakePort::with_projects(vec![
+                project_state("finalize_prepared_convergence"),
+                project_state("prepare_convergence"),
+            ])
+        };
         let service = ConvergenceService::new(port.clone());
 
         let made_progress = service
@@ -907,11 +1212,90 @@ mod tests {
             .expect("tick system actions");
 
         assert!(made_progress);
+        let calls = port.calls();
+        let finalize_index = calls
+            .iter()
+            .position(|call| call.starts_with("finalize:"))
+            .expect("finalize call");
+        let prepare_index = calls
+            .iter()
+            .position(|call| call.starts_with("prepare:"))
+            .expect("prepare call");
+        assert!(finalize_index < prepare_index);
+    }
+
+    #[tokio::test]
+    async fn approve_item_returns_stale_when_readiness_is_stale() {
+        let mut context = FakePort::default_approval_context();
+        context.finalize_readiness = ApprovalFinalizeReadiness::PreparedConvergenceStale;
+        let port = FakePort::with_approval_context(context);
+        let service = ConvergenceService::new(port);
+
+        let error = service
+            .approve_item(
+                ProjectId::from_uuid(Uuid::nil()),
+                ItemId::from_uuid(Uuid::nil()),
+            )
+            .await
+            .expect_err("approval should reject stale convergence");
+
+        assert!(matches!(error, UseCaseError::PreparedConvergenceStale));
+    }
+
+    #[tokio::test]
+    async fn approve_item_uses_shared_finalizer_for_already_finalized_target() {
+        let port = FakePort {
+            finalize_target_ref_result: FinalizeTargetRefResult::AlreadyFinalized,
+            ..FakePort::with_approval_context(FakePort::default_approval_context())
+        };
+        let service = ConvergenceService::new(port.clone());
+
+        service
+            .approve_item(
+                ProjectId::from_uuid(Uuid::nil()),
+                ItemId::from_uuid(Uuid::nil()),
+            )
+            .await
+            .expect("approval should finalize");
+
+        let calls = port.calls();
         assert!(
-            port.calls()
+            calls
                 .iter()
-                .any(|call| call.starts_with("finalize:"))
+                .any(|call| call == "update_op:Applied" || call == "update_op:Reconciled")
         );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.starts_with("finalize_target_ref:"))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| { call.starts_with("apply_successful_finalization:ApprovalCommand:") })
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_item_keeps_finalize_operation_unresolved_when_success_persistence_fails() {
+        let port = FakePort {
+            apply_successful_finalization_should_fail: true,
+            ..FakePort::with_approval_context(FakePort::default_approval_context())
+        };
+        let service = ConvergenceService::new(port.clone());
+
+        let error = service
+            .approve_item(
+                ProjectId::from_uuid(Uuid::nil()),
+                ItemId::from_uuid(Uuid::nil()),
+            )
+            .await
+            .expect_err("approval should surface persistence failure");
+
+        assert!(matches!(error, UseCaseError::Internal(message) if message == "boom"));
+        let calls = port.calls();
+        assert!(calls.iter().any(|call| call == "update_op:Applied"));
+        assert!(!calls.iter().any(|call| call == "update_op:Reconciled"));
     }
 
     fn project_state(next_action: &str) -> SystemActionProjectState {
@@ -924,6 +1308,11 @@ mod tests {
             .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
+            .approval_policy(if next_action == "finalize_prepared_convergence" {
+                ingot_domain::revision::ApprovalPolicy::NotRequired
+            } else {
+                ingot_domain::revision::ApprovalPolicy::Required
+            })
             .explicit_seed("seed")
             .created_at(created_at)
             .build();

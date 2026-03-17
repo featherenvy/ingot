@@ -184,7 +184,7 @@ async fn prepare_convergence_route_queues_lane_head_for_async_prepare() {
 }
 
 #[tokio::test]
-async fn approve_route_grants_lane_head_without_finalizing_synchronously() {
+async fn approve_route_atomically_finalizes_convergence_and_closes_item() {
     let repo = temp_git_repo("ingot-http-api");
     let base_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
     write_file(&repo.join("tracked.txt"), "prepared change");
@@ -308,10 +308,6 @@ async fn approve_route_grants_lane_head_without_finalizing_synchronously() {
         .expect("route response");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        git_output(&repo, &["rev-parse", "refs/heads/main"]),
-        base_commit_oid
-    );
 
     let item_state: (String, String, Option<String>) = sqlx::query_as(
         "SELECT lifecycle_state, approval_state, resolution_source FROM items WHERE id = ?",
@@ -320,9 +316,350 @@ async fn approve_route_grants_lane_head_without_finalizing_synchronously() {
     .fetch_one(&db.pool)
     .await
     .expect("item state");
-    assert_eq!(item_state.0, "open");
-    assert_eq!(item_state.1, "granted");
-    assert_eq!(item_state.2, None);
+    assert_eq!(item_state.0, "done");
+    assert_eq!(item_state.1, "approved");
+    assert_eq!(item_state.2, Some("approval_command".into()));
+
+    let convergence_status: (String,) =
+        sqlx::query_as("SELECT status FROM convergences WHERE id = ?")
+            .bind(&convergence_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("convergence status");
+    assert_eq!(convergence_status.0, "finalized");
+
+    let queue_state: (String,) =
+        sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
+            .bind(&revision_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("queue state");
+    assert_eq!(queue_state.0, "released");
+    assert_eq!(
+        git_output(&repo, &["rev-parse", "HEAD"]),
+        prepared_commit_oid
+    );
+    assert_eq!(
+        git_output(&repo, &["rev-parse", "refs/heads/main"]),
+        prepared_commit_oid
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("tracked.txt")).expect("read checkout file"),
+        "prepared change"
+    );
+}
+
+#[tokio::test]
+async fn approve_route_succeeds_when_target_ref_is_already_at_the_prepared_commit() {
+    let repo = temp_git_repo("ingot-http-api");
+    let base_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    write_file(&repo.join("tracked.txt"), "prepared change");
+    git(&repo, &["add", "tracked.txt"]);
+    git(&repo, &["commit", "-m", "prepared commit"]);
+    let prepared_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    git(
+        &repo,
+        &[
+            "update-ref",
+            "refs/ingot/workspaces/wrk_integration",
+            &prepared_commit_oid,
+        ],
+    );
+    git(&repo, &["reset", "--hard", &base_commit_oid]);
+
+    let db = migrated_test_db("ingot-http-api-db").await;
+    let project_id = "prj_00000000000000000000000000000077".to_string();
+    let item_id = "itm_00000000000000000000000000000077".to_string();
+    let revision_id = "rev_00000000000000000000000000000077".to_string();
+    let workspace_id = "wrk_00000000000000000000000000000077".to_string();
+    let convergence_id = "conv_00000000000000000000000000000077".to_string();
+
+    persist_test_change(
+        &db,
+        &repo,
+        &project_id,
+        &item_id,
+        &revision_id,
+        |item| {
+            item.approval_state(ApprovalState::Pending)
+                .escalated(EscalationReason::ManualDecisionRequired)
+        },
+        |revision| {
+            revision
+                .approval_policy(ApprovalPolicy::Required)
+                .seed(AuthoringBaseSeed::Explicit {
+                    seed_commit_oid: base_commit_oid.clone(),
+                    seed_target_commit_oid: base_commit_oid.clone(),
+                })
+                .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
+        },
+    )
+    .await;
+    let revision_policy_snapshot = serde_json::json!({
+        "workflow_version": "delivery:v1",
+        "approval_policy": "required",
+        "candidate_rework_budget": 7,
+        "integration_rework_budget": 8
+    });
+    sqlx::query("UPDATE item_revisions SET policy_snapshot = ? WHERE id = ?")
+        .bind(revision_policy_snapshot.to_string())
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("update revision policy snapshot");
+
+    persist_test_workspace(
+        &db,
+        &project_id,
+        WorkspaceKind::Integration,
+        &workspace_id,
+        |workspace| {
+            workspace
+                .created_for_revision_id(parse_id(&revision_id))
+                .path(repo.join("integration-workspace").display().to_string())
+                .workspace_ref("refs/ingot/workspaces/wrk_integration")
+                .base_commit_oid(&base_commit_oid)
+                .head_commit_oid(&prepared_commit_oid)
+                .retention_policy(RetentionPolicy::Persistent)
+                .status(WorkspaceStatus::Ready)
+        },
+    )
+    .await;
+
+    persist_test_convergence(
+        &db,
+        &project_id,
+        &item_id,
+        &revision_id,
+        &convergence_id,
+        |convergence| {
+            convergence
+                .source_workspace_id(parse_id(&workspace_id))
+                .integration_workspace_id(parse_id(&workspace_id))
+                .source_head_commit_oid(&prepared_commit_oid)
+                .input_target_commit_oid(&base_commit_oid)
+                .prepared_commit_oid(&prepared_commit_oid)
+        },
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO convergence_queue_entries (
+            id, project_id, item_id, item_revision_id, target_ref, status, head_acquired_at,
+            created_at, updated_at, released_at
+        ) VALUES (?, ?, ?, ?, 'refs/heads/main', 'head', ?, ?, ?, NULL)",
+    )
+    .bind("cqe_00000000000000000000000000000077")
+    .bind(&project_id)
+    .bind(&item_id)
+    .bind(&revision_id)
+    .bind(TS)
+    .bind(TS)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert queue entry");
+
+    git(&repo, &["reset", "--hard", &prepared_commit_oid]);
+
+    let app = test_router(db.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/projects/{project_id}/items/{item_id}/approval/approve"
+                ))
+                .method("POST")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("route response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let item_state: (String, String, Option<String>) = sqlx::query_as(
+        "SELECT lifecycle_state, approval_state, resolution_source FROM items WHERE id = ?",
+    )
+    .bind(&item_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("item state");
+    assert_eq!(item_state.0, "done");
+    assert_eq!(item_state.1, "approved");
+    assert_eq!(item_state.2, Some("approval_command".into()));
+
+    let convergence_status: (String,) =
+        sqlx::query_as("SELECT status FROM convergences WHERE id = ?")
+            .bind(&convergence_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("convergence status");
+    assert_eq!(convergence_status.0, "finalized");
+
+    let queue_state: (String,) =
+        sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
+            .bind(&revision_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("queue state");
+    assert_eq!(queue_state.0, "released");
+}
+
+#[tokio::test]
+async fn approve_route_reuses_existing_finalize_op_when_checkout_is_blocked() {
+    let repo = temp_git_repo("ingot-http-api");
+    let base_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    write_file(&repo.join("tracked.txt"), "prepared change");
+    git(&repo, &["add", "tracked.txt"]);
+    git(&repo, &["commit", "-m", "prepared commit"]);
+    let prepared_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    git(
+        &repo,
+        &[
+            "update-ref",
+            "refs/ingot/workspaces/wrk_integration_blocked",
+            &prepared_commit_oid,
+        ],
+    );
+    git(&repo, &["reset", "--hard", &base_commit_oid]);
+    write_file(&repo.join("tracked.txt"), "dirty checkout");
+
+    let db = migrated_test_db("ingot-http-api-db").await;
+    let project_id = "prj_00000000000000000000000000000076".to_string();
+    let item_id = "itm_00000000000000000000000000000076".to_string();
+    let revision_id = "rev_00000000000000000000000000000076".to_string();
+    let workspace_id = "wrk_00000000000000000000000000000076".to_string();
+    let convergence_id = "conv_00000000000000000000000000000076".to_string();
+
+    persist_test_change(
+        &db,
+        &repo,
+        &project_id,
+        &item_id,
+        &revision_id,
+        |item| {
+            item.approval_state(ApprovalState::Pending)
+                .escalated(EscalationReason::ManualDecisionRequired)
+        },
+        |revision| {
+            revision
+                .approval_policy(ApprovalPolicy::Required)
+                .seed(AuthoringBaseSeed::Explicit {
+                    seed_commit_oid: base_commit_oid.clone(),
+                    seed_target_commit_oid: base_commit_oid.clone(),
+                })
+                .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
+        },
+    )
+    .await;
+    let revision_policy_snapshot = serde_json::json!({
+        "workflow_version": "delivery:v1",
+        "approval_policy": "required",
+        "candidate_rework_budget": 7,
+        "integration_rework_budget": 8
+    });
+    sqlx::query("UPDATE item_revisions SET policy_snapshot = ? WHERE id = ?")
+        .bind(revision_policy_snapshot.to_string())
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("update revision policy snapshot");
+
+    persist_test_workspace(
+        &db,
+        &project_id,
+        WorkspaceKind::Integration,
+        &workspace_id,
+        |workspace| {
+            workspace
+                .created_for_revision_id(parse_id(&revision_id))
+                .path(
+                    repo.join("integration-workspace-blocked")
+                        .display()
+                        .to_string(),
+                )
+                .workspace_ref("refs/ingot/workspaces/wrk_integration_blocked")
+                .base_commit_oid(&base_commit_oid)
+                .head_commit_oid(&prepared_commit_oid)
+                .retention_policy(RetentionPolicy::Persistent)
+                .status(WorkspaceStatus::Ready)
+        },
+    )
+    .await;
+
+    persist_test_convergence(
+        &db,
+        &project_id,
+        &item_id,
+        &revision_id,
+        &convergence_id,
+        |convergence| {
+            convergence
+                .source_workspace_id(parse_id(&workspace_id))
+                .integration_workspace_id(parse_id(&workspace_id))
+                .source_head_commit_oid(&prepared_commit_oid)
+                .input_target_commit_oid(&base_commit_oid)
+                .prepared_commit_oid(&prepared_commit_oid)
+        },
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO convergence_queue_entries (
+            id, project_id, item_id, item_revision_id, target_ref, status, head_acquired_at,
+            created_at, updated_at, released_at
+        ) VALUES (?, ?, ?, ?, 'refs/heads/main', 'head', ?, ?, ?, NULL)",
+    )
+    .bind("cqe_00000000000000000000000000000076")
+    .bind(&project_id)
+    .bind(&item_id)
+    .bind(&revision_id)
+    .bind(TS)
+    .bind(TS)
+    .bind(TS)
+    .execute(&db.pool)
+    .await
+    .expect("insert queue entry");
+
+    let app = test_router(db.clone());
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/projects/{project_id}/items/{item_id}/approval/approve"
+                    ))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("route response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    let item_state: (String, String, String) = sqlx::query_as(
+        "SELECT approval_state, escalation_state, escalation_reason FROM items WHERE id = ?",
+    )
+    .bind(&item_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("item state");
+    assert_eq!(item_state.0, "pending");
+    assert_eq!(item_state.1, "operator_required");
+    assert_eq!(item_state.2, "checkout_sync_blocked");
+
+    let git_ops: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, status FROM git_operations
+         WHERE operation_kind = 'finalize_target_ref' AND entity_id = ?
+         ORDER BY created_at ASC",
+    )
+    .bind(&convergence_id)
+    .fetch_all(&db.pool)
+    .await
+    .expect("git operations");
+    assert_eq!(git_ops.len(), 1);
+    assert_eq!(git_ops[0].1, "applied");
 }
 
 #[tokio::test]
@@ -711,7 +1048,7 @@ async fn reject_approval_route_cancels_prepared_convergence_and_creates_supersed
 }
 
 #[tokio::test]
-async fn reject_route_allows_granted_without_prepared_convergence() {
+async fn reject_route_allows_pending_with_queue_entry_only() {
     let repo = temp_git_repo("ingot-http-api");
     let head = git_output(&repo, &["rev-parse", "HEAD"]);
     let db = migrated_test_db("ingot-http-api-db").await;
@@ -725,8 +1062,43 @@ async fn reject_route_allows_granted_without_prepared_convergence() {
         &project_id,
         &item_id,
         &revision_id,
-        |item| item.approval_state(ApprovalState::Granted),
+        |item| item.approval_state(ApprovalState::Pending),
         |revision| revision.explicit_seed(&head),
+    )
+    .await;
+    let convergence_id = "conv_00000000000000000000000000000060".to_string();
+    let workspace_id = "wrk_00000000000000000000000000000060".to_string();
+    persist_test_workspace(
+        &db,
+        &project_id,
+        WorkspaceKind::Integration,
+        &workspace_id,
+        |workspace| {
+            workspace
+                .created_for_revision_id(parse_id(&revision_id))
+                .path(repo.join("integration-reject").display().to_string())
+                .workspace_ref("refs/ingot/workspaces/wrk_integration_reject")
+                .base_commit_oid(&head)
+                .head_commit_oid(&head)
+                .retention_policy(RetentionPolicy::Persistent)
+                .status(WorkspaceStatus::Ready)
+        },
+    )
+    .await;
+    persist_test_convergence(
+        &db,
+        &project_id,
+        &item_id,
+        &revision_id,
+        &convergence_id,
+        |convergence| {
+            convergence
+                .source_workspace_id(parse_id(&workspace_id))
+                .integration_workspace_id(parse_id(&workspace_id))
+                .source_head_commit_oid(&head)
+                .input_target_commit_oid(&head)
+                .prepared_commit_oid(&head)
+        },
     )
     .await;
     sqlx::query(

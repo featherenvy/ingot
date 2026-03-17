@@ -10,7 +10,7 @@ CREATE TABLE items_new (
     done_reason TEXT CHECK (done_reason IN ('completed', 'dismissed', 'invalidated')),
     resolution_source TEXT CHECK (resolution_source IN ('system_command', 'approval_command', 'manual_command')),
     approval_state TEXT NOT NULL DEFAULT 'not_requested' CHECK (
-        approval_state IN ('not_required', 'not_requested', 'pending', 'granted', 'approved')
+        approval_state IN ('not_required', 'not_requested', 'pending', 'approved')
     ),
     escalation_state TEXT NOT NULL DEFAULT 'none' CHECK (escalation_state IN ('none', 'operator_required')),
     escalation_reason TEXT CHECK (
@@ -37,7 +37,6 @@ CREATE TABLE items_new (
 
     CHECK (NOT (lifecycle_state = 'done' AND parking_state = 'deferred')),
     CHECK (NOT (approval_state = 'pending' AND parking_state = 'deferred')),
-    CHECK (NOT (approval_state = 'granted' AND parking_state = 'deferred')),
     CHECK (NOT (escalation_state = 'operator_required' AND lifecycle_state = 'done')),
     CHECK (NOT (lifecycle_state = 'done' AND done_reason IS NULL)),
     CHECK (NOT (lifecycle_state = 'done' AND resolution_source IS NULL)),

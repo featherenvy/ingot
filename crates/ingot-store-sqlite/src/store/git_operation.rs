@@ -1,4 +1,5 @@
 use ingot_domain::git_operation::{GitOperation, GitOperationWire};
+use ingot_domain::ids::ConvergenceId;
 use ingot_domain::ports::{GitOperationRepository, RepositoryError};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
@@ -100,6 +101,29 @@ impl Database {
 
         rows.iter().map(map_git_operation).collect()
     }
+
+    pub async fn find_unresolved_finalize_for_convergence(
+        &self,
+        convergence_id: ConvergenceId,
+    ) -> Result<Option<GitOperation>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT id, project_id, operation_kind, entity_type, entity_id, workspace_id, ref_name,
+                    expected_old_oid, new_oid, commit_oid, status, metadata, created_at, completed_at
+             FROM git_operations
+             WHERE operation_kind = 'finalize_target_ref'
+               AND entity_type = 'convergence'
+               AND entity_id = ?
+               AND status IN ('planned', 'applied')
+             ORDER BY created_at ASC
+             LIMIT 1",
+        )
+        .bind(convergence_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+
+        row.as_ref().map(map_git_operation).transpose()
+    }
 }
 
 impl GitOperationRepository for Database {
@@ -111,6 +135,12 @@ impl GitOperationRepository for Database {
     }
     async fn find_unresolved(&self) -> Result<Vec<GitOperation>, RepositoryError> {
         self.list_unresolved_git_operations().await
+    }
+    async fn find_unresolved_finalize_for_convergence(
+        &self,
+        convergence_id: ConvergenceId,
+    ) -> Result<Option<GitOperation>, RepositoryError> {
+        Database::find_unresolved_finalize_for_convergence(self, convergence_id).await
     }
 }
 
@@ -141,4 +171,95 @@ fn map_git_operation(row: &SqliteRow) -> Result<GitOperation, RepositoryError> {
     };
     GitOperation::try_from(wire)
         .map_err(|e| RepositoryError::Conflict(format!("invalid git operation: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use ingot_domain::git_operation::{GitEntityType, GitOperationStatus, OperationKind};
+    use ingot_domain::ids::ConvergenceId;
+    use ingot_domain::ports::RepositoryError;
+    use ingot_test_support::fixtures::{GitOperationBuilder, ProjectBuilder};
+    use ingot_test_support::git::unique_temp_path;
+    use ingot_test_support::sqlite::temp_db_path;
+
+    use crate::db::Database;
+
+    #[tokio::test]
+    async fn find_unresolved_finalize_for_convergence_returns_matching_operation() {
+        let db_path = temp_db_path("ingot-store-git-op");
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+
+        let project = ProjectBuilder::new(unique_temp_path("ingot-store-project")).build();
+        db.create_project(&project).await.expect("create project");
+
+        let convergence_id = ConvergenceId::new();
+        let operation = GitOperationBuilder::new(
+            project.id,
+            OperationKind::FinalizeTargetRef,
+            GitEntityType::Convergence,
+            convergence_id.to_string(),
+        )
+        .ref_name("refs/heads/main")
+        .expected_old_oid("base")
+        .new_oid("prepared")
+        .commit_oid("prepared")
+        .status(GitOperationStatus::Planned)
+        .build();
+        db.create_git_operation(&operation)
+            .await
+            .expect("create git operation");
+
+        let found = db
+            .find_unresolved_finalize_for_convergence(convergence_id)
+            .await
+            .expect("find unresolved finalize")
+            .expect("matching operation");
+        assert_eq!(found.id, operation.id);
+    }
+
+    #[tokio::test]
+    async fn unique_index_rejects_second_unresolved_finalize_for_same_convergence() {
+        let db_path = temp_db_path("ingot-store-git-op-unique");
+        let db = Database::connect(&db_path).await.expect("connect db");
+        db.migrate().await.expect("migrate db");
+
+        let project = ProjectBuilder::new(unique_temp_path("ingot-store-project")).build();
+        db.create_project(&project).await.expect("create project");
+
+        let convergence_id = ConvergenceId::new();
+        let first = GitOperationBuilder::new(
+            project.id,
+            OperationKind::FinalizeTargetRef,
+            GitEntityType::Convergence,
+            convergence_id.to_string(),
+        )
+        .ref_name("refs/heads/main")
+        .expected_old_oid("base")
+        .new_oid("prepared")
+        .commit_oid("prepared")
+        .status(GitOperationStatus::Planned)
+        .build();
+        db.create_git_operation(&first)
+            .await
+            .expect("create first operation");
+
+        let second = GitOperationBuilder::new(
+            project.id,
+            OperationKind::FinalizeTargetRef,
+            GitEntityType::Convergence,
+            convergence_id.to_string(),
+        )
+        .ref_name("refs/heads/main")
+        .expected_old_oid("base")
+        .new_oid("prepared")
+        .commit_oid("prepared")
+        .status(GitOperationStatus::Applied)
+        .build();
+        let error = db
+            .create_git_operation(&second)
+            .await
+            .expect_err("second unresolved finalize must conflict");
+        assert!(matches!(error, RepositoryError::Conflict(_)));
+    }
 }

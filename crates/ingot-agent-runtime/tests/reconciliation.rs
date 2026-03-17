@@ -407,10 +407,11 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let item = ItemBuilder::new(project.id, revision_id)
         .id(item_id)
-        .approval_state(ApprovalState::Granted)
+        .approval_state(ApprovalState::NotRequired)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
+        .approval_policy(ingot_domain::revision::ApprovalPolicy::NotRequired)
         .seed_commit_oid(Some(base_commit.clone()))
         .seed_target_commit_oid(Some(base_commit.clone()))
         .explicit_seed(&base_commit)
@@ -556,10 +557,11 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let item = ItemBuilder::new(project.id, revision_id)
         .id(item_id)
-        .approval_state(ApprovalState::Granted)
+        .approval_state(ApprovalState::NotRequired)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
+        .approval_policy(ingot_domain::revision::ApprovalPolicy::NotRequired)
         .seed_commit_oid(Some(base_commit.clone()))
         .seed_target_commit_oid(Some(base_commit.clone()))
         .explicit_seed(&base_commit)

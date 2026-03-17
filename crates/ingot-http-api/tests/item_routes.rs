@@ -488,7 +488,7 @@ async fn resume_route_returns_success_when_projected_review_auto_dispatch_cannot
 }
 
 #[tokio::test]
-async fn defer_route_cancels_lane_head_and_clears_granted() {
+async fn defer_route_cancels_lane_head_and_clears_approval_state() {
     let repo = temp_git_repo("ingot-http-api");
     let db = migrated_test_db("ingot-http-api-db").await;
     let project_id = "prj_00000000000000000000000000000056".to_string();
@@ -498,7 +498,7 @@ async fn defer_route_cancels_lane_head_and_clears_granted() {
     let head = git_output(&repo, &["rev-parse", "HEAD"]);
 
     let mut item = test_item_builder(project_id.as_str(), revision_id.as_str(), item_id.as_str())
-        .approval_state(ApprovalState::Granted)
+        .approval_state(ApprovalState::NotRequested)
         .build();
     item.escalation = Escalation::OperatorRequired {
         reason: EscalationReason::CheckoutSyncBlocked,
@@ -1280,7 +1280,7 @@ async fn dismiss_route_cancels_lane_state() {
     let convergence_id = "conv_00000000000000000000000000000059".to_string();
 
     let item = test_item_builder(&project_id, &revision_id, &item_id)
-        .approval_state(ApprovalState::Granted)
+        .approval_state(ApprovalState::Pending)
         .build();
     persist_test_project(&db, &repo, &project_id).await;
     let revision = test_revision_builder(&item_id, &revision_id)
