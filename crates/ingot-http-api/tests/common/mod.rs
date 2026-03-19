@@ -33,7 +33,7 @@ pub use ingot_test_support::fixtures::{DEFAULT_TEST_TIMESTAMP, parse_timestamp};
 pub use ingot_test_support::git::{git_output, run_git as git, temp_git_repo, write_file};
 pub use ingot_test_support::reports::clean_validation_report;
 pub use ingot_test_support::sqlite::migrated_test_db;
-use ingot_usecases::ProjectLocks;
+use ingot_usecases::{DispatchNotify, ProjectLocks};
 use uuid::Uuid;
 
 pub const TS: &str = DEFAULT_TEST_TIMESTAMP;
@@ -45,6 +45,7 @@ pub fn test_router(db: Database) -> axum::Router {
         db,
         ProjectLocks::default(),
         state_root,
+        DispatchNotify::default(),
     )
 }
 

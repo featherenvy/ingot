@@ -6,7 +6,7 @@ use ingot_domain::ids::ProjectId;
 use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind, WorkspaceStatus};
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
 use ingot_http_api::build_router_with_project_locks_and_state_root;
-use ingot_usecases::ProjectLocks;
+use ingot_usecases::{DispatchNotify, ProjectLocks};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -145,6 +145,7 @@ async fn remove_workspace_route_deletes_abandoned_workspace_ref_and_path() {
         db.clone(),
         ProjectLocks::default(),
         state_root,
+        DispatchNotify::default(),
     );
     let response = app
         .oneshot(

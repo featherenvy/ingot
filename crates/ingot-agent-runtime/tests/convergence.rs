@@ -10,7 +10,7 @@ use ingot_domain::job::{
 use ingot_domain::revision::ApprovalPolicy;
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::{head_oid, resolve_ref_oid};
-use ingot_usecases::ProjectLocks;
+use ingot_usecases::{DispatchNotify, ProjectLocks};
 
 mod common;
 use common::*;
@@ -22,9 +22,9 @@ use ingot_test_support::fixtures::{
     GitOperationBuilder, JobBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
 };
 use ingot_test_support::git::unique_temp_path;
-use tokio::time::timeout;
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
 use ingot_workflow::{Evaluator, RecommendedAction, step};
+use tokio::time::timeout;
 
 struct BlockedAutoFinalizeFixture {
     db: ingot_store_sqlite::Database,
@@ -52,6 +52,7 @@ async fn blocked_auto_finalize_fixture() -> BlockedAutoFinalizeFixture {
         ProjectLocks::default(),
         DispatcherConfig::new(state_root.clone()),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -198,7 +199,11 @@ async fn assert_blocked_auto_finalize_state(fixture: &BlockedAutoFinalizeFixture
         .list_unresolved_git_operations()
         .await
         .expect("list unresolved");
-    assert_eq!(unresolved.len(), 1, "blocked finalize should stay unresolved");
+    assert_eq!(
+        unresolved.len(),
+        1,
+        "blocked finalize should stay unresolved"
+    );
     assert_eq!(
         unresolved[0].operation_kind(),
         OperationKind::FinalizeTargetRef
@@ -224,6 +229,7 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
         ProjectLocks::default(),
         DispatcherConfig::new(state_root.clone()),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -387,10 +393,13 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
 async fn reconcile_startup_does_not_spin_when_auto_finalize_is_blocked() {
     let fixture = blocked_auto_finalize_fixture().await;
 
-    timeout(Duration::from_secs(10), fixture.dispatcher.reconcile_startup())
-        .await
-        .expect("startup should not hang")
-        .expect("reconcile startup");
+    timeout(
+        Duration::from_secs(10),
+        fixture.dispatcher.reconcile_startup(),
+    )
+    .await
+    .expect("startup should not hang")
+    .expect("reconcile startup");
 
     assert_blocked_auto_finalize_state(&fixture).await;
 }
@@ -422,6 +431,7 @@ async fn tick_auto_finalizes_not_required_prepared_convergence_even_when_commit_
         ProjectLocks::default(),
         DispatcherConfig::new(state_root.clone()),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -698,6 +708,7 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
         ProjectLocks::default(),
         DispatcherConfig::new(state_root.clone()),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();

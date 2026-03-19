@@ -17,7 +17,7 @@ use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::{compare_and_swap_ref, delete_ref, head_oid};
 use ingot_test_support::fixtures::GitOperationBuilder;
 use ingot_test_support::git::unique_temp_path;
-use ingot_usecases::ProjectLocks;
+use ingot_usecases::{DispatchNotify, ProjectLocks};
 use ingot_workflow::step;
 
 mod common;
@@ -252,6 +252,7 @@ async fn reconcile_startup_marks_finalized_target_ref_git_operation_reconciled()
         ProjectLocks::default(),
         DispatcherConfig::new(unique_temp_path("ingot-runtime-gop-state")),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -397,6 +398,7 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
         ProjectLocks::default(),
         DispatcherConfig::new(unique_temp_path("ingot-runtime-finalize-sync-state")),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -547,6 +549,7 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
         ProjectLocks::default(),
         DispatcherConfig::new(unique_temp_path("ingot-runtime-finalize-blocked-state")),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -713,6 +716,7 @@ async fn reconcile_startup_adopts_prepared_convergence_from_git_operation() {
         ProjectLocks::default(),
         DispatcherConfig::new(unique_temp_path("ingot-runtime-prepare-adopt-state")),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -839,6 +843,7 @@ async fn reconcile_startup_does_not_resurrect_cancelled_convergence_from_prepare
         ProjectLocks::default(),
         DispatcherConfig::new(unique_temp_path("ingot-runtime-prepare-cancelled-state")),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -955,6 +960,7 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
         ProjectLocks::default(),
         DispatcherConfig::new(unique_temp_path("ingot-runtime-adopt-job-state")),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -1080,6 +1086,7 @@ async fn reconcile_startup_continues_review_recovery_past_broken_project() {
             "ingot-runtime-startup-review-recovery-state",
         )),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -1264,6 +1271,7 @@ async fn reconcile_startup_adopts_remove_workspace_ref_operation() {
         ProjectLocks::default(),
         DispatcherConfig::new(state_root.clone()),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
     let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
@@ -1345,6 +1353,7 @@ async fn reconcile_startup_removes_abandoned_review_workspace_when_safe() {
         ProjectLocks::default(),
         DispatcherConfig::new(state_root.clone()),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -1415,6 +1424,7 @@ async fn reconcile_startup_removes_abandoned_authoring_workspace_when_item_is_do
         ProjectLocks::default(),
         DispatcherConfig::new(state_root.clone()),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -1502,6 +1512,7 @@ async fn reconcile_startup_retains_abandoned_authoring_workspace_with_untriaged_
         ProjectLocks::default(),
         DispatcherConfig::new(unique_temp_path("ingot-runtime-retain-state")),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -1609,6 +1620,7 @@ async fn reconcile_startup_retains_abandoned_integration_workspace_with_untriage
         ProjectLocks::default(),
         DispatcherConfig::new(unique_temp_path("ingot-runtime-integration-retain-state")),
         Arc::new(FakeRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();

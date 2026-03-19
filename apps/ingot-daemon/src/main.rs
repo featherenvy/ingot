@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use ingot_agent_runtime::{DispatcherConfig, JobDispatcher};
-use ingot_usecases::ProjectLocks;
+use ingot_usecases::{DispatchNotify, ProjectLocks};
 use tokio::net::TcpListener;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -22,10 +22,12 @@ async fn main() -> Result<()> {
     tracing::info!("database ready at {}", db_path.display());
 
     let project_locks = ProjectLocks::default();
+    let dispatch_notify = DispatchNotify::default();
     let dispatcher = JobDispatcher::new(
         db.clone(),
         project_locks.clone(),
         DispatcherConfig::new(state_root.clone()),
+        dispatch_notify.clone(),
     );
     dispatcher.reconcile_startup().await?;
     tokio::spawn(async move {
@@ -38,6 +40,7 @@ async fn main() -> Result<()> {
         db.clone(),
         project_locks,
         state_root.clone(),
+        dispatch_notify,
     );
     let addr = SocketAddr::from(([127, 0, 0, 1], 4190));
     let listener = TcpListener::bind(addr).await?;

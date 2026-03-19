@@ -10,6 +10,7 @@ use ingot_domain::workspace::WorkspaceKind;
 use ingot_git::commands::head_oid;
 use ingot_test_support::git::unique_temp_path;
 use ingot_test_support::reports::{clean_review_report, findings_review_report};
+use ingot_usecases::DispatchNotify;
 use ingot_workspace::{provision_authoring_workspace, provision_integration_workspace};
 
 mod common;
@@ -499,6 +500,7 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
             "ingot-runtime-auto-candidate-review-state",
         )),
         Arc::new(CleanInitialReviewRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();
@@ -614,6 +616,7 @@ async fn clean_candidate_review_auto_dispatches_candidate_validation() {
             "ingot-runtime-auto-candidate-validation-state",
         )),
         Arc::new(CleanCandidateReviewRunner),
+        DispatchNotify::default(),
     );
 
     let created_at = default_timestamp();

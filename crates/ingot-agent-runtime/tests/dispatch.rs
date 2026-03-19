@@ -10,7 +10,7 @@ use ingot_domain::job::{JobStatus, OutcomeClass};
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
 use ingot_test_support::git::unique_temp_path;
-use ingot_usecases::ProjectLocks;
+use ingot_usecases::{DispatchNotify, ProjectLocks};
 
 mod common;
 use common::*;
@@ -125,6 +125,7 @@ async fn tick_executes_a_review_job_and_persists_structured_report() {
             base_commit_oid: base_commit.clone(),
             head_commit_oid: head_commit.clone(),
         }),
+        DispatchNotify::default(),
     );
 
     assert!(dispatcher.tick().await.expect("tick should run"));

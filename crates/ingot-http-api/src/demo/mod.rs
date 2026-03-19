@@ -128,14 +128,13 @@ pub async fn create_demo_project(
         message: format!("Unknown demo template: {template_slug}"),
     })?;
 
-    let stack_slug = request
-        .stack
-        .as_deref()
-        .unwrap_or(template.stacks[0].slug);
-    let stack = template.find_stack(stack_slug).ok_or(ApiError::BadRequest {
-        code: "invalid_demo_stack",
-        message: format!("Unknown stack '{stack_slug}' for template '{template_slug}'"),
-    })?;
+    let stack_slug = request.stack.as_deref().unwrap_or(template.stacks[0].slug);
+    let stack = template
+        .find_stack(stack_slug)
+        .ok_or(ApiError::BadRequest {
+            code: "invalid_demo_stack",
+            message: format!("Unknown stack '{stack_slug}' for template '{template_slug}'"),
+        })?;
 
     let slug = request
         .name

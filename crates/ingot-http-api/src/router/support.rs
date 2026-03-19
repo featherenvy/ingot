@@ -293,18 +293,6 @@ pub(super) fn repo_to_job_completion(error: RepositoryError) -> ApiError {
     }
 }
 
-pub(super) fn repo_to_job_failure(error: RepositoryError) -> ApiError {
-    match error {
-        RepositoryError::Conflict(message) if message == "job_revision_stale" => {
-            UseCaseError::ProtocolViolation(
-                "job failure does not match the current item revision".into(),
-            )
-            .into()
-        }
-        other => repo_to_job_completion(other),
-    }
-}
-
 #[allow(dead_code)]
 pub(super) fn repo_to_job_expiration(error: RepositoryError) -> ApiError {
     match error {
@@ -405,17 +393,6 @@ mod tests {
         assert!(matches!(
             error,
             ApiError::UseCase(UseCaseError::ProjectNotFound)
-        ));
-    }
-
-    #[test]
-    fn failure_revision_stale_maps_to_protocol_violation() {
-        let error = repo_to_job_failure(RepositoryError::Conflict("job_revision_stale".into()));
-
-        assert!(matches!(
-            error,
-            ApiError::UseCase(UseCaseError::ProtocolViolation(message))
-                if message == "job failure does not match the current item revision"
         ));
     }
 

@@ -13,7 +13,7 @@ use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind};
 use ingot_git::commands::resolve_ref_oid;
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
 use ingot_http_api::build_router_with_project_locks_and_state_root;
-use ingot_usecases::ProjectLocks;
+use ingot_usecases::{DispatchNotify, ProjectLocks};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -160,6 +160,7 @@ async fn dispatch_item_job_route_binds_implicit_author_initial_from_target_head(
         db.clone(),
         ProjectLocks::default(),
         state_root.clone(),
+        DispatchNotify::default(),
     );
     let response = app
         .clone()
@@ -348,6 +349,7 @@ async fn investigate_item_dispatch_creates_and_triage_removes_anchor_ref() {
         db.clone(),
         ProjectLocks::default(),
         state_root.clone(),
+        DispatchNotify::default(),
     );
     let dispatch_response = app
         .clone()
@@ -510,6 +512,7 @@ async fn investigate_item_dispatch_uses_existing_authoring_workspace_subject() {
         db.clone(),
         ProjectLocks::default(),
         state_root.clone(),
+        DispatchNotify::default(),
     );
     let dispatch_response = app
         .oneshot(

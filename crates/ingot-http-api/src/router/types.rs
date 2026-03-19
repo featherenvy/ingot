@@ -166,24 +166,6 @@ pub struct DispatchJobRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct AssignJobRequest {
-    pub agent_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct StartJobRequest {
-    pub lease_owner_id: String,
-    pub process_pid: Option<u32>,
-    pub lease_duration_seconds: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct HeartbeatJobRequest {
-    pub lease_owner_id: String,
-    pub lease_duration_seconds: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct PromoteFindingRequest {
     pub target_ref: Option<String>,
     pub approval_policy: Option<ApprovalPolicy>,

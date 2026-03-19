@@ -9,7 +9,7 @@ use ingot_git::GitJobCompletionPort;
 use ingot_git::project_repo::project_repo_paths;
 use ingot_test_support::fixtures::ProjectBuilder;
 use ingot_test_support::sqlite::migrated_test_db;
-use ingot_usecases::{CompleteJobService, ProjectLocks};
+use ingot_usecases::{CompleteJobService, DispatchNotify, ProjectLocks};
 use uuid::Uuid;
 
 use super::AppState;
@@ -34,6 +34,7 @@ pub(super) async fn test_app_state() -> AppState {
             }),
         ),
         project_locks: ProjectLocks::default(),
+        dispatch_notify: DispatchNotify::default(),
         state_root,
     }
 }

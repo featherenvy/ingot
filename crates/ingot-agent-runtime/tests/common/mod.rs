@@ -30,7 +30,7 @@ use ingot_test_support::reports::{
     clean_review_report, clean_validation_report, findings_review_report,
 };
 pub use ingot_test_support::sqlite::migrated_test_db;
-use ingot_usecases::ProjectLocks;
+use ingot_usecases::{DispatchNotify, ProjectLocks};
 
 // ---------------------------------------------------------------------------
 // TestHarness
@@ -57,8 +57,13 @@ impl TestHarness {
         let db = migrated_test_db("ingot-runtime").await;
         let state_root = unique_temp_path("ingot-runtime-state");
         let config = config.unwrap_or_else(|| DispatcherConfig::new(state_root.clone()));
-        let dispatcher =
-            JobDispatcher::with_runner(db.clone(), ProjectLocks::default(), config, runner);
+        let dispatcher = JobDispatcher::with_runner(
+            db.clone(),
+            ProjectLocks::default(),
+            config,
+            runner,
+            DispatchNotify::default(),
+        );
 
         let project = ProjectBuilder::new(&repo)
             .id(ids::ProjectId::new())

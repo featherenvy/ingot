@@ -64,7 +64,7 @@ use ingot_usecases::convergence::{
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
 use ingot_usecases::reconciliation::ReconciliationPort;
 use ingot_usecases::{
-    CompleteJobCommand, CompleteJobService, ConvergenceService, ProjectLocks,
+    CompleteJobCommand, CompleteJobService, ConvergenceService, DispatchNotify, ProjectLocks,
     ReconciliationService, rebuild_revision_context,
 };
 use ingot_workflow::{Evaluator, RecommendedAction, step};
@@ -151,6 +151,7 @@ pub struct JobDispatcher {
     config: DispatcherConfig,
     lease_owner_id: String,
     runner: Arc<dyn AgentRunner>,
+    dispatch_notify: DispatchNotify,
 }
 
 #[derive(Clone)]
@@ -704,8 +705,19 @@ impl ReconciliationPort for RuntimeReconciliationPort {
 }
 
 impl JobDispatcher {
-    pub fn new(db: Database, project_locks: ProjectLocks, config: DispatcherConfig) -> Self {
-        Self::with_runner(db, project_locks, config, Arc::new(CliAgentRunner))
+    pub fn new(
+        db: Database,
+        project_locks: ProjectLocks,
+        config: DispatcherConfig,
+        dispatch_notify: DispatchNotify,
+    ) -> Self {
+        Self::with_runner(
+            db,
+            project_locks,
+            config,
+            Arc::new(CliAgentRunner),
+            dispatch_notify,
+        )
     }
 
     pub fn with_runner(
@@ -713,6 +725,7 @@ impl JobDispatcher {
         project_locks: ProjectLocks,
         config: DispatcherConfig,
         runner: Arc<dyn AgentRunner>,
+        dispatch_notify: DispatchNotify,
     ) -> Self {
         Self {
             db,
@@ -720,6 +733,7 @@ impl JobDispatcher {
             config,
             lease_owner_id: format!("ingotd:{}", std::process::id()),
             runner,
+            dispatch_notify,
         }
     }
 
@@ -753,11 +767,24 @@ impl JobDispatcher {
 
     pub async fn run_forever(&self) {
         loop {
-            if let Err(error) = self.tick().await {
-                error!(?error, "authoring job dispatcher tick failed");
+            let made_progress = match self.tick().await {
+                Ok(made_progress) => made_progress,
+                Err(error) => {
+                    error!(?error, "authoring job dispatcher tick failed");
+                    false
+                }
+            };
+
+            if made_progress {
+                continue;
             }
 
-            sleep(self.config.poll_interval).await;
+            tokio::select! {
+                () = self.dispatch_notify.notified() => {
+                    debug!("dispatcher woken by notification");
+                }
+                () = sleep(self.config.poll_interval) => {}
+            }
         }
     }
 
@@ -908,8 +935,7 @@ impl JobDispatcher {
                     made_progress = true;
                 }
                 JobStatus::Running => {
-                    self.reconcile_running_job(job).await?;
-                    made_progress = true;
+                    made_progress |= self.reconcile_running_job(job).await?;
                 }
                 _ => {}
             }
@@ -1357,15 +1383,14 @@ impl JobDispatcher {
         Ok(())
     }
 
-    async fn reconcile_running_job(&self, job: Job) -> Result<(), RuntimeError> {
+    async fn reconcile_running_job(&self, job: Job) -> Result<bool, RuntimeError> {
         let expired = job
             .state
             .lease_expires_at()
-            .map(|lease| lease <= Utc::now())
-            .unwrap_or(true);
+            .is_none_or(|lease| lease <= Utc::now());
         let foreign_owner = job.state.lease_owner_id() != Some(self.lease_owner_id.as_str());
         if !expired && !foreign_owner {
-            return Ok(());
+            return Ok(false);
         }
 
         let _guard = self
@@ -1374,7 +1399,7 @@ impl JobDispatcher {
             .await;
         let job = self.db.get_job(job.id).await?;
         if job.state.status() != JobStatus::Running {
-            return Ok(());
+            return Ok(false);
         }
         let item = self.db.get_item(job.item_id).await?;
         self.db
@@ -1405,7 +1430,7 @@ impl JobDispatcher {
         )
         .await?;
 
-        Ok(())
+        Ok(true)
     }
 
     async fn reconcile_active_convergences(&self) -> Result<bool, RuntimeError> {

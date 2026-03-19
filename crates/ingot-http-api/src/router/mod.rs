@@ -24,8 +24,10 @@ use std::path::Path as FsPath;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{Method, StatusCode};
+use axum::middleware;
+use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::Utc;
@@ -61,7 +63,7 @@ use ingot_git::commit::{
 };
 use ingot_git::diff::changed_paths_between;
 use ingot_git::project_repo::{CheckoutSyncStatus, checkout_sync_status, project_repo_paths};
-use ingot_store_sqlite::{Database, StartJobExecutionParams};
+use ingot_store_sqlite::Database;
 use ingot_usecases::convergence::{
     ConvergenceCommandPort, ConvergenceService, ConvergenceSystemActionPort,
 };
@@ -75,7 +77,8 @@ use ingot_usecases::item::{
 };
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job, retry_job};
 use ingot_usecases::{
-    CompleteJobCommand, CompleteJobService, ProjectLocks, UseCaseError, rebuild_revision_context,
+    CompleteJobCommand, CompleteJobService, DispatchNotify, ProjectLocks, UseCaseError,
+    rebuild_revision_context,
 };
 use ingot_workflow::{AllowedAction, Evaluation, Evaluator, PhaseStatus, RecommendedAction, step};
 use ingot_workspace::{
@@ -91,6 +94,7 @@ pub(crate) struct AppState {
     pub(crate) db: Database,
     complete_job_service: CompleteJobService<Database, GitJobCompletionPort, ProjectLocks>,
     pub(crate) project_locks: ProjectLocks,
+    pub(crate) dispatch_notify: DispatchNotify,
     state_root: PathBuf,
 }
 
@@ -100,17 +104,24 @@ pub fn build_router(db: Database) -> Router {
         db,
         ProjectLocks::default(),
         default_state_root(),
+        DispatchNotify::default(),
     )
 }
 
 pub fn build_router_with_project_locks(db: Database, project_locks: ProjectLocks) -> Router {
-    build_router_with_project_locks_and_state_root(db, project_locks, default_state_root())
+    build_router_with_project_locks_and_state_root(
+        db,
+        project_locks,
+        default_state_root(),
+        DispatchNotify::default(),
+    )
 }
 
 pub fn build_router_with_project_locks_and_state_root(
     db: Database,
     project_locks: ProjectLocks,
     state_root: PathBuf,
+    dispatch_notify: DispatchNotify,
 ) -> Router {
     let repo_path_resolver_root = state_root.clone();
     let state = AppState {
@@ -129,6 +140,7 @@ pub fn build_router_with_project_locks_and_state_root(
             }),
         ),
         project_locks,
+        dispatch_notify,
         state_root,
     };
 
@@ -242,9 +254,6 @@ pub fn build_router_with_project_locks_and_state_root(
             "/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/cancel",
             post(jobs::cancel_item_job),
         )
-        .route("/api/jobs/{job_id}/assign", post(jobs::assign_job))
-        .route("/api/jobs/{job_id}/start", post(jobs::start_job))
-        .route("/api/jobs/{job_id}/heartbeat", post(jobs::heartbeat_job))
         .route("/api/jobs/{job_id}/logs", get(jobs::get_job_logs))
         .route("/api/jobs/{job_id}/complete", post(jobs::complete_job))
         .route("/api/jobs/{job_id}/fail", post(jobs::fail_job))
@@ -276,6 +285,10 @@ pub fn build_router_with_project_locks_and_state_root(
             "/api/projects/{project_id}/items/{item_id}/approval/reject",
             post(convergence::reject_item_approval),
         )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            dispatch_notify_layer,
+        ))
         .with_state(state)
 }
 
@@ -285,6 +298,36 @@ pub(super) async fn health() -> &'static str {
 
 pub(super) async fn get_global_config() -> Result<Json<IngotConfig>, ApiError> {
     Ok(Json(load_effective_config(None)?))
+}
+
+/// Wakes the background dispatcher after every successful write request.
+///
+/// Applied to routes that create dispatchable work. Write methods (POST, PUT,
+/// PATCH, DELETE) that return 2xx trigger `dispatch_notify.notify()`.
+/// Over-notification is harmless — the dispatcher drains until idle, so
+/// spurious wakeups just re-enter the drain loop. This eliminates the class
+/// of bugs where a handler forgets to notify.
+///
+/// Excludes HEAD (auto-served by Axum for GET routes) and GET to avoid waking
+/// the dispatcher on read-only requests like health probes.
+async fn dispatch_notify_layer(
+    State(state): State<AppState>,
+    request: Request,
+    next: middleware::Next,
+) -> Response {
+    let should_notify = is_dispatch_write(request.method());
+    let response = next.run(request).await;
+    if should_notify && response.status().is_success() {
+        state.dispatch_notify.notify();
+    }
+    response
+}
+
+fn is_dispatch_write(method: &Method) -> bool {
+    matches!(
+        method,
+        &Method::POST | &Method::PUT | &Method::PATCH | &Method::DELETE
+    )
 }
 
 pub(super) async fn teardown_revision_lane_state(

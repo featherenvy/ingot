@@ -1,8 +1,7 @@
 use super::dispatch::auto_dispatch_projected_review_job;
 use super::items::{
     append_activity, current_authoring_head_for_revision_with_workspace,
-    effective_authoring_base_commit_oid, ensure_authoring_workspace, read_optional_json,
-    read_optional_text,
+    effective_authoring_base_commit_oid, read_optional_json, read_optional_text,
 };
 use super::support::*;
 use super::types::*;
@@ -58,137 +57,6 @@ pub(super) async fn cancel_item_job(
     refresh_revision_context_for_job(&state, job.id).await?;
 
     Ok(Json(()))
-}
-
-pub(super) async fn assign_job(
-    State(state): State<AppState>,
-    Path(job_id): Path<String>,
-    Json(request): Json<AssignJobRequest>,
-) -> Result<Json<Job>, ApiError> {
-    let job_id = parse_id::<JobId>(&job_id, "job")?;
-    let agent_id = parse_id::<AgentId>(&request.agent_id, "agent")?;
-    let mut job = state.db.get_job(job_id).await.map_err(repo_to_internal)?;
-    if job.state.status() == JobStatus::Assigned {
-        return Ok(Json(job));
-    }
-    if job.state.status() != JobStatus::Queued {
-        return Err(ApiError::Conflict {
-            code: "job_not_assignable",
-            message: "Only queued jobs can be assigned".into(),
-        });
-    }
-    if job.workspace_kind != WorkspaceKind::Authoring {
-        return Err(ApiError::BadRequest {
-            code: "unsupported_workspace_kind",
-            message: "This milestone only provisions authoring workspaces".into(),
-        });
-    }
-
-    let agent = state.db.get_agent(agent_id).await.map_err(repo_to_agent)?;
-    if agent.status != AgentStatus::Available {
-        return Err(ApiError::Conflict {
-            code: "agent_unavailable",
-            message: "Agent is not available".into(),
-        });
-    }
-
-    let item = state.db.get_item(job.item_id).await.map_err(repo_to_item)?;
-    if item.current_revision_id != job.item_revision_id {
-        return Err(UseCaseError::ProtocolViolation(
-            "job assignment does not match the current item revision".into(),
-        )
-        .into());
-    }
-    let revision = state
-        .db
-        .get_revision(job.item_revision_id)
-        .await
-        .map_err(repo_to_internal)?;
-    let project = state
-        .db
-        .get_project(job.project_id)
-        .await
-        .map_err(repo_to_project)?;
-    let _guard = state
-        .project_locks
-        .acquire_project_mutation(project.id)
-        .await;
-    let workspace = ensure_authoring_workspace(&state, &project, &revision, &job).await?;
-
-    job.assign(JobAssignment::new(workspace.id).with_agent(agent.id));
-    state.db.update_job(&job).await.map_err(repo_to_internal)?;
-
-    Ok(Json(job))
-}
-
-pub(super) async fn start_job(
-    State(state): State<AppState>,
-    Path(job_id): Path<String>,
-    Json(request): Json<StartJobRequest>,
-) -> Result<Json<Job>, ApiError> {
-    let job_id = parse_id::<JobId>(&job_id, "job")?;
-    let mut job = state.db.get_job(job_id).await.map_err(repo_to_internal)?;
-    if job.state.status() == JobStatus::Running {
-        return Ok(Json(job));
-    }
-    if job.state.status() != JobStatus::Assigned {
-        return Err(ApiError::Conflict {
-            code: "job_not_startable",
-            message: "Only assigned jobs can be started".into(),
-        });
-    }
-    let item = state.db.get_item(job.item_id).await.map_err(repo_to_item)?;
-    let _guard = state
-        .project_locks
-        .acquire_project_mutation(job.project_id)
-        .await;
-    let lease_expires_at =
-        Utc::now() + chrono::Duration::seconds(request.lease_duration_seconds.unwrap_or(1800));
-    state
-        .db
-        .start_job_execution(StartJobExecutionParams {
-            job_id: job.id,
-            item_id: item.id,
-            expected_item_revision_id: job.item_revision_id,
-            workspace_id: job.state.workspace_id(),
-            agent_id: job.state.agent_id(),
-            lease_owner_id: request.lease_owner_id.clone(),
-            process_pid: request.process_pid,
-            lease_expires_at,
-        })
-        .await
-        .map_err(repo_to_job_failure)?;
-    job = state.db.get_job(job.id).await.map_err(repo_to_internal)?;
-    Ok(Json(job))
-}
-
-pub(super) async fn heartbeat_job(
-    State(state): State<AppState>,
-    Path(job_id): Path<String>,
-    Json(request): Json<HeartbeatJobRequest>,
-) -> Result<Json<Job>, ApiError> {
-    let job_id = parse_id::<JobId>(&job_id, "job")?;
-    let job = state.db.get_job(job_id).await.map_err(repo_to_internal)?;
-    let item = state.db.get_item(job.item_id).await.map_err(repo_to_item)?;
-    let _guard = state
-        .project_locks
-        .acquire_project_mutation(job.project_id)
-        .await;
-    let lease_expires_at =
-        Utc::now() + chrono::Duration::seconds(request.lease_duration_seconds.unwrap_or(1800));
-    state
-        .db
-        .heartbeat_job_execution(
-            job.id,
-            item.id,
-            job.item_revision_id,
-            &request.lease_owner_id,
-            lease_expires_at,
-        )
-        .await
-        .map_err(repo_to_job_failure)?;
-    let job = state.db.get_job(job.id).await.map_err(repo_to_internal)?;
-    Ok(Json(job))
 }
 
 pub(super) async fn get_job_logs(
