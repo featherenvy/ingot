@@ -7,10 +7,10 @@ use tokio::sync::Notify;
 /// The HTTP router applies a middleware layer that calls [`notify`](Self::notify)
 /// after every successful non-GET response, so individual handlers do not need
 /// to call it manually. Notifications are level-triggered hints, not work
-/// tokens: the dispatcher drains all available work (looping while `tick()`
-/// returns progress) before awaiting [`notified`](Self::notified) alongside
-/// its fallback poll interval. Multiple notifications that arrive during a
-/// single drain are harmlessly collapsed.
+/// tokens: the dispatcher drains all available work before awaiting
+/// [`notified`](Self::notified) alongside its fallback poll interval.
+/// Multiple notifications that arrive during a single drain are harmlessly
+/// collapsed.
 #[derive(Clone)]
 pub struct DispatchNotify {
     inner: Arc<Notify>,

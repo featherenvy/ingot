@@ -6,7 +6,8 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::request::AgentRequest;
@@ -14,7 +15,7 @@ use ingot_agent_protocol::response::AgentResponse;
 use ingot_agent_runtime::{AgentRunner, DispatcherConfig, JobDispatcher};
 use ingot_domain::agent::{Agent, AgentCapability};
 use ingot_domain::ids;
-use ingot_domain::job::{ExecutionPermission, Job, JobInput, OutputArtifactKind, PhaseKind};
+use ingot_domain::job::{ExecutionPermission, Job, JobInput, JobStatus, OutputArtifactKind, PhaseKind};
 use ingot_domain::project::Project;
 use ingot_domain::workspace::WorkspaceKind;
 use ingot_git::commands::head_oid;
@@ -23,7 +24,7 @@ use ingot_store_sqlite::Database;
 pub use ingot_test_support::fixtures::{
     AgentBuilder, ConvergenceBuilder, ConvergenceQueueEntryBuilder, FindingBuilder,
     GitOperationBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
-    WorkspaceBuilder, default_timestamp,
+    WorkspaceBuilder, default_timestamp, parse_timestamp,
 };
 use ingot_test_support::git::unique_temp_path;
 use ingot_test_support::reports::{
@@ -31,6 +32,8 @@ use ingot_test_support::reports::{
 };
 pub use ingot_test_support::sqlite::migrated_test_db;
 use ingot_usecases::{DispatchNotify, ProjectLocks};
+use tokio::sync::Notify;
+use tokio::time::{sleep, timeout};
 
 // ---------------------------------------------------------------------------
 // TestHarness
@@ -39,6 +42,7 @@ use ingot_usecases::{DispatchNotify, ProjectLocks};
 pub struct TestHarness {
     pub db: Database,
     pub dispatcher: JobDispatcher,
+    pub dispatch_notify: DispatchNotify,
     pub project: Project,
     pub state_root: PathBuf,
     pub repo_path: PathBuf,
@@ -57,12 +61,13 @@ impl TestHarness {
         let db = migrated_test_db("ingot-runtime").await;
         let state_root = unique_temp_path("ingot-runtime-state");
         let config = config.unwrap_or_else(|| DispatcherConfig::new(state_root.clone()));
+        let dispatch_notify = DispatchNotify::default();
         let dispatcher = JobDispatcher::with_runner(
             db.clone(),
             ProjectLocks::default(),
-            config,
+            config.clone(),
             runner,
-            DispatchNotify::default(),
+            dispatch_notify.clone(),
         );
 
         let project = ProjectBuilder::new(&repo)
@@ -74,8 +79,9 @@ impl TestHarness {
         Self {
             db,
             dispatcher,
+            dispatch_notify,
             project,
-            state_root,
+            state_root: config.state_root.clone(),
             repo_path: repo,
         }
     }
@@ -118,6 +124,74 @@ impl TestHarness {
         .build();
         self.db.create_agent(&agent).await.expect("create agent");
         agent
+    }
+
+    pub async fn wait_for_job_status(
+        &self,
+        job_id: ids::JobId,
+        expected: JobStatus,
+        timeout_duration: Duration,
+    ) -> Job {
+        match timeout(timeout_duration, async {
+            loop {
+                let job = self.db.get_job(job_id).await.expect("load job");
+                if job.state.status() == expected {
+                    return job;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        {
+            Ok(job) => job,
+            Err(_) => {
+                let current = self.db.get_job(job_id).await.expect("load timed out job");
+                panic!(
+                    "timed out waiting for job {job_id} to reach {expected:?}; last status was {:?}",
+                    current.state.status()
+                );
+            }
+        }
+    }
+
+    pub async fn wait_for_running_jobs(
+        &self,
+        expected: usize,
+        timeout_duration: Duration,
+    ) -> Vec<Job> {
+        match timeout(timeout_duration, async {
+            loop {
+                let jobs = self
+                    .db
+                    .list_jobs_by_project(self.project.id)
+                    .await
+                    .expect("list project jobs")
+                    .into_iter()
+                    .filter(|job| job.state.status() == JobStatus::Running)
+                    .collect::<Vec<_>>();
+                if jobs.len() == expected {
+                    return jobs;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        {
+            Ok(jobs) => jobs,
+            Err(_) => {
+                let jobs = self
+                    .db
+                    .list_jobs_by_project(self.project.id)
+                    .await
+                    .expect("list jobs after timeout");
+                panic!(
+                    "timed out waiting for {expected} running jobs; current statuses: {:?}",
+                    jobs.into_iter()
+                        .map(|job| (job.id, job.state.status()))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
     }
 }
 
@@ -371,6 +445,94 @@ impl AgentRunner for CleanValidationRunner {
                     "unexpected step in clean validation runner: {other:?}"
                 ))),
             }
+        })
+    }
+}
+
+#[derive(Default)]
+struct BlockingRunnerState {
+    launches: usize,
+    release_budget: usize,
+}
+
+#[derive(Clone, Default)]
+pub struct BlockingRunner {
+    state: Arc<Mutex<BlockingRunnerState>>,
+    launch_notify: Arc<Notify>,
+    release_notify: Arc<Notify>,
+}
+
+impl BlockingRunner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn wait_for_launches(&self, expected: usize, timeout_duration: Duration) {
+        timeout(timeout_duration, async {
+            loop {
+                if self.state.lock().expect("blocking runner state").launches >= expected {
+                    return;
+                }
+                self.launch_notify.notified().await;
+            }
+        })
+        .await
+        .expect("timed out waiting for runner launches");
+    }
+
+    pub fn release_one(&self) {
+        let mut state = self.state.lock().expect("blocking runner state");
+        state.release_budget += 1;
+        drop(state);
+        self.release_notify.notify_one();
+    }
+
+    pub fn release_all(&self) {
+        let mut state = self.state.lock().expect("blocking runner state");
+        state.release_budget = usize::MAX / 2;
+        drop(state);
+        self.release_notify.notify_waiters();
+    }
+}
+
+impl AgentRunner for BlockingRunner {
+    fn launch<'a>(
+        &'a self,
+        _agent: &'a Agent,
+        _request: &'a AgentRequest,
+        working_dir: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
+        Box::pin(async move {
+            {
+                let mut state = self.state.lock().expect("blocking runner state");
+                state.launches += 1;
+            }
+            self.launch_notify.notify_waiters();
+
+            loop {
+                if {
+                    let mut state = self.state.lock().expect("blocking runner state");
+                    if state.release_budget > 0 {
+                        state.release_budget -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                } {
+                    break;
+                }
+                self.release_notify.notified().await;
+            }
+
+            tokio::fs::write(working_dir.join("generated.txt"), "hello")
+                .await
+                .expect("write generated file");
+            Ok(AgentResponse {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                result: Some(serde_json::json!({ "message": "implemented change" })),
+            })
         })
     }
 }
