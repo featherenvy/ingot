@@ -103,6 +103,7 @@ pub struct DispatcherConfig {
     pub state_root: PathBuf,
     pub poll_interval: Duration,
     pub heartbeat_interval: Duration,
+    pub lease_ttl: Duration,
     pub job_timeout: Duration,
     pub max_concurrent_jobs: usize,
 }
@@ -113,6 +114,7 @@ impl DispatcherConfig {
             state_root,
             poll_interval: Duration::from_secs(1),
             heartbeat_interval: Duration::from_secs(5),
+            lease_ttl: Duration::from_secs(30),
             job_timeout: Duration::from_secs(30 * 60),
             max_concurrent_jobs: 2,
         }
@@ -1993,7 +1995,7 @@ impl JobDispatcher {
         request: AgentRequest,
     ) -> AgentRunOutcome {
         let timeout_duration = self.config.job_timeout;
-        let lease_expires_at = Utc::now() + ChronoDuration::minutes(30);
+        let lease_expires_at = self.next_lease_expiration();
         let mut dispatch_listener = self.dispatch_notify.subscribe();
         if let Err(error) = self
             .db
@@ -2119,7 +2121,7 @@ impl JobDispatcher {
                             warn!(?error, job_id = %prepared.job.id, "failed to load job during heartbeat tick");
                         }
                     }
-                    let lease_expires_at = Utc::now() + ChronoDuration::minutes(30);
+                    let lease_expires_at = self.next_lease_expiration();
                     if let Err(error) = self.db.heartbeat_job_execution(
                         prepared.job.id,
                         prepared.item.id,
@@ -3688,7 +3690,7 @@ impl JobDispatcher {
                 agent_id: None,
                 lease_owner_id: self.lease_owner_id.clone(),
                 process_pid: None,
-                lease_expires_at: now + ChronoDuration::minutes(30),
+                lease_expires_at: now + self.lease_ttl(),
             })
             .await?;
 
@@ -3932,7 +3934,7 @@ impl JobDispatcher {
     }
 
     async fn refresh_daemon_validation_heartbeat(&self, prepared: &PreparedHarnessValidation) {
-        let lease_expires_at = Utc::now() + ChronoDuration::minutes(30);
+        let lease_expires_at = self.next_lease_expiration();
         if let Err(error) = self
             .db
             .heartbeat_job_execution(
@@ -4835,6 +4837,14 @@ impl JobDispatcher {
     fn artifact_dir(&self, job_id: ingot_domain::ids::JobId) -> PathBuf {
         self.config.state_root.join("logs").join(job_id.to_string())
     }
+
+    fn lease_ttl(&self) -> ChronoDuration {
+        ChronoDuration::from_std(self.config.lease_ttl).expect("lease ttl fits chrono duration")
+    }
+
+    fn next_lease_expiration(&self) -> chrono::DateTime<Utc> {
+        Utc::now() + self.lease_ttl()
+    }
 }
 
 async fn run_prepared_agent_job(
@@ -5587,10 +5597,17 @@ mod tests {
 
     impl TestRuntimeHarness {
         async fn new(runner: Arc<dyn AgentRunner>) -> Self {
+            Self::with_config(runner, None).await
+        }
+
+        async fn with_config(
+            runner: Arc<dyn AgentRunner>,
+            config: Option<DispatcherConfig>,
+        ) -> Self {
             let repo_path = temp_git_repo("ingot-runtime-lib");
             let db = migrated_test_db("ingot-runtime-lib").await;
             let state_root = unique_temp_path("ingot-runtime-lib-state");
-            let config = DispatcherConfig::new(state_root);
+            let config = config.unwrap_or_else(|| DispatcherConfig::new(state_root));
             let dispatch_notify = DispatchNotify::default();
             let dispatcher = JobDispatcher::with_runner(
                 db.clone(),
@@ -5729,6 +5746,95 @@ mod tests {
         let result = run_task.await.expect("join run_with_heartbeats task");
         assert!(matches!(result, AgentRunOutcome::Cancelled));
         assert_eq!(runner.launch_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn run_with_heartbeats_claims_running_job_with_configured_lease_ttl() {
+        let runner = Arc::new(BlockingRunner::new());
+        let mut config = DispatcherConfig::new(unique_temp_path("ingot-runtime-lease-ttl-state"));
+        config.lease_ttl = Duration::from_secs(17);
+        let harness = TestRuntimeHarness::with_config(runner.clone(), Some(config)).await;
+        harness.register_mutating_agent().await;
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head");
+        let item = ItemBuilder::new(harness.project.id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .explicit_seed(&seed_commit)
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let job = JobBuilder::new(harness.project.id, item_id, revision_id, "author_initial")
+            .phase_kind(PhaseKind::Author)
+            .workspace_kind(WorkspaceKind::Authoring)
+            .execution_permission(ExecutionPermission::MayMutate)
+            .phase_template_slug("author-initial")
+            .job_input(JobInput::authoring_head(seed_commit))
+            .output_artifact_kind(OutputArtifactKind::Commit)
+            .build();
+        harness.db.create_job(&job).await.expect("create job");
+
+        let mut dispatcher = harness.dispatcher.clone();
+        let pause_hook = PreSpawnPauseHook::new(PreSpawnPausePoint::AgentBeforeSpawn);
+        dispatcher.pre_spawn_pause_hook = Some(pause_hook.clone());
+
+        let prepared = match dispatcher
+            .prepare_run(harness.db.get_job(job.id).await.expect("load queued job"))
+            .await
+            .expect("prepare run")
+        {
+            PrepareRunOutcome::Prepared(prepared) => *prepared,
+            _ => panic!("expected prepared run"),
+        };
+        let request = AgentRequest {
+            prompt: prepared.prompt.clone(),
+            working_dir: prepared.workspace.path.clone(),
+            may_mutate: prepared.job.execution_permission == ExecutionPermission::MayMutate,
+            timeout_seconds: Some(dispatcher.config.job_timeout.as_secs()),
+            output_schema: output_schema_for_job(&prepared.job),
+        };
+
+        let run_task = tokio::spawn({
+            let dispatcher = dispatcher.clone();
+            let prepared = prepared.clone();
+            async move { dispatcher.run_with_heartbeats(&prepared, request).await }
+        });
+
+        pause_hook
+            .wait_until_entered(1, Duration::from_secs(2))
+            .await;
+
+        let running_job = harness
+            .db
+            .get_job(job.id)
+            .await
+            .expect("reload running job");
+        let started_at = running_job.state.started_at().expect("started_at");
+        let lease_expires_at = running_job
+            .state
+            .lease_expires_at()
+            .expect("lease_expires_at");
+        let lease_duration = lease_expires_at.signed_duration_since(started_at);
+        assert!(lease_duration <= ChronoDuration::seconds(17));
+        assert!(lease_duration >= ChronoDuration::seconds(16));
+
+        pause_hook.release();
+        {
+            let mut state = runner.state.lock().expect("blocking runner state");
+            state.release_budget = 1;
+        }
+        runner.release_notify.notify_waiters();
+
+        let result = run_task.await.expect("join run_with_heartbeats task");
+        assert!(matches!(result, AgentRunOutcome::Completed(_)));
     }
 
     #[tokio::test]
@@ -6028,6 +6134,89 @@ timeout = "30s"
             .expect("join run_harness_command_with_heartbeats task");
         assert!(result.cancelled);
         assert!(!marker_path.exists());
+    }
+
+    #[tokio::test]
+    async fn prepare_harness_validation_uses_configured_lease_ttl() {
+        let mut config = DispatcherConfig::new(unique_temp_path("ingot-runtime-harness-lease"));
+        config.lease_ttl = Duration::from_secs(23);
+        let harness =
+            TestRuntimeHarness::with_config(Arc::new(BlockingRunner::new()), Some(config)).await;
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head");
+        let item = ItemBuilder::new(harness.project.id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .explicit_seed(&seed_commit)
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        write_harness_toml(
+            &harness.repo_path,
+            r#"
+[commands.marker]
+run = "printf spawned > pre_spawn_marker.txt"
+timeout = "30s"
+"#,
+        );
+
+        let job = JobBuilder::new(
+            harness.project.id,
+            item_id,
+            revision_id,
+            step::VALIDATE_CANDIDATE_INITIAL,
+        )
+        .phase_kind(PhaseKind::Validate)
+        .workspace_kind(WorkspaceKind::Authoring)
+        .execution_permission(ExecutionPermission::DaemonOnly)
+        .context_policy(ContextPolicy::None)
+        .phase_template_slug("")
+        .job_input(JobInput::candidate_subject(
+            seed_commit.clone(),
+            seed_commit.clone(),
+        ))
+        .output_artifact_kind(OutputArtifactKind::ValidationReport)
+        .build();
+        harness.db.create_job(&job).await.expect("create job");
+
+        let prepared = match harness
+            .dispatcher
+            .prepare_harness_validation(harness.db.get_job(job.id).await.expect("load queued job"))
+            .await
+            .expect("prepare harness validation")
+        {
+            PrepareHarnessValidationOutcome::Prepared(prepared) => *prepared,
+            _ => panic!("expected prepared harness validation"),
+        };
+
+        let running_job = harness
+            .db
+            .get_job(job.id)
+            .await
+            .expect("reload running job");
+        let started_at = running_job.state.started_at().expect("started_at");
+        let lease_expires_at = running_job
+            .state
+            .lease_expires_at()
+            .expect("lease_expires_at");
+        let lease_duration = lease_expires_at.signed_duration_since(started_at);
+        assert!(lease_duration <= ChronoDuration::seconds(23));
+        assert!(lease_duration >= ChronoDuration::seconds(22));
+
+        let workspace = harness
+            .db
+            .get_workspace(prepared.workspace_id)
+            .await
+            .expect("reload workspace");
+        assert_eq!(workspace.state.status(), WorkspaceStatus::Ready);
     }
 
     fn assert_schema_requires_all_properties(schema: &serde_json::Value) {
