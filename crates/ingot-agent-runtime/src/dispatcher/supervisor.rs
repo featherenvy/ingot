@@ -1,8 +1,8 @@
 use super::*;
 use crate::dispatcher::agent_execution::run_prepared_agent_job;
 use crate::dispatcher::harness_execution::run_prepared_harness_validation_job;
-use crate::dispatcher::prepare::{is_daemon_only_validation, is_supported_runtime_job};
 use crate::dispatcher::prompt::output_schema_for_job;
+use ingot_usecases::job_preparation::{is_daemon_only_validation, is_supported_runtime_job};
 
 impl JobDispatcher {
     pub async fn run_forever(&self) {

@@ -15,7 +15,7 @@ use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
 use ingot_domain::activity::{Activity, ActivityEventType};
-use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
+use ingot_domain::agent::{AdapterKind, Agent};
 use ingot_domain::convergence::{Convergence, ConvergenceStatus, PrepareFailureKind};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::FindingTriageState;
@@ -28,8 +28,7 @@ use ingot_domain::item::{
     ApprovalState, DoneReason, Escalation, EscalationReason, Lifecycle, ResolutionSource,
 };
 use ingot_domain::job::{
-    ExecutionPermission, Job, JobAssignment, JobState, JobStatus, OutcomeClass, OutputArtifactKind,
-    PhaseKind,
+    ExecutionPermission, Job, JobState, JobStatus, OutcomeClass, OutputArtifactKind,
 };
 use ingot_domain::ports::{JobCompletionMutation, ProjectMutationLockPort, RepositoryError};
 use ingot_domain::project::Project;
@@ -82,11 +81,11 @@ mod completion;
 mod git_ops;
 mod harness_execution;
 mod ports;
+#[cfg(test)]
+mod pre_spawn_tests;
 mod prepare;
 mod projected_dispatch;
 mod prompt;
-#[cfg(test)]
-mod pre_spawn_tests;
 mod startup;
 mod supervisor;
 mod system_actions;

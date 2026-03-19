@@ -485,8 +485,8 @@ async fn run_forever_starts_next_job_after_running_job_cancellation() {
     .expect("cancel running job");
     h.dispatch_notify.notify();
 
-    runner
-        .wait_for_launches(2, Duration::from_millis(500))
+    runner.wait_for_launches(2, Duration::from_secs(2)).await;
+    h.wait_for_job_status(second_job.id, JobStatus::Running, Duration::from_secs(2))
         .await;
 
     assert_eq!(

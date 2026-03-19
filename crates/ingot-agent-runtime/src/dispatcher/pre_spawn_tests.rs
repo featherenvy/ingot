@@ -4,6 +4,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::dispatcher::prompt::output_schema_for_job;
+use ingot_domain::agent::AgentCapability;
+use ingot_domain::job::PhaseKind;
 use ingot_test_support::fixtures::{
     AgentBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
 };
@@ -28,7 +30,10 @@ impl BlockingRunner {
     }
 
     fn launch_count(&self) -> usize {
-        self.state.lock().expect("blocking runner state").launch_count
+        self.state
+            .lock()
+            .expect("blocking runner state")
+            .launch_count
     }
 }
 
@@ -40,7 +45,10 @@ impl AgentRunner for BlockingRunner {
         _working_dir: &'a Path,
     ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
         Box::pin(async move {
-            self.state.lock().expect("blocking runner state").launch_count += 1;
+            self.state
+                .lock()
+                .expect("blocking runner state")
+                .launch_count += 1;
             tokio::time::sleep(Duration::from_secs(60)).await;
             Err(AgentError::ProcessError("blocking runner aborted".into()))
         })
@@ -175,7 +183,11 @@ async fn run_with_heartbeats_does_not_spawn_agent_when_job_is_cancelled_before_s
     .expect("cancel active job");
     harness.dispatch_notify.notify();
 
-    let cancelled_job = harness.db.get_job(job.id).await.expect("reload cancelled job");
+    let cancelled_job = harness
+        .db
+        .get_job(job.id)
+        .await
+        .expect("reload cancelled job");
     let released_workspace = harness
         .db
         .get_workspace(workspace_id)
@@ -294,7 +306,11 @@ timeout = "30s"
     .expect("cancel active job");
     harness.dispatch_notify.notify();
 
-    let cancelled_job = harness.db.get_job(job.id).await.expect("reload cancelled job");
+    let cancelled_job = harness
+        .db
+        .get_job(job.id)
+        .await
+        .expect("reload cancelled job");
     let released_workspace = harness
         .db
         .get_workspace(workspace_id)

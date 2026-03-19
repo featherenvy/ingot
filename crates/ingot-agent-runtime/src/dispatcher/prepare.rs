@@ -2,6 +2,7 @@ use super::*;
 use crate::dispatcher::prompt::{
     built_in_template, load_harness_profile, resolve_harness_prompt_context, template_digest,
 };
+use ingot_usecases::job_preparation;
 
 impl JobDispatcher {
     pub(super) async fn hydrate_convergences(
@@ -43,15 +44,21 @@ impl JobDispatcher {
             .await;
 
         let mut job = self.db.get_job(queued_job.id).await?;
-        if job.state.status() != JobStatus::Queued || !is_supported_runtime_job(&job) {
-            return Ok(PrepareRunOutcome::NotPrepared);
-        }
-
         let item = self.db.get_item(job.item_id).await?;
-        if item.current_revision_id != job.item_revision_id {
+        if !job_preparation::should_prepare_agent_execution(&job, &item) {
             return Ok(PrepareRunOutcome::NotPrepared);
         }
 
+        let Some(agent) =
+            job_preparation::select_runtime_agent(&self.db.list_agents().await?, &job)
+        else {
+            debug!(
+                job_id = %job.id,
+                step_id = %job.step_id,
+                "queued job is waiting for a compatible available agent"
+            );
+            return Ok(PrepareRunOutcome::NotPrepared);
+        };
         let revision = self.db.get_revision(job.item_revision_id).await?;
         let project = self.db.get_project(job.project_id).await?;
         let harness_prompt = match resolve_harness_prompt_context(Path::new(&project.path)) {
@@ -69,14 +76,6 @@ impl JobDispatcher {
             }
         };
         let paths = self.refresh_project_mirror(&project).await?;
-        let Some(agent) = self.select_agent(&job).await? else {
-            debug!(
-                job_id = %job.id,
-                step_id = %job.step_id,
-                "queued job is waiting for a compatible available agent"
-            );
-            return Ok(PrepareRunOutcome::NotPrepared);
-        };
         let now = Utc::now();
         let (workspace, workspace_lifecycle, workspace_exists) = self
             .prepare_workspace(
@@ -106,11 +105,12 @@ impl JobDispatcher {
         let prompt = self
             .assemble_prompt(&job, &item, &revision, template, &harness_prompt)
             .await?;
-        job.assign(
-            JobAssignment::new(workspace.id)
-                .with_agent(agent.id)
-                .with_prompt_snapshot(prompt.clone())
-                .with_phase_template_digest(template_digest(template)),
+        job_preparation::assign_agent_execution(
+            &mut job,
+            workspace.id,
+            agent.id,
+            prompt.clone(),
+            template_digest(template),
         );
         self.db.update_job(&job).await?;
 
@@ -136,20 +136,6 @@ impl JobDispatcher {
             prompt,
             workspace_lifecycle,
         })))
-    }
-
-    async fn select_agent(&self, job: &Job) -> Result<Option<Agent>, RuntimeError> {
-        let mut agents = self
-            .db
-            .list_agents()
-            .await?
-            .into_iter()
-            .filter(|agent| agent.status == AgentStatus::Available)
-            .filter(|agent| agent.adapter_kind == AdapterKind::Codex)
-            .filter(|agent| supports_job(agent, job))
-            .collect::<Vec<_>>();
-        agents.sort_by(|left, right| left.slug.cmp(&right.slug));
-        Ok(agents.into_iter().next())
     }
 
     async fn prepare_workspace(
@@ -301,12 +287,8 @@ impl JobDispatcher {
             .await;
 
         let mut job = self.db.get_job(queued_job.id).await?;
-        if job.state.status() != JobStatus::Queued || !is_daemon_only_validation(&job) {
-            return Ok(PrepareHarnessValidationOutcome::NotPrepared);
-        }
-
         let item = self.db.get_item(job.item_id).await?;
-        if item.current_revision_id != job.item_revision_id {
+        if !job_preparation::should_prepare_harness_validation(&job, &item) {
             return Ok(PrepareHarnessValidationOutcome::NotPrepared);
         }
 
@@ -357,7 +339,7 @@ impl JobDispatcher {
             self.db.create_workspace(&workspace).await?;
         }
 
-        job.assign(JobAssignment::new(workspace.id));
+        job_preparation::assign_daemon_validation(&mut job, workspace.id);
         self.db.update_job(&job).await?;
         self.db
             .start_job_execution(StartJobExecutionParams {
@@ -385,54 +367,4 @@ impl JobDispatcher {
             },
         )))
     }
-}
-
-pub(super) fn is_supported_runtime_job(job: &Job) -> bool {
-    matches!(
-        (
-            job.workspace_kind,
-            job.execution_permission,
-            job.output_artifact_kind,
-        ),
-        (
-            WorkspaceKind::Authoring,
-            ExecutionPermission::MayMutate,
-            OutputArtifactKind::Commit
-        ) | (
-            WorkspaceKind::Authoring | WorkspaceKind::Review | WorkspaceKind::Integration,
-            ExecutionPermission::MustNotMutate,
-            OutputArtifactKind::ReviewReport
-                | OutputArtifactKind::ValidationReport
-                | OutputArtifactKind::FindingReport,
-        ) | (
-            WorkspaceKind::Authoring | WorkspaceKind::Integration,
-            ExecutionPermission::DaemonOnly,
-            OutputArtifactKind::ValidationReport,
-        )
-    )
-}
-
-fn supports_job(agent: &Agent, job: &Job) -> bool {
-    if job.execution_permission == ExecutionPermission::DaemonOnly
-        || !agent
-            .capabilities
-            .contains(&AgentCapability::StructuredOutput)
-    {
-        return false;
-    }
-
-    match job.execution_permission {
-        ExecutionPermission::MayMutate => {
-            agent.capabilities.contains(&AgentCapability::MutatingJobs)
-        }
-        ExecutionPermission::MustNotMutate => {
-            agent.capabilities.contains(&AgentCapability::ReadOnlyJobs)
-        }
-        ExecutionPermission::DaemonOnly => unreachable!("daemon-only jobs are filtered above"),
-    }
-}
-
-pub(super) fn is_daemon_only_validation(job: &Job) -> bool {
-    job.execution_permission == ExecutionPermission::DaemonOnly
-        && job.phase_kind == PhaseKind::Validate
 }

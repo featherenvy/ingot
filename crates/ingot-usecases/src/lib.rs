@@ -5,6 +5,7 @@ pub mod finding;
 pub mod item;
 pub mod job;
 pub mod job_lifecycle;
+pub mod job_preparation;
 pub mod locking;
 pub mod notify;
 pub mod reconciliation;
