@@ -1045,7 +1045,8 @@ impl JobDispatcher {
                     Err(error) => {
                         warn!(?error, job_id = %task_result.job_id, task_id = %task_id, "supervised job task returned error");
                         if let Some(meta) = meta {
-                            self.cleanup_supervised_task(meta, error.to_string()).await?;
+                            self.cleanup_supervised_task(meta, error.to_string())
+                                .await?;
                         }
                     }
                 }
@@ -1054,7 +1055,8 @@ impl JobDispatcher {
                 let task_id = error.id();
                 warn!(?error, task_id = %task_id, "supervised job task failed");
                 if let Some(meta) = running_meta.remove(&task_id) {
-                    self.cleanup_supervised_task(meta, error.to_string()).await?;
+                    self.cleanup_supervised_task(meta, error.to_string())
+                        .await?;
                 }
             }
         }
@@ -1166,7 +1168,8 @@ impl JobDispatcher {
                             prepared.clone(),
                             permit,
                         ));
-                        running_meta.insert(handle.id(), RunningJobMeta::HarnessValidation(prepared));
+                        running_meta
+                            .insert(handle.id(), RunningJobMeta::HarnessValidation(prepared));
                         made_progress = true;
                     }
                     Err(RuntimeError::Workspace(WorkspaceError::Busy))
@@ -1192,8 +1195,11 @@ impl JobDispatcher {
                 }
                 Ok(PrepareRunOutcome::Prepared(prepared)) => {
                     let prepared = *prepared;
-                    let handle =
-                        running.spawn(run_prepared_agent_job(self.clone(), prepared.clone(), permit));
+                    let handle = running.spawn(run_prepared_agent_job(
+                        self.clone(),
+                        prepared.clone(),
+                        permit,
+                    ));
                     running_meta.insert(handle.id(), RunningJobMeta::Agent(prepared));
                     made_progress = true;
                 }
@@ -2401,7 +2407,8 @@ impl JobDispatcher {
 
         match response {
             Ok(response) => {
-                self.write_response_artifacts(&prepared.job, &response).await?;
+                self.write_response_artifacts(&prepared.job, &response)
+                    .await?;
                 self.finish_run(prepared, response).await?;
             }
             Err(AgentError::Timeout) => {
@@ -3508,8 +3515,25 @@ impl JobDispatcher {
         let mut findings = Vec::new();
 
         for command in &prepared.harness.commands {
-            let result =
-                self.run_harness_command_with_heartbeats(&prepared, command).await;
+            if self.harness_validation_cancelled(&prepared).await? {
+                info!(
+                    job_id = %prepared.job_id,
+                    "daemon-only validation cancelled before next harness command"
+                );
+                return Ok(());
+            }
+
+            let result = self
+                .run_harness_command_with_heartbeats(&prepared, command)
+                .await;
+            if result.cancelled {
+                info!(
+                    job_id = %prepared.job_id,
+                    command = %command.name,
+                    "daemon-only validation cancelled while harness command was running"
+                );
+                return Ok(());
+            }
             let status = if result.timed_out || result.exit_code != 0 {
                 "fail"
             } else {
@@ -3581,6 +3605,14 @@ impl JobDispatcher {
             OutcomeClass::Findings
         };
 
+        if self.harness_validation_cancelled(&prepared).await? {
+            info!(
+                job_id = %prepared.job_id,
+                "daemon-only validation cancelled before completion"
+            );
+            return Ok(());
+        }
+
         if let Err(error) = self
             .complete_job_service()
             .execute(CompleteJobCommand {
@@ -3592,6 +3624,14 @@ impl JobDispatcher {
             })
             .await
         {
+            let current_job = self.db.get_job(prepared.job_id).await?;
+            if current_job.state.status() == JobStatus::Cancelled {
+                info!(
+                    job_id = %prepared.job_id,
+                    "daemon-only validation was cancelled before completion was persisted"
+                );
+                return Ok(());
+            }
             warn!(?error, job_id = %prepared.job_id, "harness validation completion failed");
             self.db
                 .finish_job_non_success(FinishJobNonSuccessParams {
@@ -3685,6 +3725,13 @@ impl JobDispatcher {
         Ok(())
     }
 
+    async fn harness_validation_cancelled(
+        &self,
+        prepared: &PreparedHarnessValidation,
+    ) -> Result<bool, RuntimeError> {
+        Ok(self.db.get_job(prepared.job_id).await?.state.status() == JobStatus::Cancelled)
+    }
+
     async fn refresh_daemon_validation_heartbeat(&self, prepared: &PreparedHarnessValidation) {
         let lease_expires_at = Utc::now() + ChronoDuration::minutes(30);
         if let Err(error) = self
@@ -3735,6 +3782,7 @@ impl JobDispatcher {
                     stdout_tail: String::new(),
                     stderr_tail: format!("failed to spawn command: {error}"),
                     timed_out: false,
+                    cancelled: false,
                 };
             }
         };
@@ -3755,6 +3803,7 @@ impl JobDispatcher {
                                 collect_pipe_output(stdout_task, "stdout").await,
                                 collect_pipe_output(stderr_task, "stderr").await,
                                 false,
+                                false,
                                 Vec::new(),
                             );
                         }
@@ -3763,6 +3812,7 @@ impl JobDispatcher {
                                 -1,
                                 collect_pipe_output(stdout_task, "stdout").await,
                                 collect_pipe_output(stderr_task, "stderr").await,
+                                false,
                                 false,
                                 vec![format!("command I/O error: {error}")],
                             );
@@ -3775,6 +3825,7 @@ impl JobDispatcher {
                             status.code().unwrap_or(-1),
                             collect_pipe_output(stdout_task, "stdout").await,
                             collect_pipe_output(stderr_task, "stderr").await,
+                            false,
                             false,
                             Vec::new(),
                         );
@@ -3791,10 +3842,38 @@ impl JobDispatcher {
                         collect_pipe_output(stdout_task, "stdout").await,
                         collect_pipe_output(stderr_task, "stderr").await,
                         true,
+                        false,
                         notes,
                     );
                 }
                 _ = ticker.tick() => {
+                    match self.db.get_job(prepared.job_id).await {
+                        Ok(job) if job.state.status() == JobStatus::Cancelled => {
+                            let mut notes = vec!["command cancelled".to_string()];
+                            if let Err(error) = terminate_harness_command(&mut child).await {
+                                notes.push(format!("failed to terminate cancelled command: {error}"));
+                            }
+                            if let Err(error) = child.wait().await {
+                                notes.push(format!("failed to reap cancelled command: {error}"));
+                            }
+                            return build_harness_command_result(
+                                -1,
+                                collect_pipe_output(stdout_task, "stdout").await,
+                                collect_pipe_output(stderr_task, "stderr").await,
+                                false,
+                                true,
+                                notes,
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(
+                                ?error,
+                                job_id = %prepared.job_id,
+                                "failed to load daemon-only validation job during heartbeat tick"
+                            );
+                        }
+                    }
                     self.refresh_daemon_validation_heartbeat(prepared).await;
                 }
             }
@@ -4620,6 +4699,7 @@ struct HarnessCommandResult {
     stdout_tail: String,
     stderr_tail: String,
     timed_out: bool,
+    cancelled: bool,
 }
 
 fn build_harness_command_result(
@@ -4627,6 +4707,7 @@ fn build_harness_command_result(
     stdout: Result<String, String>,
     stderr: Result<String, String>,
     timed_out: bool,
+    cancelled: bool,
     mut notes: Vec<String>,
 ) -> HarnessCommandResult {
     let stdout_tail = match stdout {
@@ -4656,6 +4737,7 @@ fn build_harness_command_result(
         stdout_tail,
         stderr_tail,
         timed_out,
+        cancelled,
     }
 }
 

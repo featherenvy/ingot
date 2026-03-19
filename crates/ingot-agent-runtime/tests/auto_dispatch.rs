@@ -7,7 +7,7 @@ use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
     PhaseKind,
 };
-use ingot_domain::workspace::WorkspaceKind;
+use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
 use ingot_test_support::git::unique_temp_path;
 use ingot_test_support::reports::{clean_review_report, findings_review_report};
@@ -19,6 +19,7 @@ use common::*;
 use ingot_domain::finding::{FindingSeverity, FindingTriageState};
 use ingot_git::commands::git;
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
+use ingot_usecases::job_lifecycle;
 use ingot_workflow::step;
 
 fn write_harness_toml(repo_path: &Path, contents: &str) {
@@ -849,7 +850,11 @@ async fn run_forever_executes_daemon_only_validation_job() {
     h.dispatch_notify.notify();
 
     let job = h
-        .wait_for_job_status(validation_job.id, JobStatus::Completed, Duration::from_secs(5))
+        .wait_for_job_status(
+            validation_job.id,
+            JobStatus::Completed,
+            Duration::from_secs(5),
+        )
         .await;
     assert_eq!(job.state.outcome_class(), Some(OutcomeClass::Clean));
     assert_eq!(
@@ -857,7 +862,10 @@ async fn run_forever_executes_daemon_only_validation_job() {
         Some("validation_report:v1")
     );
 
-    let artifact_dir = h.state_root.join("logs").join(validation_job.id.to_string());
+    let artifact_dir = h
+        .state_root
+        .join("logs")
+        .join(validation_job.id.to_string());
     assert!(
         !artifact_dir.join("prompt.txt").exists(),
         "daemon-only validation should not write prompt artifacts"
@@ -873,8 +881,9 @@ async fn run_forever_executes_daemon_only_validation_job() {
 
 #[tokio::test]
 async fn run_forever_refreshes_heartbeat_for_daemon_only_validation_job() {
-    let mut config =
-        DispatcherConfig::new(unique_temp_path("ingot-runtime-daemon-validation-heartbeat"));
+    let mut config = DispatcherConfig::new(unique_temp_path(
+        "ingot-runtime-daemon-validation-heartbeat",
+    ));
     config.poll_interval = Duration::from_secs(10);
     config.heartbeat_interval = Duration::from_millis(20);
     config.max_concurrent_jobs = 1;
@@ -940,7 +949,11 @@ timeout = "30s"
     h.dispatch_notify.notify();
 
     let running_job = h
-        .wait_for_job_status(validation_job.id, JobStatus::Running, Duration::from_secs(2))
+        .wait_for_job_status(
+            validation_job.id,
+            JobStatus::Running,
+            Duration::from_secs(2),
+        )
         .await;
     let initial_heartbeat = running_job
         .state
@@ -949,7 +962,10 @@ timeout = "30s"
 
     let refreshed_job = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let job = h.db.get_job(validation_job.id).await.expect("reload validation job");
+            let job =
+                h.db.get_job(validation_job.id)
+                    .await
+                    .expect("reload validation job");
             if job
                 .state
                 .heartbeat_at()
@@ -969,17 +985,148 @@ timeout = "30s"
             .is_some_and(|heartbeat| heartbeat > initial_heartbeat)
     );
 
-    h.wait_for_job_status(validation_job.id, JobStatus::Completed, Duration::from_secs(2))
-        .await;
+    h.wait_for_job_status(
+        validation_job.id,
+        JobStatus::Completed,
+        Duration::from_secs(2),
+    )
+    .await;
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn run_forever_cancels_daemon_only_validation_command() {
+    let mut config =
+        DispatcherConfig::new(unique_temp_path("ingot-runtime-daemon-validation-cancel"));
+    config.poll_interval = Duration::from_secs(10);
+    config.heartbeat_interval = Duration::from_millis(20);
+    config.max_concurrent_jobs = 1;
+    let h = TestHarness::with_config(Arc::new(FakeRunner), Some(config)).await;
+    h.dispatcher
+        .reconcile_startup()
+        .await
+        .expect("reconcile startup");
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
+    git_sync(&h.repo_path, &["add", "tracked.txt"]);
+    git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(seed_commit.clone()))
+        .seed_target_commit_oid(Some(seed_commit.clone()))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+    let workspace =
+        create_authoring_validation_workspace(&h, revision_id, &seed_commit, &candidate_head).await;
+
+    write_harness_toml(
+        &h.repo_path,
+        r#"
+[commands.sleepy]
+run = "while true; do echo tick >> cancellation-marker.log; sleep 0.05; done"
+timeout = "30s"
+"#,
+    );
+
+    let validation_job = JobBuilder::new(
+        h.project.id,
+        item_id,
+        revision_id,
+        step::VALIDATE_CANDIDATE_INITIAL,
+    )
+    .phase_kind(PhaseKind::Validate)
+    .workspace_kind(WorkspaceKind::Authoring)
+    .execution_permission(ExecutionPermission::DaemonOnly)
+    .context_policy(ContextPolicy::None)
+    .phase_template_slug("")
+    .job_input(JobInput::candidate_subject(
+        seed_commit.clone(),
+        candidate_head.clone(),
+    ))
+    .output_artifact_kind(OutputArtifactKind::ValidationReport)
+    .build();
+    h.db.create_job(&validation_job)
+        .await
+        .expect("create validation job");
+
+    let dispatcher = h.dispatcher.clone();
+    let handle = tokio::spawn(async move { dispatcher.run_forever().await });
+    h.dispatch_notify.notify();
+
+    h.wait_for_job_status(
+        validation_job.id,
+        JobStatus::Running,
+        Duration::from_secs(2),
+    )
+    .await;
+    let marker_path = Path::new(&workspace.path).join("cancellation-marker.log");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if marker_path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("marker file should be created before cancellation");
+
+    let active_job =
+        h.db.get_job(validation_job.id)
+            .await
+            .expect("reload active job");
+    job_lifecycle::cancel_job(
+        &h.db,
+        &h.db,
+        &h.db,
+        &active_job,
+        &item,
+        "operator_cancelled",
+        WorkspaceStatus::Ready,
+    )
+    .await
+    .expect("cancel validation job");
+
+    h.wait_for_job_status(
+        validation_job.id,
+        JobStatus::Cancelled,
+        Duration::from_secs(2),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let size_after_settle = std::fs::metadata(&marker_path)
+        .expect("marker file after cancellation settles")
+        .len();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let size_later = std::fs::metadata(&marker_path)
+        .expect("marker file after cancellation remains stable")
+        .len();
+    assert_eq!(
+        size_later, size_after_settle,
+        "cancelled daemon-only validation command should stop writing output"
+    );
+
     handle.abort();
     let _ = handle.await;
 }
 
 #[tokio::test]
 async fn daemon_only_validation_command_completes_even_when_heartbeat_interval_exceeds_command_timeout()
-{
-    let mut config =
-        DispatcherConfig::new(unique_temp_path("ingot-runtime-daemon-validation-timeout-race"));
+ {
+    let mut config = DispatcherConfig::new(unique_temp_path(
+        "ingot-runtime-daemon-validation-timeout-race",
+    ));
     config.poll_interval = Duration::from_secs(10);
     config.heartbeat_interval = Duration::from_secs(5);
     config.max_concurrent_jobs = 1;
@@ -1038,7 +1185,10 @@ timeout = "1s"
 
     assert!(h.dispatcher.tick().await.expect("validation tick"));
 
-    let job = h.db.get_job(validation_job.id).await.expect("reload validation job");
+    let job =
+        h.db.get_job(validation_job.id)
+            .await
+            .expect("reload validation job");
     assert_eq!(job.state.status(), JobStatus::Completed);
     assert_eq!(job.state.outcome_class(), Some(OutcomeClass::Clean));
 }
