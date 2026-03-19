@@ -25,7 +25,7 @@ This is not a logging-only change. The root bug is that the live agent path curr
 - [x] (2026-03-19 21:45Z) Refactored the agent runtime launch path so `PreparedRun` carries in-memory assignment metadata, `prepare_run()` no longer persists live `Assigned`, `tick()` delegates to `execute_prepared_agent_job()`, and `run_with_heartbeats()` claims `Queued -> Running` atomically before the pre-spawn pause hook and cancellation guard.
 - [x] (2026-03-19 21:49Z) Added queued-workspace cleanup for prepared agent runs that never reach the claim point, kept startup repair for legacy `Assigned` rows via an explicit startup-only pass, and stopped steady-state `reconcile_active_jobs()` from requeueing `Assigned`.
 - [x] (2026-03-19 21:54Z) Added the new regressions in `crates/ingot-store-sqlite/src/store/job.rs`, crate-private runtime regressions in `crates/ingot-agent-runtime/src/lib.rs`, and the maintenance-vs-startup reconciliation regression in `crates/ingot-agent-runtime/tests/reconciliation.rs`.
-- [x] (2026-03-19 22:00Z) Validation passed with `cargo test -p ingot-store-sqlite --lib`, `cargo test -p ingot-agent-runtime`, `cargo check -p ingot-daemon`, and `cargo fmt --all --check`. Session wrap-up still needs the bead close, commit, and push sequence.
+- [x] (2026-03-19 22:04Z) Validation passed with `cargo test -p ingot-store-sqlite --lib`, `cargo test -p ingot-agent-runtime`, `cargo check -p ingot-daemon`, and `cargo fmt --all --check`; `ingot-6l0` is closed; commit `2a56e40` is on `origin/master`; and the required `git pull --rebase`, `bd dolt push`, and `git push` sequence completed successfully.
 
 ## Surprises & Discoveries
 
