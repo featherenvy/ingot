@@ -1,9 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router'
-import { toast } from 'sonner'
-import { createDemoProject } from '../api/client'
-import { projectsQuery, queryKeys } from '../api/queries'
+import { Link } from 'react-router'
+import { projectsQuery } from '../api/queries'
+import { DemoProjectDialog } from '../components/DemoProjectDialog'
 import { EmptyState } from '../components/EmptyState'
 import { PageHeader } from '../components/PageHeader'
 import { PageQueryError } from '../components/PageQueryError'
@@ -13,25 +12,11 @@ import { RegisterProjectDialog } from '../components/RegisterProjectDialog'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Card, CardContent } from '../components/ui/card'
-import { showErrorToast } from '../lib/toast'
 
 export default function ProjectsPage() {
   const { data: projects, error, isError, isFetching, isLoading, refetch } = useQuery(projectsQuery())
   const [dialogOpen, setDialogOpen] = useState(false)
-  const queryClient = useQueryClient()
-  const navigate = useNavigate()
-
-  const demoMutation = useMutation({
-    mutationFn: () => createDemoProject(),
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.projects() })
-      toast.success(`Demo project created with ${result.items_created} items.`)
-      navigate(`/projects/${result.project.id}`)
-    },
-    onError: (error) => {
-      showErrorToast('Failed to create demo project.', error)
-    },
-  })
+  const [demoOpen, setDemoOpen] = useState(false)
 
   if (isLoading) {
     return (
@@ -55,13 +40,8 @@ export default function ProjectsPage() {
         description="Register repositories and jump into the boards already under management."
         action={
           <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => demoMutation.mutate()}
-              disabled={demoMutation.isPending}
-            >
-              {demoMutation.isPending ? 'Creating…' : 'Try demo project'}
+            <Button type="button" variant="outline" onClick={() => setDemoOpen(true)}>
+              Try demo project
             </Button>
             <Button type="button" onClick={() => setDialogOpen(true)}>
               Register project
@@ -70,6 +50,7 @@ export default function ProjectsPage() {
         }
       />
       <RegisterProjectDialog open={dialogOpen} onOpenChange={setDialogOpen} />
+      <DemoProjectDialog open={demoOpen} onOpenChange={setDemoOpen} />
 
       {projects && projects.length > 0 ? (
         <div className="grid gap-3">

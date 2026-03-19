@@ -1,5 +1,6 @@
 import { queryOptions } from '@tanstack/react-query'
 import type { Activity, Agent, ItemDetail, ItemSummary, Job, JobLogs, JsonObject, Project } from '../types/domain'
+import type { DemoTemplateSummary } from './client'
 import * as api from './client'
 
 // Query key factories — consistent keys for invalidation from WS events.
@@ -90,4 +91,11 @@ export const jobLogsQuery = (jobId: string) =>
     queryFn: () => api.getJobLogs(jobId),
     enabled: !!jobId,
     staleTime: 5_000,
+  })
+
+export const demoCatalogQuery = () =>
+  queryOptions<{ templates: DemoTemplateSummary[] }>({
+    queryKey: ['demo-catalog'],
+    queryFn: api.getDemoCatalog,
+    staleTime: Infinity,
   })

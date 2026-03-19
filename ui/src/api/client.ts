@@ -54,7 +54,24 @@ export const createProject = (payload: { name?: string; path: string; default_br
     body: JSON.stringify(payload),
   })
 
-export const createDemoProject = (payload?: { name?: string }) =>
+// Demo catalog
+export interface DemoTemplateSummary {
+  slug: string
+  name: string
+  description: string
+  color: string
+  item_count: number
+  stacks: DemoStackSummary[]
+}
+
+export interface DemoStackSummary {
+  slug: string
+  label: string
+}
+
+export const getDemoCatalog = () => request<{ templates: DemoTemplateSummary[] }>('/demo-catalog')
+
+export const createDemoProject = (payload?: { name?: string; template?: string; stack?: string }) =>
   request<{ project: Project; items_created: number }>('/demo-project', {
     method: 'POST',
     body: JSON.stringify(payload ?? {}),

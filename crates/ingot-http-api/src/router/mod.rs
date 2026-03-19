@@ -140,6 +140,7 @@ pub fn build_router_with_project_locks_and_state_root(
             "/api/projects",
             get(projects::list_projects).post(projects::create_project),
         )
+        .route("/api/demo-catalog", get(crate::demo::get_demo_catalog))
         .route("/api/demo-project", post(crate::demo::create_demo_project))
         .route(
             "/api/projects/{project_id}/activity",
