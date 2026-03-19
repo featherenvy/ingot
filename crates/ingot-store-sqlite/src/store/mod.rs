@@ -14,3 +14,5 @@ mod job_completion;
 mod project;
 mod revision;
 mod workspace;
+
+pub use job::ClaimQueuedAgentJobExecutionParams;

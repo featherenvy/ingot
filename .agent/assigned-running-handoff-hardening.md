@@ -21,11 +21,11 @@ This is not a logging-only change. The root bug is that the live agent path curr
 - [x] (2026-03-19 20:48Z) Created and claimed beads issue `ingot-6l0` for this bug and recorded the production evidence there.
 - [x] (2026-03-19 20:49Z) Authored this ExecPlan in `.agent/assigned-running-handoff-hardening.md`.
 - [x] (2026-03-19 20:48Z) Deep-read every file already referenced by this plan plus adjacent state-mutating paths in `crates/ingot-domain/src/ports.rs`, `crates/ingot-domain/src/workspace.rs`, `crates/ingot-usecases/src/job.rs`, `crates/ingot-usecases/src/reconciliation.rs`, `crates/ingot-agent-runtime/tests/common/mod.rs`, and the runtime crate-private tests in `crates/ingot-agent-runtime/src/lib.rs`.
-- [ ] Implement an agent-specific store claim that moves `Queued -> Running` and persists assignment metadata atomically, without broadening the generic `JobRepository::start_execution` trait.
-- [ ] Refactor the agent runtime call paths (`tick()`, `execute_prepared_agent_job()`, `run_with_heartbeats()`, `launch_supervised_jobs()`, and `cleanup_supervised_task()`) so prepared work that never reaches the claim point still releases its workspace safely.
-- [ ] Keep startup repair for legacy `Assigned` rows, stop steady-state maintenance from requeueing live agent launch handoffs, and leave the daemon-only validation path on its current `Assigned -> Running` flow until a dedicated follow-up changes it.
-- [ ] Add store, runtime, and reconciliation regressions for atomic claim semantics, duplicate-launch prevention, queued-workspace cleanup, ownership-loss handling, and legacy assigned-row startup recovery.
-- [ ] Run the focused test commands, then the broader Rust validation commands, update this plan with outcomes, and close `ingot-6l0` only if the implementation and validation both land cleanly.
+- [x] (2026-03-19 21:39Z) Added `ClaimQueuedAgentJobExecutionParams` plus `Database::claim_queued_agent_job_execution(...)` in `crates/ingot-store-sqlite/src/store/job.rs`, kept `JobRepository::start_execution` unchanged for daemon-only validation, and re-exported the new params type from `crates/ingot-store-sqlite/src/lib.rs`.
+- [x] (2026-03-19 21:45Z) Refactored the agent runtime launch path so `PreparedRun` carries in-memory assignment metadata, `prepare_run()` no longer persists live `Assigned`, `tick()` delegates to `execute_prepared_agent_job()`, and `run_with_heartbeats()` claims `Queued -> Running` atomically before the pre-spawn pause hook and cancellation guard.
+- [x] (2026-03-19 21:49Z) Added queued-workspace cleanup for prepared agent runs that never reach the claim point, kept startup repair for legacy `Assigned` rows via an explicit startup-only pass, and stopped steady-state `reconcile_active_jobs()` from requeueing `Assigned`.
+- [x] (2026-03-19 21:54Z) Added the new regressions in `crates/ingot-store-sqlite/src/store/job.rs`, crate-private runtime regressions in `crates/ingot-agent-runtime/src/lib.rs`, and the maintenance-vs-startup reconciliation regression in `crates/ingot-agent-runtime/tests/reconciliation.rs`.
+- [x] (2026-03-19 22:00Z) Validation passed with `cargo test -p ingot-store-sqlite --lib`, `cargo test -p ingot-agent-runtime`, `cargo check -p ingot-daemon`, and `cargo fmt --all --check`. Session wrap-up still needs the bead close, commit, and push sequence.
 
 ## Surprises & Discoveries
 
@@ -52,6 +52,9 @@ This is not a logging-only change. The root bug is that the live agent path curr
 
 - Observation: report-job completion and commit-job completion already use different seams, so “completion hardening” must refer to the real call sites instead of one imagined helper.
   Evidence: authoring commit jobs call `Database::apply_job_completion(...)` directly in `complete_commit_run()`, while report-producing jobs go through `CompleteJobService::execute(...)` in `crates/ingot-usecases/src/job.rs`, which already maps `RepositoryError::Conflict("job_not_active")` to `UseCaseError::JobNotActive`.
+
+- Observation: keeping the queued-to-running claim inside `run_with_heartbeats()` still leaves a brief queued window between Tokio task spawn and the first poll of that task.
+  Evidence: the final implementation still needed a supervisor-local `HashSet<JobId>`, because `launch_supervised_jobs()` spawns the background task before the claim runs and a second supervisor iteration could otherwise observe the same queued row before that task executes.
 
 ## Decision Log
 
@@ -91,13 +94,17 @@ This is not a logging-only change. The root bug is that the live agent path curr
   Rationale: both `tick()` and `execute_prepared_agent_job()` currently treat any non-timeout runtime failure as something to terminally fail again unless the job is already `Cancelled`. When `run_with_heartbeats()` loses ownership because another task already completed the row, those branches should stop cleanly instead of calling `fail_run()` and generating an extra `job_not_active` conflict.
   Date/Author: 2026-03-19 / Codex
 
+- Decision: repair legacy `Assigned` rows in an explicit startup-only pass before the shared reconciliation service runs.
+  Rationale: `ReconciliationService::reconcile_startup()` and `tick_maintenance()` both call the same `reconcile_active_jobs()` port method. Once steady-state maintenance stops touching `Assigned`, startup still needs a separate explicit pass so old persisted rows remain recoverable without reintroducing the original race.
+  Date/Author: 2026-03-19 / Codex
+
 ## Outcomes & Retrospective
 
-No implementation has landed yet. The investigation changed the understanding of the bug in two important ways. First, the repeated heartbeat warnings are not the root problem; they are the tail symptom of two live runners sharing one `job_id`. Second, the problem is not just “reconciliation is too eager.” The deeper issue is that the current lifecycle lets a live launch inhabit a recovery-only state (`Assigned`) long enough for the maintenance loop to treat it as abandoned.
+Implementation landed in both the store and runtime layers without broadening the generic job repository trait. Agent-backed launch now computes assignment metadata in memory during `prepare_run()`, claims `Queued -> Running` atomically through `Database::claim_queued_agent_job_execution(...)`, and persists assignment metadata plus the lease in that one durable transition. The daemon-only validation path still uses the existing `Assigned -> Running` helper and remained behaviorally unchanged.
 
-The deeper audit in this revision uncovered two concrete execution details that the first draft of this plan did not spell out. One is that queued jobs can strand a `Busy` workspace if the plan removes live `Assigned` without adding a new cleanup path. The other is that daemon-only validation still depends on the generic `start_job_execution()` helper and therefore constrains how aggressively the store API can be rewritten in the first patch.
+The cleanup and reconciliation boundaries also changed as planned. Prepared agent work that never reaches the claim point now releases its busy workspace explicitly when the job row is still queued. Ordinary `reconcile_active_jobs()` no longer requeues `Assigned`, while `reconcile_startup()` runs an explicit legacy-assigned repair pass before the shared reconciliation service so older persisted rows still recover cleanly.
 
-The recommended implementation strategy is therefore broader and more exact than a one-line guard in `reconcile_active_jobs()`. The fix should add an agent-specific atomic claim helper, reshape runtime cleanup around prepared workspaces, preserve startup repair for legacy assigned rows, leave daemon-only validation behavior stable, add in-process dedupe, and explicitly test that one queued agent job produces one runner process.
+Validation was broader than the original focused list. `cargo test -p ingot-store-sqlite --lib`, `cargo test -p ingot-agent-runtime`, `cargo check -p ingot-daemon`, and `cargo fmt --all --check` all passed on 2026-03-19. The new regressions specifically proved the queued-only claim semantics, the queued-workspace cleanup path, the supervisor duplicate-launch fix under a forced pre-spawn pause, and the startup-versus-maintenance split for legacy `Assigned` rows.
 
 ## Context and Orientation
 
@@ -218,9 +225,9 @@ Work from `/Users/aa/Documents/ingot`.
 
        - `supervisor_does_not_launch_same_job_twice_during_pre_spawn_pause`
        - `cleanup_supervised_task_releases_workspace_for_unclaimed_prepared_agent_job`
-       - `run_with_heartbeats_stops_after_job_row_becomes_inactive`
        - `run_with_heartbeats_does_not_launch_runner_when_job_is_cancelled_before_spawn`
        - `reconcile_startup_handles_mixed_inflight_states_conservatively`
+       - `reconcile_active_jobs_leaves_assigned_rows_for_startup_recovery`
 
    Keep the existing dispatch regressions green, especially:
 
@@ -233,17 +240,10 @@ Work from `/Users/aa/Documents/ingot`.
    Run:
 
        cd /Users/aa/Documents/ingot
-       cargo test -p ingot-store-sqlite claim_queued_agent_job_execution_persists_assignment_and_running_lease -- --exact
-       cargo test -p ingot-store-sqlite claim_queued_agent_job_execution_rejects_rows_that_left_queued -- --exact
-       cargo test -p ingot-agent-runtime --lib supervisor_does_not_launch_same_job_twice_during_pre_spawn_pause -- --exact
-       cargo test -p ingot-agent-runtime --lib cleanup_supervised_task_releases_workspace_for_unclaimed_prepared_agent_job -- --exact
-       cargo test -p ingot-agent-runtime --lib run_with_heartbeats_stops_after_job_row_becomes_inactive -- --exact
-       cargo test -p ingot-agent-runtime --lib run_with_heartbeats_does_not_launch_runner_when_job_is_cancelled_before_spawn -- --exact
-       cargo test -p ingot-agent-runtime --test reconciliation reconcile_startup_handles_mixed_inflight_states_conservatively -- --exact
-       cargo test -p ingot-agent-runtime --test dispatch
-       cargo test -p ingot-agent-runtime --test auto_dispatch
+       cargo test -p ingot-store-sqlite --lib
+       cargo test -p ingot-agent-runtime
        cargo check -p ingot-daemon
-       make test
+       cargo fmt --all --check
 
    If one of the exact-test commands changes because the implementation uses a different stable name, update this plan immediately before stopping.
 
@@ -265,7 +265,7 @@ Acceptance is reached when all of the following are true.
 
 7. When a running task loses ownership and `heartbeat_job_execution(...)` returns `job_not_active`, the runtime stops heartbeating and exits through an explicit ownership-loss path. `tick()` and `execute_prepared_agent_job()` do not follow that path with a second `fail_run()` call.
 
-8. The focused exact tests above pass, followed by `cargo test -p ingot-agent-runtime --test dispatch`, `cargo test -p ingot-agent-runtime --test auto_dispatch`, `cargo check -p ingot-daemon`, and `make test`, except for any unrelated pre-existing failures recorded in `Progress` and `Outcomes & Retrospective`.
+8. The broader Rust validation commands above pass: `cargo test -p ingot-store-sqlite --lib`, `cargo test -p ingot-agent-runtime`, `cargo check -p ingot-daemon`, and `cargo fmt --all --check`, except for any unrelated pre-existing failures recorded in `Progress` and `Outcomes & Retrospective`.
 
 The proof must be behavioral, not rhetorical. In particular, the duplicate-launch regression should demonstrate one launch count and one running row for one queued job under a forced pre-spawn pause, because that is the closest repository-native reproduction of the production race.
 
@@ -285,20 +285,25 @@ If a new daemon binary is deployed while old `Assigned` rows already exist, star
 
 When implementation lands, record the most useful evidence here. At minimum include:
 
-    cargo test -p ingot-store-sqlite claim_queued_agent_job_execution_persists_assignment_and_running_lease -- --exact
-    test claim_queued_agent_job_execution_persists_assignment_and_running_lease ... ok
+    cargo test -p ingot-store-sqlite --lib
+    test store::job::tests::claim_queued_agent_job_execution_persists_assignment_and_running_lease ... ok
+    test store::job::tests::claim_queued_agent_job_execution_rejects_rows_that_left_queued ... ok
 
-    cargo test -p ingot-agent-runtime --lib supervisor_does_not_launch_same_job_twice_during_pre_spawn_pause -- --exact
-    test supervisor_does_not_launch_same_job_twice_during_pre_spawn_pause ... ok
+    cargo test -p ingot-agent-runtime
+    test tests::supervisor_does_not_launch_same_job_twice_during_pre_spawn_pause ... ok
 
-    cargo test -p ingot-agent-runtime --lib cleanup_supervised_task_releases_workspace_for_unclaimed_prepared_agent_job -- --exact
-    test cleanup_supervised_task_releases_workspace_for_unclaimed_prepared_agent_job ... ok
+    cargo test -p ingot-agent-runtime
+    test tests::cleanup_supervised_task_releases_workspace_for_unclaimed_prepared_agent_job ... ok
 
-    cargo test -p ingot-agent-runtime --test reconciliation reconcile_startup_handles_mixed_inflight_states_conservatively -- --exact
+    cargo test -p ingot-agent-runtime
+    test reconcile_active_jobs_leaves_assigned_rows_for_startup_recovery ... ok
     test reconcile_startup_handles_mixed_inflight_states_conservatively ... ok
 
     cargo check -p ingot-daemon
-    Finished `dev` profile ... target(s) in ...
+    Finished `dev` profile ... target(s) in 25.45s
+
+    cargo fmt --all --check
+    [exit 0]
 
 If you reproduce the original bug manually after implementation, include a short daemon-log excerpt with one `prepared job execution`, one `job entered running state`, and no repeated `job heartbeat update failed` lines for the same `job_id` after completion.
 
@@ -341,4 +346,4 @@ The supervisor should maintain a `HashSet<ingot_domain::ids::JobId>` alongside `
 
 No new external dependency should be needed. Tokio, SQLx, the existing use-case layer, and the current test harnesses are sufficient.
 
-Revision note: revised on 2026-03-19 after a deeper code audit of every referenced file and adjacent lifecycle path. This pass corrected a few inaccurate assumptions from the first draft: the atomic claim helper should be agent-specific rather than a blanket rewrite of `start_job_execution()`, `process_pid` cannot be part of the pre-spawn atomic claim, the inline `tick()` path must stay aligned with the supervised path, and removing live `Assigned` requires an explicit cleanup path for queued jobs that already attached a busy workspace. It also added concrete coverage for the daemon-only validation path, the completion/use-case seam, the new store tests, and the crate-private runtime tests needed to reproduce the race reliably.
+Revision note: revised on 2026-03-19 after implementation and validation. This pass converted the remaining plan tasks into completed work, documented the startup-only assigned-row repair pass that the code now uses, replaced the provisional exact-test list with the broader commands that actually ran cleanly, and recorded the passing validation evidence for the landed store and runtime changes.

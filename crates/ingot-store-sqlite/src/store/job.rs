@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId};
 use ingot_domain::item::Escalation;
 use ingot_domain::job::{Job, JobAssignment, JobInput, JobLease, JobState, TerminalStatus};
@@ -13,6 +13,16 @@ use super::helpers::{
     parse_id, parse_json, serialize_optional_json,
 };
 use crate::db::Database;
+
+#[derive(Debug, Clone)]
+pub struct ClaimQueuedAgentJobExecutionParams {
+    pub job_id: JobId,
+    pub item_id: ItemId,
+    pub expected_item_revision_id: ItemRevisionId,
+    pub assignment: JobAssignment,
+    pub lease_owner_id: String,
+    pub lease_expires_at: DateTime<Utc>,
+}
 
 fn encode_job_input(job_input: &JobInput) -> (&'static str, Option<&str>, Option<&str>) {
     match job_input {
@@ -188,6 +198,71 @@ impl Database {
                 item_id,
                 expected_item_revision_id,
                 &["queued", "assigned"],
+                true,
+            )
+            .await?);
+        }
+
+        Ok(())
+    }
+
+    pub async fn claim_queued_agent_job_execution(
+        &self,
+        params: ClaimQueuedAgentJobExecutionParams,
+    ) -> Result<(), RepositoryError> {
+        let ClaimQueuedAgentJobExecutionParams {
+            job_id,
+            item_id,
+            expected_item_revision_id,
+            assignment,
+            lease_owner_id,
+            lease_expires_at,
+        } = params;
+        let now = Utc::now();
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET status = 'running',
+                 workspace_id = ?,
+                 agent_id = ?,
+                 prompt_snapshot = ?,
+                 phase_template_digest = ?,
+                 process_pid = NULL,
+                 lease_owner_id = ?,
+                 heartbeat_at = ?,
+                 lease_expires_at = ?,
+                 started_at = COALESCE(started_at, ?)
+             WHERE id = ?
+               AND status = 'queued'
+               AND EXISTS (
+                   SELECT 1
+                   FROM items
+                   WHERE id = ?
+                     AND current_revision_id = ?
+               )",
+        )
+        .bind(assignment.workspace_id.to_string())
+        .bind(assignment.agent_id.map(|id| id.to_string()))
+        .bind(assignment.prompt_snapshot)
+        .bind(assignment.phase_template_digest)
+        .bind(lease_owner_id)
+        .bind(now)
+        .bind(lease_expires_at)
+        .bind(now)
+        .bind(job_id.to_string())
+        .bind(item_id.to_string())
+        .bind(expected_item_revision_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+
+        if result.rows_affected() != 1 {
+            return Err(classify_running_job_conflict(
+                &self.pool,
+                job_id,
+                item_id,
+                expected_item_revision_id,
+                &["queued"],
+                false,
             )
             .await?);
         }
@@ -233,6 +308,7 @@ impl Database {
                 item_id,
                 expected_item_revision_id,
                 &["running"],
+                true,
             )
             .await?);
         }
@@ -564,6 +640,7 @@ async fn classify_running_job_conflict(
     item_id: ItemId,
     expected_item_revision_id: ItemRevisionId,
     expected_statuses: &[&str],
+    require_workspace_binding: bool,
 ) -> Result<RepositoryError, RepositoryError> {
     let mut tx = pool.begin().await.map_err(db_err)?;
 
@@ -592,18 +669,20 @@ async fn classify_running_job_conflict(
         return Ok(RepositoryError::Conflict("job_not_active".into()));
     }
 
-    let workspace_id: Option<String> = sqlx::query_scalar(
-        "SELECT workspace_id
-         FROM jobs
-         WHERE id = ?",
-    )
-    .bind(job_id.to_string())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(db_err)?
-    .flatten();
-    if workspace_id.is_none() {
-        return Ok(RepositoryError::Conflict("job_missing_workspace".into()));
+    if require_workspace_binding {
+        let workspace_id: Option<String> = sqlx::query_scalar(
+            "SELECT workspace_id
+             FROM jobs
+             WHERE id = ?",
+        )
+        .bind(job_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?
+        .flatten();
+        if workspace_id.is_none() {
+            return Ok(RepositoryError::Conflict("job_missing_workspace".into()));
+        }
     }
 
     Ok(RepositoryError::Conflict("job_update_conflict".into()))
@@ -793,21 +872,26 @@ fn required_job_field<T>(field: &'static str, value: Option<T>) -> Result<T, Rep
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use ingot_domain::agent::AgentCapability;
     use ingot_domain::ids::{ItemId, ItemRevisionId, JobId};
     use ingot_domain::item::EscalationReason;
     use ingot_domain::job::{
-        ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
+        ContextPolicy, ExecutionPermission, JobAssignment, JobStatus, OutcomeClass,
+        OutputArtifactKind, PhaseKind,
     };
     use ingot_domain::ports::RepositoryError;
     use ingot_domain::workspace::WorkspaceKind;
     use ingot_test_support::fixtures::{
-        ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder, parse_timestamp,
+        AgentBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
+        parse_timestamp,
     };
     use ingot_test_support::sqlite::temp_db_path;
 
     use crate::Database;
     use crate::store::test_fixtures::PersistFixture;
-    use crate::{FinishJobNonSuccessParams, StartJobExecutionParams};
+    use crate::{
+        ClaimQueuedAgentJobExecutionParams, FinishJobNonSuccessParams, StartJobExecutionParams,
+    };
 
     async fn migrated_test_db(prefix: &str) -> Database {
         let path = temp_db_path(prefix);
@@ -1029,5 +1113,149 @@ mod tests {
         let persisted_job = db.get_job(job.id).await.expect("job remains readable");
         assert_eq!(persisted_job.state.status(), JobStatus::Queued);
         assert_eq!(persisted_job.state.workspace_id(), None);
+    }
+
+    #[tokio::test]
+    async fn claim_queued_agent_job_execution_persists_assignment_and_running_lease() {
+        let db = migrated_test_db("ingot-store").await;
+
+        let project = ProjectBuilder::new("/tmp/test")
+            .name("Test")
+            .build()
+            .persist(&db)
+            .await
+            .expect("create project");
+
+        let item_id = ItemId::new();
+        let revision = RevisionBuilder::new(item_id)
+            .seed_commit_oid(Some("abc"))
+            .seed_target_commit_oid(Some("def"))
+            .build();
+        let item = ItemBuilder::new(project.id, revision.id)
+            .id(item_id)
+            .build();
+        let (item, revision) = (item, revision)
+            .persist(&db)
+            .await
+            .expect("create item with revision");
+
+        let job = JobBuilder::new(project.id, item.id, revision.id, "author_initial")
+            .status(JobStatus::Queued)
+            .phase_kind(PhaseKind::Author)
+            .workspace_kind(WorkspaceKind::Authoring)
+            .execution_permission(ExecutionPermission::MayMutate)
+            .context_policy(ContextPolicy::Fresh)
+            .phase_template_slug("author-initial")
+            .output_artifact_kind(OutputArtifactKind::Commit)
+            .build()
+            .persist(&db)
+            .await
+            .expect("create queued job");
+
+        let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
+            .created_for_revision_id(revision.id)
+            .status(ingot_domain::workspace::WorkspaceStatus::Ready)
+            .base_commit_oid("abc")
+            .head_commit_oid("abc")
+            .build();
+        db.create_workspace(&workspace)
+            .await
+            .expect("create workspace");
+        let agent = AgentBuilder::new("codex", vec![AgentCapability::MutatingJobs]).build();
+        db.create_agent(&agent).await.expect("create agent");
+        let lease_expires_at = Utc::now() + chrono::Duration::seconds(60);
+        db.claim_queued_agent_job_execution(ClaimQueuedAgentJobExecutionParams {
+            job_id: job.id,
+            item_id: item.id,
+            expected_item_revision_id: revision.id,
+            assignment: JobAssignment::new(workspace.id)
+                .with_agent(agent.id)
+                .with_prompt_snapshot("prompt body")
+                .with_phase_template_digest("template-digest"),
+            lease_owner_id: "ingotd:test".into(),
+            lease_expires_at,
+        })
+        .await
+        .expect("claim queued job");
+
+        let persisted_job = db.get_job(job.id).await.expect("load claimed job");
+        assert_eq!(persisted_job.state.status(), JobStatus::Running);
+        assert_eq!(persisted_job.state.workspace_id(), Some(workspace.id));
+        assert_eq!(persisted_job.state.agent_id(), Some(agent.id));
+        assert_eq!(persisted_job.state.prompt_snapshot(), Some("prompt body"));
+        assert_eq!(
+            persisted_job.state.phase_template_digest(),
+            Some("template-digest")
+        );
+        assert_eq!(persisted_job.state.lease_owner_id(), Some("ingotd:test"));
+        assert!(persisted_job.state.heartbeat_at().is_some());
+        assert_eq!(
+            persisted_job.state.lease_expires_at(),
+            Some(lease_expires_at)
+        );
+        assert!(persisted_job.state.started_at().is_some());
+    }
+
+    #[tokio::test]
+    async fn claim_queued_agent_job_execution_rejects_rows_that_left_queued() {
+        let db = migrated_test_db("ingot-store").await;
+
+        let project = ProjectBuilder::new("/tmp/test")
+            .name("Test")
+            .build()
+            .persist(&db)
+            .await
+            .expect("create project");
+
+        let item_id = ItemId::new();
+        let revision = RevisionBuilder::new(item_id)
+            .seed_commit_oid(Some("abc"))
+            .seed_target_commit_oid(Some("def"))
+            .build();
+        let item = ItemBuilder::new(project.id, revision.id)
+            .id(item_id)
+            .build();
+        let (item, revision) = (item, revision)
+            .persist(&db)
+            .await
+            .expect("create item with revision");
+
+        let workspace_id = ingot_domain::ids::WorkspaceId::new();
+        let job = JobBuilder::new(project.id, item.id, revision.id, "author_initial")
+            .status(JobStatus::Assigned)
+            .phase_kind(PhaseKind::Author)
+            .workspace_kind(WorkspaceKind::Authoring)
+            .execution_permission(ExecutionPermission::MayMutate)
+            .context_policy(ContextPolicy::Fresh)
+            .phase_template_slug("author-initial")
+            .output_artifact_kind(OutputArtifactKind::Commit)
+            .workspace_id(workspace_id)
+            .build()
+            .persist(&db)
+            .await
+            .expect("create assigned job");
+
+        let error = db
+            .claim_queued_agent_job_execution(ClaimQueuedAgentJobExecutionParams {
+                job_id: job.id,
+                item_id: item.id,
+                expected_item_revision_id: revision.id,
+                assignment: JobAssignment::new(workspace_id)
+                    .with_prompt_snapshot("prompt body")
+                    .with_phase_template_digest("template-digest"),
+                lease_owner_id: "ingotd:test".into(),
+                lease_expires_at: Utc::now() + chrono::Duration::seconds(60),
+            })
+            .await
+            .expect_err("non-queued job should fail");
+
+        assert!(matches!(
+            error,
+            RepositoryError::Conflict(message) if message == "job_not_active"
+        ));
+
+        let persisted_job = db.get_job(job.id).await.expect("load unchanged job");
+        assert_eq!(persisted_job.state.status(), JobStatus::Assigned);
+        assert_eq!(persisted_job.state.workspace_id(), Some(workspace_id));
     }
 }

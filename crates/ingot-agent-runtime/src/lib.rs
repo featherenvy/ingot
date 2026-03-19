@@ -1,6 +1,6 @@
 mod bootstrap;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -55,7 +55,10 @@ use ingot_git::project_repo::{
     CheckoutFinalizationStatus, CheckoutSyncStatus, checkout_finalization_status,
     checkout_sync_status, ensure_mirror, project_repo_paths, sync_checkout_to_commit,
 };
-use ingot_store_sqlite::{Database, FinishJobNonSuccessParams, StartJobExecutionParams};
+use ingot_store_sqlite::{
+    ClaimQueuedAgentJobExecutionParams, Database, FinishJobNonSuccessParams,
+    StartJobExecutionParams,
+};
 use ingot_usecases::convergence::{
     CheckoutFinalizationReadiness, ConvergenceSystemActionPort, FinalizePreparedTrigger,
     FinalizeTargetRefResult, PreparedConvergenceFinalizePort, SystemActionItemState,
@@ -305,6 +308,7 @@ struct PreparedRun {
     project: Project,
     canonical_repo_path: PathBuf,
     agent: Agent,
+    assignment: JobAssignment,
     workspace: Workspace,
     original_head_commit_oid: String,
     prompt: String,
@@ -350,6 +354,24 @@ struct RunningJobResult {
 enum RunningJobMeta {
     Agent(PreparedRun),
     HarnessValidation(PreparedHarnessValidation),
+}
+
+impl RunningJobMeta {
+    fn job_id(&self) -> ingot_domain::ids::JobId {
+        match self {
+            Self::Agent(prepared) => prepared.job.id,
+            Self::HarnessValidation(prepared) => prepared.job_id,
+        }
+    }
+}
+
+enum AgentRunOutcome {
+    Completed(AgentResponse),
+    TimedOut,
+    Cancelled,
+    OwnershipLostBeforeSpawn,
+    OwnershipLostDuringRun,
+    LaunchFailed(AgentError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -912,11 +934,17 @@ impl JobDispatcher {
         let semaphore = Arc::new(Semaphore::new(self.config.max_concurrent_jobs));
         let mut running = JoinSet::<RunningJobResult>::new();
         let mut running_meta = HashMap::<TaskId, RunningJobMeta>::new();
+        let mut running_job_ids = HashSet::new();
         let mut dispatch_listener = self.dispatch_notify.subscribe();
 
         loop {
             let made_progress = match self
-                .run_supervisor_iteration(&mut running, &mut running_meta, &semaphore)
+                .run_supervisor_iteration(
+                    &mut running,
+                    &mut running_meta,
+                    &mut running_job_ids,
+                    &semaphore,
+                )
                 .await
             {
                 Ok(made_progress) => made_progress,
@@ -942,7 +970,12 @@ impl JobDispatcher {
                 tokio::select! {
                     join_result = running.join_next_with_id() => {
                         if let Some(join_result) = join_result {
-                            self.handle_supervised_join_result(join_result, &mut running_meta).await
+                            self.handle_supervised_join_result(
+                                join_result,
+                                &mut running_meta,
+                                &mut running_job_ids,
+                            )
+                            .await
                         } else {
                             Ok(())
                         }
@@ -963,6 +996,7 @@ impl JobDispatcher {
 
     pub async fn reconcile_startup(&self) -> Result<(), RuntimeError> {
         bootstrap::ensure_default_agent(&self.db).await?;
+        let _ = self.reconcile_startup_assigned_jobs().await?;
         ReconciliationService::new(RuntimeReconciliationPort {
             dispatcher: self.clone(),
         })
@@ -988,56 +1022,7 @@ impl JobDispatcher {
             } else {
                 match self.prepare_run(job).await? {
                     PrepareRunOutcome::Prepared(prepared) => {
-                        let prepared = *prepared;
-                        self.write_prompt_artifact(&prepared.job, &prepared.prompt)
-                            .await?;
-                        let request = AgentRequest {
-                            prompt: prepared.prompt.clone(),
-                            working_dir: prepared.workspace.path.clone(),
-                            may_mutate: prepared.job.execution_permission
-                                == ExecutionPermission::MayMutate,
-                            timeout_seconds: Some(self.config.job_timeout.as_secs()),
-                            output_schema: output_schema_for_job(&prepared.job),
-                        };
-                        let response = self.run_with_heartbeats(&prepared, request).await;
-
-                        match response {
-                            Ok(response) => {
-                                self.write_response_artifacts(&prepared.job, &response)
-                                    .await?;
-                                self.finish_run(prepared, response).await?;
-                            }
-                            Err(AgentError::Timeout) => {
-                                self.fail_run(
-                                    &prepared,
-                                    OutcomeClass::TransientFailure,
-                                    "job_timeout",
-                                    Some("job execution timed out".into()),
-                                )
-                                .await?;
-                            }
-                            Err(error) => {
-                                let current_job = self.db.get_job(prepared.job.id).await?;
-                                if current_job.state.status() == JobStatus::Cancelled {
-                                    self.finalize_workspace_after_failure(&prepared).await?;
-                                    info!(
-                                        job_id = %prepared.job.id,
-                                        "job cancelled during runtime execution"
-                                    );
-                                    let _ = self.recover_projected_review_jobs().await?;
-                                    return Ok(true);
-                                }
-                                warn!(?error, job_id = %prepared.job.id, "agent launch failed");
-                                self.fail_run(
-                                    &prepared,
-                                    OutcomeClass::TerminalFailure,
-                                    "agent_launch_failed",
-                                    Some(error.to_string()),
-                                )
-                                .await?;
-                            }
-                        }
-
+                        self.execute_prepared_agent_job(*prepared).await?;
                         made_progress = true;
                     }
                     PrepareRunOutcome::FailedBeforeLaunch => {
@@ -1111,12 +1096,15 @@ impl JobDispatcher {
         &self,
         running: &mut JoinSet<RunningJobResult>,
         running_meta: &mut HashMap<TaskId, RunningJobMeta>,
+        running_job_ids: &mut HashSet<ingot_domain::ids::JobId>,
         semaphore: &Arc<Semaphore>,
     ) -> Result<bool, RuntimeError> {
-        let mut made_progress = self.reap_completed_tasks(running, running_meta).await?;
+        let mut made_progress = self
+            .reap_completed_tasks(running, running_meta, running_job_ids)
+            .await?;
         made_progress |= self.drive_non_job_work().await?.made_progress;
         made_progress |= self
-            .launch_supervised_jobs(running, running_meta, semaphore)
+            .launch_supervised_jobs(running, running_meta, running_job_ids, semaphore)
             .await?;
         Ok(made_progress)
     }
@@ -1125,10 +1113,11 @@ impl JobDispatcher {
         &self,
         running: &mut JoinSet<RunningJobResult>,
         running_meta: &mut HashMap<TaskId, RunningJobMeta>,
+        running_job_ids: &mut HashSet<ingot_domain::ids::JobId>,
     ) -> Result<bool, RuntimeError> {
         let mut made_progress = false;
         while let Some(join_result) = running.try_join_next_with_id() {
-            self.handle_supervised_join_result(join_result, running_meta)
+            self.handle_supervised_join_result(join_result, running_meta, running_job_ids)
                 .await?;
             made_progress = true;
         }
@@ -1139,10 +1128,12 @@ impl JobDispatcher {
         &self,
         join_result: Result<(TaskId, RunningJobResult), JoinError>,
         running_meta: &mut HashMap<TaskId, RunningJobMeta>,
+        running_job_ids: &mut HashSet<ingot_domain::ids::JobId>,
     ) -> Result<(), RuntimeError> {
         match join_result {
             Ok((task_id, task_result)) => {
                 let meta = running_meta.remove(&task_id);
+                running_job_ids.remove(&task_result.job_id);
                 match task_result.result {
                     Ok(()) => {
                         debug!(job_id = %task_result.job_id, task_id = %task_id, "supervised job task completed");
@@ -1160,6 +1151,7 @@ impl JobDispatcher {
                 let task_id = error.id();
                 warn!(?error, task_id = %task_id, "supervised job task failed");
                 if let Some(meta) = running_meta.remove(&task_id) {
+                    running_job_ids.remove(&meta.job_id());
                     self.cleanup_supervised_task(meta, error.to_string())
                         .await?;
                 }
@@ -1177,6 +1169,9 @@ impl JobDispatcher {
             RunningJobMeta::Agent(prepared) => {
                 let current_job = self.db.get_job(prepared.job.id).await?;
                 match current_job.state.status() {
+                    JobStatus::Queued => {
+                        self.cleanup_unclaimed_prepared_agent_run(&prepared).await?
+                    }
                     JobStatus::Assigned => self.reconcile_assigned_job(current_job).await?,
                     JobStatus::Running => {
                         self.fail_run(
@@ -1238,10 +1233,14 @@ impl JobDispatcher {
         &self,
         running: &mut JoinSet<RunningJobResult>,
         running_meta: &mut HashMap<TaskId, RunningJobMeta>,
+        running_job_ids: &mut HashSet<ingot_domain::ids::JobId>,
         semaphore: &Arc<Semaphore>,
     ) -> Result<bool, RuntimeError> {
         let mut made_progress = false;
         for job in self.db.list_queued_jobs(32).await? {
+            if running_job_ids.contains(&job.id) {
+                continue;
+            }
             let permit = match semaphore.clone().try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(TryAcquireError::NoPermits) => break,
@@ -1273,6 +1272,7 @@ impl JobDispatcher {
                             prepared.clone(),
                             permit,
                         ));
+                        running_job_ids.insert(prepared.job_id);
                         running_meta
                             .insert(handle.id(), RunningJobMeta::HarnessValidation(prepared));
                         made_progress = true;
@@ -1305,6 +1305,7 @@ impl JobDispatcher {
                         prepared.clone(),
                         permit,
                     ));
+                    running_job_ids.insert(prepared.job.id);
                     running_meta.insert(handle.id(), RunningJobMeta::Agent(prepared));
                     made_progress = true;
                 }
@@ -1328,14 +1329,22 @@ impl JobDispatcher {
         let mut made_progress = false;
         for job in active_jobs {
             match job.state.status() {
-                JobStatus::Assigned => {
-                    self.reconcile_assigned_job(job).await?;
-                    made_progress = true;
-                }
                 JobStatus::Running => {
                     made_progress |= self.reconcile_running_job(job).await?;
                 }
                 _ => {}
+            }
+        }
+        Ok(made_progress)
+    }
+
+    async fn reconcile_startup_assigned_jobs(&self) -> Result<bool, RuntimeError> {
+        let active_jobs = self.db.list_active_jobs().await?;
+        let mut made_progress = false;
+        for job in active_jobs {
+            if job.state.status() == JobStatus::Assigned {
+                self.reconcile_assigned_job(job).await?;
+                made_progress = true;
             }
         }
         Ok(made_progress)
@@ -1982,27 +1991,39 @@ impl JobDispatcher {
         &self,
         prepared: &PreparedRun,
         request: AgentRequest,
-    ) -> Result<AgentResponse, AgentError> {
+    ) -> AgentRunOutcome {
         let timeout_duration = self.config.job_timeout;
         let lease_expires_at = Utc::now() + ChronoDuration::minutes(30);
         let mut dispatch_listener = self.dispatch_notify.subscribe();
-        self.db
-            .start_job_execution(StartJobExecutionParams {
+        if let Err(error) = self
+            .db
+            .claim_queued_agent_job_execution(ClaimQueuedAgentJobExecutionParams {
                 job_id: prepared.job.id,
                 item_id: prepared.item.id,
                 expected_item_revision_id: prepared.job.item_revision_id,
-                workspace_id: Some(prepared.workspace.id),
-                agent_id: Some(prepared.agent.id),
+                assignment: prepared.assignment.clone(),
                 lease_owner_id: self.lease_owner_id.clone(),
-                process_pid: None,
                 lease_expires_at,
             })
             .await
-            .map_err(|error| AgentError::ProcessError(error.to_string()))?;
+        {
+            return match error {
+                RepositoryError::Conflict(_) => match self.db.get_job(prepared.job.id).await {
+                    Ok(job) if job.state.status() == JobStatus::Cancelled => {
+                        AgentRunOutcome::Cancelled
+                    }
+                    Ok(_) => AgentRunOutcome::OwnershipLostBeforeSpawn,
+                    Err(load_error) => AgentRunOutcome::LaunchFailed(AgentError::ProcessError(
+                        load_error.to_string(),
+                    )),
+                },
+                other => AgentRunOutcome::LaunchFailed(AgentError::ProcessError(other.to_string())),
+            };
+        }
         info!(
             job_id = %prepared.job.id,
             agent_id = %prepared.agent.id,
-            workspace_id = %prepared.workspace.id,
+            workspace_id = %prepared.assignment.workspace_id,
             lease_owner_id = %self.lease_owner_id,
             timeout_seconds = timeout_duration.as_secs(),
             "job entered running state"
@@ -2017,7 +2038,7 @@ impl JobDispatcher {
                 job_id = %prepared.job.id,
                 "skipping agent launch because job was cancelled before spawn"
             );
-            return Err(AgentError::ProcessError("job cancelled".into()));
+            return AgentRunOutcome::Cancelled;
         }
 
         let runner = self.runner.clone();
@@ -2044,21 +2065,34 @@ impl JobDispatcher {
         loop {
             tokio::select! {
                 result = &mut handle => {
-                    let result = result.map_err(|error| AgentError::ProcessError(error.to_string()))?;
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(error) => {
+                            return AgentRunOutcome::LaunchFailed(AgentError::ProcessError(error.to_string()));
+                        }
+                    };
                     debug!(job_id = %prepared.job.id, "job execution future resolved");
-                    return result;
+                    return match result {
+                        Ok(response) => AgentRunOutcome::Completed(response),
+                        Err(error) => AgentRunOutcome::LaunchFailed(error),
+                    };
                 }
                 _ = &mut timeout => {
                     handle.abort();
                     warn!(job_id = %prepared.job.id, timeout_seconds = timeout_duration.as_secs(), "job execution timed out");
-                    return Err(AgentError::Timeout);
+                    return AgentRunOutcome::TimedOut;
                 }
                 _ = dispatch_listener.notified() => {
                     match self.db.get_job(prepared.job.id).await {
                         Ok(job) if job.state.status() == JobStatus::Cancelled => {
                             handle.abort();
                             info!(job_id = %prepared.job.id, "cancelling running job after operator request");
-                            return Err(AgentError::ProcessError("job cancelled".into()));
+                            return AgentRunOutcome::Cancelled;
+                        }
+                        Ok(job) if job.state.status() != JobStatus::Running => {
+                            handle.abort();
+                            info!(job_id = %prepared.job.id, status = ?job.state.status(), "stopping runner after job lost ownership");
+                            return AgentRunOutcome::OwnershipLostDuringRun;
                         }
                         Ok(_) => {
                             debug!(job_id = %prepared.job.id, "running job woke on unrelated dispatcher notification");
@@ -2073,7 +2107,12 @@ impl JobDispatcher {
                         Ok(job) if job.state.status() == JobStatus::Cancelled => {
                             handle.abort();
                             info!(job_id = %prepared.job.id, "cancelling running job after operator request");
-                            return Err(AgentError::ProcessError("job cancelled".into()));
+                            return AgentRunOutcome::Cancelled;
+                        }
+                        Ok(job) if job.state.status() != JobStatus::Running => {
+                            handle.abort();
+                            info!(job_id = %prepared.job.id, status = ?job.state.status(), "stopping runner after job lost ownership");
+                            return AgentRunOutcome::OwnershipLostDuringRun;
                         }
                         Ok(_) => {}
                         Err(error) => {
@@ -2088,6 +2127,11 @@ impl JobDispatcher {
                         &self.lease_owner_id,
                         lease_expires_at,
                     ).await {
+                        if matches!(&error, RepositoryError::Conflict(message) if message == "job_not_active") {
+                            handle.abort();
+                            info!(job_id = %prepared.job.id, "stopping runner after heartbeat lost job ownership");
+                            return AgentRunOutcome::OwnershipLostDuringRun;
+                        }
                         warn!(?error, job_id = %prepared.job.id, "job heartbeat update failed");
                     } else {
                         debug!(job_id = %prepared.job.id, "job heartbeat updated");
@@ -2132,7 +2176,7 @@ impl JobDispatcher {
             .acquire_project_mutation(queued_job.project_id)
             .await;
 
-        let mut job = self.db.get_job(queued_job.id).await?;
+        let job = self.db.get_job(queued_job.id).await?;
         if job.state.status() != JobStatus::Queued || !is_supported_runtime_job(&job) {
             return Ok(PrepareRunOutcome::NotPrepared);
         }
@@ -2193,16 +2237,29 @@ impl JobDispatcher {
         }
 
         let template = built_in_template(&job.phase_template_slug, &job.step_id);
-        let prompt = self
+        let phase_template_digest = template_digest(template);
+        let prompt = match self
             .assemble_prompt(&job, &item, &revision, template, &harness_prompt)
-            .await?;
-        job.assign(
-            JobAssignment::new(workspace.id)
-                .with_agent(agent.id)
-                .with_prompt_snapshot(prompt.clone())
-                .with_phase_template_digest(template_digest(template)),
-        );
-        self.db.update_job(&job).await?;
+            .await
+        {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                self.cleanup_unclaimed_prepared_workspace(
+                    job.project_id,
+                    job.id,
+                    &workspace,
+                    workspace_lifecycle,
+                    &original_head_commit_oid,
+                    paths.mirror_git_dir.as_path(),
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+        let assignment = JobAssignment::new(workspace.id)
+            .with_agent(agent.id)
+            .with_prompt_snapshot(prompt.clone())
+            .with_phase_template_digest(phase_template_digest);
 
         info!(
             job_id = %job.id,
@@ -2221,6 +2278,7 @@ impl JobDispatcher {
             project,
             canonical_repo_path: paths.mirror_git_dir,
             agent,
+            assignment,
             workspace,
             original_head_commit_oid,
             prompt,
@@ -2536,15 +2594,13 @@ impl JobDispatcher {
             timeout_seconds: Some(self.config.job_timeout.as_secs()),
             output_schema: output_schema_for_job(&prepared.job),
         };
-        let response = self.run_with_heartbeats(&prepared, request).await;
-
-        match response {
-            Ok(response) => {
+        match self.run_with_heartbeats(&prepared, request).await {
+            AgentRunOutcome::Completed(response) => {
                 self.write_response_artifacts(&prepared.job, &response)
                     .await?;
                 self.finish_run(prepared, response).await?;
             }
-            Err(AgentError::Timeout) => {
+            AgentRunOutcome::TimedOut => {
                 self.fail_run(
                     &prepared,
                     OutcomeClass::TransientFailure,
@@ -2553,17 +2609,27 @@ impl JobDispatcher {
                 )
                 .await?;
             }
-            Err(error) => {
-                let current_job = self.db.get_job(prepared.job.id).await?;
-                if current_job.state.status() == JobStatus::Cancelled {
-                    self.finalize_workspace_after_failure(&prepared).await?;
-                    info!(
-                        job_id = %prepared.job.id,
-                        "job cancelled during runtime execution"
-                    );
-                    let _ = self.recover_projected_review_jobs().await?;
-                    return Ok(());
-                }
+            AgentRunOutcome::Cancelled => {
+                info!(
+                    job_id = %prepared.job.id,
+                    "job cancelled during runtime execution"
+                );
+                let _ = self.recover_projected_review_jobs().await?;
+            }
+            AgentRunOutcome::OwnershipLostBeforeSpawn => {
+                self.cleanup_unclaimed_prepared_agent_run(&prepared).await?;
+                info!(
+                    job_id = %prepared.job.id,
+                    "prepared job lost ownership before agent spawn"
+                );
+            }
+            AgentRunOutcome::OwnershipLostDuringRun => {
+                info!(
+                    job_id = %prepared.job.id,
+                    "running job lost ownership before completion handling"
+                );
+            }
+            AgentRunOutcome::LaunchFailed(error) => {
                 warn!(?error, job_id = %prepared.job.id, "agent launch failed");
                 self.fail_run(
                     &prepared,
@@ -4345,6 +4411,61 @@ impl JobDispatcher {
         Ok(())
     }
 
+    async fn cleanup_unclaimed_prepared_agent_run(
+        &self,
+        prepared: &PreparedRun,
+    ) -> Result<(), RuntimeError> {
+        self.cleanup_unclaimed_prepared_workspace(
+            prepared.job.project_id,
+            prepared.job.id,
+            &prepared.workspace,
+            prepared.workspace_lifecycle,
+            &prepared.original_head_commit_oid,
+            prepared.canonical_repo_path.as_path(),
+        )
+        .await
+    }
+
+    async fn cleanup_unclaimed_prepared_workspace(
+        &self,
+        project_id: ingot_domain::ids::ProjectId,
+        job_id: ingot_domain::ids::JobId,
+        workspace: &Workspace,
+        workspace_lifecycle: WorkspaceLifecycle,
+        original_head_commit_oid: &str,
+        canonical_repo_path: &Path,
+    ) -> Result<(), RuntimeError> {
+        let _guard = self
+            .project_locks
+            .acquire_project_mutation(project_id)
+            .await;
+
+        let current_job = self.db.get_job(job_id).await?;
+        if current_job.state.status() != JobStatus::Queued {
+            return Ok(());
+        }
+
+        let mut persisted_workspace = self.db.get_workspace(workspace.id).await?;
+        if persisted_workspace.state.current_job_id() != Some(job_id) {
+            return Ok(());
+        }
+
+        let now = Utc::now();
+        match workspace_lifecycle {
+            WorkspaceLifecycle::PersistentAuthoring | WorkspaceLifecycle::PersistentIntegration => {
+                persisted_workspace.release_with_head(original_head_commit_oid.to_owned(), now);
+                self.db.update_workspace(&persisted_workspace).await?;
+            }
+            WorkspaceLifecycle::EphemeralReview => {
+                remove_workspace(canonical_repo_path, Path::new(&persisted_workspace.path)).await?;
+                persisted_workspace.mark_abandoned(now);
+                self.db.update_workspace(&persisted_workspace).await?;
+            }
+        }
+
+        Ok(())
+    }
+
     async fn fail_job_preparation(
         &self,
         job: &Job,
@@ -5606,11 +5727,185 @@ mod tests {
         pause_hook.release();
 
         let result = run_task.await.expect("join run_with_heartbeats task");
-        assert!(matches!(
-            result,
-            Err(AgentError::ProcessError(message)) if message == "job cancelled"
-        ));
+        assert!(matches!(result, AgentRunOutcome::Cancelled));
         assert_eq!(runner.launch_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_supervised_task_releases_workspace_for_unclaimed_prepared_agent_job() {
+        let harness = TestRuntimeHarness::new(Arc::new(BlockingRunner::new())).await;
+        harness.register_mutating_agent().await;
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head");
+        let item = ItemBuilder::new(harness.project.id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .explicit_seed(&seed_commit)
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let job = JobBuilder::new(harness.project.id, item_id, revision_id, "author_initial")
+            .phase_kind(PhaseKind::Author)
+            .workspace_kind(WorkspaceKind::Authoring)
+            .execution_permission(ExecutionPermission::MayMutate)
+            .phase_template_slug("author-initial")
+            .job_input(JobInput::authoring_head(seed_commit))
+            .output_artifact_kind(OutputArtifactKind::Commit)
+            .build();
+        harness.db.create_job(&job).await.expect("create job");
+
+        let prepared = match harness
+            .dispatcher
+            .prepare_run(harness.db.get_job(job.id).await.expect("load queued job"))
+            .await
+            .expect("prepare run")
+        {
+            PrepareRunOutcome::Prepared(prepared) => *prepared,
+            _ => panic!("expected prepared run"),
+        };
+
+        let workspace_before = harness
+            .db
+            .get_workspace(prepared.workspace.id)
+            .await
+            .expect("workspace before cleanup");
+        assert_eq!(workspace_before.state.status(), WorkspaceStatus::Busy);
+        assert_eq!(workspace_before.state.current_job_id(), Some(job.id));
+
+        harness
+            .dispatcher
+            .cleanup_supervised_task(
+                RunningJobMeta::Agent(prepared.clone()),
+                "supervised task failed".into(),
+            )
+            .await
+            .expect("cleanup supervised task");
+
+        let updated_job = harness.db.get_job(job.id).await.expect("reload job");
+        let updated_workspace = harness
+            .db
+            .get_workspace(prepared.workspace.id)
+            .await
+            .expect("reload workspace");
+        assert_eq!(updated_job.state.status(), JobStatus::Queued);
+        assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Ready);
+        assert_eq!(updated_workspace.state.current_job_id(), None);
+    }
+
+    #[tokio::test]
+    async fn supervisor_does_not_launch_same_job_twice_during_pre_spawn_pause() {
+        let runner = Arc::new(BlockingRunner::new());
+        let harness = TestRuntimeHarness::new(runner.clone()).await;
+        harness.register_mutating_agent().await;
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head");
+        let item = ItemBuilder::new(harness.project.id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .explicit_seed(&seed_commit)
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let job = JobBuilder::new(harness.project.id, item_id, revision_id, "author_initial")
+            .phase_kind(PhaseKind::Author)
+            .workspace_kind(WorkspaceKind::Authoring)
+            .execution_permission(ExecutionPermission::MayMutate)
+            .phase_template_slug("author-initial")
+            .job_input(JobInput::authoring_head(&seed_commit))
+            .output_artifact_kind(OutputArtifactKind::Commit)
+            .build();
+        harness.db.create_job(&job).await.expect("create job");
+
+        let mut dispatcher = harness.dispatcher.clone();
+        let pause_hook = PreSpawnPauseHook::new(PreSpawnPausePoint::AgentBeforeSpawn);
+        dispatcher.pre_spawn_pause_hook = Some(pause_hook.clone());
+
+        let semaphore = Arc::new(Semaphore::new(1));
+        let mut running = JoinSet::<RunningJobResult>::new();
+        let mut running_meta = HashMap::<TaskId, RunningJobMeta>::new();
+        let mut running_job_ids = HashSet::new();
+
+        let made_progress = dispatcher
+            .run_supervisor_iteration(
+                &mut running,
+                &mut running_meta,
+                &mut running_job_ids,
+                &semaphore,
+            )
+            .await
+            .expect("first supervisor iteration");
+        assert!(made_progress);
+
+        pause_hook
+            .wait_until_entered(1, Duration::from_secs(2))
+            .await;
+
+        let running_job = harness
+            .db
+            .get_job(job.id)
+            .await
+            .expect("reload running job");
+        assert_eq!(running_job.state.status(), JobStatus::Running);
+        assert_eq!(running_meta.len(), 1);
+        assert_eq!(running_job_ids.len(), 1);
+        assert_eq!(runner.launch_count(), 0);
+
+        dispatcher
+            .run_supervisor_iteration(
+                &mut running,
+                &mut running_meta,
+                &mut running_job_ids,
+                &semaphore,
+            )
+            .await
+            .expect("second supervisor iteration");
+
+        assert_eq!(running_meta.len(), 1);
+        assert_eq!(running_job_ids.len(), 1);
+        assert_eq!(runner.launch_count(), 0);
+
+        {
+            let mut state = runner.state.lock().expect("blocking runner state");
+            state.release_budget = 1;
+        }
+        pause_hook.release();
+        runner.release_notify.notify_waiters();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                dispatcher
+                    .reap_completed_tasks(&mut running, &mut running_meta, &mut running_job_ids)
+                    .await
+                    .expect("reap completed tasks");
+                if running_meta.is_empty() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("supervised task should finish");
+
+        assert_eq!(runner.launch_count(), 1);
+        assert!(running_job_ids.is_empty());
+        let completed_job = harness.db.get_job(job.id).await.expect("completed job");
+        assert!(completed_job.state.status().is_terminal());
     }
 
     #[tokio::test]
