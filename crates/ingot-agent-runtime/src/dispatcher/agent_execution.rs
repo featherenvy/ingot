@@ -1,8 +1,8 @@
 use super::*;
 use crate::dispatcher::completion::should_clear_item_escalation_on_success;
 use crate::dispatcher::prompt::{
-    commit_subject, non_empty_message, outcome_class_name, output_schema_for_job,
-    report_outcome_class, result_schema_version,
+    commit_subject, non_empty_message, output_schema_for_job, report_outcome_class,
+    result_schema_version,
 };
 
 impl JobDispatcher {
@@ -334,33 +334,36 @@ impl JobDispatcher {
                 )
                 .await;
         }
-        self.append_activity(
+        ingot_usecases::job_lifecycle::append_job_completed_activity(
+            &self.db,
             prepared.project.id,
-            ActivityEventType::JobCompleted,
-            "job",
-            prepared.job.id.to_string(),
-            serde_json::json!({ "item_id": prepared.item.id, "outcome": outcome_class_name(outcome_class) }),
+            prepared.job.id,
+            prepared.item.id,
+            outcome_class,
         )
-        .await?;
-        if prepared.job.step_id == "validate_integrated" && outcome_class == OutcomeClass::Clean {
-            let updated_item = self.db.get_item(prepared.item.id).await?;
-            if updated_item.approval_state == ApprovalState::Pending {
-                self.append_activity(
-                    prepared.project.id,
-                    ActivityEventType::ApprovalRequested,
-                    "item",
-                    prepared.item.id.to_string(),
-                    serde_json::json!({ "job_id": prepared.job.id }),
-                )
-                .await?;
-            }
-        }
+        .await
+        .map_err(usecase_to_runtime_error)?;
+        let updated_item = self.db.get_item(prepared.item.id).await?;
+        ingot_usecases::job_lifecycle::append_approval_requested_activity_if_needed(
+            &self.db,
+            &updated_item,
+            &prepared.job,
+            outcome_class,
+        )
+        .await
+        .map_err(usecase_to_runtime_error)?;
 
         self.finalize_workspace_after_success(&prepared, None)
             .await?;
         self.refresh_revision_context(&prepared).await?;
-        self.append_escalation_cleared_activity_if_needed(&prepared)
-            .await?;
+        ingot_usecases::job_lifecycle::append_item_escalation_cleared_activity_if_needed(
+            &self.db,
+            &prepared.item,
+            &updated_item,
+            &prepared.job,
+        )
+        .await
+        .map_err(usecase_to_runtime_error)?;
         self.auto_dispatch_projected_review(prepared.project.id, prepared.item.id)
             .await?;
         info!(
@@ -509,18 +512,26 @@ impl JobDispatcher {
                 prepared_convergence_guard: None,
             })
             .await?;
-        self.append_activity(
+        ingot_usecases::job_lifecycle::append_job_completed_activity(
+            &self.db,
             prepared.project.id,
-            ActivityEventType::JobCompleted,
-            "job",
-            prepared.job.id.to_string(),
-            serde_json::json!({ "item_id": prepared.item.id, "outcome": "clean" }),
+            prepared.job.id,
+            prepared.item.id,
+            OutcomeClass::Clean,
         )
-        .await?;
+        .await
+        .map_err(usecase_to_runtime_error)?;
+        let updated_item = self.db.get_item(prepared.item.id).await?;
 
         self.refresh_revision_context(prepared).await?;
-        self.append_escalation_cleared_activity_if_needed(prepared)
-            .await?;
+        ingot_usecases::job_lifecycle::append_item_escalation_cleared_activity_if_needed(
+            &self.db,
+            &prepared.item,
+            &updated_item,
+            &prepared.job,
+        )
+        .await
+        .map_err(usecase_to_runtime_error)?;
         self.auto_dispatch_projected_review(prepared.project.id, prepared.item.id)
             .await?;
 

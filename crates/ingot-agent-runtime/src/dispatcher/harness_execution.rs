@@ -150,70 +150,34 @@ impl JobDispatcher {
             return Ok(());
         }
 
-        self.append_activity(
+        ingot_usecases::job_lifecycle::append_job_completed_activity(
+            &self.db,
             prepared.project_id,
-            ActivityEventType::JobCompleted,
-            "job",
-            prepared.job_id.to_string(),
-            serde_json::json!({ "item_id": prepared.item_id, "outcome": outcome }),
+            prepared.job_id,
+            prepared.item_id,
+            outcome_class,
+        )
+        .await
+        .map_err(usecase_to_runtime_error)?;
+
+        let updated_item = self.db.get_item(prepared.item_id).await?;
+        let completed_job = self.db.get_job(prepared.job_id).await?;
+        ingot_usecases::job_lifecycle::append_approval_requested_activity_if_needed(
+            &self.db,
+            &updated_item,
+            &completed_job,
+            outcome_class,
+        )
+        .await
+        .map_err(usecase_to_runtime_error)?;
+
+        self.refresh_revision_context_for_ids(
+            prepared.project_id,
+            prepared.item_id,
+            prepared.revision_id,
+            Some(prepared.job_id),
         )
         .await?;
-
-        if prepared.step_id == "validate_integrated" && outcome_class == OutcomeClass::Clean {
-            let updated_item = self.db.get_item(prepared.item_id).await?;
-            if updated_item.approval_state == ApprovalState::Pending {
-                self.append_activity(
-                    prepared.project_id,
-                    ActivityEventType::ApprovalRequested,
-                    "item",
-                    prepared.item_id.to_string(),
-                    serde_json::json!({ "job_id": prepared.job_id }),
-                )
-                .await?;
-            }
-        }
-
-        let revision = self.db.get_revision(prepared.revision_id).await?;
-        let item = self.db.get_item(prepared.item_id).await?;
-        let jobs = self.db.list_jobs_by_item(prepared.item_id).await?;
-        let authoring_workspace = self
-            .db
-            .find_authoring_workspace_for_revision(prepared.revision_id)
-            .await?;
-        let authoring_head =
-            ingot_usecases::dispatch::current_authoring_head_for_revision_with_workspace(
-                &revision,
-                &jobs,
-                authoring_workspace.as_ref(),
-            );
-        let changed_paths = if let Some(ref head) = authoring_head {
-            let base = revision
-                .seed
-                .seed_commit_oid()
-                .or_else(|| {
-                    authoring_workspace
-                        .as_ref()
-                        .and_then(|ws| ws.state.base_commit_oid())
-                })
-                .unwrap_or(head);
-            let project = self.db.get_project(prepared.project_id).await?;
-            let paths = self.refresh_project_mirror(&project).await?;
-            changed_paths_between(&paths.mirror_git_dir, base, head)
-                .await
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let context = rebuild_revision_context(
-            &item,
-            &revision,
-            &jobs,
-            authoring_head,
-            changed_paths,
-            Some(prepared.job_id),
-            Utc::now(),
-        );
-        self.db.upsert_revision_context(&context).await?;
 
         self.auto_dispatch_projected_review(prepared.project_id, prepared.item_id)
             .await?;

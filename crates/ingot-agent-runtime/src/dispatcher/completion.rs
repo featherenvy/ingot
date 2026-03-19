@@ -10,51 +10,19 @@ impl JobDispatcher {
     ) -> Result<(), RuntimeError> {
         self.finalize_workspace_after_failure(prepared).await?;
 
-        let status = match outcome_class {
-            OutcomeClass::Cancelled => JobStatus::Cancelled,
-            OutcomeClass::TransientFailure
-            | OutcomeClass::TerminalFailure
-            | OutcomeClass::ProtocolViolation => JobStatus::Failed,
-            OutcomeClass::Clean | OutcomeClass::Findings => JobStatus::Failed,
-        };
-        let escalation_reason = failure_escalation_reason(&prepared.job, outcome_class);
-
         let error_message_log = error_message.as_deref().unwrap_or("").to_string();
-        self.db
-            .finish_job_non_success(FinishJobNonSuccessParams {
-                job_id: prepared.job.id,
-                item_id: prepared.item.id,
-                expected_item_revision_id: prepared.job.item_revision_id,
-                status,
-                outcome_class: Some(outcome_class),
-                error_code: Some(error_code.into()),
-                error_message,
-                escalation_reason,
-            })
-            .await?;
-        let event_type = if outcome_class == OutcomeClass::Cancelled {
-            ActivityEventType::JobCancelled
-        } else {
-            ActivityEventType::JobFailed
-        };
-        self.append_activity(
-            prepared.project.id,
-            event_type,
-            "job",
-            prepared.job.id.to_string(),
-            serde_json::json!({ "item_id": prepared.item.id, "error_code": error_code }),
+        ingot_usecases::job_lifecycle::record_non_success_outcome(
+            &self.db,
+            &self.db,
+            &prepared.job,
+            &prepared.item,
+            outcome_class,
+            Some(error_code.to_string()),
+            error_message,
+            "job failure does not match the current item revision",
         )
-        .await?;
-        if let Some(escalation_reason) = escalation_reason {
-            self.append_activity(
-                prepared.project.id,
-                ActivityEventType::ItemEscalated,
-                "item",
-                prepared.item.id.to_string(),
-                serde_json::json!({ "reason": escalation_reason }),
-            )
-            .await?;
-        }
+        .await
+        .map_err(usecase_to_runtime_error)?;
 
         self.refresh_revision_context(prepared).await?;
         warn!(
@@ -77,38 +45,18 @@ impl JobDispatcher {
         error_message: String,
     ) -> Result<(), RuntimeError> {
         let outcome_class = OutcomeClass::TerminalFailure;
-        let escalation_reason = failure_escalation_reason(job, outcome_class);
-
-        self.db
-            .finish_job_non_success(FinishJobNonSuccessParams {
-                job_id: job.id,
-                item_id: item.id,
-                expected_item_revision_id: job.item_revision_id,
-                status: JobStatus::Failed,
-                outcome_class: Some(outcome_class),
-                error_code: Some(error_code.into()),
-                error_message: Some(error_message.clone()),
-                escalation_reason,
-            })
-            .await?;
-        self.append_activity(
-            project.id,
-            ActivityEventType::JobFailed,
-            "job",
-            job.id.to_string(),
-            serde_json::json!({ "item_id": item.id, "error_code": error_code }),
+        ingot_usecases::job_lifecycle::record_non_success_outcome(
+            &self.db,
+            &self.db,
+            job,
+            item,
+            outcome_class,
+            Some(error_code.to_string()),
+            Some(error_message.clone()),
+            "job preparation failure does not match the current item revision",
         )
-        .await?;
-        if let Some(escalation_reason) = escalation_reason {
-            self.append_activity(
-                project.id,
-                ActivityEventType::ItemEscalated,
-                "item",
-                item.id.to_string(),
-                serde_json::json!({ "reason": escalation_reason }),
-            )
-            .await?;
-        }
+        .await
+        .map_err(usecase_to_runtime_error)?;
         self.refresh_revision_context_for_ids(
             project.id,
             item.id,
@@ -122,33 +70,6 @@ impl JobDispatcher {
             error_message = %error_message,
             "job failed during preparation"
         );
-        Ok(())
-    }
-
-    pub(super) async fn append_escalation_cleared_activity_if_needed(
-        &self,
-        prepared: &PreparedRun,
-    ) -> Result<(), RuntimeError> {
-        if !prepared.item.escalation.is_escalated() {
-            return Ok(());
-        }
-
-        let item = self.db.get_item(prepared.item.id).await?;
-        if item.current_revision_id != prepared.job.item_revision_id
-            || item.escalation.is_escalated()
-        {
-            return Ok(());
-        }
-
-        self.append_activity(
-            prepared.project.id,
-            ActivityEventType::ItemEscalationCleared,
-            "item",
-            prepared.item.id.to_string(),
-            serde_json::json!({ "reason": "successful_retry", "job_id": prepared.job.id }),
-        )
-        .await?;
-
         Ok(())
     }
 
@@ -271,13 +192,6 @@ impl JobDispatcher {
             .await?;
         Ok(())
     }
-}
-
-pub(super) fn failure_escalation_reason(
-    job: &Job,
-    outcome_class: OutcomeClass,
-) -> Option<EscalationReason> {
-    ingot_usecases::dispatch::failure_escalation_reason(job, outcome_class)
 }
 
 pub(super) fn should_clear_item_escalation_on_success(

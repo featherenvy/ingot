@@ -27,6 +27,7 @@ The observable improvement is internal resilience: smaller modules, narrower por
 - [x] (2026-03-19 21:02Z) Re-checked `recover_projected_review_jobs()`, `reconcile_assigned_job()`, and the current runtime crate test inventory from `cargo test -p ingot-agent-runtime -- --list`; confirmed the remaining gaps are explicit projected-review failure-isolation coverage and explicit assigned-versus-running recovery acceptance.
 - [x] (2026-03-19 21:21Z) Split `crates/ingot-agent-runtime/src/lib.rs` into `crates/ingot-agent-runtime/src/dispatcher/` modules, preserved the crate-root API, and revalidated the runtime crate with `cargo check -p ingot-agent-runtime`.
 - [x] (2026-03-19 21:21Z) Extracted projected follow-up dispatch and recovery scan policy into `crates/ingot-usecases/src/dispatch.rs`, kept `JobDispatcher::auto_dispatch_projected_review_locked()` as a facade, and revalidated with `cargo test -p ingot-agent-runtime --test auto_dispatch --test dispatch` plus `cargo test -p ingot-usecases`.
+- [x] (2026-03-19 21:35Z) Extracted non-success outcome bookkeeping plus completion-activity policy into `crates/ingot-usecases/src/job_lifecycle.rs`, rewired runtime report, harness, and failure paths to use those helpers, removed the daemon-validation-local revision-context rebuild in favor of `refresh_revision_context_for_ids()`, and revalidated with `cargo test -p ingot-usecases`, `cargo check -p ingot-agent-runtime`, and `cargo test -p ingot-agent-runtime --lib --test escalation --test auto_dispatch --test dispatch --test reconciliation`.
 - [ ] Extract execution-preparation policy into `crates/ingot-usecases`.
 - [ ] Extract Git-operation reconciliation and maintenance policy into `crates/ingot-usecases`.
 - [ ] Extract execution-completion policy into `crates/ingot-usecases`.
@@ -88,6 +89,9 @@ The observable improvement is internal resilience: smaller modules, narrower por
 - Observation: projected-dispatch extraction did not require a new runtime-specific trait in `ingot-usecases`; a closure-based recovery helper plus `auto_dispatch_projected()` was enough to move the policy while keeping hydrated convergence loading in the runtime.
   Evidence: `crates/ingot-usecases/src/dispatch.rs` now owns `auto_dispatch_validation`, `auto_dispatch_projected`, and `recover_projected_jobs`, while `crates/ingot-agent-runtime/tests/auto_dispatch.rs` and `tests/dispatch.rs` stayed green unchanged.
 
+- Observation: once completion activities moved into `ingot-usecases`, the daemon-only harness path no longer needed its private revision-context rebuild branch.
+  Evidence: `crates/ingot-agent-runtime/src/dispatcher/harness_execution.rs` now calls `refresh_revision_context_for_ids()` after `append_job_completed_activity()` and `append_approval_requested_activity_if_needed()`, replacing the previous inline fetch or diff or `rebuild_revision_context()` sequence.
+
 ## Decision Log
 
 - Decision: land this refactor in two layers, not one. First split `lib.rs` into internal runtime modules with no behavior change, then move policy out of the runtime crate into `ingot-usecases`.
@@ -130,17 +134,22 @@ The observable improvement is internal resilience: smaller modules, narrower por
   Rationale: the runtime already needs to hydrate convergences against the mirror before dispatch evaluation, so a small usecase helper that accepts repositories, project locks, and a per-item async callback moved the policy without forcing a second abstraction layer that would only forward to the existing runtime facade.
   Date/Author: 2026-03-19 / Codex
 
+- Decision: land completion extraction incrementally by moving durable non-success bookkeeping and post-completion activity rules before attempting to extract workspace-finalization or commit-materialization paths.
+  Rationale: `CompleteJobService` already owns the durable report-completion semantics, while workspace cleanup and Git commit creation are explicitly runtime infrastructure. Moving the shared activity and escalation rules first removed duplication without forcing artificial usecase abstractions over filesystem-side effects.
+  Date/Author: 2026-03-19 / Codex
+
 ## Outcomes & Retrospective
 
-The initial runtime-only split and the projected-dispatch extraction are now complete. `crates/ingot-agent-runtime/src/lib.rs` is a small crate root, the runtime implementation lives under `crates/ingot-agent-runtime/src/dispatcher/`, and `crates/ingot-usecases/src/dispatch.rs` now owns projected review or validation selection plus projected-dispatch recovery sequencing.
+The initial runtime-only split, the projected-dispatch extraction, and the first completion-policy extraction slice are now complete. `crates/ingot-agent-runtime/src/lib.rs` is a small crate root, the runtime implementation lives under `crates/ingot-agent-runtime/src/dispatcher/`, `crates/ingot-usecases/src/dispatch.rs` owns projected review or validation selection plus projected-dispatch recovery sequencing, and `crates/ingot-usecases/src/job_lifecycle.rs` now owns shared non-success outcome bookkeeping plus job-completed, approval-requested, and escalation-cleared activity rules.
 
 The current verified state is:
 
 - `cargo check -p ingot-agent-runtime` passes after the split
 - `cargo test -p ingot-agent-runtime --test auto_dispatch --test dispatch` passes
+- `cargo test -p ingot-agent-runtime --lib --test escalation --test auto_dispatch --test dispatch --test reconciliation` passes after the completion-policy extraction slice
 - `cargo test -p ingot-usecases` passes
 
-The remaining work is still substantial. Execution completion, execution preparation, and recovery or convergence-system-action policy still live primarily in runtime modules, even though the file breakup now makes those extractions much smaller and more reviewable.
+The remaining work is still substantial. Execution preparation, Git-operation reconciliation, and the remaining completion branches around commit materialization and workspace-finalization sequencing still live primarily in runtime modules, even though the file breakup now makes those extractions much smaller and more reviewable.
 
 The intended end state is:
 
@@ -161,7 +170,7 @@ The most important implementation constraint discovered during this review is th
 
 If implementation follows this plan, the runtime should become much easier to test and modify because behavioral changes will land in smaller services and modules with explicit invariants instead of inside one monolithic dispatcher impl.
 
-Plan revision note (2026-03-19 21:21Z): updated progress, discoveries, decisions, and outcomes after landing the runtime module split plus the projected-dispatch extraction into `ingot-usecases`, and recorded the concrete validation commands that now pass.
+Plan revision note (2026-03-19 21:35Z): updated progress, discoveries, decisions, and outcomes after moving non-success outcome bookkeeping and completion-activity policy into `ingot-usecases::job_lifecycle`, simplifying daemon-only validation completion, and recording the expanded runtime or usecase validation set that now passes.
 
 ## Context and Orientation
 

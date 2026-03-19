@@ -1,13 +1,14 @@
 use chrono::Utc;
 use ingot_domain::activity::{Activity, ActivityEventType};
 use ingot_domain::ids::{ActivityId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
-use ingot_domain::item::{EscalationReason, Item};
+use ingot_domain::item::{ApprovalState, EscalationReason, Item};
 use ingot_domain::job::{Job, JobStatus, OutcomeClass};
 use ingot_domain::ports::{
     ActivityRepository, FinishJobNonSuccessParams, JobRepository, RepositoryError,
     WorkspaceRepository,
 };
 use ingot_domain::workspace::WorkspaceStatus;
+use ingot_workflow::step;
 
 use crate::UseCaseError;
 use crate::dispatch::{failure_escalation_reason, failure_status};
@@ -23,6 +24,159 @@ pub struct JobTerminationResult {
     pub revision_id: ItemRevisionId,
     pub released_workspace_id: Option<WorkspaceId>,
     pub escalation_reason: Option<EscalationReason>,
+}
+
+/// Persist a terminal non-success outcome and append the corresponding activities.
+/// This does not touch workspace state, so callers remain responsible for any
+/// filesystem or workspace-status cleanup that must happen first.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_non_success_outcome<J, A>(
+    job_repo: &J,
+    activity_repo: &A,
+    job: &Job,
+    item: &Item,
+    outcome_class: OutcomeClass,
+    error_code: Option<String>,
+    error_message: Option<String>,
+    revision_stale_message: &'static str,
+) -> Result<JobTerminationResult, UseCaseError>
+where
+    J: JobRepository,
+    A: ActivityRepository,
+{
+    let status = failure_status(outcome_class).ok_or_else(|| {
+        UseCaseError::ProtocolViolation(
+            "Failure endpoints only accept transient_failure, terminal_failure, protocol_violation, or cancelled".into(),
+        )
+    })?;
+    let escalation_reason = failure_escalation_reason(job, outcome_class);
+
+    job_repo
+        .finish_non_success(FinishJobNonSuccessParams {
+            job_id: job.id,
+            item_id: item.id,
+            expected_item_revision_id: job.item_revision_id,
+            status,
+            outcome_class: Some(outcome_class),
+            error_code: error_code.clone(),
+            error_message,
+            escalation_reason,
+        })
+        .await
+        .map_err(|error| map_finish_non_success_error(error, revision_stale_message))?;
+
+    append_non_success_activities(
+        activity_repo,
+        job.project_id,
+        job.id,
+        item.id,
+        outcome_class,
+        error_code.as_deref(),
+        escalation_reason,
+    )
+    .await?;
+
+    Ok(JobTerminationResult {
+        job_id: job.id,
+        project_id: job.project_id,
+        item_id: item.id,
+        revision_id: job.item_revision_id,
+        released_workspace_id: None,
+        escalation_reason,
+    })
+}
+
+/// Append the standard job-completed activity payload used after successful job completion.
+pub async fn append_job_completed_activity<A>(
+    activity_repo: &A,
+    project_id: ProjectId,
+    job_id: JobId,
+    item_id: ItemId,
+    outcome_class: OutcomeClass,
+) -> Result<(), UseCaseError>
+where
+    A: ActivityRepository,
+{
+    activity_repo
+        .append(&Activity {
+            id: ActivityId::new(),
+            project_id,
+            event_type: ActivityEventType::JobCompleted,
+            entity_type: "job".into(),
+            entity_id: job_id.to_string(),
+            payload: serde_json::json!({
+                "item_id": item_id,
+                "outcome": outcome_class_name(outcome_class),
+            }),
+            created_at: Utc::now(),
+        })
+        .await?;
+    Ok(())
+}
+
+/// Append ApprovalRequested when a clean integrated validation transitions the item
+/// into pending approval.
+pub async fn append_approval_requested_activity_if_needed<A>(
+    activity_repo: &A,
+    item: &Item,
+    job: &Job,
+    outcome_class: OutcomeClass,
+) -> Result<bool, UseCaseError>
+where
+    A: ActivityRepository,
+{
+    if outcome_class != OutcomeClass::Clean
+        || job.step_id != step::VALIDATE_INTEGRATED
+        || item.approval_state != ApprovalState::Pending
+    {
+        return Ok(false);
+    }
+
+    activity_repo
+        .append(&Activity {
+            id: ActivityId::new(),
+            project_id: job.project_id,
+            event_type: ActivityEventType::ApprovalRequested,
+            entity_type: "item".into(),
+            entity_id: item.id.to_string(),
+            payload: serde_json::json!({ "job_id": job.id }),
+            created_at: Utc::now(),
+        })
+        .await?;
+
+    Ok(true)
+}
+
+/// Append ItemEscalationCleared after a successful retry clears escalation on the current revision.
+pub async fn append_item_escalation_cleared_activity_if_needed<A>(
+    activity_repo: &A,
+    original_item: &Item,
+    current_item: &Item,
+    job: &Job,
+) -> Result<bool, UseCaseError>
+where
+    A: ActivityRepository,
+{
+    if !original_item.escalation.is_escalated()
+        || current_item.current_revision_id != job.item_revision_id
+        || current_item.escalation.is_escalated()
+    {
+        return Ok(false);
+    }
+
+    activity_repo
+        .append(&Activity {
+            id: ActivityId::new(),
+            project_id: job.project_id,
+            event_type: ActivityEventType::ItemEscalationCleared,
+            entity_type: "item".into(),
+            entity_id: original_item.id.to_string(),
+            payload: serde_json::json!({ "reason": "successful_retry", "job_id": job.id }),
+            created_at: Utc::now(),
+        })
+        .await?;
+
+    Ok(true)
 }
 
 /// Cancel an active job. Sets status to Cancelled, releases workspace (to `target_workspace_status`),
@@ -116,78 +270,26 @@ where
         return Err(UseCaseError::JobNotActive);
     }
 
-    let status = failure_status(outcome_class).ok_or_else(|| {
-        UseCaseError::ProtocolViolation(
-            "Failure endpoints only accept transient_failure, terminal_failure, protocol_violation, or cancelled".into(),
-        )
-    })?;
-    let escalation_reason = failure_escalation_reason(job, outcome_class);
+    let mut result = record_non_success_outcome(
+        job_repo,
+        activity_repo,
+        job,
+        item,
+        outcome_class,
+        error_code,
+        error_message,
+        "job failure does not match the current item revision",
+    )
+    .await?;
 
-    job_repo
-        .finish_non_success(FinishJobNonSuccessParams {
-            job_id: job.id,
-            item_id: item.id,
-            expected_item_revision_id: job.item_revision_id,
-            status,
-            outcome_class: Some(outcome_class),
-            error_code: error_code.clone(),
-            error_message,
-            escalation_reason,
-        })
-        .await
-        .map_err(|error| {
-            map_finish_non_success_error(
-                error,
-                "job failure does not match the current item revision",
-            )
-        })?;
-
-    let released_workspace_id = release_workspace(
+    result.released_workspace_id = release_workspace(
         workspace_repo,
         job.state.workspace_id(),
         target_workspace_status,
     )
     .await?;
 
-    if escalation_reason.is_some() {
-        activity_repo
-            .append(&Activity {
-                id: ActivityId::new(),
-                project_id: job.project_id,
-                event_type: ActivityEventType::ItemEscalated,
-                entity_type: "item".into(),
-                entity_id: item.id.to_string(),
-                payload: serde_json::json!({ "reason": escalation_reason }),
-                created_at: Utc::now(),
-            })
-            .await?;
-    }
-
-    let event_type = if outcome_class == OutcomeClass::Cancelled {
-        ActivityEventType::JobCancelled
-    } else {
-        ActivityEventType::JobFailed
-    };
-    activity_repo
-        .append(&Activity {
-            id: ActivityId::new(),
-            project_id: job.project_id,
-            event_type,
-            entity_type: "job".into(),
-            entity_id: job.id.to_string(),
-            payload: serde_json::json!({ "item_id": item.id, "error_code": error_code }),
-            created_at: Utc::now(),
-        })
-        .await?;
-
-    Ok(JobTerminationResult {
-        job_id: job.id,
-        project_id: job.project_id,
-        item_id: item.id,
-        revision_id: job.item_revision_id,
-        released_workspace_id,
-        escalation_reason,
-    })
+    Ok(result)
 }
 
 /// Expire an active job. Sets status to Expired with TransientFailure outcome.
@@ -286,12 +388,70 @@ pub(crate) fn map_finish_non_success_error(
     }
 }
 
+async fn append_non_success_activities<A>(
+    activity_repo: &A,
+    project_id: ProjectId,
+    job_id: JobId,
+    item_id: ItemId,
+    outcome_class: OutcomeClass,
+    error_code: Option<&str>,
+    escalation_reason: Option<EscalationReason>,
+) -> Result<(), UseCaseError>
+where
+    A: ActivityRepository,
+{
+    if escalation_reason.is_some() {
+        activity_repo
+            .append(&Activity {
+                id: ActivityId::new(),
+                project_id,
+                event_type: ActivityEventType::ItemEscalated,
+                entity_type: "item".into(),
+                entity_id: item_id.to_string(),
+                payload: serde_json::json!({ "reason": escalation_reason }),
+                created_at: Utc::now(),
+            })
+            .await?;
+    }
+
+    let event_type = if outcome_class == OutcomeClass::Cancelled {
+        ActivityEventType::JobCancelled
+    } else {
+        ActivityEventType::JobFailed
+    };
+    activity_repo
+        .append(&Activity {
+            id: ActivityId::new(),
+            project_id,
+            event_type,
+            entity_type: "job".into(),
+            entity_id: job_id.to_string(),
+            payload: serde_json::json!({ "item_id": item_id, "error_code": error_code }),
+            created_at: Utc::now(),
+        })
+        .await?;
+
+    Ok(())
+}
+
+fn outcome_class_name(outcome_class: OutcomeClass) -> &'static str {
+    match outcome_class {
+        OutcomeClass::Clean => "clean",
+        OutcomeClass::Findings => "findings",
+        OutcomeClass::TransientFailure => "transient_failure",
+        OutcomeClass::TerminalFailure => "terminal_failure",
+        OutcomeClass::ProtocolViolation => "protocol_violation",
+        OutcomeClass::Cancelled => "cancelled",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use ingot_domain::activity::Activity;
+    use ingot_domain::activity::{Activity, ActivityEventType};
     use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
+    use ingot_domain::item::{ApprovalState, Escalation};
     use ingot_domain::job::{JobStatus, OutcomeClass};
     use ingot_domain::ports::{RepositoryError, StartJobExecutionParams};
     use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
@@ -311,7 +471,7 @@ mod tests {
         let result = cancel_job(
             &job_repo,
             &FakeWorkspaceRepository::default(),
-            &FakeActivityRepository,
+            &FakeActivityRepository::default(),
             &job,
             &item,
             "operator_cancelled",
@@ -333,7 +493,7 @@ mod tests {
         let result = cancel_job(
             &job_repo,
             &FakeWorkspaceRepository::default(),
-            &FakeActivityRepository,
+            &FakeActivityRepository::default(),
             &job,
             &item,
             "operator_cancelled",
@@ -359,7 +519,7 @@ mod tests {
         let result = fail_job(
             &job_repo,
             &FakeWorkspaceRepository::default(),
-            &FakeActivityRepository,
+            &FakeActivityRepository::default(),
             &job,
             &item,
             OutcomeClass::TransientFailure,
@@ -387,7 +547,7 @@ mod tests {
         let result = expire_job(
             &job_repo,
             &FakeWorkspaceRepository::default(),
-            &FakeActivityRepository,
+            &FakeActivityRepository::default(),
             &job,
             &item,
             WorkspaceStatus::Ready,
@@ -411,7 +571,7 @@ mod tests {
         let result = cancel_job(
             &FakeJobRepository::default(),
             &workspace_repo,
-            &FakeActivityRepository,
+            &FakeActivityRepository::default(),
             &job,
             &item,
             "operator_cancelled",
@@ -424,6 +584,97 @@ mod tests {
         assert_eq!(result.released_workspace_id, Some(updated_workspace.id));
         assert_eq!(updated_workspace.state.current_job_id(), None);
         assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn record_non_success_outcome_appends_failure_and_escalation_activities() {
+        let job = test_job(None);
+        let item = nil_item();
+        let activity_repo = FakeActivityRepository::default();
+
+        let result = record_non_success_outcome(
+            &FakeJobRepository::default(),
+            &activity_repo,
+            &job,
+            &item,
+            OutcomeClass::TerminalFailure,
+            Some("agent_launch_failed".into()),
+            Some("boom".into()),
+            "job failure does not match the current item revision",
+        )
+        .await
+        .expect("failure should be recorded");
+
+        assert_eq!(result.escalation_reason, Some(EscalationReason::StepFailed));
+
+        let activities = activity_repo.appended();
+        assert!(activities.iter().any(|activity| {
+            activity.event_type == ActivityEventType::JobFailed
+                && activity.entity_id == job.id.to_string()
+        }));
+        assert!(activities.iter().any(|activity| {
+            activity.event_type == ActivityEventType::ItemEscalated
+                && activity.entity_id == item.id.to_string()
+        }));
+    }
+
+    #[tokio::test]
+    async fn append_approval_requested_activity_if_needed_requires_pending_clean_validation() {
+        let mut item = nil_item();
+        item.approval_state = ApprovalState::Pending;
+        let job = JobBuilder::new(
+            ProjectId::from_uuid(Uuid::nil()),
+            item.id,
+            item.current_revision_id,
+            step::VALIDATE_INTEGRATED,
+        )
+        .id(JobId::from_uuid(Uuid::nil()))
+        .build();
+        let activity_repo = FakeActivityRepository::default();
+
+        let appended = append_approval_requested_activity_if_needed(
+            &activity_repo,
+            &item,
+            &job,
+            OutcomeClass::Clean,
+        )
+        .await
+        .expect("approval activity should succeed");
+
+        assert!(appended);
+        let activities = activity_repo.appended();
+        assert!(activities.iter().any(|activity| {
+            activity.event_type == ActivityEventType::ApprovalRequested
+                && activity.entity_id == item.id.to_string()
+        }));
+    }
+
+    #[tokio::test]
+    async fn append_item_escalation_cleared_activity_if_needed_appends_when_current_item_cleared() {
+        let mut original_item = nil_item();
+        original_item.escalation = Escalation::OperatorRequired {
+            reason: EscalationReason::StepFailed,
+        };
+        let mut current_item = original_item.clone();
+        current_item.escalation = Escalation::None;
+        let job = test_job(None);
+        let activity_repo = FakeActivityRepository::default();
+
+        let appended = append_item_escalation_cleared_activity_if_needed(
+            &activity_repo,
+            &original_item,
+            &current_item,
+            &job,
+        )
+        .await
+        .expect("escalation clear activity should succeed");
+
+        assert!(appended);
+        let activities = activity_repo.appended();
+        assert!(activities.iter().any(|activity| {
+            activity.event_type == ActivityEventType::ItemEscalationCleared
+                && activity.entity_id == original_item.id.to_string()
+        }));
     }
 
     fn test_job(workspace_id: Option<WorkspaceId>) -> Job {
@@ -613,10 +864,22 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct FakeActivityRepository;
+    struct FakeActivityRepository {
+        activities: Arc<Mutex<Vec<Activity>>>,
+    }
+
+    impl FakeActivityRepository {
+        fn appended(&self) -> Vec<Activity> {
+            self.activities.lock().expect("activity lock").clone()
+        }
+    }
 
     impl ActivityRepository for FakeActivityRepository {
-        async fn append(&self, _activity: &Activity) -> Result<(), RepositoryError> {
+        async fn append(&self, activity: &Activity) -> Result<(), RepositoryError> {
+            self.activities
+                .lock()
+                .expect("activity lock")
+                .push(activity.clone());
             Ok(())
         }
 

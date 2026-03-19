@@ -494,17 +494,6 @@ pub(super) fn non_empty_message(message: &str) -> Option<String> {
     }
 }
 
-pub(super) fn outcome_class_name(outcome_class: OutcomeClass) -> &'static str {
-    match outcome_class {
-        OutcomeClass::Clean => "clean",
-        OutcomeClass::Findings => "findings",
-        OutcomeClass::TransientFailure => "transient_failure",
-        OutcomeClass::TerminalFailure => "terminal_failure",
-        OutcomeClass::ProtocolViolation => "protocol_violation",
-        OutcomeClass::Cancelled => "cancelled",
-    }
-}
-
 pub(super) fn template_digest(template: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(template.as_bytes());
