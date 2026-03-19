@@ -3746,30 +3746,39 @@ impl JobDispatcher {
         tokio::pin!(timeout);
 
         loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    return build_harness_command_result(
-                        status.code().unwrap_or(-1),
-                        collect_pipe_output(stdout_task, "stdout").await,
-                        collect_pipe_output(stderr_task, "stderr").await,
-                        false,
-                        Vec::new(),
-                    );
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    return build_harness_command_result(
-                        -1,
-                        collect_pipe_output(stdout_task, "stdout").await,
-                        collect_pipe_output(stderr_task, "stderr").await,
-                        false,
-                        vec![format!("command I/O error: {error}")],
-                    );
-                }
-            }
-
             tokio::select! {
+                result = child.wait() => {
+                    match result {
+                        Ok(status) => {
+                            return build_harness_command_result(
+                                status.code().unwrap_or(-1),
+                                collect_pipe_output(stdout_task, "stdout").await,
+                                collect_pipe_output(stderr_task, "stderr").await,
+                                false,
+                                Vec::new(),
+                            );
+                        }
+                        Err(error) => {
+                            return build_harness_command_result(
+                                -1,
+                                collect_pipe_output(stdout_task, "stdout").await,
+                                collect_pipe_output(stderr_task, "stderr").await,
+                                false,
+                                vec![format!("command I/O error: {error}")],
+                            );
+                        }
+                    }
+                }
                 _ = &mut timeout => {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        return build_harness_command_result(
+                            status.code().unwrap_or(-1),
+                            collect_pipe_output(stdout_task, "stdout").await,
+                            collect_pipe_output(stderr_task, "stderr").await,
+                            false,
+                            Vec::new(),
+                        );
+                    }
                     let mut notes = vec!["command timed out".to_string()];
                     if let Err(error) = terminate_harness_command(&mut child).await {
                         notes.push(format!("failed to terminate timed out command: {error}"));
