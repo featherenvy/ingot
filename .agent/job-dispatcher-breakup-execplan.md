@@ -52,11 +52,17 @@ The observable improvement is internal resilience: smaller modules, narrower por
 - Observation: existing usecase helpers already cover part of the job termination surface, but they do not match runtime recovery semantics exactly.
   Evidence: `crates/ingot-usecases/src/job_lifecycle.rs::expire_job()` writes `error_code = "job_expired"` and releases the workspace, while `crates/ingot-agent-runtime/src/lib.rs::reconcile_running_job()` writes `error_code = "heartbeat_expired"` and marks the workspace `Stale`. The current runtime tests assert the latter behavior.
 
+- Observation: several contested runtime mutations are protected by `ProjectLocks` plus re-fetch-and-check logic rather than by SQL compare-and-swap updates.
+  Evidence: `prepare_run()`, `prepare_harness_validation()`, `reconcile_assigned_job()`, `reconcile_running_job()`, and `prepare_queue_head_convergence()` all acquire a project lock and re-load current rows before mutating them, while `Database::update_job()`, `update_workspace()`, `update_convergence()`, and `update_git_operation()` themselves have no revision or status guard.
+
 - Observation: the runtime already has three internal adapter structs that bridge into `ingot-usecases`, so the cleanest extraction path is to move policy behind more ports, not to bypass those adapters.
   Evidence: `RuntimeConvergencePort`, `RuntimeFinalizePort`, and `RuntimeReconciliationPort` in `crates/ingot-agent-runtime/src/lib.rs` already implement `ConvergenceSystemActionPort`, `PreparedConvergenceFinalizePort`, and `ReconciliationPort`.
 
 - Observation: `refresh_project_mirror()` logic is duplicated today between the runtime and the HTTP API support layer.
   Evidence: `crates/ingot-agent-runtime/src/lib.rs::refresh_project_mirror()` and `crates/ingot-http-api/src/router/support.rs::refresh_project_mirror()` both re-check unresolved finalize operations before calling `ensure_mirror`.
+
+- Observation: retry lineage is already encoded in durable job fields and is exercised by tests adjacent to the runtime.
+  Evidence: `crates/ingot-usecases/src/job.rs::dispatch_job()` and `retry_job()` set `semantic_attempt_no`, `retry_no`, and `supersedes_job_id`, and `crates/ingot-agent-runtime/tests/escalation.rs::successful_authoring_retry_clears_escalation_and_reopens_review_dispatch()` asserts successful retry behavior tied to `retry_no > 0`.
 
 ## Decision Log
 
@@ -225,6 +231,16 @@ Convergence system-action helpers that still live in the runtime:
 
 The file also contains a large amount of prompt, schema, artifact, and harness text utility code. Those helpers are not themselves business policy, but they currently live next to it and contribute to the “god type” problem.
 
+Adjacent code that already encodes patterns this refactor should reuse includes:
+
+`crates/ingot-http-api/src/router/jobs.rs`, which already composes `CompleteJobService`, `job_lifecycle`, revision-context refresh, and projected review dispatch after job mutations.
+
+`crates/ingot-usecases/src/job_lifecycle.rs`, which centralizes guarded cancel, fail, and expire mutations for active jobs.
+
+`crates/ingot-usecases/src/teardown.rs`, which centralizes lane teardown across jobs, convergences, queue entries, and Git operations.
+
+`crates/ingot-agent-runtime/tests/common/mod.rs`, which provides the runtime test harness and fake runner patterns that the current runtime tests already use.
+
 ## Lifecycle and Invariants
 
 The core rule for this refactor is that every extracted mutating path must preserve the guards that the current code already enforces. Those guards are not optional cleanup. They are the stale-work protection for this daemon.
@@ -270,6 +286,18 @@ The durable lease fields are `lease_owner_id`, `heartbeat_at`, and `lease_expire
 - `reconcile_running_job()` expires a running job when either `lease_expires_at` is stale or `lease_owner_id` does not match the current dispatcher.
 
 This is important because it means a recovery extraction must preserve the current “foreign owner means expired” rule. It also means a usecase extraction cannot drop `lease_owner_id` on the floor and treat a heartbeat update as a generic running-job write.
+
+### Retry-lineage guard
+
+The durable retry and supersession fields are:
+
+- `semantic_attempt_no`
+- `retry_no`
+- `supersedes_job_id`
+
+These are created and advanced in `crates/ingot-usecases/src/job.rs::dispatch_job()` and `retry_job()`. They are then consumed by runtime behavior such as escalation clearing, because `should_clear_item_escalation_on_success()` depends on `job.retry_no > 0`.
+
+Any extraction of projected dispatch or completion policy must continue using the existing usecase job-construction helpers so those lineage fields remain correct. Do not create follow-up or retry jobs by hand in the runtime or in a new service.
 
 ### Prepared convergence guard
 
@@ -334,6 +362,19 @@ Different paths deliberately leave workspaces in different states:
 
 This asymmetry is real and tested. The extraction must not collapse all termination paths onto one helper unless that helper can preserve each distinct resulting state.
 
+### Lock-and-reload guard
+
+Not every stateful path in this codebase is protected by a single SQL compare-and-swap. Several important mutations depend on:
+
+- acquiring `ProjectLocks`
+- re-fetching the current row after the lock
+- re-checking status, revision, queue-head identity, or activity state in Rust
+- only then calling `update_*()`
+
+This pattern exists in `prepare_run()`, `prepare_harness_validation()`, `reconcile_assigned_job()`, `reconcile_running_job()`, `prepare_queue_head_convergence()`, and parts of `cleanup_supervised_task()`.
+
+Because `Database::update_job()`, `update_workspace()`, `update_convergence()`, and `update_git_operation()` do not enforce their own revision or status guard, any extraction that moves those paths must preserve the current lock-plus-reload structure. Treat that structure as part of the invariant, not as incidental style.
+
 ## Plan of Work
 
 Begin with a behavior-preserving runtime-only split. Create internal runtime modules and move code out of `crates/ingot-agent-runtime/src/lib.rs` while keeping the current public API stable. This first step is mechanical on purpose. It reduces merge conflict pressure and makes later semantic extraction reviewable.
@@ -363,7 +404,10 @@ The runtime split should reflect the clusters that already exist in the code tod
 - move `cleanup_supervised_task`
 - move `launch_supervised_jobs`
 - move `next_runnable_job`
+- move `run_prepared_agent_job`
+- move `run_prepared_harness_validation_job`
 - preserve the current `tick()` behavior where `system_actions_progressed` causes an early return before launching a job
+- preserve the current top-level spawned-helper shape, because `JoinSet::spawn(...)` currently depends on owned wrapper futures that take `JobDispatcher`, prepared state, and `OwnedSemaphorePermit`
 
 `crates/ingot-agent-runtime/src/dispatcher/prepare.rs`
 
@@ -444,6 +488,7 @@ The runtime split should reflect the clusters that already exist in the code tod
 
 `crates/ingot-agent-runtime/src/dispatcher/system_actions.rs`
 
+- move `reconcile_startup`
 - move `tick_system_action`
 - move `promote_queue_heads`
 - move `auto_finalize_prepared_convergence`
@@ -475,10 +520,13 @@ Second extract execution completion policy into `ingot-usecases`, but compose ex
 
 - reuse `CompleteJobService` for report and harness-validation completion
 - reuse `job_lifecycle` helpers where the resulting status and workspace semantics match the runtime behavior
+- reuse the pattern already present in `crates/ingot-http-api/src/router/jobs.rs` for “mutate job, refresh revision context, append activities, then trigger projected follow-up dispatch”
 - do not replace `reconcile_running_job()` with `job_lifecycle::expire_job()` without first deciding whether to preserve current `heartbeat_expired` plus `WorkspaceStatus::Stale` semantics or to intentionally change them and update tests
 - do not bypass the existing `PreparedConvergenceGuard` flow for clean `validate_integrated`
 
 Third extract execution preparation policy into `ingot-usecases`. That service should decide whether the job is launchable and should return the durable execution facts that the runtime needs, but it should not perform worktree provisioning or process launching. Reuse the existing `ingot_usecases::dispatch` helpers for candidate-subject derivation instead of re-implementing them.
+
+That extraction must also preserve the current lock-and-reload behavior for contested preparation paths, because the store-layer `update_*()` helpers do not provide their own revision or status compare-and-swap semantics for those updates.
 
 Fourth extract recovery policy into `ingot-usecases`. That includes:
 
@@ -521,6 +569,7 @@ This milestone must preserve the behaviors tested in `crates/ingot-agent-runtime
 - `clean_incremental_review_auto_dispatches_candidate_review`
 - `clean_candidate_review_auto_dispatches_candidate_validation`
 - `idle_item_auto_dispatches_candidate_review_after_nonblocking_incremental_triage`
+- the daemon-only validation and invalid-harness cases later in the same file, because projected follow-up dispatch shares completion and recovery edges with those paths
 
 Run `cargo test -p ingot-agent-runtime --test auto_dispatch` and `cargo test -p ingot-usecases`. Acceptance is that the runtime public facade still passes the same tests while the policy lives in `ingot-usecases`.
 
@@ -538,6 +587,7 @@ This milestone must preserve the distinct paths for:
 - agent launch failure
 - operator cancellation detected mid-run
 - supervised-task cleanup after join error or task error
+- successful retry clearing escalation through `retry_no > 0`
 
 It must also preserve the stale-state guards around `expected_item_revision_id`, `lease_owner_id`, and `PreparedConvergenceGuard`.
 
@@ -554,6 +604,7 @@ This milestone must preserve:
 - the current `WorkspaceError::Busy` handling in the supervisor
 - the current integration-workspace lookup from prepared convergence for daemon-only validation
 - the current prompt contract, including repo-local skill inclusion and invalid-harness failure behavior
+- the current job-lineage behavior for projected and retry-created jobs, including `semantic_attempt_no`, `retry_no`, and `supersedes_job_id`
 
 Run `cargo test -p ingot-agent-runtime --test dispatch`, `cargo test -p ingot-agent-runtime --test auto_dispatch`, and `cargo test -p ingot-usecases`. Acceptance is that preparation behavior is unchanged but the decision logic now lives in `ingot-usecases`.
 
@@ -574,6 +625,7 @@ That includes:
 - leaving blocked finalize operations unresolved
 - invalidating stale prepared convergence
 - preserving `fail_prepare_convergence_attempt()` semantics, including queue-entry release and replay metadata
+- preserving the current lock-plus-reload structure in contested mutating paths that use `update_job()`, `update_workspace()`, `update_convergence()`, or `update_git_operation()`
 - conservative mixed-state startup recovery
 
 Run `cargo test -p ingot-agent-runtime --test reconciliation`, `cargo test -p ingot-agent-runtime --test convergence`, and `cargo test -p ingot-usecases`. Acceptance is that those flows stay green while `JobDispatcher` becomes a thin façade.
@@ -655,6 +707,8 @@ The extracted code still preserves the current stale-state guards for:
 - `PreparedConvergenceGuard`
 - queue-entry identity and `Head` status
 - item `current_revision_id` checks inside convergence preparation and item-closing adoption paths
+- retry lineage fields `semantic_attempt_no`, `retry_no`, and `supersedes_job_id` where follow-up or retry job creation is involved
+- lock-plus-reload protections on paths that currently rely on `ProjectLocks` rather than SQL compare-and-swap updates
 
 Projected review and projected validation auto-dispatch still happen after the same job outcomes as before, but the policy lives in `ingot-usecases`.
 
@@ -703,6 +757,15 @@ The runtime crate should continue to use:
 
 The runtime crate should not add a third implementation of mirror refresh logic. If the refactor exposes a shared helper, use it to remove duplication between the runtime and `crates/ingot-http-api/src/router/support.rs`. If that deduplication is not needed for this refactor, leave both existing copies alone and do not create a new one.
 
+When extracting completion and recovery policy, prefer composing:
+
+- `CompleteJobService`
+- `job_lifecycle`
+- `teardown_revision_lane`
+- `ingot_usecases::dispatch` helpers
+
+before introducing new durable mutation helpers. Those existing utilities already encode significant parts of the repository’s guarded state-transition behavior.
+
 After Milestone 1, parallel work should follow these write-ownership rules:
 
 One agent owns:
@@ -736,3 +799,5 @@ Those write sets are based on the current function clusters in the code, not on 
 Revision note: created this ExecPlan on 2026-03-19 after investigating the current `JobDispatcher` implementation, the existing usecase boundaries, and the adjacent ExecPlans for convergence extraction, harness hardening, and JoinSet-based concurrency.
 
 Revision note: revised this ExecPlan after a deeper code audit of the runtime tests, store guards, HTTP-adjacent helpers, and existing usecase lifecycle helpers. The update fixes missing public API coverage, adds concrete stale-state and lease invariants, distinguishes supervisor, completion, projected-dispatch, Git-operation, and convergence-system-action paths, and replaces speculative service guidance with code-grounded extraction steps tied to the helpers and tests that already exist.
+
+Revision note: revised this ExecPlan again after auditing the HTTP job routes, convergence queue store helpers, convergence store helpers, daemon-only validation tests, and the direct `update_*()` store methods. The update adds retry-lineage coverage, calls out the current lock-plus-reload mutation pattern as an invariant, includes the spawned `JoinSet` helper functions in the runtime split, and ties completion extraction more explicitly to the patterns already used in `crates/ingot-http-api/src/router/jobs.rs`.
