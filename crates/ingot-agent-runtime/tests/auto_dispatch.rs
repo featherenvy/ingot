@@ -872,6 +872,110 @@ async fn run_forever_executes_daemon_only_validation_job() {
 }
 
 #[tokio::test]
+async fn run_forever_refreshes_heartbeat_for_daemon_only_validation_job() {
+    let mut config =
+        DispatcherConfig::new(unique_temp_path("ingot-runtime-daemon-validation-heartbeat"));
+    config.poll_interval = Duration::from_secs(10);
+    config.heartbeat_interval = Duration::from_millis(20);
+    config.max_concurrent_jobs = 1;
+    let h = TestHarness::with_config(Arc::new(FakeRunner), Some(config)).await;
+    h.dispatcher
+        .reconcile_startup()
+        .await
+        .expect("reconcile startup");
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
+    git_sync(&h.repo_path, &["add", "tracked.txt"]);
+    git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .seed_commit_oid(Some(seed_commit.clone()))
+        .seed_target_commit_oid(Some(seed_commit.clone()))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+    create_authoring_validation_workspace(&h, revision_id, &seed_commit, &candidate_head).await;
+
+    write_harness_toml(
+        &h.repo_path,
+        r#"
+[commands.sleepy]
+run = "sleep 0.5"
+timeout = "30s"
+"#,
+    );
+
+    let validation_job = JobBuilder::new(
+        h.project.id,
+        item_id,
+        revision_id,
+        step::VALIDATE_CANDIDATE_INITIAL,
+    )
+    .phase_kind(PhaseKind::Validate)
+    .workspace_kind(WorkspaceKind::Authoring)
+    .execution_permission(ExecutionPermission::DaemonOnly)
+    .context_policy(ContextPolicy::None)
+    .phase_template_slug("")
+    .job_input(JobInput::candidate_subject(
+        seed_commit.clone(),
+        candidate_head.clone(),
+    ))
+    .output_artifact_kind(OutputArtifactKind::ValidationReport)
+    .build();
+    h.db.create_job(&validation_job)
+        .await
+        .expect("create validation job");
+
+    let dispatcher = h.dispatcher.clone();
+    let handle = tokio::spawn(async move { dispatcher.run_forever().await });
+    h.dispatch_notify.notify();
+
+    let running_job = h
+        .wait_for_job_status(validation_job.id, JobStatus::Running, Duration::from_secs(2))
+        .await;
+    let initial_heartbeat = running_job
+        .state
+        .heartbeat_at()
+        .expect("initial validation heartbeat");
+
+    let refreshed_job = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let job = h.db.get_job(validation_job.id).await.expect("reload validation job");
+            if job
+                .state
+                .heartbeat_at()
+                .is_some_and(|heartbeat| heartbeat > initial_heartbeat)
+            {
+                return job;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for validation heartbeat refresh");
+    assert!(
+        refreshed_job
+            .state
+            .heartbeat_at()
+            .is_some_and(|heartbeat| heartbeat > initial_heartbeat)
+    );
+
+    h.wait_for_job_status(validation_job.id, JobStatus::Completed, Duration::from_secs(2))
+        .await;
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test]
 async fn harness_validation_with_commands_produces_findings_on_failure() {
     let h = TestHarness::new(Arc::new(FakeRunner)).await;
 

@@ -3509,7 +3509,7 @@ impl JobDispatcher {
 
         for command in &prepared.harness.commands {
             let result =
-                run_harness_command(&command.run, &prepared.workspace_path, command.timeout).await;
+                self.run_harness_command_with_heartbeats(&prepared, command).await;
             let status = if result.timed_out || result.exit_code != 0 {
                 "fail"
             } else {
@@ -3683,6 +3683,113 @@ impl JobDispatcher {
             "completed harness validation"
         );
         Ok(())
+    }
+
+    async fn refresh_daemon_validation_heartbeat(&self, prepared: &PreparedHarnessValidation) {
+        let lease_expires_at = Utc::now() + ChronoDuration::minutes(30);
+        if let Err(error) = self
+            .db
+            .heartbeat_job_execution(
+                prepared.job_id,
+                prepared.item_id,
+                prepared.revision_id,
+                &self.lease_owner_id,
+                lease_expires_at,
+            )
+            .await
+        {
+            warn!(
+                ?error,
+                job_id = %prepared.job_id,
+                "daemon-only validation heartbeat update failed"
+            );
+        } else {
+            debug!(
+                job_id = %prepared.job_id,
+                "daemon-only validation heartbeat updated"
+            );
+        }
+    }
+
+    async fn run_harness_command_with_heartbeats(
+        &self,
+        prepared: &PreparedHarnessValidation,
+        command_spec: &HarnessCommand,
+    ) -> HarnessCommandResult {
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(&command_spec.run)
+            .current_dir(&prepared.workspace_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command.spawn();
+
+        let mut child = match child {
+            Ok(child) => child,
+            Err(error) => {
+                return HarnessCommandResult {
+                    exit_code: -1,
+                    stdout_tail: String::new(),
+                    stderr_tail: format!("failed to spawn command: {error}"),
+                    timed_out: false,
+                };
+            }
+        };
+
+        let stdout_task = spawn_pipe_reader(child.stdout.take());
+        let stderr_task = spawn_pipe_reader(child.stderr.take());
+        let mut ticker = interval(self.config.heartbeat_interval);
+        let timeout = tokio::time::sleep(command_spec.timeout);
+        tokio::pin!(timeout);
+
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return build_harness_command_result(
+                        status.code().unwrap_or(-1),
+                        collect_pipe_output(stdout_task, "stdout").await,
+                        collect_pipe_output(stderr_task, "stderr").await,
+                        false,
+                        Vec::new(),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return build_harness_command_result(
+                        -1,
+                        collect_pipe_output(stdout_task, "stdout").await,
+                        collect_pipe_output(stderr_task, "stderr").await,
+                        false,
+                        vec![format!("command I/O error: {error}")],
+                    );
+                }
+            }
+
+            tokio::select! {
+                _ = &mut timeout => {
+                    let mut notes = vec!["command timed out".to_string()];
+                    if let Err(error) = terminate_harness_command(&mut child).await {
+                        notes.push(format!("failed to terminate timed out command: {error}"));
+                    }
+                    if let Err(error) = child.wait().await {
+                        notes.push(format!("failed to reap timed out command: {error}"));
+                    }
+                    return build_harness_command_result(
+                        -1,
+                        collect_pipe_output(stdout_task, "stdout").await,
+                        collect_pipe_output(stderr_task, "stderr").await,
+                        true,
+                        notes,
+                    );
+                }
+                _ = ticker.tick() => {
+                    self.refresh_daemon_validation_heartbeat(prepared).await;
+                }
+            }
+        }
     }
 
     async fn execute_harness_validation(&self, queued_job: Job) -> Result<(), RuntimeError> {
@@ -4504,67 +4611,6 @@ struct HarnessCommandResult {
     stdout_tail: String,
     stderr_tail: String,
     timed_out: bool,
-}
-
-async fn run_harness_command(run: &str, cwd: &Path, timeout: Duration) -> HarnessCommandResult {
-    let mut command = tokio::process::Command::new("sh");
-    command
-        .arg("-c")
-        .arg(run)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    command.process_group(0);
-    let child = command.spawn();
-
-    let mut child = match child {
-        Ok(child) => child,
-        Err(error) => {
-            return HarnessCommandResult {
-                exit_code: -1,
-                stdout_tail: String::new(),
-                stderr_tail: format!("failed to spawn command: {error}"),
-                timed_out: false,
-            };
-        }
-    };
-
-    let stdout_task = spawn_pipe_reader(child.stdout.take());
-    let stderr_task = spawn_pipe_reader(child.stderr.take());
-
-    match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => build_harness_command_result(
-            status.code().unwrap_or(-1),
-            collect_pipe_output(stdout_task, "stdout").await,
-            collect_pipe_output(stderr_task, "stderr").await,
-            false,
-            Vec::new(),
-        ),
-        Ok(Err(error)) => build_harness_command_result(
-            -1,
-            collect_pipe_output(stdout_task, "stdout").await,
-            collect_pipe_output(stderr_task, "stderr").await,
-            false,
-            vec![format!("command I/O error: {error}")],
-        ),
-        Err(_) => {
-            let mut notes = vec!["command timed out".to_string()];
-            if let Err(error) = terminate_harness_command(&mut child).await {
-                notes.push(format!("failed to terminate timed out command: {error}"));
-            }
-            if let Err(error) = child.wait().await {
-                notes.push(format!("failed to reap timed out command: {error}"));
-            }
-            build_harness_command_result(
-                -1,
-                collect_pipe_output(stdout_task, "stdout").await,
-                collect_pipe_output(stderr_task, "stderr").await,
-                true,
-                notes,
-            )
-        }
-    }
 }
 
 fn build_harness_command_result(
