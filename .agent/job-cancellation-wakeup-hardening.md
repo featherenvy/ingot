@@ -19,6 +19,7 @@ After this change, cancelling a running job will stop its long-running process p
 - [x] (2026-03-19 19:23Z) Updated `run_forever_cancels_daemon_only_validation_command` to use a five-second heartbeat and an explicit `h.dispatch_notify.notify()` after `cancel_job(...)`, matching the production router wakeup path.
 - [x] (2026-03-19 19:23Z) Added `run_forever_starts_next_job_after_running_job_cancellation` in `crates/ingot-agent-runtime/tests/dispatch.rs` to prove prompt permit release for cancelled agent-backed work under `max_concurrent_jobs = 1`.
 - [x] (2026-03-19 19:23Z) Ran focused runtime and cross-crate validation: `cargo test -p ingot-agent-runtime --test auto_dispatch run_forever_cancels_daemon_only_validation_command -- --exact`, `cargo test -p ingot-agent-runtime --test dispatch run_forever_starts_next_job_after_running_job_cancellation -- --exact`, `cargo test -p ingot-agent-runtime --test dispatch run_forever_starts_next_job_on_joinset_completion -- --exact`, `cargo test -p ingot-agent-runtime --test dispatch run_forever_refreshes_heartbeat_while_job_is_running -- --exact`, `cargo test -p ingot-agent-runtime --test auto_dispatch run_forever_refreshes_heartbeat_for_daemon_only_validation_job -- --exact`, `cargo test -p ingot-agent-runtime --test auto_dispatch`, `cargo test -p ingot-agent-runtime --test dispatch`, `cargo test -p ingot-http-api --test job_routes cancel_route_marks_active_job_cancelled_and_clears_workspace_attachment -- --exact`, and `cargo check -p ingot-daemon`.
+- [x] (2026-03-19 19:26Z) Removed the temporary `DispatchNotify::notified()` compatibility shim so the notifier API now exposes only the broadcast-safe `subscribe()` listener path.
 
 ## Surprises & Discoveries
 
@@ -64,13 +65,13 @@ After this change, cancelling a running job will stop its long-running process p
   Rationale: `cancel_job()` sets the database state to `Cancelled` synchronously, so status changes do not prove that the running Tokio task was aborted promptly. A second queued job launching under `max_concurrent_jobs = 1` is an observable signal that the cancelled task released its permit.
   Date/Author: 2026-03-19 / Codex
 
-- Decision: keep `DispatchNotify::notified()` as a compatibility helper while moving the runtime to `subscribe()`.
-  Rationale: only the runtime needed multi-waiter semantics immediately, but preserving the old helper behind a private single-waiter receiver keeps the API migration narrow and avoids unnecessary churn in constructor-heavy call sites.
+- Decision: remove `DispatchNotify::notified()` entirely once the runtime migration to `subscribe()` landed cleanly.
+  Rationale: the compatibility shim reintroduced a misleading single-waiter-looking API surface even though the repository no longer needed it. Keeping only `subscribe()` makes the multi-listener contract explicit and avoids future misuse.
   Date/Author: 2026-03-19 / Codex
 
 ## Outcomes & Retrospective
 
-The implementation landed as planned. `DispatchNotify` is now listener-based and safe for multiple concurrent waiters, `run_forever()` uses a persistent listener instead of repeated single-waiter waits, and both long-running execution loops now react to prompt cancellation notifications without waiting for the next heartbeat tick. The new long-heartbeat daemon regression and the new agent-capacity regression both pass, and the nearby JoinSet, heartbeat, HTTP cancel-route, and daemon wiring checks remained green after the refactor.
+The implementation landed as planned. `DispatchNotify` is now listener-based and safe for multiple concurrent waiters, `run_forever()` uses a persistent listener instead of repeated single-waiter waits, and both long-running execution loops now react to prompt cancellation notifications without waiting for the next heartbeat tick. The temporary compatibility shim has also been removed, so `subscribe()` is now the only wait-side API. The new long-heartbeat daemon regression and the new agent-capacity regression both pass, and the nearby JoinSet, heartbeat, HTTP cancel-route, and daemon wiring checks remained green after the refactor.
 
 One small adjustment was needed during validation: the existing runtime heartbeat regression in `crates/ingot-agent-runtime/tests/dispatch.rs` had a too-tight two-second window and became flaky under the full test binary after adding the extra notification wakeup path. Widening that test’s wait bounds kept the intended behavior check while making the binary stable again.
 
@@ -166,7 +167,7 @@ The exact-name regression tests must fail before the implementation if run with 
 
 These changes are safe to repeat because they are confined to the in-memory notification primitive, runtime wait loops, and temp-directory-backed tests. No schema migration or persistent data rewrite is involved. If a partial implementation leaves tests failing, revert only the in-progress tracked edits in the affected Rust files and rerun the exact-name tests above. Do not use destructive git resets in a dirty worktree; make small commits or use targeted patch reverts instead.
 
-Because `DispatchNotify` is shared across crates, an API refactor can break compilation in `apps/ingot-daemon`, `ingot-http-api`, or runtime tests before behavior is correct. Treat that as an expected intermediate state. Re-run the exact-name runtime tests after each compile fix rather than trying to jump directly to the full suite. If removing `DispatchNotify::notified()` causes too much temporary churn, keep it as a thin compatibility wrapper around a private per-instance listener until every runtime caller has moved to `subscribe()`, then decide whether deleting it is worth the extra diff.
+Because `DispatchNotify` is shared across crates, an API refactor can break compilation in `apps/ingot-daemon`, `ingot-http-api`, or runtime tests before behavior is correct. Treat that as an expected intermediate state. Re-run the exact-name runtime tests after each compile fix rather than trying to jump directly to the full suite.
 
 If you adopt a listener type returned from `DispatchNotify::subscribe()`, decide explicitly whether that type needs a crate-root re-export. The runtime can usually use `let mut listener = self.dispatch_notify.subscribe();` without naming the type, so widening the public API may be unnecessary. Prefer the narrower API surface unless a compile error proves otherwise.
 
@@ -204,7 +205,7 @@ At the end of this work, `crates/ingot-usecases/src/notify.rs` should expose a b
         pub async fn notified(&mut self);
     }
 
-`DispatchNotify::notify()` must remain cheap to call from HTTP middleware, and `DispatchNotifyListener::notified()` must allow more than one waiter to observe the same event independently. The implementation may use `tokio::sync::watch`, a generation counter, or another repository-local approach with the same semantics, but it must not rely on `Notify::notify_one()` alone. If you keep `DispatchNotify::notified()` for compatibility, document clearly whether it internally owns a persistent listener or whether only `subscribe()` is safe for multiple waiters.
+`DispatchNotify::notify()` must remain cheap to call from HTTP middleware, and `DispatchNotifyListener::notified()` must allow more than one waiter to observe the same event independently. The implementation may use `tokio::sync::watch`, a generation counter, or another repository-local approach with the same semantics, but it must not rely on `Notify::notify_one()` alone. The public wait-side API should stay narrow: `subscribe()` for creating listeners and `DispatchNotifyListener::notified()` for awaiting the next wakeup.
 
 In `crates/ingot-agent-runtime/src/lib.rs`, both `run_with_heartbeats()` and `run_harness_command_with_heartbeats()` must gain a notification-based wakeup branch in their `tokio::select!` loops. The heartbeat branch must remain responsible for `heartbeat_job_execution(...)`. The notification branch must only re-check job state and handle cancellation; it must not emit extra heartbeats. `run_forever()` must also move from calling `self.dispatch_notify.notified()` directly to using a persistent listener created before the outer loop, otherwise the shared notification semantics remain split between two APIs.
 
@@ -217,3 +218,5 @@ Revision note (2026-03-19, improvement pass): added the missing shared wiring co
 Revision note (2026-03-19, second improvement pass): added the remaining constructor call sites that constrain the `DispatchNotify` API (`Default` and `Clone` must stay stable), and expanded validation to explicitly rerun the existing JoinSet and heartbeat regressions that are most likely to break when `run_forever()` and the long-running job loops move to per-listener notification wakeups.
 
 Revision note (2026-03-19, implementation pass): landed the `watch`-backed `DispatchNotify` listener model, moved the runtime wait loops to persistent listeners, added the long-heartbeat daemon cancellation regression plus the agent permit-release regression, and recorded the exact passing validation commands. Also widened the existing runtime heartbeat regression timeout after the notifier refactor exposed a full-binary flake without changing the underlying behavior.
+
+Revision note (2026-03-19, shim-removal pass): removed the temporary `DispatchNotify::notified()` compatibility helper after confirming the runtime had fully migrated to `subscribe()`, so the notifier API now exposes only the broadcast-safe listener path.

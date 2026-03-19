@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::sync::{Mutex, watch};
+use tokio::sync::watch;
 
 /// Hints that dispatcher-visible state may have changed.
 ///
@@ -18,9 +18,6 @@ pub struct DispatchNotify {
 
 struct DispatchNotifyInner {
     sender: watch::Sender<u64>,
-    // Compatibility path for the legacy single-waiter `DispatchNotify::notified()`
-    // helper. Multi-waiter consumers must use `subscribe()`.
-    fallback_receiver: Mutex<watch::Receiver<u64>>,
     next_generation: AtomicU64,
 }
 
@@ -30,11 +27,10 @@ pub struct DispatchNotifyListener {
 
 impl DispatchNotify {
     pub fn new() -> Self {
-        let (sender, receiver) = watch::channel(0_u64);
+        let (sender, _receiver) = watch::channel(0_u64);
         Self {
             inner: Arc::new(DispatchNotifyInner {
                 sender,
-                fallback_receiver: Mutex::new(receiver),
                 next_generation: AtomicU64::new(0),
             }),
         }
@@ -55,15 +51,6 @@ impl DispatchNotify {
         DispatchNotifyListener {
             receiver: self.inner.sender.subscribe(),
         }
-    }
-
-    /// Wait until signalled using a shared single-waiter listener.
-    ///
-    /// Multi-waiter consumers should call [`subscribe`](Self::subscribe) and
-    /// await notifications on their own [`DispatchNotifyListener`].
-    pub async fn notified(&self) {
-        let mut receiver = self.inner.fallback_receiver.lock().await;
-        let _ = receiver.changed().await;
     }
 }
 
