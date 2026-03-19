@@ -808,6 +808,7 @@ impl JobDispatcher {
         let semaphore = Arc::new(Semaphore::new(self.config.max_concurrent_jobs));
         let mut running = JoinSet::<RunningJobResult>::new();
         let mut running_meta = HashMap::<TaskId, RunningJobMeta>::new();
+        let mut dispatch_listener = self.dispatch_notify.subscribe();
 
         loop {
             let made_progress = match self
@@ -827,7 +828,7 @@ impl JobDispatcher {
 
             let wait_result: Result<(), RuntimeError> = if running.is_empty() {
                 tokio::select! {
-                    () = self.dispatch_notify.notified() => {
+                    () = dispatch_listener.notified() => {
                         debug!("dispatcher woken by notification");
                         Ok(())
                     }
@@ -842,7 +843,7 @@ impl JobDispatcher {
                             Ok(())
                         }
                     }
-                    () = self.dispatch_notify.notified() => {
+                    () = dispatch_listener.notified() => {
                         debug!("dispatcher woken by notification");
                         Ok(())
                     }
@@ -1920,6 +1921,7 @@ impl JobDispatcher {
                 .await
         });
         let mut ticker = interval(self.config.heartbeat_interval);
+        let mut dispatch_listener = self.dispatch_notify.subscribe();
         let timeout = tokio::time::sleep(timeout_duration);
         tokio::pin!(timeout);
 
@@ -1934,6 +1936,21 @@ impl JobDispatcher {
                     handle.abort();
                     warn!(job_id = %prepared.job.id, timeout_seconds = timeout_duration.as_secs(), "job execution timed out");
                     return Err(AgentError::Timeout);
+                }
+                _ = dispatch_listener.notified() => {
+                    match self.db.get_job(prepared.job.id).await {
+                        Ok(job) if job.state.status() == JobStatus::Cancelled => {
+                            handle.abort();
+                            info!(job_id = %prepared.job.id, "cancelling running job after operator request");
+                            return Err(AgentError::ProcessError("job cancelled".into()));
+                        }
+                        Ok(_) => {
+                            debug!(job_id = %prepared.job.id, "running job woke on unrelated dispatcher notification");
+                        }
+                        Err(error) => {
+                            warn!(?error, job_id = %prepared.job.id, "failed to load job after dispatcher notification");
+                        }
+                    }
                 }
                 _ = ticker.tick() => {
                     match self.db.get_job(prepared.job.id).await {
@@ -3790,6 +3807,7 @@ impl JobDispatcher {
         let stdout_task = spawn_pipe_reader(child.stdout.take());
         let stderr_task = spawn_pipe_reader(child.stderr.take());
         let mut ticker = interval(self.config.heartbeat_interval);
+        let mut dispatch_listener = self.dispatch_notify.subscribe();
         let timeout = tokio::time::sleep(command_spec.timeout);
         tokio::pin!(timeout);
 
@@ -3845,6 +3863,42 @@ impl JobDispatcher {
                         false,
                         notes,
                     );
+                }
+                _ = dispatch_listener.notified() => {
+                    match self.db.get_job(prepared.job_id).await {
+                        Ok(job) if job.state.status() == JobStatus::Cancelled => {
+                            let mut notes = vec!["command cancelled".to_string()];
+                            if let Err(error) = terminate_harness_command(&mut child).await {
+                                notes.push(format!("failed to terminate cancelled command: {error}"));
+                            }
+                            if let Err(error) = child.wait().await {
+                                notes.push(format!("failed to reap cancelled command: {error}"));
+                            }
+                            return build_harness_command_result(
+                                -1,
+                                collect_pipe_output(stdout_task, "stdout").await,
+                                collect_pipe_output(stderr_task, "stderr").await,
+                                false,
+                                true,
+                                notes,
+                            );
+                        }
+                        Ok(_) => {
+                            debug!(
+                                job_id = %prepared.job_id,
+                                command = %command_spec.name,
+                                "harness command woke on unrelated dispatcher notification"
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                ?error,
+                                job_id = %prepared.job_id,
+                                command = %command_spec.name,
+                                "failed to load harness job after dispatcher notification"
+                            );
+                        }
+                    }
                 }
                 _ = ticker.tick() => {
                     match self.db.get_job(prepared.job_id).await {

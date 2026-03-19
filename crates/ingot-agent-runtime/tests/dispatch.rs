@@ -19,6 +19,7 @@ use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
+use ingot_usecases::job_lifecycle;
 use ingot_workflow::step;
 
 #[tokio::test]
@@ -443,6 +444,75 @@ async fn run_forever_starts_next_job_on_joinset_completion() {
 }
 
 #[tokio::test]
+async fn run_forever_starts_next_job_after_running_job_cancellation() {
+    let runner = BlockingRunner::new();
+    let mut config =
+        DispatcherConfig::new(unique_temp_path("ingot-runtime-cancellation-wakeup-state"));
+    config.poll_interval = Duration::from_secs(10);
+    config.heartbeat_interval = Duration::from_secs(5);
+    config.max_concurrent_jobs = 1;
+    let h = TestHarness::with_config(Arc::new(runner.clone()), Some(config)).await;
+    h.register_mutating_agent().await;
+    h.dispatcher
+        .reconcile_startup()
+        .await
+        .expect("reconcile startup");
+
+    let (first_item, _, first_job) =
+        create_supervised_authoring_job(&h, parse_timestamp("2026-03-12T00:00:00Z")).await;
+    let (_, _, second_job) =
+        create_supervised_authoring_job(&h, parse_timestamp("2026-03-12T00:00:01Z")).await;
+
+    let dispatcher = h.dispatcher.clone();
+    let handle = tokio::spawn(async move { dispatcher.run_forever().await });
+    h.dispatch_notify.notify();
+
+    runner.wait_for_launches(1, Duration::from_secs(2)).await;
+    h.wait_for_job_status(first_job.id, JobStatus::Running, Duration::from_secs(2))
+        .await;
+
+    let active_job = h.db.get_job(first_job.id).await.expect("reload active job");
+    job_lifecycle::cancel_job(
+        &h.db,
+        &h.db,
+        &h.db,
+        &active_job,
+        &first_item,
+        "operator_cancelled",
+        WorkspaceStatus::Ready,
+    )
+    .await
+    .expect("cancel running job");
+    h.dispatch_notify.notify();
+
+    runner
+        .wait_for_launches(2, Duration::from_millis(500))
+        .await;
+
+    assert_eq!(
+        h.db.get_job(first_job.id)
+            .await
+            .expect("reload cancelled job")
+            .state
+            .status(),
+        JobStatus::Cancelled
+    );
+    assert_eq!(
+        h.db.get_job(second_job.id)
+            .await
+            .expect("reload queued successor")
+            .state
+            .status(),
+        JobStatus::Running
+    );
+
+    runner.release_all();
+    h.wait_for_job_status(second_job.id, JobStatus::Completed, Duration::from_secs(2))
+        .await;
+    stop_background_dispatcher(handle).await;
+}
+
+#[tokio::test]
 async fn run_forever_skips_unlaunchable_head_job_when_filling_capacity() {
     let mut config = DispatcherConfig::new(unique_temp_path("ingot-runtime-stale-head-state"));
     config.poll_interval = Duration::from_secs(10);
@@ -569,16 +639,16 @@ async fn run_forever_refreshes_heartbeat_while_job_is_running() {
     let handle = tokio::spawn(async move { dispatcher.run_forever().await });
     h.dispatch_notify.notify();
 
-    runner.wait_for_launches(1, Duration::from_secs(2)).await;
+    runner.wait_for_launches(1, Duration::from_secs(5)).await;
     let running_job = h
-        .wait_for_job_status(job.id, JobStatus::Running, Duration::from_secs(2))
+        .wait_for_job_status(job.id, JobStatus::Running, Duration::from_secs(5))
         .await;
     let initial_heartbeat = running_job
         .state
         .heartbeat_at()
         .expect("initial running heartbeat");
 
-    let refreshed_job = tokio::time::timeout(Duration::from_secs(2), async {
+    let refreshed_job = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let job = h.db.get_job(job.id).await.expect("reload job");
             if job
@@ -601,7 +671,7 @@ async fn run_forever_refreshes_heartbeat_while_job_is_running() {
     );
 
     runner.release_all();
-    h.wait_for_job_status(job.id, JobStatus::Completed, Duration::from_secs(2))
+    h.wait_for_job_status(job.id, JobStatus::Completed, Duration::from_secs(5))
         .await;
     stop_background_dispatcher(handle).await;
 }

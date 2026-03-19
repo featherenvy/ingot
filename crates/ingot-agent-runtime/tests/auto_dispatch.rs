@@ -1000,7 +1000,7 @@ async fn run_forever_cancels_daemon_only_validation_command() {
     let mut config =
         DispatcherConfig::new(unique_temp_path("ingot-runtime-daemon-validation-cancel"));
     config.poll_interval = Duration::from_secs(10);
-    config.heartbeat_interval = Duration::from_millis(20);
+    config.heartbeat_interval = Duration::from_secs(5);
     config.max_concurrent_jobs = 1;
     let h = TestHarness::with_config(Arc::new(FakeRunner), Some(config)).await;
     h.dispatcher
@@ -1097,6 +1097,7 @@ timeout = "30s"
     )
     .await
     .expect("cancel validation job");
+    h.dispatch_notify.notify();
 
     h.wait_for_job_status(
         validation_job.id,

@@ -15,7 +15,9 @@ use ingot_agent_protocol::response::AgentResponse;
 use ingot_agent_runtime::{AgentRunner, DispatcherConfig, JobDispatcher};
 use ingot_domain::agent::{Agent, AgentCapability};
 use ingot_domain::ids;
-use ingot_domain::job::{ExecutionPermission, Job, JobInput, JobStatus, OutputArtifactKind, PhaseKind};
+use ingot_domain::job::{
+    ExecutionPermission, Job, JobInput, JobStatus, OutputArtifactKind, PhaseKind,
+};
 use ingot_domain::project::Project;
 use ingot_domain::workspace::WorkspaceKind;
 use ingot_git::commands::head_oid;
