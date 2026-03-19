@@ -3,9 +3,13 @@ use ingot_domain::activity::{Activity, ActivityEventType};
 use ingot_domain::convergence::Convergence;
 use ingot_domain::finding::Finding;
 use ingot_domain::ids::ActivityId;
+use ingot_domain::ids::ItemId;
 use ingot_domain::item::{EscalationReason, Item};
 use ingot_domain::job::{Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind};
-use ingot_domain::ports::{ActivityRepository, JobRepository, WorkspaceRepository};
+use ingot_domain::ports::{
+    ActivityRepository, ItemRepository, JobRepository, ProjectMutationLockPort, ProjectRepository,
+    WorkspaceRepository,
+};
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::workspace::Workspace;
@@ -211,6 +215,201 @@ where
         .await?;
 
     Ok(Some(job))
+}
+
+/// Auto-dispatch a closure-relevant validation job if the evaluator recommends one.
+///
+/// Requires pre-hydrated convergences (with `target_head_valid` set) and pre-loaded entity state.
+/// Fills candidate subject from workspace/job history when needed, creates and persists the job.
+///
+/// Returns `Some(job)` if a validation job was dispatched, `None` if not dispatchable.
+pub async fn auto_dispatch_validation<J, W, A>(
+    job_repo: &J,
+    workspace_repo: &W,
+    activity_repo: &A,
+    project: &Project,
+    item: &Item,
+    revision: &ItemRevision,
+    jobs: &[Job],
+    findings: &[Finding],
+    convergences: &[Convergence],
+) -> Result<Option<Job>, UseCaseError>
+where
+    J: JobRepository,
+    W: WorkspaceRepository,
+    A: ActivityRepository,
+{
+    let evaluation = Evaluator::new().evaluate(item, revision, jobs, findings, convergences);
+    let Some(step_id) = evaluation.dispatchable_step_id.as_deref() else {
+        return Ok(None);
+    };
+    if !step::is_closure_relevant_validate_step(step_id) {
+        return Ok(None);
+    }
+
+    let mut job = dispatch_job(
+        item,
+        revision,
+        jobs,
+        findings,
+        convergences,
+        DispatchJobCommand {
+            step_id: Some(step_id.to_string()),
+        },
+    )?;
+
+    if should_fill_candidate_subject_from_workspace(&job.step_id) {
+        let authoring_workspace = workspace_repo
+            .find_authoring_for_revision(revision.id)
+            .await?;
+        let base = job
+            .job_input
+            .base_commit_oid()
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                effective_authoring_base_commit_oid(revision, authoring_workspace.as_ref())
+            });
+        let head = job
+            .job_input
+            .head_commit_oid()
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                current_authoring_head_for_revision_with_workspace(
+                    revision,
+                    jobs,
+                    authoring_workspace.as_ref(),
+                )
+            });
+        match (base, head) {
+            (Some(base), Some(head)) => {
+                job.job_input = JobInput::candidate_subject(base, head);
+            }
+            _ => {
+                return Err(UseCaseError::Internal(format!(
+                    "incomplete candidate subject for auto-dispatched validation {}",
+                    job.step_id
+                )));
+            }
+        }
+    }
+
+    job_repo.create(&job).await?;
+    activity_repo
+        .append(&Activity {
+            id: ActivityId::new(),
+            project_id: project.id,
+            event_type: ActivityEventType::JobDispatched,
+            entity_type: "job".into(),
+            entity_id: job.id.to_string(),
+            payload: serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
+            created_at: Utc::now(),
+        })
+        .await?;
+
+    Ok(Some(job))
+}
+
+/// Auto-dispatch the next projected closure-relevant follow-up for an item.
+///
+/// Review is preferred over validation when both are technically dispatchable, matching
+/// the runtime's historical behavior.
+pub async fn auto_dispatch_projected<J, W, A>(
+    job_repo: &J,
+    workspace_repo: &W,
+    activity_repo: &A,
+    project: &Project,
+    item: &Item,
+    revision: &ItemRevision,
+    jobs: &[Job],
+    findings: &[Finding],
+    convergences: &[Convergence],
+) -> Result<Option<Job>, UseCaseError>
+where
+    J: JobRepository,
+    W: WorkspaceRepository,
+    A: ActivityRepository,
+{
+    if let Some(job) = auto_dispatch_review(
+        job_repo,
+        workspace_repo,
+        activity_repo,
+        project,
+        item,
+        revision,
+        jobs,
+        findings,
+        convergences,
+    )
+    .await?
+    {
+        return Ok(Some(job));
+    }
+
+    auto_dispatch_validation(
+        job_repo,
+        workspace_repo,
+        activity_repo,
+        project,
+        item,
+        revision,
+        jobs,
+        findings,
+        convergences,
+    )
+    .await
+}
+
+/// Recover projected follow-up work across all projects. Per-project and per-item failures
+/// are logged and skipped by the caller-provided dispatch closure.
+pub async fn recover_projected_jobs<P, I, L, F, Fut>(
+    project_repo: &P,
+    item_repo: &I,
+    project_locks: &L,
+    mut auto_dispatch_locked: F,
+) -> Result<bool, UseCaseError>
+where
+    P: ProjectRepository,
+    I: ItemRepository,
+    L: ProjectMutationLockPort,
+    F: FnMut(&Project, ItemId) -> Fut,
+    Fut: std::future::Future<Output = Result<bool, UseCaseError>>,
+{
+    let mut dispatched_any = false;
+
+    for project in project_repo.list().await? {
+        let _guard = project_locks.acquire_project_mutation(project.id).await;
+        let items = match item_repo.list_by_project(project.id).await {
+            Ok(items) => items,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    project_id = %project.id,
+                    "projected review recovery skipped project"
+                );
+                continue;
+            }
+        };
+        for item in items {
+            if !item.lifecycle.is_open() {
+                continue;
+            }
+            match auto_dispatch_locked(&project, item.id).await {
+                Ok(dispatched) => {
+                    dispatched_any |= dispatched;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        project_id = %project.id,
+                        item_id = %item.id,
+                        "projected review recovery skipped item"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(dispatched_any)
 }
 
 #[cfg(test)]
