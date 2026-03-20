@@ -405,8 +405,8 @@ mod tests {
             .phase_template_slug("validate-integrated")
             .output_artifact_kind(OutputArtifactKind::ValidationReport)
             .job_input(JobInput::integrated_subject(
-                expected_target_head_oid,
-                prepared_head_oid,
+                expected_target_head_oid.into(),
+                prepared_head_oid.into(),
             ))
             .build()
             .persist(db)

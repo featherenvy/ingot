@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::commit_oid::CommitOid;
 use crate::ids::{ItemId, ItemRevisionId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,17 +14,17 @@ pub enum ApprovalPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthoringBaseSeed {
     Explicit {
-        seed_commit_oid: String,
-        seed_target_commit_oid: String,
+        seed_commit_oid: CommitOid,
+        seed_target_commit_oid: CommitOid,
     },
     Implicit {
-        seed_target_commit_oid: String,
+        seed_target_commit_oid: CommitOid,
     },
 }
 
 impl AuthoringBaseSeed {
     #[must_use]
-    pub fn from_parts(seed_commit_oid: Option<String>, seed_target_commit_oid: String) -> Self {
+    pub fn from_parts(seed_commit_oid: Option<CommitOid>, seed_target_commit_oid: CommitOid) -> Self {
         match seed_commit_oid {
             Some(seed_commit_oid) => Self::Explicit {
                 seed_commit_oid,
@@ -36,7 +37,7 @@ impl AuthoringBaseSeed {
     }
 
     #[must_use]
-    pub fn seed_commit_oid(&self) -> Option<&str> {
+    pub fn seed_commit_oid(&self) -> Option<&CommitOid> {
         match self {
             Self::Explicit {
                 seed_commit_oid, ..
@@ -46,7 +47,7 @@ impl AuthoringBaseSeed {
     }
 
     #[must_use]
-    pub fn seed_target_commit_oid(&self) -> &str {
+    pub fn seed_target_commit_oid(&self) -> &CommitOid {
         match self {
             Self::Explicit {
                 seed_target_commit_oid,
@@ -78,8 +79,8 @@ struct ItemRevisionWire {
     pub approval_policy: ApprovalPolicy,
     pub policy_snapshot: serde_json::Value,
     pub template_map_snapshot: serde_json::Value,
-    pub seed_commit_oid: Option<String>,
-    pub seed_target_commit_oid: String,
+    pub seed_commit_oid: Option<CommitOid>,
+    pub seed_target_commit_oid: CommitOid,
     pub supersedes_revision_id: Option<ItemRevisionId>,
     pub created_at: DateTime<Utc>,
 }
@@ -133,8 +134,8 @@ impl From<ItemRevision> for ItemRevisionWire {
             approval_policy,
             policy_snapshot,
             template_map_snapshot,
-            seed_commit_oid: seed.seed_commit_oid().map(ToOwned::to_owned),
-            seed_target_commit_oid: seed.seed_target_commit_oid().to_owned(),
+            seed_commit_oid: seed.seed_commit_oid().cloned(),
+            seed_target_commit_oid: seed.seed_target_commit_oid().clone(),
             supersedes_revision_id,
             created_at,
         }

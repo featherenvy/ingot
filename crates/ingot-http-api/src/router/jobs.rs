@@ -275,7 +275,7 @@ pub(super) async fn refresh_revision_context_for_job_like(
         item,
         revision,
         &jobs,
-        authoring_head_commit_oid,
+        authoring_head_commit_oid.map(CommitOid::new),
         changed_paths,
         jobs.first().map(|job| job.id),
         Utc::now(),

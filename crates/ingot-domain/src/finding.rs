@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::commit_oid::CommitOid;
 use crate::ids::{FindingId, ItemId, ItemRevisionId, JobId, ProjectId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,8 +281,8 @@ struct FindingWire {
     pub source_report_schema_version: String,
     pub source_finding_key: String,
     pub source_subject_kind: FindingSubjectKind,
-    pub source_subject_base_commit_oid: Option<String>,
-    pub source_subject_head_commit_oid: String,
+    pub source_subject_base_commit_oid: Option<CommitOid>,
+    pub source_subject_head_commit_oid: CommitOid,
     pub code: String,
     pub severity: FindingSeverity,
     pub summary: String,
@@ -374,8 +375,8 @@ pub struct Finding {
     pub source_report_schema_version: String,
     pub source_finding_key: String,
     pub source_subject_kind: FindingSubjectKind,
-    pub source_subject_base_commit_oid: Option<String>,
-    pub source_subject_head_commit_oid: String,
+    pub source_subject_base_commit_oid: Option<CommitOid>,
+    pub source_subject_head_commit_oid: CommitOid,
     pub code: String,
     pub severity: FindingSeverity,
     pub summary: String,

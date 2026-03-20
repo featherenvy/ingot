@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::commit_oid::CommitOid;
 use crate::ids::{ItemRevisionId, JobId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +33,7 @@ pub struct RevisionContextSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevisionContextPayload {
-    pub authoring_head_commit_oid: Option<String>,
+    pub authoring_head_commit_oid: Option<CommitOid>,
     pub changed_paths: Vec<String>,
     pub latest_validation: Option<RevisionContextResultSummary>,
     pub latest_review: Option<RevisionContextResultSummary>,

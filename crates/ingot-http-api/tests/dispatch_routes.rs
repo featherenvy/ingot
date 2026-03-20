@@ -153,7 +153,7 @@ async fn dispatch_item_job_route_binds_implicit_author_initial_from_target_head(
         |revision| {
             revision
                 .seed(AuthoringBaseSeed::Implicit {
-                    seed_target_commit_oid: target_head.clone(),
+                    seed_target_commit_oid: target_head.clone().into(),
                 })
                 .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
         },
@@ -246,7 +246,7 @@ async fn resume_route_implicit_revision_queues_incremental_review_from_bound_wor
     item.parking_state = ParkingState::Deferred;
     let revision = test_revision_builder(&item_id, &revision_id)
         .seed(AuthoringBaseSeed::Implicit {
-            seed_target_commit_oid: bound_base.clone(),
+            seed_target_commit_oid: bound_base.clone().into(),
         })
         .build();
     (item, revision).persist(&db).await.expect("insert item");
@@ -347,7 +347,7 @@ async fn investigate_item_dispatch_creates_and_triage_removes_anchor_ref() {
         |item| item,
         |revision| {
             revision.seed(AuthoringBaseSeed::Implicit {
-                seed_target_commit_oid: target_head.clone(),
+                seed_target_commit_oid: target_head.clone().into(),
             })
         },
     )
@@ -398,7 +398,8 @@ async fn investigate_item_dispatch_creates_and_triage_removes_anchor_ref() {
         resolve_ref_oid(paths.mirror_git_dir.as_path(), &investigation_ref)
             .await
             .expect("resolve investigation ref")
-            .as_deref(),
+            .as_ref()
+            .map(|o| o.as_str()),
         Some(target_head.as_str())
     );
 
@@ -493,7 +494,7 @@ async fn investigate_item_dispatch_uses_existing_authoring_workspace_subject() {
         |item| item,
         |revision| {
             revision.seed(AuthoringBaseSeed::Implicit {
-                seed_target_commit_oid: bound_base.clone(),
+                seed_target_commit_oid: bound_base.clone().into(),
             })
         },
     )

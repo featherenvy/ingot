@@ -2,6 +2,7 @@ use std::future::Future;
 
 use chrono::Utc;
 use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::Finding;
@@ -200,14 +201,14 @@ pub trait PreparedConvergenceFinalizePort: Send + Sync {
         project: &Project,
         item: &ingot_domain::item::Item,
         revision: &ItemRevision,
-        prepared_commit_oid: &str,
+        prepared_commit_oid: &CommitOid,
     ) -> impl Future<Output = Result<CheckoutFinalizationReadiness, UseCaseError>> + Send;
 
     fn sync_checkout_to_prepared_commit(
         &self,
         project: &Project,
         revision: &ItemRevision,
-        prepared_commit_oid: &str,
+        prepared_commit_oid: &CommitOid,
     ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
 
     fn update_git_operation(
@@ -732,6 +733,7 @@ mod tests {
     use ingot_domain::activity::Activity;
 
     use super::FinalizationTarget;
+    use ingot_domain::commit_oid::CommitOid;
     use ingot_domain::convergence::{Convergence, ConvergenceStatus};
     use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
     use ingot_domain::git_operation::GitOperation;
@@ -1062,7 +1064,7 @@ mod tests {
             _project: &Project,
             item: &ingot_domain::item::Item,
             _revision: &ItemRevision,
-            _prepared_commit_oid: &str,
+            _prepared_commit_oid: &CommitOid,
         ) -> impl Future<Output = Result<CheckoutFinalizationReadiness, UseCaseError>> + Send
         {
             self.calls
@@ -1076,7 +1078,7 @@ mod tests {
             &self,
             _project: &Project,
             revision: &ItemRevision,
-            _prepared_commit_oid: &str,
+            _prepared_commit_oid: &CommitOid,
         ) -> impl Future<Output = Result<(), UseCaseError>> + Send {
             self.calls
                 .lock()

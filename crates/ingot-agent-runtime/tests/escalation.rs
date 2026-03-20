@@ -1,3 +1,4 @@
+use ingot_domain::commit_oid::CommitOid;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -39,21 +40,21 @@ async fn runtime_terminal_failure_escalates_closure_relevant_item() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
         .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item");
 
-    let job = test_authoring_job(h.project.id, item_id, revision_id, &seed_commit);
+    let job = test_authoring_job(h.project.id, item_id, revision_id, seed_commit.as_str());
     h.db.create_job(&job).await.expect("create job");
 
     assert!(h.dispatcher.tick().await.expect("tick should run"));
@@ -74,7 +75,7 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -82,7 +83,7 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
         .build();
     h.db.create_item_with_revision(&item, &revision)
@@ -99,7 +100,7 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
         .error_code("step_failed")
         .error_message("first attempt failed")
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(&seed_commit))
+        .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .started_at(created_at)
         .ended_at(created_at)
@@ -113,7 +114,7 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
         .supersedes_job_id(failed_job_id)
         .retry_no(1)
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(&seed_commit))
+        .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .build();
     h.db.create_job(&retry_job).await.expect("create retry job");

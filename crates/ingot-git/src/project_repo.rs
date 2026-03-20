@@ -125,7 +125,7 @@ pub async fn checkout_finalization_status(
 ) -> Result<CheckoutFinalizationStatus, GitCommandError> {
     match checkout_sync_status(checkout_path, target_ref).await? {
         CheckoutSyncStatus::Ready => {
-            if head_oid(checkout_path).await? == commit_oid {
+            if head_oid(checkout_path).await? == *commit_oid {
                 Ok(CheckoutFinalizationStatus::Synced)
             } else {
                 Ok(CheckoutFinalizationStatus::NeedsSync)
@@ -162,11 +162,13 @@ pub async fn sync_checkout_to_commit(
     )
     .await?;
     let fetched_oid = resolve_ref_oid(checkout_path, &sync_ref).await?;
-    if fetched_oid.as_deref() != Some(commit_oid) {
+    if !fetched_oid.as_ref().is_some_and(|oid| oid == commit_oid) {
         let _ = crate::commands::delete_ref(checkout_path, &sync_ref).await;
         return Err(GitCommandError::CommandFailed(format!(
             "fetched {target_ref} as {}, expected {commit_oid}",
-            fetched_oid.unwrap_or_else(|| "missing".into())
+            fetched_oid
+                .map(|oid| oid.into_inner())
+                .unwrap_or_else(|| "missing".into())
         )));
     }
     let reset_result = git(checkout_path, &["reset", "--hard", commit_oid]).await;
@@ -198,6 +200,7 @@ async fn git_clone_mirror(
 mod tests {
     use super::{ensure_mirror, project_repo_paths, sync_checkout_to_commit};
     use crate::commands::{current_head_ref, resolve_ref_oid};
+    use ingot_domain::commit_oid::CommitOid;
     use ingot_domain::ids::ProjectId;
     use ingot_test_support::git::{
         git_output, run_git as git_sync, temp_git_repo, unique_temp_path,
@@ -241,19 +244,19 @@ mod tests {
             resolve_ref_oid(&paths.mirror_git_dir, "refs/ingot/workspaces/wrk_test")
                 .await
                 .expect("resolve daemon ref"),
-            Some(initial_head)
+            Some(CommitOid::from(initial_head))
         );
         assert_eq!(
             resolve_ref_oid(&paths.mirror_git_dir, "refs/heads/main")
                 .await
                 .expect("resolve main"),
-            Some(updated_head.clone())
+            Some(CommitOid::from(updated_head.clone()))
         );
         assert_eq!(
             resolve_ref_oid(&paths.mirror_git_dir, "refs/heads/fresh-branch")
                 .await
                 .expect("resolve fresh branch"),
-            Some(updated_head.clone())
+            Some(CommitOid::from(updated_head.clone()))
         );
         assert_eq!(
             resolve_ref_oid(&paths.mirror_git_dir, "refs/heads/stale-branch")
@@ -271,7 +274,7 @@ mod tests {
             resolve_ref_oid(&paths.mirror_git_dir, "refs/tags/fresh-tag")
                 .await
                 .expect("resolve fresh tag"),
-            Some(updated_head)
+            Some(CommitOid::from(updated_head))
         );
         assert_eq!(
             current_head_ref(&paths.mirror_git_dir)

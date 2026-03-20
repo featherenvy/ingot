@@ -1,3 +1,4 @@
+use crate::commit_oid::CommitOid;
 use crate::git_operation::{
     ConvergenceReplayMetadata, GitEntityType, GitOperation, GitOperationStatus, OperationKind,
     OperationPayload,
@@ -15,9 +16,9 @@ pub struct GitOperationBuilder {
     entity_id: String,
     workspace_id: Option<ids::WorkspaceId>,
     ref_name: Option<String>,
-    expected_old_oid: Option<String>,
-    new_oid: Option<String>,
-    commit_oid: Option<String>,
+    expected_old_oid: Option<CommitOid>,
+    new_oid: Option<CommitOid>,
+    commit_oid: Option<CommitOid>,
     status: GitOperationStatus,
     metadata: Option<serde_json::Value>,
     created_at: DateTime<Utc>,
@@ -64,17 +65,17 @@ impl GitOperationBuilder {
         self
     }
 
-    pub fn expected_old_oid(mut self, expected_old_oid: impl Into<String>) -> Self {
+    pub fn expected_old_oid(mut self, expected_old_oid: impl Into<CommitOid>) -> Self {
         self.expected_old_oid = Some(expected_old_oid.into());
         self
     }
 
-    pub fn new_oid(mut self, new_oid: impl Into<String>) -> Self {
+    pub fn new_oid(mut self, new_oid: impl Into<CommitOid>) -> Self {
         self.new_oid = Some(new_oid.into());
         self
     }
 
-    pub fn commit_oid(mut self, commit_oid: impl Into<String>) -> Self {
+    pub fn commit_oid(mut self, commit_oid: impl Into<CommitOid>) -> Self {
         self.commit_oid = Some(commit_oid.into());
         self
     }

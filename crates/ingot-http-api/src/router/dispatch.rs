@@ -151,8 +151,8 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
         return Ok(None);
     }
 
-    let mut base_commit_oid = job.job_input.base_commit_oid().map(ToOwned::to_owned);
-    let mut head_commit_oid = job.job_input.head_commit_oid().map(ToOwned::to_owned);
+    let mut base_commit_oid = job.job_input.base_commit_oid().map(|o| o.as_str().to_owned());
+    let mut head_commit_oid = job.job_input.head_commit_oid().map(|o| o.as_str().to_owned());
 
     if should_fill_candidate_subject_from_workspace(&job.step_id) {
         if base_commit_oid.is_none() {
@@ -165,8 +165,10 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
         if let (Some(base_commit_oid), Some(head_commit_oid)) =
             (base_commit_oid.clone(), head_commit_oid.clone())
         {
-            job.job_input =
-                ingot_domain::job::JobInput::candidate_subject(base_commit_oid, head_commit_oid);
+            job.job_input = ingot_domain::job::JobInput::candidate_subject(
+                CommitOid::new(base_commit_oid),
+                CommitOid::new(head_commit_oid),
+            );
             return Ok(None);
         }
     }
@@ -176,8 +178,8 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
     {
         if let Some(seed_commit_oid) = revision.seed.seed_commit_oid() {
             job.job_input = ingot_domain::job::JobInput::candidate_subject(
-                seed_commit_oid.to_owned(),
-                seed_commit_oid.to_owned(),
+                seed_commit_oid.clone(),
+                seed_commit_oid.clone(),
             );
             return Ok(None);
         }
@@ -193,7 +195,7 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
         );
         return Ok(Some(PendingInvestigationRef {
             ref_name,
-            commit_oid: resolved_head,
+            commit_oid: resolved_head.into_inner(),
         }));
     }
 
@@ -296,8 +298,8 @@ pub(super) async fn plan_and_apply_investigation_ref(
         entity_id,
         payload: OperationPayload::CreateInvestigationRef {
             ref_name: ref_name.into(),
-            new_oid: commit_oid.into(),
-            commit_oid: Some(commit_oid.into()),
+            new_oid: CommitOid::new(commit_oid),
+            commit_oid: Some(CommitOid::new(commit_oid)),
         },
         status: GitOperationStatus::Planned,
         created_at: Utc::now(),
@@ -634,7 +636,7 @@ mod tests {
         .workspace_kind(WorkspaceKind::Authoring)
         .execution_permission(ExecutionPermission::MayMutate)
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head("head"))
+        .job_input(JobInput::authoring_head(CommitOid::from("head")))
         .output_artifact_kind(output_artifact_kind)
         .build()
     }
@@ -678,8 +680,9 @@ mod tests {
         let pending_investigation_ref =
             pending_investigation_ref.expect("expected pending investigation ref");
         assert!(precreated_authoring_workspace.is_none());
-        assert_eq!(job.job_input.base_commit_oid(), Some(head.as_str()));
-        assert_eq!(job.job_input.head_commit_oid(), Some(head.as_str()));
+        let expected_oid = CommitOid::new(&head);
+        assert_eq!(job.job_input.base_commit_oid(), Some(&expected_oid));
+        assert_eq!(job.job_input.head_commit_oid(), Some(&expected_oid));
 
         let paths = project_repo_paths(state.state_root.as_path(), project.id, &repo);
         ensure_mirror(&paths).await.expect("ensure mirror");
@@ -770,8 +773,9 @@ mod tests {
         let pending_investigation_ref =
             pending_investigation_ref.expect("expected pending investigation ref");
         assert!(precreated_authoring_workspace.is_none());
-        assert_eq!(job.job_input.base_commit_oid(), Some(head.as_str()));
-        assert_eq!(job.job_input.head_commit_oid(), Some(head.as_str()));
+        let expected_oid = CommitOid::new(&head);
+        assert_eq!(job.job_input.base_commit_oid(), Some(&expected_oid));
+        assert_eq!(job.job_input.head_commit_oid(), Some(&expected_oid));
 
         let paths = project_repo_paths(state.state_root.as_path(), project.id, &repo);
         ensure_mirror(&paths).await.expect("ensure mirror");
@@ -976,8 +980,8 @@ mod tests {
                 entity_id: JobId::from_uuid(Uuid::now_v7()).to_string(),
                 payload: OperationPayload::CreateInvestigationRef {
                     ref_name: investigation_ref.clone(),
-                    new_oid: head.clone(),
-                    commit_oid: Some(head.clone()),
+                    new_oid: CommitOid::new(&head),
+                    commit_oid: Some(CommitOid::new(&head)),
                 },
                 status: GitOperationStatus::Applied,
                 created_at: Utc::now(),
@@ -1073,8 +1077,8 @@ mod tests {
                 entity_id: JobId::from_uuid(Uuid::now_v7()).to_string(),
                 payload: OperationPayload::CreateInvestigationRef {
                     ref_name: investigation_ref.clone(),
-                    new_oid: "deadbeef".repeat(5),
-                    commit_oid: Some("deadbeef".repeat(5)),
+                    new_oid: CommitOid::new("deadbeef".repeat(5)),
+                    commit_oid: Some(CommitOid::new("deadbeef".repeat(5))),
                 },
                 status: GitOperationStatus::Applied,
                 created_at: Utc::now(),

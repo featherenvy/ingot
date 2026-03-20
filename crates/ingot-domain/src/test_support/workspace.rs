@@ -1,3 +1,4 @@
+use crate::commit_oid::CommitOid;
 use crate::ids;
 use crate::workspace::{
     RetentionPolicy, Workspace, WorkspaceCommitState, WorkspaceKind, WorkspaceState,
@@ -16,8 +17,8 @@ pub struct WorkspaceBuilder {
     created_for_revision_id: Option<ids::ItemRevisionId>,
     target_ref: Option<String>,
     workspace_ref: Option<String>,
-    base_commit_oid: Option<String>,
-    head_commit_oid: Option<String>,
+    base_commit_oid: Option<CommitOid>,
+    head_commit_oid: Option<CommitOid>,
     retention_policy: RetentionPolicy,
     status: WorkspaceStatus,
     current_job_id: Option<ids::JobId>,
@@ -60,12 +61,12 @@ impl WorkspaceBuilder {
     }
 
     pub fn base_commit_oid(mut self, commit_oid: impl Into<String>) -> Self {
-        self.base_commit_oid = Some(commit_oid.into());
+        self.base_commit_oid = Some(CommitOid::new(commit_oid.into()));
         self
     }
 
     pub fn head_commit_oid(mut self, commit_oid: impl Into<String>) -> Self {
-        self.head_commit_oid = Some(commit_oid.into());
+        self.head_commit_oid = Some(CommitOid::new(commit_oid.into()));
         self
     }
 

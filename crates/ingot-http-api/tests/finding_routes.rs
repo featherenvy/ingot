@@ -37,8 +37,8 @@ async fn triaging_final_integrated_finding_enters_pending_approval() {
     let item = test_item_builder(project_id, revision_id, item_id).build();
     let revision = test_revision_builder(item_id, revision_id)
         .seed(AuthoringBaseSeed::Explicit {
-            seed_commit_oid: head.clone(),
-            seed_target_commit_oid: head.clone(),
+            seed_commit_oid: head.clone().into(),
+            seed_target_commit_oid: head.clone().into(),
         })
         .build();
     (item, revision).persist(&db).await.expect("insert item");
@@ -176,8 +176,8 @@ async fn backlog_triage_rejects_self_linked_item() {
     let item = test_item_builder(project_id, revision_id, item_id).build();
     let revision = test_revision_builder(item_id, revision_id)
         .seed(AuthoringBaseSeed::Explicit {
-            seed_commit_oid: head.clone(),
-            seed_target_commit_oid: head.clone(),
+            seed_commit_oid: head.clone().into(),
+            seed_target_commit_oid: head.clone().into(),
         })
         .build();
     (item, revision).persist(&db).await.expect("insert item");
@@ -265,8 +265,8 @@ async fn retriaging_backlog_created_item_clears_origin_backlink() {
     let item = test_item_builder(project_id, revision_id, item_id).build();
     let revision = test_revision_builder(item_id, revision_id)
         .seed(AuthoringBaseSeed::Explicit {
-            seed_commit_oid: head.clone(),
-            seed_target_commit_oid: head.clone(),
+            seed_commit_oid: head.clone().into(),
+            seed_target_commit_oid: head.clone().into(),
         })
         .build();
     (item, revision).persist(&db).await.expect("insert item");
@@ -303,8 +303,8 @@ async fn retriaging_backlog_created_item_clears_origin_backlink() {
     linked_item.classification = Classification::Bug;
     let linked_revision = test_revision_builder(linked_item_id, linked_revision_id)
         .seed(AuthoringBaseSeed::Explicit {
-            seed_commit_oid: head.clone(),
-            seed_target_commit_oid: head.clone(),
+            seed_commit_oid: head.clone().into(),
+            seed_target_commit_oid: head.clone().into(),
         })
         .build();
     let (mut linked_item, _) = (linked_item, linked_revision)

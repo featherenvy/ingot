@@ -1,3 +1,4 @@
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::ids::{ItemId, ItemRevisionId};
 use ingot_domain::ports::{RepositoryError, RevisionContextRepository, RevisionRepository};
 use ingot_domain::revision::{AuthoringBaseSeed, ItemRevision};
@@ -59,8 +60,8 @@ impl Database {
         .bind(encode_enum(&revision.approval_policy)?)
         .bind(serde_json::to_string(&revision.policy_snapshot).map_err(json_err)?)
         .bind(serde_json::to_string(&revision.template_map_snapshot).map_err(json_err)?)
-        .bind(revision.seed.seed_commit_oid())
-        .bind(revision.seed.seed_target_commit_oid())
+        .bind(revision.seed.seed_commit_oid().map(CommitOid::as_str))
+        .bind(revision.seed.seed_target_commit_oid().as_str())
         .bind(revision.supersedes_revision_id.map(|id| id.to_string()))
         .bind(revision.created_at)
         .execute(&self.pool)
@@ -135,13 +136,13 @@ impl RevisionContextRepository for Database {
 }
 
 fn map_revision(row: &SqliteRow) -> Result<ItemRevision, RepositoryError> {
-    let seed_commit_oid: Option<String> = row.try_get("seed_commit_oid").map_err(db_err)?;
-    let seed_target_commit_oid: String = row
+    let seed_commit_oid: Option<CommitOid> = row.try_get::<Option<String>, _>("seed_commit_oid").map_err(db_err)?.map(CommitOid::new);
+    let seed_target_commit_oid: CommitOid = CommitOid::new(row
         .try_get::<Option<String>, _>("seed_target_commit_oid")
         .map_err(db_err)?
         .ok_or_else(|| {
             RepositoryError::Conflict("seed_target_commit_oid must not be NULL".into())
-        })?;
+        })?);
     let seed = AuthoringBaseSeed::from_parts(seed_commit_oid, seed_target_commit_oid);
 
     Ok(ItemRevision {

@@ -1,3 +1,4 @@
+use ingot_domain::commit_oid::CommitOid;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,14 +90,14 @@ async fn authoring_success_auto_dispatches_incremental_review() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
@@ -136,7 +137,7 @@ async fn authoring_success_auto_dispatches_incremental_review() {
         .expect("auto-dispatched incremental review job");
     assert_eq!(review_job.state.status(), JobStatus::Queued);
     assert_eq!(
-        review_job.job_input.base_commit_oid(),
+        review_job.job_input.base_commit_oid().map(|c| c.as_str()),
         Some(seed_commit.as_str())
     );
     assert_eq!(
@@ -151,7 +152,7 @@ async fn implicit_revision_auto_dispatches_incremental_review_from_bound_workspa
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let bound_base = head_oid(&h.repo_path).await.expect("bound base");
+    let bound_base = head_oid(&h.repo_path).await.expect("bound base").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -173,7 +174,7 @@ async fn implicit_revision_auto_dispatches_incremental_review_from_bound_workspa
     git(&h.repo_path, &["commit", "-m", "implicit review change"])
         .await
         .expect("git commit");
-    let author_output_commit = head_oid(&h.repo_path).await.expect("author output");
+    let author_output_commit = head_oid(&h.repo_path).await.expect("author output").into_inner();
 
     let created_at = default_timestamp();
     let authoring_workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
@@ -192,7 +193,7 @@ async fn implicit_revision_auto_dispatches_incremental_review_from_bound_workspa
         .outcome_class(OutcomeClass::Clean)
         .workspace_id(authoring_workspace.id)
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(bound_base.clone()))
+        .job_input(JobInput::authoring_head(CommitOid::new(bound_base.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .output_commit_oid(author_output_commit.clone())
         .result_schema_version("commit_summary:v1")
@@ -224,11 +225,11 @@ async fn implicit_revision_auto_dispatches_incremental_review_from_bound_workspa
         .expect("auto-dispatched incremental review job");
     assert_eq!(review_job.state.status(), JobStatus::Queued);
     assert_eq!(
-        review_job.job_input.base_commit_oid(),
+        review_job.job_input.base_commit_oid().map(|c| c.as_str()),
         Some(bound_base.as_str())
     );
     assert_eq!(
-        review_job.job_input.head_commit_oid(),
+        review_job.job_input.head_commit_oid().map(|c| c.as_str()),
         Some(author_output_commit.as_str())
     );
 }
@@ -298,11 +299,11 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
     let h = TestHarness::new(Arc::new(FakeRunner)).await;
     h.register_full_agent().await;
 
-    let authored_seed = head_oid(&h.repo_path).await.expect("seed head");
+    let authored_seed = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     std::fs::write(h.repo_path.join("feature.txt"), "candidate change").expect("write feature");
     git_sync(&h.repo_path, &["add", "feature.txt"]);
     git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
-    let authored_head = head_oid(&h.repo_path).await.expect("authored head");
+    let authored_head = head_oid(&h.repo_path).await.expect("authored head").into_inner();
 
     // Busy item with a queued authoring job
     let busy_item_id = ingot_domain::ids::ItemId::new();
@@ -358,7 +359,7 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
         .status(JobStatus::Completed)
         .outcome_class(OutcomeClass::Clean)
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(authored_seed.clone()))
+        .job_input(JobInput::authoring_head(CommitOid::new(authored_seed.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .output_commit_oid(authored_head.clone())
         .created_at(created_at)
@@ -401,8 +402,8 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
     .execution_permission(ExecutionPermission::MustNotMutate)
     .phase_template_slug("review-incremental")
     .job_input(JobInput::candidate_subject(
-        authored_seed.clone(),
-        authored_head.clone(),
+        CommitOid::new(authored_seed.clone()),
+        CommitOid::new(authored_head.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ReviewReport)
     .result_schema_version("review_report:v1")
@@ -487,11 +488,11 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
 #[tokio::test]
 async fn clean_incremental_review_auto_dispatches_candidate_review() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let seed_commit = head_oid(&repo).await.expect("seed head");
+    let seed_commit = head_oid(&repo).await.expect("seed head").into_inner();
     std::fs::write(repo.join("feature.txt"), "candidate change").expect("write feature");
     git_sync(&repo, &["add", "feature.txt"]);
     git_sync(&repo, &["commit", "-m", "candidate change"]);
-    let candidate_head = head_oid(&repo).await.expect("candidate head");
+    let candidate_head = head_oid(&repo).await.expect("candidate head").into_inner();
 
     let db = migrated_test_db("ingot-runtime-auto-candidate-review").await;
     let dispatcher = ingot_agent_runtime::JobDispatcher::with_runner(
@@ -538,7 +539,7 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
             .status(JobStatus::Completed)
             .outcome_class(OutcomeClass::Clean)
             .phase_template_slug("author-initial")
-            .job_input(JobInput::authoring_head(seed_commit.clone()))
+            .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
             .output_artifact_kind(OutputArtifactKind::Commit)
             .output_commit_oid(candidate_head.clone())
             .created_at(created_at)
@@ -562,9 +563,9 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
         .execution_permission(ExecutionPermission::MustNotMutate)
         .phase_template_slug("review-incremental")
         .job_input(JobInput::candidate_subject(
-            seed_commit.clone(),
-            candidate_head.clone(),
-        ))
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(candidate_head.clone()),
+    ))
         .output_artifact_kind(OutputArtifactKind::ReviewReport)
         .created_at(created_at)
         .build(),
@@ -591,11 +592,11 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
         .expect("auto-dispatched candidate review");
     assert_eq!(candidate_review.state.status(), JobStatus::Queued);
     assert_eq!(
-        candidate_review.job_input.base_commit_oid(),
+        candidate_review.job_input.base_commit_oid().map(|c| c.as_str()),
         Some(seed_commit.as_str())
     );
     assert_eq!(
-        candidate_review.job_input.head_commit_oid(),
+        candidate_review.job_input.head_commit_oid().map(|c| c.as_str()),
         Some(candidate_head.as_str())
     );
 }
@@ -603,11 +604,11 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
 #[tokio::test]
 async fn clean_candidate_review_auto_dispatches_candidate_validation() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let seed_commit = head_oid(&repo).await.expect("seed head");
+    let seed_commit = head_oid(&repo).await.expect("seed head").into_inner();
     std::fs::write(repo.join("feature.txt"), "candidate change").expect("write feature");
     git_sync(&repo, &["add", "feature.txt"]);
     git_sync(&repo, &["commit", "-m", "candidate change"]);
-    let candidate_head = head_oid(&repo).await.expect("candidate head");
+    let candidate_head = head_oid(&repo).await.expect("candidate head").into_inner();
 
     let db = migrated_test_db("ingot-runtime-auto-candidate-validation").await;
     let dispatcher = ingot_agent_runtime::JobDispatcher::with_runner(
@@ -653,7 +654,7 @@ async fn clean_candidate_review_auto_dispatches_candidate_validation() {
             .status(JobStatus::Completed)
             .outcome_class(OutcomeClass::Clean)
             .phase_template_slug("author-initial")
-            .job_input(JobInput::authoring_head(seed_commit.clone()))
+            .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
             .output_artifact_kind(OutputArtifactKind::Commit)
             .output_commit_oid(candidate_head.clone())
             .created_at(created_at)
@@ -676,9 +677,9 @@ async fn clean_candidate_review_auto_dispatches_candidate_validation() {
         .execution_permission(ExecutionPermission::MustNotMutate)
         .phase_template_slug("review-candidate")
         .job_input(JobInput::candidate_subject(
-            seed_commit.clone(),
-            candidate_head.clone(),
-        ))
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(candidate_head.clone()),
+    ))
         .output_artifact_kind(OutputArtifactKind::ReviewReport)
         .created_at(created_at)
         .build(),
@@ -705,11 +706,11 @@ async fn clean_candidate_review_auto_dispatches_candidate_validation() {
         .expect("auto-dispatched candidate validation");
     assert_eq!(validation_job.state.status(), JobStatus::Queued);
     assert_eq!(
-        validation_job.job_input.base_commit_oid(),
+        validation_job.job_input.base_commit_oid().map(|c| c.as_str()),
         Some(seed_commit.as_str())
     );
     assert_eq!(
-        validation_job.job_input.head_commit_oid(),
+        validation_job.job_input.head_commit_oid().map(|c| c.as_str()),
         Some(candidate_head.as_str())
     );
 }
@@ -722,11 +723,11 @@ async fn daemon_only_validation_job_executes_on_tick() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
     git_sync(&h.repo_path, &["add", "tracked.txt"]);
     git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
-    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -767,8 +768,8 @@ async fn daemon_only_validation_job_executes_on_tick() {
     .context_policy(ContextPolicy::None)
     .phase_template_slug("")
     .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        candidate_head.clone(),
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(candidate_head.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ValidationReport)
     .build();
@@ -803,11 +804,11 @@ async fn run_forever_executes_daemon_only_validation_job() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
     git_sync(&h.repo_path, &["add", "tracked.txt"]);
     git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
-    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -834,8 +835,8 @@ async fn run_forever_executes_daemon_only_validation_job() {
     .context_policy(ContextPolicy::None)
     .phase_template_slug("")
     .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        candidate_head.clone(),
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(candidate_head.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ValidationReport)
     .build();
@@ -893,11 +894,11 @@ async fn run_forever_refreshes_heartbeat_for_daemon_only_validation_job() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
     git_sync(&h.repo_path, &["add", "tracked.txt"]);
     git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
-    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -933,8 +934,8 @@ timeout = "30s"
     .context_policy(ContextPolicy::None)
     .phase_template_slug("")
     .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        candidate_head.clone(),
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(candidate_head.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ValidationReport)
     .build();
@@ -1008,11 +1009,11 @@ async fn run_forever_cancels_daemon_only_validation_command() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
     git_sync(&h.repo_path, &["add", "tracked.txt"]);
     git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
-    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -1049,8 +1050,8 @@ timeout = "30s"
     .context_policy(ContextPolicy::None)
     .phase_template_slug("")
     .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        candidate_head.clone(),
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(candidate_head.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ValidationReport)
     .build();
@@ -1133,11 +1134,11 @@ async fn daemon_only_validation_command_completes_even_when_heartbeat_interval_e
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
     git_sync(&h.repo_path, &["add", "tracked.txt"]);
     git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
-    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -1173,8 +1174,8 @@ timeout = "1s"
     .context_policy(ContextPolicy::None)
     .phase_template_slug("")
     .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        candidate_head.clone(),
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(candidate_head.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ValidationReport)
     .build();
@@ -1198,11 +1199,11 @@ async fn harness_validation_with_commands_produces_findings_on_failure() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
     git_sync(&h.repo_path, &["add", "tracked.txt"]);
     git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
-    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -1261,8 +1262,8 @@ timeout = "30s"
     .context_policy(ContextPolicy::None)
     .phase_template_slug("")
     .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        candidate_head.clone(),
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(candidate_head.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ValidationReport)
     .build();
@@ -1312,11 +1313,11 @@ async fn daemon_only_validation_fails_on_invalid_harness_profile() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
     git_sync(&h.repo_path, &["add", "tracked.txt"]);
     git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
-    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -1352,8 +1353,8 @@ timeout = "bogus"
     .context_policy(ContextPolicy::None)
     .phase_template_slug("")
     .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        candidate_head.clone(),
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(candidate_head.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ValidationReport)
     .build();
@@ -1388,14 +1389,14 @@ async fn queued_authoring_job_fails_on_invalid_harness_profile() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
         .build();
     h.db.create_item_with_revision(&item, &revision)
@@ -1411,7 +1412,7 @@ timeout = "bogus"
 "#,
     );
 
-    let job = test_authoring_job(h.project.id, item_id, revision_id, &seed_commit);
+    let job = test_authoring_job(h.project.id, item_id, revision_id, seed_commit.as_str());
     h.db.create_job(&job).await.expect("create job");
 
     assert!(h.dispatcher.tick().await.expect("tick should run"));
@@ -1445,14 +1446,14 @@ async fn authoring_prompt_includes_resolved_repo_local_skill_files() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
         .build();
     h.db.create_item_with_revision(&item, &revision)
@@ -1478,7 +1479,7 @@ paths = [".ingot/skills/*.md"]
 "#,
     );
 
-    let job = test_authoring_job(h.project.id, item_id, revision_id, &seed_commit);
+    let job = test_authoring_job(h.project.id, item_id, revision_id, seed_commit.as_str());
     h.db.create_job(&job).await.expect("create job");
 
     assert!(h.dispatcher.tick().await.expect("tick should run"));
@@ -1506,14 +1507,14 @@ async fn queued_authoring_job_fails_when_harness_skill_glob_escapes_repo() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
         .build();
     h.db.create_item_with_revision(&item, &revision)
@@ -1545,7 +1546,7 @@ paths = ["../{escaped_dir_name}/*.md"]
         ),
     );
 
-    let job = test_authoring_job(h.project.id, item_id, revision_id, &seed_commit);
+    let job = test_authoring_job(h.project.id, item_id, revision_id, seed_commit.as_str());
     h.db.create_job(&job).await.expect("create job");
 
     assert!(h.dispatcher.tick().await.expect("tick should run"));
@@ -1587,14 +1588,14 @@ async fn queued_authoring_job_fails_when_repo_local_skill_symlink_points_outside
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
         .build();
     h.db.create_item_with_revision(&item, &revision)
@@ -1626,7 +1627,7 @@ paths = [".ingot/skills/*.md"]
 "#,
     );
 
-    let job = test_authoring_job(h.project.id, item_id, revision_id, &seed_commit);
+    let job = test_authoring_job(h.project.id, item_id, revision_id, seed_commit.as_str());
     h.db.create_job(&job).await.expect("create job");
 
     assert!(h.dispatcher.tick().await.expect("tick should run"));
@@ -1666,11 +1667,11 @@ async fn harness_validation_timeout_kills_background_processes() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
     git_sync(&h.repo_path, &["add", "tracked.txt"]);
     git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
-    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -1707,8 +1708,8 @@ timeout = "1s"
     .context_policy(ContextPolicy::None)
     .phase_template_slug("")
     .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        candidate_head.clone(),
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(candidate_head.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ValidationReport)
     .build();
@@ -1747,11 +1748,11 @@ async fn daemon_validation_resyncs_authoring_workspace_before_running_harness() 
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     std::fs::write(h.repo_path.join("tracked.txt"), "candidate change").expect("write tracked");
     git_sync(&h.repo_path, &["add", "tracked.txt"]);
     git_sync(&h.repo_path, &["commit", "-m", "candidate change"]);
-    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head");
+    let candidate_head = head_oid(&h.repo_path).await.expect("candidate head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -1791,8 +1792,8 @@ timeout = "30s"
     .context_policy(ContextPolicy::None)
     .phase_template_slug("")
     .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        candidate_head.clone(),
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(candidate_head.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ValidationReport)
     .build();
@@ -1811,7 +1812,7 @@ timeout = "30s"
     assert_eq!(
         head_oid(Path::new(&workspace.path))
             .await
-            .expect("workspace head"),
+            .expect("workspace head").into_inner(),
         candidate_head
     );
 }
@@ -1822,7 +1823,7 @@ async fn daemon_validation_resyncs_integration_workspace_before_running_harness(
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -1905,8 +1906,8 @@ timeout = "30s"
     .context_policy(ContextPolicy::None)
     .phase_template_slug("")
     .job_input(JobInput::integrated_subject(
-        seed_commit.clone(),
-        integrated_head.clone(),
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(integrated_head.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ValidationReport)
     .build();
@@ -1925,7 +1926,7 @@ timeout = "30s"
     assert_eq!(
         head_oid(Path::new(&workspace.path))
             .await
-            .expect("workspace head"),
+            .expect("workspace head").into_inner(),
         integrated_head
     );
 }
@@ -1936,11 +1937,11 @@ async fn idle_item_auto_dispatches_candidate_review_after_nonblocking_incrementa
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     std::fs::write(h.repo_path.join("feature.txt"), "authored change").expect("write feature");
     git_sync(&h.repo_path, &["add", "feature.txt"]);
     git_sync(&h.repo_path, &["commit", "-m", "author change"]);
-    let authored_commit = head_oid(&h.repo_path).await.expect("authored head");
+    let authored_commit = head_oid(&h.repo_path).await.expect("authored head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -1959,7 +1960,7 @@ async fn idle_item_auto_dispatches_candidate_review_after_nonblocking_incrementa
         .status(JobStatus::Completed)
         .outcome_class(OutcomeClass::Clean)
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(seed_commit.clone()))
+        .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .output_commit_oid(authored_commit.clone())
         .created_at(created_at)
@@ -2002,8 +2003,8 @@ async fn idle_item_auto_dispatches_candidate_review_after_nonblocking_incrementa
     .execution_permission(ExecutionPermission::MustNotMutate)
     .phase_template_slug("review-incremental")
     .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        authored_commit.clone(),
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(authored_commit.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ReviewReport)
     .result_schema_version("review_report:v1")

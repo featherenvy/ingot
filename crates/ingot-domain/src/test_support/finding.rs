@@ -1,3 +1,4 @@
+use crate::commit_oid::CommitOid;
 use crate::finding::{
     Finding, FindingSeverity, FindingSubjectKind, FindingTriage, FindingTriageState,
 };
@@ -17,8 +18,8 @@ pub struct FindingBuilder {
     source_report_schema_version: String,
     source_finding_key: String,
     source_subject_kind: FindingSubjectKind,
-    source_subject_base_commit_oid: Option<String>,
-    source_subject_head_commit_oid: String,
+    source_subject_base_commit_oid: Option<CommitOid>,
+    source_subject_head_commit_oid: CommitOid,
     code: String,
     severity: FindingSeverity,
     summary: String,
@@ -48,8 +49,8 @@ impl FindingBuilder {
             source_report_schema_version: "review_report:v1".into(),
             source_finding_key: "f-1".into(),
             source_subject_kind: FindingSubjectKind::Candidate,
-            source_subject_base_commit_oid: Some("base".into()),
-            source_subject_head_commit_oid: "head".into(),
+            source_subject_base_commit_oid: Some(CommitOid::new("base")),
+            source_subject_head_commit_oid: CommitOid::new("head"),
             code: "BUG001".into(),
             severity: FindingSeverity::High,
             summary: "summary".into(),
@@ -88,12 +89,12 @@ impl FindingBuilder {
         self
     }
 
-    pub fn source_subject_base_commit_oid(mut self, oid: Option<impl Into<String>>) -> Self {
-        self.source_subject_base_commit_oid = oid.map(Into::into);
+    pub fn source_subject_base_commit_oid(mut self, oid: Option<impl Into<CommitOid>>) -> Self {
+        self.source_subject_base_commit_oid = oid.map(|v| v.into());
         self
     }
 
-    pub fn source_subject_head_commit_oid(mut self, oid: impl Into<String>) -> Self {
+    pub fn source_subject_head_commit_oid(mut self, oid: impl Into<CommitOid>) -> Self {
         self.source_subject_head_commit_oid = oid.into();
         self
     }

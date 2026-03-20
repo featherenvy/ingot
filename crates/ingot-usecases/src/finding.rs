@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::finding::{
     Finding, FindingSeverity, FindingSubjectKind, FindingTriage, FindingTriageState,
@@ -135,9 +136,9 @@ pub fn extract_findings(
             let outcome_class =
                 validate_review_report(&report.outcome, &report.findings, &report.summary)?;
 
-            if job.job_input.base_commit_oid()
+            if job.job_input.base_commit_oid().map(CommitOid::as_str)
                 != Some(report.review_subject.base_commit_oid.as_str())
-                || job.job_input.head_commit_oid()
+                || job.job_input.head_commit_oid().map(CommitOid::as_str)
                     != Some(report.review_subject.head_commit_oid.as_str())
             {
                 return Err(UseCaseError::ProtocolViolation(
@@ -287,11 +288,12 @@ pub fn backlog_finding(
         return Err(UseCaseError::FindingNotTriageable);
     }
 
-    if finding.source_subject_head_commit_oid.trim().is_empty()
+    if finding.source_subject_head_commit_oid.as_str().trim().is_empty()
         || (finding.source_subject_kind == FindingSubjectKind::Integrated
             && finding
                 .source_subject_base_commit_oid
-                .as_deref()
+                .as_ref()
+                .map(CommitOid::as_str)
                 .is_none_or(str::is_empty))
     {
         return Err(UseCaseError::FindingSubjectUnreachable);
@@ -369,7 +371,7 @@ pub fn backlog_finding(
                 FindingSubjectKind::Integrated => finding
                     .source_subject_base_commit_oid
                     .clone()
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|| CommitOid::new("")),
                 FindingSubjectKind::Candidate => {
                     source_revision.seed.seed_target_commit_oid().to_owned()
                 }
@@ -586,7 +588,7 @@ mod tests {
         let mut job = test_job();
         job.step_id = "validate_integrated".into();
         job.phase_kind = PhaseKind::Validate;
-        job.job_input = JobInput::integrated_subject("base", "head");
+        job.job_input = JobInput::integrated_subject("base".into(), "head".into());
         job.state = ingot_domain::job::JobState::Completed {
             assignment: None,
             started_at: None,
@@ -713,7 +715,7 @@ mod tests {
         let mut job = test_job();
         job.step_id = "validate_candidate_initial".into();
         job.phase_kind = PhaseKind::Validate;
-        job.job_input = JobInput::candidate_subject("base", "head");
+        job.job_input = JobInput::candidate_subject("base".into(), "head".into());
         job.state = ingot_domain::job::JobState::Completed {
             assignment: None,
             started_at: None,
@@ -739,7 +741,7 @@ mod tests {
         let mut job = test_job();
         job.step_id = "review_candidate_initial".into();
         job.phase_kind = PhaseKind::Review;
-        job.job_input = JobInput::candidate_subject("base", "head");
+        job.job_input = JobInput::candidate_subject("base".into(), "head".into());
         job.state = ingot_domain::job::JobState::Completed {
             assignment: None,
             started_at: None,
@@ -768,7 +770,7 @@ mod tests {
         let mut job = test_job();
         job.step_id = "validate_candidate_initial".into();
         job.phase_kind = PhaseKind::Validate;
-        job.job_input = JobInput::candidate_subject("base", "head");
+        job.job_input = JobInput::candidate_subject("base".into(), "head".into());
         job.state = ingot_domain::job::JobState::Completed {
             assignment: None,
             started_at: None,
@@ -815,7 +817,7 @@ mod tests {
         let mut job = test_job();
         job.step_id = "review_candidate_initial".into();
         job.phase_kind = PhaseKind::Review;
-        job.job_input = JobInput::candidate_subject("base", "head");
+        job.job_input = JobInput::candidate_subject("base".into(), "head".into());
         job.state = ingot_domain::job::JobState::Completed {
             assignment: None,
             started_at: None,
@@ -862,7 +864,7 @@ mod tests {
         let mut job = test_job();
         job.step_id = "investigate_item".into();
         job.phase_kind = PhaseKind::Investigate;
-        job.job_input = JobInput::candidate_subject("base", "head");
+        job.job_input = JobInput::candidate_subject("base".into(), "head".into());
         job.state = ingot_domain::job::JobState::Completed {
             assignment: None,
             started_at: None,
@@ -913,7 +915,7 @@ mod tests {
         .workspace_kind(ingot_domain::workspace::WorkspaceKind::Review)
         .execution_permission(ingot_domain::job::ExecutionPermission::MustNotMutate)
         .phase_template_slug("investigate-item")
-        .job_input(JobInput::candidate_subject("base", "head"))
+        .job_input(JobInput::candidate_subject("base".into(), "head".into()))
         .output_artifact_kind(OutputArtifactKind::FindingReport)
         .ended_at(Utc::now())
         .build()

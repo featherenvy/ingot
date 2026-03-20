@@ -432,7 +432,7 @@ pub(super) async fn ensure_finding_subject_reachable(
     let paths = refresh_project_mirror(state, project).await?;
     let repo_path = paths.mirror_git_dir.as_path();
     let head_reachable =
-        is_commit_reachable_from_any_ref(repo_path, &finding.source_subject_head_commit_oid)
+        is_commit_reachable_from_any_ref(repo_path, finding.source_subject_head_commit_oid.as_str())
             .await
             .map_err(|err| ApiError::from(UseCaseError::Internal(err.to_string())))?;
 
@@ -441,10 +441,10 @@ pub(super) async fn ensure_finding_subject_reachable(
     }
 
     if finding.source_subject_kind == ingot_domain::finding::FindingSubjectKind::Integrated {
-        let Some(base_commit_oid) = finding.source_subject_base_commit_oid.as_deref() else {
+        let Some(base_commit_oid) = finding.source_subject_base_commit_oid.as_ref() else {
             return Err(UseCaseError::FindingSubjectUnreachable.into());
         };
-        let base_reachable = is_commit_reachable_from_any_ref(repo_path, base_commit_oid)
+        let base_reachable = is_commit_reachable_from_any_ref(repo_path, base_commit_oid.as_str())
             .await
             .map_err(|err| ApiError::from(UseCaseError::Internal(err.to_string())))?;
 
@@ -519,7 +519,7 @@ mod tests {
         let head = git_output(&repo, &["rev-parse", "HEAD"]);
         let mut finding = test_finding();
         finding.source_subject_kind = FindingSubjectKind::Candidate;
-        finding.source_subject_head_commit_oid = head;
+        finding.source_subject_head_commit_oid = head.into();
         finding.source_subject_base_commit_oid = Some("deadbeef".into());
         let state = test_app_state().await;
 

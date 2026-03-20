@@ -1,3 +1,4 @@
+use crate::commit_oid::CommitOid;
 use crate::convergence::{Convergence, ConvergenceState, ConvergenceStatus, ConvergenceStrategy};
 use crate::ids;
 use chrono::{DateTime, Utc};
@@ -11,13 +12,13 @@ pub struct ConvergenceBuilder {
     item_revision_id: ids::ItemRevisionId,
     source_workspace_id: ids::WorkspaceId,
     integration_workspace_id: Option<ids::WorkspaceId>,
-    source_head_commit_oid: String,
+    source_head_commit_oid: CommitOid,
     target_ref: String,
     strategy: ConvergenceStrategy,
     status: ConvergenceStatus,
-    input_target_commit_oid: Option<String>,
-    prepared_commit_oid: Option<String>,
-    final_target_commit_oid: Option<String>,
+    input_target_commit_oid: Option<CommitOid>,
+    prepared_commit_oid: Option<CommitOid>,
+    final_target_commit_oid: Option<CommitOid>,
     target_head_valid: Option<bool>,
     conflict_summary: Option<String>,
     created_at: DateTime<Utc>,
@@ -37,12 +38,12 @@ impl ConvergenceBuilder {
             item_revision_id,
             source_workspace_id: ids::WorkspaceId::new(),
             integration_workspace_id: Some(ids::WorkspaceId::new()),
-            source_head_commit_oid: "head".into(),
+            source_head_commit_oid: CommitOid::new("head"),
             target_ref: "refs/heads/main".into(),
             strategy: ConvergenceStrategy::RebaseThenFastForward,
             status: ConvergenceStatus::Prepared,
-            input_target_commit_oid: Some("base".into()),
-            prepared_commit_oid: Some("prepared".into()),
+            input_target_commit_oid: Some(CommitOid::new("base")),
+            prepared_commit_oid: Some(CommitOid::new("prepared")),
             final_target_commit_oid: None,
             target_head_valid: None,
             conflict_summary: None,
@@ -67,7 +68,7 @@ impl ConvergenceBuilder {
     }
 
     pub fn source_head_commit_oid(mut self, oid: impl Into<String>) -> Self {
-        self.source_head_commit_oid = oid.into();
+        self.source_head_commit_oid = CommitOid::new(oid.into());
         self
     }
 
@@ -77,12 +78,12 @@ impl ConvergenceBuilder {
     }
 
     pub fn input_target_commit_oid(mut self, oid: impl Into<String>) -> Self {
-        self.input_target_commit_oid = Some(oid.into());
+        self.input_target_commit_oid = Some(CommitOid::new(oid.into()));
         self
     }
 
     pub fn prepared_commit_oid(mut self, oid: impl Into<String>) -> Self {
-        self.prepared_commit_oid = Some(oid.into());
+        self.prepared_commit_oid = Some(CommitOid::new(oid.into()));
         self
     }
 
@@ -120,7 +121,7 @@ impl ConvergenceBuilder {
                     .expect("Running convergence requires integration_workspace_id"),
                 input_target_commit_oid: self
                     .input_target_commit_oid
-                    .unwrap_or_else(|| "base".into()),
+                    .unwrap_or_else(|| CommitOid::new("base")),
             },
             ConvergenceStatus::Conflicted => ConvergenceState::Conflicted {
                 integration_workspace_id: self
@@ -128,7 +129,7 @@ impl ConvergenceBuilder {
                     .expect("Conflicted convergence requires integration_workspace_id"),
                 input_target_commit_oid: self
                     .input_target_commit_oid
-                    .unwrap_or_else(|| "base".into()),
+                    .unwrap_or_else(|| CommitOid::new("base")),
                 conflict_summary: self.conflict_summary.unwrap_or_else(|| "conflict".into()),
                 completed_at: self.completed_at.unwrap_or_else(Utc::now),
             },
@@ -138,7 +139,7 @@ impl ConvergenceBuilder {
                     .expect("Prepared convergence requires integration_workspace_id"),
                 input_target_commit_oid: self
                     .input_target_commit_oid
-                    .unwrap_or_else(|| "base".into()),
+                    .unwrap_or_else(|| CommitOid::new("base")),
                 prepared_commit_oid: self
                     .prepared_commit_oid
                     .expect("Prepared convergence requires prepared_commit_oid"),
@@ -148,10 +149,10 @@ impl ConvergenceBuilder {
                 integration_workspace_id: self.integration_workspace_id,
                 input_target_commit_oid: self
                     .input_target_commit_oid
-                    .unwrap_or_else(|| "base".into()),
+                    .unwrap_or_else(|| CommitOid::new("base")),
                 prepared_commit_oid: self
                     .prepared_commit_oid
-                    .unwrap_or_else(|| "prepared".into()),
+                    .unwrap_or_else(|| CommitOid::new("prepared")),
                 final_target_commit_oid: self
                     .final_target_commit_oid
                     .expect("Finalized convergence requires final_target_commit_oid"),

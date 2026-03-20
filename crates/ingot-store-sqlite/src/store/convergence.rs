@@ -1,3 +1,4 @@
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::{Convergence, ConvergenceState, ConvergenceStatus};
 use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId};
 use ingot_domain::ports::{ConvergenceRepository, RepositoryError};
@@ -71,13 +72,13 @@ impl Database {
         .bind(convergence.item_revision_id.to_string())
         .bind(convergence.source_workspace_id.to_string())
         .bind(state.integration_workspace_id().map(|id| id.to_string()))
-        .bind(&convergence.source_head_commit_oid)
+        .bind(convergence.source_head_commit_oid.as_str())
         .bind(&convergence.target_ref)
         .bind(encode_enum(&convergence.strategy)?)
         .bind(encode_enum(&state.status())?)
-        .bind(state.input_target_commit_oid())
-        .bind(state.prepared_commit_oid())
-        .bind(state.final_target_commit_oid())
+        .bind(state.input_target_commit_oid().map(CommitOid::as_str))
+        .bind(state.prepared_commit_oid().map(CommitOid::as_str))
+        .bind(state.final_target_commit_oid().map(CommitOid::as_str))
         .bind(state.conflict_summary())
         .bind(convergence.created_at)
         .bind(state.completed_at())
@@ -102,13 +103,13 @@ impl Database {
              WHERE id = ?",
         )
         .bind(state.integration_workspace_id().map(|id| id.to_string()))
-        .bind(&convergence.source_head_commit_oid)
+        .bind(convergence.source_head_commit_oid.as_str())
         .bind(&convergence.target_ref)
         .bind(encode_enum(&convergence.strategy)?)
         .bind(encode_enum(&state.status())?)
-        .bind(state.input_target_commit_oid())
-        .bind(state.prepared_commit_oid())
-        .bind(state.final_target_commit_oid())
+        .bind(state.input_target_commit_oid().map(CommitOid::as_str))
+        .bind(state.prepared_commit_oid().map(CommitOid::as_str))
+        .bind(state.final_target_commit_oid().map(CommitOid::as_str))
         .bind(state.conflict_summary())
         .bind(state.completed_at())
         .bind(convergence.id.to_string())
@@ -237,11 +238,11 @@ fn map_convergence(row: &SqliteRow) -> Result<Convergence, RepositoryError> {
         .map_err(db_err)?
         .map(parse_id)
         .transpose()?;
-    let input_target_commit_oid: Option<String> =
-        row.try_get("input_target_commit_oid").map_err(db_err)?;
-    let prepared_commit_oid: Option<String> = row.try_get("prepared_commit_oid").map_err(db_err)?;
-    let final_target_commit_oid: Option<String> =
-        row.try_get("final_target_commit_oid").map_err(db_err)?;
+    let input_target_commit_oid: Option<CommitOid> =
+        row.try_get::<Option<String>, _>("input_target_commit_oid").map_err(db_err)?.map(CommitOid::new);
+    let prepared_commit_oid: Option<CommitOid> = row.try_get::<Option<String>, _>("prepared_commit_oid").map_err(db_err)?.map(CommitOid::new);
+    let final_target_commit_oid: Option<CommitOid> =
+        row.try_get::<Option<String>, _>("final_target_commit_oid").map_err(db_err)?.map(CommitOid::new);
     let conflict_summary: Option<String> = row.try_get("conflict_summary").map_err(db_err)?;
     let completed_at: Option<chrono::DateTime<chrono::Utc>> =
         row.try_get("completed_at").map_err(db_err)?;
@@ -334,7 +335,7 @@ fn map_convergence(row: &SqliteRow) -> Result<Convergence, RepositoryError> {
         item_id: parse_id(row.try_get("item_id").map_err(db_err)?)?,
         item_revision_id: parse_id(row.try_get("item_revision_id").map_err(db_err)?)?,
         source_workspace_id: parse_id(row.try_get("source_workspace_id").map_err(db_err)?)?,
-        source_head_commit_oid: row.try_get("source_head_commit_oid").map_err(db_err)?,
+        source_head_commit_oid: CommitOid::new(row.try_get::<String, _>("source_head_commit_oid").map_err(db_err)?),
         target_ref: row.try_get("target_ref").map_err(db_err)?,
         strategy: parse_enum(row.try_get("strategy").map_err(db_err)?)?,
         target_head_valid: None,

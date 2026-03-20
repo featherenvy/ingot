@@ -1,3 +1,4 @@
+use crate::commit_oid::CommitOid;
 use crate::ids;
 use crate::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use chrono::{DateTime, Utc};
@@ -40,7 +41,7 @@ impl RevisionBuilder {
             policy_snapshot: json!({}),
             template_map_snapshot: json!({}),
             seed: AuthoringBaseSeed::Implicit {
-                seed_target_commit_oid: "target-head".into(),
+                seed_target_commit_oid: CommitOid::new("target-head"),
             },
             created_at: default_timestamp(),
         }
@@ -61,11 +62,11 @@ impl RevisionBuilder {
         self
     }
 
-    pub fn explicit_seed(mut self, commit_oid: impl Into<String>) -> Self {
-        let commit_oid = commit_oid.into();
+    pub fn explicit_seed(mut self, commit_oid: impl Into<CommitOid>) -> Self {
+        let oid: CommitOid = commit_oid.into();
         self.seed = AuthoringBaseSeed::Explicit {
-            seed_commit_oid: commit_oid.clone(),
-            seed_target_commit_oid: commit_oid,
+            seed_commit_oid: oid.clone(),
+            seed_target_commit_oid: oid,
         };
         self
     }
@@ -81,16 +82,19 @@ impl RevisionBuilder {
     }
 
     pub fn seed_commit_oid(mut self, commit_oid: Option<impl Into<String>>) -> Self {
-        let seed_target = self.seed.seed_target_commit_oid().to_owned();
-        self.seed = AuthoringBaseSeed::from_parts(commit_oid.map(Into::into), seed_target);
+        let seed_target = self.seed.seed_target_commit_oid().clone();
+        self.seed = AuthoringBaseSeed::from_parts(
+            commit_oid.map(|v| CommitOid::new(v.into())),
+            seed_target,
+        );
         self
     }
 
     pub fn seed_target_commit_oid(mut self, commit_oid: Option<impl Into<String>>) -> Self {
-        let seed_commit = self.seed.seed_commit_oid().map(ToOwned::to_owned);
+        let seed_commit = self.seed.seed_commit_oid().cloned();
         let seed_target = commit_oid
-            .map(Into::into)
-            .unwrap_or_else(|| self.seed.seed_target_commit_oid().to_owned());
+            .map(|v| CommitOid::new(v.into()))
+            .unwrap_or_else(|| self.seed.seed_target_commit_oid().clone());
         self.seed = AuthoringBaseSeed::from_parts(seed_commit, seed_target);
         self
     }

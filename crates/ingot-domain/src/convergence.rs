@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::commit_oid::CommitOid;
 use crate::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId, WorkspaceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,36 +39,36 @@ pub enum ConvergenceState {
     Queued,
     Running {
         integration_workspace_id: WorkspaceId,
-        input_target_commit_oid: String,
+        input_target_commit_oid: CommitOid,
     },
     Conflicted {
         integration_workspace_id: WorkspaceId,
-        input_target_commit_oid: String,
+        input_target_commit_oid: CommitOid,
         conflict_summary: String,
         completed_at: DateTime<Utc>,
     },
     Prepared {
         integration_workspace_id: WorkspaceId,
-        input_target_commit_oid: String,
-        prepared_commit_oid: String,
+        input_target_commit_oid: CommitOid,
+        prepared_commit_oid: CommitOid,
         completed_at: Option<DateTime<Utc>>,
     },
     Finalized {
         integration_workspace_id: Option<WorkspaceId>,
-        input_target_commit_oid: String,
-        prepared_commit_oid: String,
-        final_target_commit_oid: String,
+        input_target_commit_oid: CommitOid,
+        prepared_commit_oid: CommitOid,
+        final_target_commit_oid: CommitOid,
         completed_at: DateTime<Utc>,
     },
     Failed {
         integration_workspace_id: Option<WorkspaceId>,
-        input_target_commit_oid: Option<String>,
+        input_target_commit_oid: Option<CommitOid>,
         conflict_summary: Option<String>,
         completed_at: DateTime<Utc>,
     },
     Cancelled {
         integration_workspace_id: Option<WorkspaceId>,
-        input_target_commit_oid: Option<String>,
+        input_target_commit_oid: Option<CommitOid>,
         completed_at: DateTime<Utc>,
     },
 }
@@ -134,7 +135,7 @@ impl ConvergenceState {
     }
 
     #[must_use]
-    pub fn input_target_commit_oid(&self) -> Option<&str> {
+    pub fn input_target_commit_oid(&self) -> Option<&CommitOid> {
         match self {
             Self::Queued => None,
             Self::Running {
@@ -152,7 +153,7 @@ impl ConvergenceState {
             | Self::Finalized {
                 input_target_commit_oid,
                 ..
-            } => Some(input_target_commit_oid.as_str()),
+            } => Some(input_target_commit_oid),
             Self::Failed {
                 input_target_commit_oid,
                 ..
@@ -160,12 +161,12 @@ impl ConvergenceState {
             | Self::Cancelled {
                 input_target_commit_oid,
                 ..
-            } => input_target_commit_oid.as_deref(),
+            } => input_target_commit_oid.as_ref(),
         }
     }
 
     #[must_use]
-    pub fn prepared_commit_oid(&self) -> Option<&str> {
+    pub fn prepared_commit_oid(&self) -> Option<&CommitOid> {
         match self {
             Self::Prepared {
                 prepared_commit_oid,
@@ -174,18 +175,18 @@ impl ConvergenceState {
             | Self::Finalized {
                 prepared_commit_oid,
                 ..
-            } => Some(prepared_commit_oid.as_str()),
+            } => Some(prepared_commit_oid),
             _ => None,
         }
     }
 
     #[must_use]
-    pub fn final_target_commit_oid(&self) -> Option<&str> {
+    pub fn final_target_commit_oid(&self) -> Option<&CommitOid> {
         match self {
             Self::Finalized {
                 final_target_commit_oid,
                 ..
-            } => Some(final_target_commit_oid.as_str()),
+            } => Some(final_target_commit_oid),
             _ => None,
         }
     }
@@ -215,7 +216,7 @@ impl ConvergenceState {
         }
     }
 
-    fn into_required_transition_context(self) -> (WorkspaceId, String) {
+    fn into_required_transition_context(self) -> (WorkspaceId, CommitOid) {
         match self {
             Self::Running {
                 integration_workspace_id,
@@ -264,7 +265,7 @@ impl ConvergenceState {
         }
     }
 
-    fn into_optional_transition_context(self) -> (Option<WorkspaceId>, Option<String>) {
+    fn into_optional_transition_context(self) -> (Option<WorkspaceId>, Option<CommitOid>) {
         match self {
             Self::Queued => (None, None),
             Self::Running {
@@ -317,7 +318,7 @@ pub struct Convergence {
     pub item_id: ItemId,
     pub item_revision_id: ItemRevisionId,
     pub source_workspace_id: WorkspaceId,
-    pub source_head_commit_oid: String,
+    pub source_head_commit_oid: CommitOid,
     pub target_ref: String,
     pub strategy: ConvergenceStrategy,
     pub created_at: DateTime<Utc>,
@@ -329,7 +330,7 @@ impl Convergence {
     #[must_use]
     pub fn target_head_valid_for_resolved_oid(
         &self,
-        resolved_target_oid: Option<&str>,
+        resolved_target_oid: Option<&CommitOid>,
     ) -> Option<bool> {
         let input_target_oid = self.state.input_target_commit_oid()?;
         if resolved_target_oid == Some(input_target_oid) {
@@ -362,7 +363,7 @@ impl Convergence {
 
     pub fn transition_to_prepared(
         &mut self,
-        prepared_oid: String,
+        prepared_oid: CommitOid,
         completed_at: Option<DateTime<Utc>>,
     ) {
         let (integration_workspace_id, input_target_commit_oid) =
@@ -375,7 +376,7 @@ impl Convergence {
         };
     }
 
-    pub fn transition_to_finalized(&mut self, final_oid: String, completed_at: DateTime<Utc>) {
+    pub fn transition_to_finalized(&mut self, final_oid: CommitOid, completed_at: DateTime<Utc>) {
         self.state = match self.take_state() {
             ConvergenceState::Prepared {
                 integration_workspace_id,
@@ -395,7 +396,7 @@ impl Convergence {
                 ConvergenceState::Finalized {
                     integration_workspace_id: Some(integration_workspace_id),
                     input_target_commit_oid,
-                    prepared_commit_oid: String::new(),
+                    prepared_commit_oid: CommitOid::new(""),
                     final_target_commit_oid: final_oid,
                     completed_at,
                 }
@@ -435,13 +436,13 @@ struct ConvergenceWire {
     pub item_revision_id: ItemRevisionId,
     pub source_workspace_id: WorkspaceId,
     pub integration_workspace_id: Option<WorkspaceId>,
-    pub source_head_commit_oid: String,
+    pub source_head_commit_oid: CommitOid,
     pub target_ref: String,
     pub strategy: ConvergenceStrategy,
     pub status: ConvergenceStatus,
-    pub input_target_commit_oid: Option<String>,
-    pub prepared_commit_oid: Option<String>,
-    pub final_target_commit_oid: Option<String>,
+    pub input_target_commit_oid: Option<CommitOid>,
+    pub prepared_commit_oid: Option<CommitOid>,
+    pub final_target_commit_oid: Option<CommitOid>,
     pub target_head_valid: Option<bool>,
     pub conflict_summary: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -547,9 +548,9 @@ impl From<Convergence> for ConvergenceWire {
     fn from(c: Convergence) -> Self {
         let status = c.state.status();
         let integration_workspace_id = c.state.integration_workspace_id();
-        let input_target_commit_oid = c.state.input_target_commit_oid().map(ToOwned::to_owned);
-        let prepared_commit_oid = c.state.prepared_commit_oid().map(ToOwned::to_owned);
-        let final_target_commit_oid = c.state.final_target_commit_oid().map(ToOwned::to_owned);
+        let input_target_commit_oid = c.state.input_target_commit_oid().cloned();
+        let prepared_commit_oid = c.state.prepared_commit_oid().cloned();
+        let final_target_commit_oid = c.state.final_target_commit_oid().cloned();
         let conflict_summary = c.state.conflict_summary().map(ToOwned::to_owned);
         let completed_at = c.state.completed_at();
 

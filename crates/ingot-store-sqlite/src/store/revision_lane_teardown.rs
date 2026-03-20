@@ -1,4 +1,5 @@
 use chrono::Utc;
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::git_operation::GitOperationWire;
 use ingot_domain::ports::{
     RepositoryError, RevisionLaneTeardownMutation, RevisionLaneTeardownRepository,
@@ -82,8 +83,8 @@ impl Database {
                 .bind(&workspace.path)
                 .bind(workspace.target_ref.as_deref())
                 .bind(workspace.workspace_ref.as_deref())
-                .bind(workspace.state.base_commit_oid())
-                .bind(workspace.state.head_commit_oid())
+                .bind(workspace.state.base_commit_oid().map(CommitOid::as_str))
+                .bind(workspace.state.head_commit_oid().map(CommitOid::as_str))
                 .bind(encode_enum(&workspace.retention_policy)?)
                 .bind(encode_enum(&workspace.state.status())?)
                 .bind(workspace.state.current_job_id().map(|id| id.to_string()))
@@ -125,13 +126,13 @@ impl Database {
                  WHERE id = ?",
             )
             .bind(state.integration_workspace_id().map(|id| id.to_string()))
-            .bind(&convergence.source_head_commit_oid)
+            .bind(convergence.source_head_commit_oid.as_str())
             .bind(&convergence.target_ref)
             .bind(encode_enum(&convergence.strategy)?)
             .bind(encode_enum(&state.status())?)
-            .bind(state.input_target_commit_oid())
-            .bind(state.prepared_commit_oid())
-            .bind(state.final_target_commit_oid())
+            .bind(state.input_target_commit_oid().map(CommitOid::as_str))
+            .bind(state.prepared_commit_oid().map(CommitOid::as_str))
+            .bind(state.final_target_commit_oid().map(CommitOid::as_str))
             .bind(state.conflict_summary())
             .bind(state.completed_at())
             .bind(convergence.id.to_string())
@@ -156,8 +157,8 @@ impl Database {
             .bind(&workspace.path)
             .bind(workspace.target_ref.as_deref())
             .bind(workspace.workspace_ref.as_deref())
-            .bind(workspace.state.base_commit_oid())
-            .bind(workspace.state.head_commit_oid())
+            .bind(workspace.state.base_commit_oid().map(CommitOid::as_str))
+            .bind(workspace.state.head_commit_oid().map(CommitOid::as_str))
             .bind(encode_enum(&workspace.retention_policy)?)
             .bind(encode_enum(&workspace.state.status())?)
             .bind(workspace.state.current_job_id().map(|id| id.to_string()))
@@ -204,9 +205,9 @@ impl Database {
             )
             .bind(wire.workspace_id.map(|id| id.to_string()))
             .bind(wire.ref_name.as_deref())
-            .bind(wire.expected_old_oid.as_deref())
-            .bind(wire.new_oid.as_deref())
-            .bind(wire.commit_oid.as_deref())
+            .bind(wire.expected_old_oid.as_ref().map(CommitOid::as_str))
+            .bind(wire.new_oid.as_ref().map(CommitOid::as_str))
+            .bind(wire.commit_oid.as_ref().map(CommitOid::as_str))
             .bind(encode_enum(&wire.status)?)
             .bind(
                 wire.metadata

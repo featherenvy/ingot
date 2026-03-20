@@ -157,6 +157,7 @@ pub fn rework_budgets_from_policy_snapshot(policy_snapshot: &Value) -> Option<(u
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use ingot_domain::commit_oid::CommitOid;
     use ingot_domain::ids::ProjectId;
     use ingot_domain::item::{ApprovalState, Classification, Priority};
     use ingot_domain::project::Project;
@@ -208,8 +209,8 @@ mod tests {
         assert_eq!(revision.item_id, item.id);
         assert_eq!(revision.revision_no, 1);
         assert_eq!(revision.target_ref, "refs/heads/main");
-        assert_eq!(revision.seed.seed_commit_oid(), Some("seed"));
-        assert_eq!(revision.seed.seed_target_commit_oid(), "target");
+        assert_eq!(revision.seed.seed_commit_oid().map(CommitOid::as_str), Some("seed"));
+        assert_eq!(revision.seed.seed_target_commit_oid().as_str(), "target");
         assert_eq!(revision.policy_snapshot["candidate_rework_budget"], 3);
         assert_eq!(revision.policy_snapshot["integration_rework_budget"], 4);
         assert_eq!(

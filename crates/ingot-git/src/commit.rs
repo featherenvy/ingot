@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::Stdio;
 
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::ids::{ConvergenceId, GitOperationId, ItemId, JobId};
 use tokio::process::Command;
 
@@ -20,7 +21,7 @@ pub struct ConvergenceCommitTrailers {
     pub item_id: ItemId,
     pub revision_no: u32,
     pub convergence_id: ConvergenceId,
-    pub source_commit_oid: String,
+    pub source_commit_oid: CommitOid,
 }
 
 pub async fn working_tree_has_changes(repo_path: &Path) -> Result<bool, GitCommandError> {
@@ -33,7 +34,7 @@ pub async fn create_daemon_job_commit(
     subject: &str,
     summary: &str,
     trailers: &JobCommitTrailers,
-) -> Result<String, GitCommandError> {
+) -> Result<CommitOid, GitCommandError> {
     let message = format!(
         "{subject}\n\n{summary}\n\nIngot-Operation: {}\nIngot-Item: {}\nIngot-Revision: {}\nIngot-Job: {}",
         trailers.operation_id, trailers.item_id, trailers.revision_no, trailers.job_id
@@ -45,7 +46,7 @@ pub async fn create_daemon_convergence_commit(
     repo_path: &Path,
     original_message: &str,
     trailers: &ConvergenceCommitTrailers,
-) -> Result<String, GitCommandError> {
+) -> Result<CommitOid, GitCommandError> {
     let message = format!(
         "{}\n\nIngot-Operation: {}\nIngot-Item: {}\nIngot-Revision: {}\nIngot-Convergence: {}\nIngot-Source-Commit: {}",
         original_message.trim_end(),
@@ -61,7 +62,7 @@ pub async fn create_daemon_convergence_commit(
 pub async fn create_daemon_commit_from_staged(
     repo_path: &Path,
     message: &str,
-) -> Result<String, GitCommandError> {
+) -> Result<CommitOid, GitCommandError> {
     git(repo_path, &["add", "-A"]).await?;
 
     let mut child = Command::new("git")
@@ -104,7 +105,7 @@ pub async fn list_commits_oldest_first(
     repo_path: &Path,
     base_commit_oid: &str,
     head_commit_oid: &str,
-) -> Result<Vec<String>, GitCommandError> {
+) -> Result<Vec<CommitOid>, GitCommandError> {
     if base_commit_oid == head_commit_oid {
         return Ok(vec![]);
     }
@@ -115,7 +116,7 @@ pub async fn list_commits_oldest_first(
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
+        .map(CommitOid::new)
         .collect())
 }
 

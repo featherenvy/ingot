@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId};
 use ingot_domain::item::Escalation;
 use ingot_domain::job::{Job, JobAssignment, JobInput, JobLease, JobState, TerminalStatus};
@@ -57,12 +58,12 @@ fn decode_job_input(
     match kind.as_str() {
         "none" => Ok(JobInput::None),
         "authoring_head" => head_commit_oid
-            .map(JobInput::authoring_head)
+            .map(|oid| JobInput::authoring_head(CommitOid::new(oid)))
             .ok_or_else(|| StoreDecodeError::Json("authoring_head job_input missing head".into())),
         "candidate_subject" => match (base_commit_oid, head_commit_oid) {
             (Some(base_commit_oid), Some(head_commit_oid)) => Ok(JobInput::candidate_subject(
-                base_commit_oid,
-                head_commit_oid,
+                CommitOid::new(base_commit_oid),
+                CommitOid::new(head_commit_oid),
             )),
             _ => Err(StoreDecodeError::Json(
                 "candidate_subject job_input missing base or head".into(),
@@ -70,8 +71,8 @@ fn decode_job_input(
         },
         "integrated_subject" => match (base_commit_oid, head_commit_oid) {
             (Some(base_commit_oid), Some(head_commit_oid)) => Ok(JobInput::integrated_subject(
-                base_commit_oid,
-                head_commit_oid,
+                CommitOid::new(base_commit_oid),
+                CommitOid::new(head_commit_oid),
             )),
             _ => Err(StoreDecodeError::Json(
                 "integrated_subject job_input missing base or head".into(),
@@ -366,7 +367,7 @@ impl Database {
         .bind(input_base_commit_oid)
         .bind(input_head_commit_oid)
         .bind(encode_enum(&job.output_artifact_kind)?)
-        .bind(job.state.output_commit_oid())
+        .bind(job.state.output_commit_oid().map(CommitOid::as_str))
         .bind(job.state.result_schema_version())
         .bind(serialize_optional_json(job.state.result_payload())?)
         .bind(job.state.agent_id().map(|id| id.to_string()))
@@ -421,7 +422,7 @@ impl Database {
         .bind(input_base_commit_oid)
         .bind(input_head_commit_oid)
         .bind(encode_enum(&job.output_artifact_kind)?)
-        .bind(job.state.output_commit_oid())
+        .bind(job.state.output_commit_oid().map(CommitOid::as_str))
         .bind(job.state.result_schema_version())
         .bind(serialize_optional_json(job.state.result_payload())?)
         .bind(job.state.agent_id().map(|id| id.to_string()))
@@ -739,7 +740,7 @@ fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {
     let prompt_snapshot: Option<String> = row.try_get("prompt_snapshot").map_err(db_err)?;
     let phase_template_digest: Option<String> =
         row.try_get("phase_template_digest").map_err(db_err)?;
-    let output_commit_oid: Option<String> = row.try_get("output_commit_oid").map_err(db_err)?;
+    let output_commit_oid: Option<CommitOid> = row.try_get::<Option<String>, _>("output_commit_oid").map_err(db_err)?.map(CommitOid::new);
     let result_schema_version: Option<String> =
         row.try_get("result_schema_version").map_err(db_err)?;
     let result_payload: Option<serde_json::Value> = row

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::commit_oid::CommitOid;
 use crate::ids::{GitOperationId, ProjectId, WorkspaceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,8 +36,8 @@ pub enum GitOperationStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConvergenceReplayMetadata {
-    pub source_commit_oids: Vec<String>,
-    pub prepared_commit_oids: Vec<String>,
+    pub source_commit_oids: Vec<CommitOid>,
+    pub prepared_commit_oids: Vec<CommitOid>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,44 +45,44 @@ pub enum OperationPayload {
     CreateJobCommit {
         workspace_id: WorkspaceId,
         ref_name: String,
-        expected_old_oid: String,
-        new_oid: Option<String>,
-        commit_oid: Option<String>,
+        expected_old_oid: CommitOid,
+        new_oid: Option<CommitOid>,
+        commit_oid: Option<CommitOid>,
     },
     PrepareConvergenceCommit {
         workspace_id: WorkspaceId,
         ref_name: Option<String>,
-        expected_old_oid: String,
-        new_oid: Option<String>,
-        commit_oid: Option<String>,
+        expected_old_oid: CommitOid,
+        new_oid: Option<CommitOid>,
+        commit_oid: Option<CommitOid>,
         replay_metadata: Option<ConvergenceReplayMetadata>,
     },
     FinalizeTargetRef {
         workspace_id: Option<WorkspaceId>,
         ref_name: String,
-        expected_old_oid: String,
-        new_oid: String,
-        commit_oid: Option<String>,
+        expected_old_oid: CommitOid,
+        new_oid: CommitOid,
+        commit_oid: Option<CommitOid>,
     },
     CreateInvestigationRef {
         ref_name: String,
-        new_oid: String,
-        commit_oid: Option<String>,
+        new_oid: CommitOid,
+        commit_oid: Option<CommitOid>,
     },
     RemoveInvestigationRef {
         ref_name: String,
-        expected_old_oid: String,
+        expected_old_oid: CommitOid,
     },
     ResetWorkspace {
         workspace_id: WorkspaceId,
         ref_name: Option<String>,
-        expected_old_oid: Option<String>,
-        new_oid: String,
+        expected_old_oid: Option<CommitOid>,
+        new_oid: CommitOid,
     },
     RemoveWorkspaceRef {
         workspace_id: WorkspaceId,
         ref_name: String,
-        expected_old_oid: String,
+        expected_old_oid: CommitOid,
     },
 }
 
@@ -141,7 +142,7 @@ impl OperationPayload {
     }
 
     #[must_use]
-    pub fn expected_old_oid(&self) -> Option<&str> {
+    pub fn expected_old_oid(&self) -> Option<&CommitOid> {
         match self {
             Self::CreateJobCommit {
                 expected_old_oid, ..
@@ -160,16 +161,16 @@ impl OperationPayload {
             } => Some(expected_old_oid),
             Self::ResetWorkspace {
                 expected_old_oid, ..
-            } => expected_old_oid.as_deref(),
+            } => expected_old_oid.as_ref(),
             Self::CreateInvestigationRef { .. } => None,
         }
     }
 
     #[must_use]
-    pub fn new_oid(&self) -> Option<&str> {
+    pub fn new_oid(&self) -> Option<&CommitOid> {
         match self {
             Self::CreateJobCommit { new_oid, .. }
-            | Self::PrepareConvergenceCommit { new_oid, .. } => new_oid.as_deref(),
+            | Self::PrepareConvergenceCommit { new_oid, .. } => new_oid.as_ref(),
             Self::FinalizeTargetRef { new_oid, .. }
             | Self::CreateInvestigationRef { new_oid, .. }
             | Self::ResetWorkspace { new_oid, .. } => Some(new_oid),
@@ -178,12 +179,12 @@ impl OperationPayload {
     }
 
     #[must_use]
-    pub fn commit_oid(&self) -> Option<&str> {
+    pub fn commit_oid(&self) -> Option<&CommitOid> {
         match self {
             Self::CreateJobCommit { commit_oid, .. }
             | Self::PrepareConvergenceCommit { commit_oid, .. }
             | Self::FinalizeTargetRef { commit_oid, .. }
-            | Self::CreateInvestigationRef { commit_oid, .. } => commit_oid.as_deref(),
+            | Self::CreateInvestigationRef { commit_oid, .. } => commit_oid.as_ref(),
             Self::RemoveInvestigationRef { .. }
             | Self::ResetWorkspace { .. }
             | Self::RemoveWorkspaceRef { .. } => None,
@@ -191,7 +192,7 @@ impl OperationPayload {
     }
 
     #[must_use]
-    pub fn effective_commit_oid(&self) -> Option<&str> {
+    pub fn effective_commit_oid(&self) -> Option<&CommitOid> {
         self.commit_oid().or_else(|| self.new_oid())
     }
 
@@ -205,7 +206,7 @@ impl OperationPayload {
         }
     }
 
-    pub fn set_job_commit_result(&mut self, oid: String) {
+    pub fn set_job_commit_result(&mut self, oid: CommitOid) {
         match self {
             Self::CreateJobCommit {
                 new_oid,
@@ -219,7 +220,7 @@ impl OperationPayload {
         }
     }
 
-    pub fn set_convergence_commit_result(&mut self, tip_oid: String) {
+    pub fn set_convergence_commit_result(&mut self, tip_oid: CommitOid) {
         match self {
             Self::PrepareConvergenceCommit {
                 new_oid,
@@ -280,22 +281,22 @@ impl GitOperation {
     }
 
     #[must_use]
-    pub fn expected_old_oid(&self) -> Option<&str> {
+    pub fn expected_old_oid(&self) -> Option<&CommitOid> {
         self.payload.expected_old_oid()
     }
 
     #[must_use]
-    pub fn new_oid(&self) -> Option<&str> {
+    pub fn new_oid(&self) -> Option<&CommitOid> {
         self.payload.new_oid()
     }
 
     #[must_use]
-    pub fn commit_oid(&self) -> Option<&str> {
+    pub fn commit_oid(&self) -> Option<&CommitOid> {
         self.payload.commit_oid()
     }
 
     #[must_use]
-    pub fn effective_commit_oid(&self) -> Option<&str> {
+    pub fn effective_commit_oid(&self) -> Option<&CommitOid> {
         self.payload.effective_commit_oid()
     }
 }
@@ -309,9 +310,9 @@ pub struct GitOperationWire {
     pub entity_id: String,
     pub workspace_id: Option<WorkspaceId>,
     pub ref_name: Option<String>,
-    pub expected_old_oid: Option<String>,
-    pub new_oid: Option<String>,
-    pub commit_oid: Option<String>,
+    pub expected_old_oid: Option<CommitOid>,
+    pub new_oid: Option<CommitOid>,
+    pub commit_oid: Option<CommitOid>,
     pub status: GitOperationStatus,
     pub metadata: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
@@ -449,9 +450,9 @@ impl From<&GitOperation> for GitOperationWire {
             entity_id: op.entity_id.clone(),
             workspace_id: op.workspace_id(),
             ref_name: op.ref_name().map(ToOwned::to_owned),
-            expected_old_oid: op.expected_old_oid().map(ToOwned::to_owned),
-            new_oid: op.new_oid().map(ToOwned::to_owned),
-            commit_oid: op.commit_oid().map(ToOwned::to_owned),
+            expected_old_oid: op.expected_old_oid().cloned(),
+            new_oid: op.new_oid().cloned(),
+            commit_oid: op.commit_oid().cloned(),
             status: op.status,
             metadata: op
                 .payload
@@ -509,7 +510,7 @@ mod tests {
         assert_eq!(payload.entity_type(), GitEntityType::Job);
         assert_eq!(payload.workspace_id(), Some(test_workspace_id()));
         assert_eq!(payload.ref_name(), Some("refs/ingot/workspaces/auth"));
-        assert_eq!(payload.expected_old_oid(), Some("aaa"));
+        assert_eq!(payload.expected_old_oid(), Some(&CommitOid::from("aaa")));
         assert_eq!(payload.new_oid(), None);
         assert_eq!(payload.commit_oid(), None);
         assert_eq!(payload.effective_commit_oid(), None);
@@ -524,7 +525,7 @@ mod tests {
             new_oid: Some("new".into()),
             commit_oid: Some("commit".into()),
         };
-        assert_eq!(payload.effective_commit_oid(), Some("commit"));
+        assert_eq!(payload.effective_commit_oid(), Some(&CommitOid::from("commit")));
     }
 
     #[test]
@@ -536,7 +537,7 @@ mod tests {
             new_oid: "new".into(),
             commit_oid: None,
         };
-        assert_eq!(payload.effective_commit_oid(), Some("new"));
+        assert_eq!(payload.effective_commit_oid(), Some(&CommitOid::from("new")));
     }
 
     #[test]
@@ -549,8 +550,8 @@ mod tests {
             commit_oid: None,
         };
         payload.set_job_commit_result("abc123".into());
-        assert_eq!(payload.new_oid(), Some("abc123"));
-        assert_eq!(payload.commit_oid(), Some("abc123"));
+        assert_eq!(payload.new_oid(), Some(&CommitOid::from("abc123")));
+        assert_eq!(payload.commit_oid(), Some(&CommitOid::from("abc123")));
     }
 
     #[test]
@@ -564,8 +565,8 @@ mod tests {
             replay_metadata: None,
         };
         payload.set_convergence_commit_result("tip123".into());
-        assert_eq!(payload.new_oid(), Some("tip123"));
-        assert_eq!(payload.commit_oid(), Some("tip123"));
+        assert_eq!(payload.new_oid(), Some(&CommitOid::from("tip123")));
+        assert_eq!(payload.commit_oid(), Some(&CommitOid::from("tip123")));
     }
 
     #[test]
@@ -579,16 +580,16 @@ mod tests {
             replay_metadata: None,
         };
         payload.set_replay_metadata(ConvergenceReplayMetadata {
-            source_commit_oids: vec!["s1".into()],
-            prepared_commit_oids: vec!["p1".into()],
+            source_commit_oids: vec![CommitOid::from("s1")],
+            prepared_commit_oids: vec![CommitOid::from("p1")],
         });
         match &payload {
             OperationPayload::PrepareConvergenceCommit {
                 replay_metadata, ..
             } => {
                 let rm = replay_metadata.as_ref().unwrap();
-                assert_eq!(rm.source_commit_oids, vec!["s1"]);
-                assert_eq!(rm.prepared_commit_oids, vec!["p1"]);
+                assert_eq!(rm.source_commit_oids, vec![CommitOid::from("s1")]);
+                assert_eq!(rm.prepared_commit_oids, vec![CommitOid::from("p1")]);
             }
             _ => unreachable!(),
         }
@@ -695,7 +696,7 @@ mod tests {
             restored.payload.ref_name(),
             Some("refs/ingot/workspaces/auth")
         );
-        assert_eq!(restored.payload.new_oid(), Some("bbb"));
+        assert_eq!(restored.payload.new_oid(), Some(&CommitOid::from("bbb")));
     }
 
     #[test]
@@ -729,8 +730,8 @@ mod tests {
                 replay_metadata, ..
             } => {
                 let rm = replay_metadata.as_ref().unwrap();
-                assert_eq!(rm.source_commit_oids, vec!["s1", "s2"]);
-                assert_eq!(rm.prepared_commit_oids, vec!["p1", "p2"]);
+                assert_eq!(rm.source_commit_oids, vec![CommitOid::from("s1"), CommitOid::from("s2")]);
+                assert_eq!(rm.prepared_commit_oids, vec![CommitOid::from("p1"), CommitOid::from("p2")]);
             }
             _ => unreachable!(),
         }

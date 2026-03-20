@@ -1129,8 +1129,8 @@ async fn complete_route_recovers_projected_review_after_warning_only_dispatch_fa
     .context_policy(ContextPolicy::ResumeContext)
     .phase_template_slug("validate-integrated")
     .job_input(JobInput::integrated_subject(
-        base_commit.clone(),
-        prepared_commit.clone(),
+        base_commit.clone().into(),
+        prepared_commit.clone().into(),
     ))
     .output_artifact_kind(OutputArtifactKind::ValidationReport)
     .result_schema_version("validation_report:v1")

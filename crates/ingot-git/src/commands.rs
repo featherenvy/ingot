@@ -2,6 +2,7 @@ use std::future::Future;
 use std::path::Path;
 use std::process::Output;
 
+use ingot_domain::commit_oid::CommitOid;
 use tokio::process::Command;
 
 #[derive(Debug, thiserror::Error)]
@@ -36,9 +37,9 @@ pub async fn git(repo_path: &Path, args: &[&str]) -> Result<Output, GitCommandEr
 }
 
 /// Get the current HEAD commit OID.
-pub async fn head_oid(repo_path: &Path) -> Result<String, GitCommandError> {
+pub async fn head_oid(repo_path: &Path) -> Result<CommitOid, GitCommandError> {
     let output = git(repo_path, &["rev-parse", "HEAD"]).await?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(CommitOid::new(String::from_utf8_lossy(&output.stdout).trim()))
 }
 
 /// Get the current branch name for HEAD.
@@ -59,17 +60,18 @@ pub async fn current_head_ref(repo_path: &Path) -> Result<Option<String>, GitCom
 }
 
 /// Get the OID a ref points to.
-pub async fn ref_oid(repo_path: &Path, ref_name: &str) -> Result<String, GitCommandError> {
+pub async fn ref_oid(repo_path: &Path, ref_name: &str) -> Result<CommitOid, GitCommandError> {
     let output = git(repo_path, &["rev-parse", ref_name]).await?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(CommitOid::new(String::from_utf8_lossy(&output.stdout).trim()))
 }
 
 /// Resolve a ref if it exists, returning None for missing refs.
 pub async fn resolve_ref_oid(
     repo_path: &Path,
     ref_name: &str,
-) -> Result<Option<String>, GitCommandError> {
-    verify_revision(repo_path, ref_name).await
+) -> Result<Option<CommitOid>, GitCommandError> {
+    let resolved = verify_revision(repo_path, ref_name).await?;
+    Ok(resolved.map(CommitOid::new))
 }
 
 /// Return whether the commit is reachable from any local ref.
@@ -158,7 +160,11 @@ pub async fn finalize_target_ref(
     expected_old_oid: &str,
 ) -> Result<FinalizeTargetRefOutcome, GitCommandError> {
     finalize_target_ref_with(
-        || resolve_ref_oid(repo_path, ref_name),
+        || async {
+            resolve_ref_oid(repo_path, ref_name)
+                .await
+                .map(|opt| opt.map(|oid| oid.into_inner()))
+        },
         || compare_and_swap_ref(repo_path, ref_name, new_oid, expected_old_oid),
         new_oid,
         expected_old_oid,
@@ -230,8 +236,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        FinalizeTargetRefOutcome, GitCommandError, check_ref_format, finalize_target_ref,
-        finalize_target_ref_with, resolve_ref_oid,
+        CommitOid, FinalizeTargetRefOutcome, GitCommandError, check_ref_format,
+        finalize_target_ref, finalize_target_ref_with, resolve_ref_oid,
     };
     use ingot_test_support::git::{git_output, run_git as git_sync, temp_git_repo};
 
@@ -338,7 +344,7 @@ mod tests {
             resolve_ref_oid(&repo, "refs/heads/main")
                 .await
                 .expect("resolve main"),
-            Some(prepared_commit_oid)
+            Some(CommitOid::from(prepared_commit_oid))
         );
     }
 

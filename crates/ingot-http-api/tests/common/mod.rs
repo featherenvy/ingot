@@ -171,12 +171,14 @@ fn parse_test_ts(value: &str) -> DateTime<Utc> {
 fn into_test_job_input(input: TestJobInput<'_>) -> JobInput {
     match input {
         TestJobInput::None => JobInput::None,
-        TestJobInput::AuthoringHead(head_commit_oid) => JobInput::authoring_head(head_commit_oid),
+        TestJobInput::AuthoringHead(head_commit_oid) => {
+            JobInput::authoring_head(head_commit_oid.into())
+        }
         TestJobInput::CandidateSubject(base_commit_oid, head_commit_oid) => {
-            JobInput::candidate_subject(base_commit_oid, head_commit_oid)
+            JobInput::candidate_subject(base_commit_oid.into(), head_commit_oid.into())
         }
         TestJobInput::IntegratedSubject(base_commit_oid, head_commit_oid) => {
-            JobInput::integrated_subject(base_commit_oid, head_commit_oid)
+            JobInput::integrated_subject(base_commit_oid.into(), head_commit_oid.into())
         }
     }
 }

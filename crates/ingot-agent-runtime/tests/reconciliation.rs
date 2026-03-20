@@ -1,3 +1,4 @@
+use ingot_domain::commit_oid::CommitOid;
 use std::sync::Arc;
 
 use chrono::Duration as ChronoDuration;
@@ -29,14 +30,14 @@ async fn reconcile_startup_expires_stale_running_jobs_and_marks_workspace_stale(
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
@@ -69,7 +70,7 @@ async fn reconcile_startup_expires_stale_running_jobs_and_marks_workspace_stale(
         .workspace_kind(WorkspaceKind::Authoring)
         .execution_permission(ExecutionPermission::MayMutate)
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(&seed_commit))
+        .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .lease_owner_id("old-daemon")
         .heartbeat_at(created_at)
@@ -102,14 +103,14 @@ async fn reconcile_active_jobs_reports_progress_when_it_expires_a_running_job() 
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
@@ -142,7 +143,7 @@ async fn reconcile_active_jobs_reports_progress_when_it_expires_a_running_job() 
         .workspace_kind(WorkspaceKind::Authoring)
         .execution_permission(ExecutionPermission::MayMutate)
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(&seed_commit))
+        .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .lease_owner_id("old-daemon")
         .heartbeat_at(created_at)
@@ -168,14 +169,14 @@ async fn reconcile_active_jobs_leaves_assigned_rows_for_startup_recovery() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
@@ -208,7 +209,7 @@ async fn reconcile_active_jobs_leaves_assigned_rows_for_startup_recovery() {
         .workspace_kind(WorkspaceKind::Authoring)
         .execution_permission(ExecutionPermission::MayMutate)
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(&seed_commit))
+        .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .created_at(created_at)
         .build();
@@ -241,14 +242,14 @@ async fn reconcile_active_jobs_repairs_inert_assigned_authoring_dispatch_residue
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
@@ -281,7 +282,7 @@ async fn reconcile_active_jobs_repairs_inert_assigned_authoring_dispatch_residue
         .execution_permission(ExecutionPermission::MayMutate)
         .phase_kind(PhaseKind::Author)
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(&seed_commit))
+        .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .created_at(created_at)
         .build();
@@ -311,14 +312,14 @@ async fn reconcile_active_jobs_does_not_repair_daemon_validation_assigned_handof
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
@@ -359,8 +360,8 @@ async fn reconcile_active_jobs_does_not_repair_daemon_validation_assigned_handof
     .phase_kind(PhaseKind::Validate)
     .phase_template_slug("")
     .job_input(JobInput::candidate_subject(
-        seed_commit.clone(),
-        seed_commit.clone(),
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(seed_commit.clone()),
     ))
     .output_artifact_kind(OutputArtifactKind::ValidationReport)
     .created_at(created_at)
@@ -394,14 +395,14 @@ async fn reconcile_startup_fails_inflight_convergences_and_marks_workspace_stale
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
@@ -466,11 +467,11 @@ async fn reconcile_startup_fails_inflight_convergences_and_marks_workspace_stale
 #[tokio::test]
 async fn reconcile_startup_marks_finalized_target_ref_git_operation_reconciled() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let base_commit = head_oid(&repo).await.expect("base head");
+    let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     std::fs::write(repo.join("tracked.txt"), "next").expect("write file");
     git_sync(&repo, &["add", "tracked.txt"]);
     git_sync(&repo, &["commit", "-m", "next"]);
-    let new_head = head_oid(&repo).await.expect("new head");
+    let new_head = head_oid(&repo).await.expect("new head").into_inner();
 
     let db = migrated_test_db("ingot-runtime").await;
     let dispatcher = JobDispatcher::with_runner(
@@ -494,7 +495,7 @@ async fn reconcile_startup_marks_finalized_target_ref_git_operation_reconciled()
         .id(revision_id)
         .seed_commit_oid(Some(base_commit.clone()))
         .seed_target_commit_oid(Some(base_commit.clone()))
-        .explicit_seed(&base_commit)
+        .explicit_seed(base_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -603,11 +604,11 @@ async fn reconcile_startup_marks_finalized_target_ref_git_operation_reconciled()
 #[tokio::test]
 async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let base_commit = head_oid(&repo).await.expect("base head");
+    let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     std::fs::write(repo.join("tracked.txt"), "prepared").expect("write prepared");
     git_sync(&repo, &["add", "tracked.txt"]);
     git_sync(&repo, &["commit", "-m", "prepared"]);
-    let prepared_commit = head_oid(&repo).await.expect("prepared head");
+    let prepared_commit = head_oid(&repo).await.expect("prepared head").into_inner();
     git_sync(
         &repo,
         &[
@@ -642,7 +643,7 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
         .approval_policy(ingot_domain::revision::ApprovalPolicy::NotRequired)
         .seed_commit_oid(Some(base_commit.clone()))
         .seed_target_commit_oid(Some(base_commit.clone()))
-        .explicit_seed(&base_commit)
+        .explicit_seed(base_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -725,14 +726,14 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
         .await
         .expect("create git operation");
 
-    assert_eq!(head_oid(&repo).await.expect("checkout head"), base_commit);
+    assert_eq!(head_oid(&repo).await.expect("checkout head").into_inner(), base_commit);
 
     dispatcher
         .reconcile_startup()
         .await
         .expect("reconcile startup");
 
-    assert_eq!(head_oid(&repo).await.expect("synced head"), prepared_commit);
+    assert_eq!(head_oid(&repo).await.expect("synced head").into_inner(), prepared_commit);
     let unresolved = db
         .list_unresolved_git_operations()
         .await
@@ -753,11 +754,11 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
 #[tokio::test]
 async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let base_commit = head_oid(&repo).await.expect("base head");
+    let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     std::fs::write(repo.join("tracked.txt"), "prepared").expect("write prepared");
     git_sync(&repo, &["add", "tracked.txt"]);
     git_sync(&repo, &["commit", "-m", "prepared"]);
-    let prepared_commit = head_oid(&repo).await.expect("prepared head");
+    let prepared_commit = head_oid(&repo).await.expect("prepared head").into_inner();
     git_sync(
         &repo,
         &[
@@ -793,7 +794,7 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
         .approval_policy(ingot_domain::revision::ApprovalPolicy::NotRequired)
         .seed_commit_oid(Some(base_commit.clone()))
         .seed_target_commit_oid(Some(base_commit.clone()))
-        .explicit_seed(&base_commit)
+        .explicit_seed(base_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -871,7 +872,8 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
         convergence
             .state
             .prepared_commit_oid()
-            .expect("prepared oid"),
+            .expect("prepared oid")
+            .clone(),
     )
     .status(GitOperationStatus::Applied)
     .created_at(created_at)
@@ -921,11 +923,11 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
 #[tokio::test]
 async fn reconcile_startup_adopts_prepared_convergence_from_git_operation() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let base_commit = head_oid(&repo).await.expect("base head");
+    let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     std::fs::write(repo.join("tracked.txt"), "prepared").expect("write file");
     git_sync(&repo, &["add", "tracked.txt"]);
     git_sync(&repo, &["commit", "-m", "prepared"]);
-    let prepared_head = head_oid(&repo).await.expect("prepared head");
+    let prepared_head = head_oid(&repo).await.expect("prepared head").into_inner();
     git_sync(
         &repo,
         &[
@@ -958,7 +960,7 @@ async fn reconcile_startup_adopts_prepared_convergence_from_git_operation() {
         .id(revision_id)
         .seed_commit_oid(Some(base_commit.clone()))
         .seed_target_commit_oid(Some(base_commit.clone()))
-        .explicit_seed(&base_commit)
+        .explicit_seed(base_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -1048,11 +1050,11 @@ async fn reconcile_startup_adopts_prepared_convergence_from_git_operation() {
 #[tokio::test]
 async fn reconcile_startup_does_not_resurrect_cancelled_convergence_from_prepare_git_operation() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let base_commit = head_oid(&repo).await.expect("base head");
+    let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     std::fs::write(repo.join("tracked.txt"), "prepared").expect("write file");
     git_sync(&repo, &["add", "tracked.txt"]);
     git_sync(&repo, &["commit", "-m", "prepared"]);
-    let prepared_head = head_oid(&repo).await.expect("prepared head");
+    let prepared_head = head_oid(&repo).await.expect("prepared head").into_inner();
     git_sync(
         &repo,
         &[
@@ -1085,7 +1087,7 @@ async fn reconcile_startup_does_not_resurrect_cancelled_convergence_from_prepare
         .id(revision_id)
         .seed_commit_oid(Some(base_commit.clone()))
         .seed_target_commit_oid(Some(base_commit.clone()))
-        .explicit_seed(&base_commit)
+        .explicit_seed(base_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -1165,11 +1167,11 @@ async fn reconcile_startup_does_not_resurrect_cancelled_convergence_from_prepare
 #[tokio::test]
 async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let base_commit = head_oid(&repo).await.expect("base head");
+    let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     std::fs::write(repo.join("tracked.txt"), "authored").expect("write file");
     git_sync(&repo, &["add", "tracked.txt"]);
     git_sync(&repo, &["commit", "-m", "authored"]);
-    let authored_commit = head_oid(&repo).await.expect("authored head");
+    let authored_commit = head_oid(&repo).await.expect("authored head").into_inner();
     git_sync(
         &repo,
         &[
@@ -1202,7 +1204,7 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
         .id(revision_id)
         .seed_commit_oid(Some(base_commit.clone()))
         .seed_target_commit_oid(Some(base_commit.clone()))
-        .explicit_seed(&base_commit)
+        .explicit_seed(base_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -1230,7 +1232,7 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
         .workspace_kind(WorkspaceKind::Authoring)
         .execution_permission(ExecutionPermission::MayMutate)
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(base_commit.clone()))
+        .job_input(JobInput::authoring_head(CommitOid::new(base_commit.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .lease_owner_id("old-daemon")
         .heartbeat_at(created_at)
@@ -1266,14 +1268,14 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
     assert_eq!(updated_job.state.status(), JobStatus::Completed);
     assert_eq!(updated_job.state.outcome_class(), Some(OutcomeClass::Clean));
     assert_eq!(
-        updated_job.state.output_commit_oid(),
+        updated_job.state.output_commit_oid().map(|c| c.as_str()),
         Some(authored_commit.as_str())
     );
 
     let updated_workspace = db.get_workspace(workspace.id).await.expect("workspace");
     assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Ready);
     assert_eq!(
-        updated_workspace.state.head_commit_oid(),
+        updated_workspace.state.head_commit_oid().map(|c| c.as_str()),
         Some(authored_commit.as_str())
     );
 
@@ -1284,11 +1286,11 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
         .expect("auto-dispatched review job after startup adoption");
     assert_eq!(review_job.state.status(), JobStatus::Queued);
     assert_eq!(
-        review_job.job_input.base_commit_oid(),
+        review_job.job_input.base_commit_oid().map(|c| c.as_str()),
         Some(base_commit.as_str())
     );
     assert_eq!(
-        review_job.job_input.head_commit_oid(),
+        review_job.job_input.head_commit_oid().map(|c| c.as_str()),
         Some(authored_commit.as_str())
     );
 }
@@ -1296,7 +1298,7 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
 #[tokio::test]
 async fn reconcile_startup_continues_review_recovery_past_broken_project() {
     let healthy_repo = temp_git_repo("ingot-runtime-repo");
-    let healthy_seed_commit = head_oid(&healthy_repo).await.expect("healthy seed head");
+    let healthy_seed_commit = head_oid(&healthy_repo).await.expect("healthy seed head").into_inner();
     std::fs::write(healthy_repo.join("feature.txt"), "authored").expect("write file");
     git_sync(&healthy_repo, &["add", "feature.txt"]);
     git_sync(&healthy_repo, &["commit", "-m", "authored"]);
@@ -1382,7 +1384,7 @@ async fn reconcile_startup_continues_review_recovery_past_broken_project() {
         .build();
     let healthy_revision = RevisionBuilder::new(healthy_item_id)
         .id(healthy_revision_id)
-        .explicit_seed(&healthy_seed_commit)
+        .explicit_seed(healthy_seed_commit.as_str())
         .build();
     db.create_item_with_revision(&healthy_item, &healthy_revision)
         .await
@@ -1399,7 +1401,7 @@ async fn reconcile_startup_continues_review_recovery_past_broken_project() {
         .workspace_kind(WorkspaceKind::Authoring)
         .execution_permission(ExecutionPermission::MayMutate)
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(&healthy_seed_commit))
+        .job_input(JobInput::authoring_head(CommitOid::new(healthy_seed_commit.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .output_commit_oid(healthy_authored_commit.clone())
         .started_at(created_at)
@@ -1424,11 +1426,11 @@ async fn reconcile_startup_continues_review_recovery_past_broken_project() {
         .expect("startup queued review for healthy project");
     assert_eq!(review_job.state.status(), JobStatus::Queued);
     assert_eq!(
-        review_job.job_input.base_commit_oid(),
+        review_job.job_input.base_commit_oid().map(|c| c.as_str()),
         Some(healthy_seed_commit.as_str())
     );
     assert_eq!(
-        review_job.job_input.head_commit_oid(),
+        review_job.job_input.head_commit_oid().map(|c| c.as_str()),
         Some(healthy_authored_commit.as_str())
     );
 }
@@ -1436,7 +1438,7 @@ async fn reconcile_startup_continues_review_recovery_past_broken_project() {
 #[tokio::test]
 async fn reconcile_startup_adopts_reset_workspace_operation() {
     let h = TestHarness::new(Arc::new(FakeRunner)).await;
-    let head = head_oid(&h.repo_path).await.expect("head");
+    let head = head_oid(&h.repo_path).await.expect("head").into_inner();
     let created_at = default_timestamp();
 
     let workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
@@ -1487,7 +1489,7 @@ async fn reconcile_startup_adopts_reset_workspace_operation() {
 #[tokio::test]
 async fn reconcile_startup_adopts_remove_workspace_ref_operation() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let head = head_oid(&repo).await.expect("head");
+    let head = head_oid(&repo).await.expect("head").into_inner();
     let workspace_path = unique_temp_path("ingot-runtime-remove-adopt");
 
     let db = migrated_test_db("ingot-runtime").await;
@@ -1584,7 +1586,7 @@ async fn reconcile_startup_removes_abandoned_review_workspace_when_safe() {
 
     let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
-    let seed_commit = head_oid(&repo).await.expect("seed head");
+    let seed_commit = head_oid(&repo).await.expect("seed head").into_inner();
     db.create_project(&project).await.expect("create project");
     let paths = ensure_test_mirror(state_root.as_path(), &project).await;
     git_sync(
@@ -1606,7 +1608,7 @@ async fn reconcile_startup_removes_abandoned_review_workspace_when_safe() {
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -1655,7 +1657,7 @@ async fn reconcile_startup_removes_abandoned_authoring_workspace_when_item_is_do
 
     let created_at = default_timestamp();
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
-    let seed_commit = head_oid(&repo).await.expect("seed head");
+    let seed_commit = head_oid(&repo).await.expect("seed head").into_inner();
     db.create_project(&project).await.expect("create project");
     let paths = ensure_test_mirror(state_root.as_path(), &project).await;
     git_sync(
@@ -1685,7 +1687,7 @@ async fn reconcile_startup_removes_abandoned_authoring_workspace_when_item_is_do
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -1719,7 +1721,7 @@ async fn reconcile_startup_removes_abandoned_authoring_workspace_when_item_is_do
 async fn reconcile_startup_retains_abandoned_authoring_workspace_with_untriaged_candidate_finding()
 {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let seed_commit = head_oid(&repo).await.expect("seed head");
+    let seed_commit = head_oid(&repo).await.expect("seed head").into_inner();
     let workspace_path = unique_temp_path("ingot-runtime-author-retain");
     git_sync(
         &repo,
@@ -1753,7 +1755,7 @@ async fn reconcile_startup_retains_abandoned_authoring_workspace_with_untriaged_
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -1782,9 +1784,9 @@ async fn reconcile_startup_retains_abandoned_authoring_workspace_with_untriaged_
         .execution_permission(ExecutionPermission::MustNotMutate)
         .phase_template_slug("review-candidate")
         .job_input(JobInput::candidate_subject(
-            seed_commit.clone(),
-            seed_commit.clone(),
-        ))
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(seed_commit.clone()),
+    ))
         .output_artifact_kind(OutputArtifactKind::ReviewReport)
         .result_schema_version("review_report:v1")
         .result_payload(serde_json::json!({
@@ -1827,7 +1829,7 @@ async fn reconcile_startup_retains_abandoned_authoring_workspace_with_untriaged_
 async fn reconcile_startup_retains_abandoned_integration_workspace_with_untriaged_integrated_finding()
  {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let seed_commit = head_oid(&repo).await.expect("seed head");
+    let seed_commit = head_oid(&repo).await.expect("seed head").into_inner();
     let workspace_path = unique_temp_path("ingot-runtime-integration-retain");
     git_sync(
         &repo,
@@ -1861,7 +1863,7 @@ async fn reconcile_startup_retains_abandoned_integration_workspace_with_untriage
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -1876,9 +1878,9 @@ async fn reconcile_startup_retains_abandoned_integration_workspace_with_untriage
         .context_policy(ContextPolicy::ResumeContext)
         .phase_template_slug("validate-integrated")
         .job_input(JobInput::integrated_subject(
-            seed_commit.clone(),
-            seed_commit.clone(),
-        ))
+        CommitOid::new(seed_commit.clone()),
+        CommitOid::new(seed_commit.clone()),
+    ))
         .output_artifact_kind(OutputArtifactKind::ValidationReport)
         .result_schema_version("validation_report:v1")
         .result_payload(serde_json::json!({
@@ -1935,7 +1937,7 @@ async fn reconcile_startup_retains_abandoned_integration_workspace_with_untriage
 async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
     let h = TestHarness::new(Arc::new(FakeRunner)).await;
 
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     let created_at = default_timestamp();
 
     let item_a_id = ingot_domain::ids::ItemId::new();
@@ -1943,7 +1945,7 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
     let rev_a = RevisionBuilder::new(item_a_id)
         .id(rev_a_id)
         .revision_no(1)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .created_at(created_at)
         .build();
     let item_a = ItemBuilder::new(h.project.id, rev_a.id)
@@ -1969,7 +1971,7 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
     let assigned_job = JobBuilder::new(h.project.id, item_a.id, rev_a.id, "author_initial")
         .id(assigned_job_id)
         .workspace_kind(WorkspaceKind::Authoring)
-        .job_input(JobInput::authoring_head(&seed_commit))
+        .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .status(JobStatus::Assigned)
         .workspace_id(workspace_a.id)
@@ -1982,7 +1984,7 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
     let rev_b = RevisionBuilder::new(item_b_id)
         .id(rev_b_id)
         .revision_no(1)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .created_at(created_at)
         .build();
     let item_b = ItemBuilder::new(h.project.id, rev_b.id)
@@ -2008,7 +2010,7 @@ async fn reconcile_startup_handles_mixed_inflight_states_conservatively() {
     let running_job = JobBuilder::new(h.project.id, item_b.id, rev_b.id, "author_initial")
         .id(running_job_id)
         .workspace_kind(WorkspaceKind::Authoring)
-        .job_input(JobInput::authoring_head(&seed_commit))
+        .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .status(JobStatus::Running)
         .workspace_id(workspace_b.id)

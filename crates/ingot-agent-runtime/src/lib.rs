@@ -16,6 +16,7 @@ use ingot_agent_adapters::codex::CodexCliAdapter;
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
 use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
 use ingot_domain::convergence::{Convergence, ConvergenceStatus, PrepareFailureKind};
@@ -312,7 +313,7 @@ struct PreparedRun {
     agent: Agent,
     assignment: JobAssignment,
     workspace: Workspace,
-    original_head_commit_oid: String,
+    original_head_commit_oid: CommitOid,
     prompt: String,
     workspace_lifecycle: WorkspaceLifecycle,
 }
@@ -670,8 +671,8 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
             match finalize_target_ref_in_repo(
                 paths.mirror_git_dir.as_path(),
                 &convergence.target_ref,
-                &prepared_commit_oid,
-                &input_target_commit_oid,
+                prepared_commit_oid.as_str(),
+                input_target_commit_oid.as_str(),
             )
             .await
             .map_err(|error| usecase_from_runtime_error(RuntimeError::from(error)))?
@@ -690,13 +691,13 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
         project: &Project,
         item: &ingot_domain::item::Item,
         revision: &ItemRevision,
-        prepared_commit_oid: &str,
+        prepared_commit_oid: &CommitOid,
     ) -> impl Future<Output = Result<CheckoutFinalizationReadiness, ingot_usecases::UseCaseError>> + Send
     {
         let dispatcher = self.dispatcher.clone();
         let project = project.clone();
         let revision = revision.clone();
-        let prepared_commit_oid = prepared_commit_oid.to_string();
+        let prepared_commit_oid = prepared_commit_oid.clone();
         async move {
             match dispatcher
                 .reconcile_checkout_sync_state(&project, item.id, &revision)
@@ -709,7 +710,7 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                 CheckoutSyncStatus::Ready => match checkout_finalization_status(
                     Path::new(&project.path),
                     &revision.target_ref,
-                    &prepared_commit_oid,
+                    prepared_commit_oid.as_str(),
                 )
                 .await
                 .map_err(|error| usecase_from_runtime_error(RuntimeError::from(error)))?
@@ -730,12 +731,12 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
         &self,
         project: &Project,
         revision: &ItemRevision,
-        prepared_commit_oid: &str,
+        prepared_commit_oid: &CommitOid,
     ) -> impl Future<Output = Result<(), ingot_usecases::UseCaseError>> + Send {
         let dispatcher = self.dispatcher.clone();
         let project = project.clone();
         let revision = revision.clone();
-        let prepared_commit_oid = prepared_commit_oid.to_string();
+        let prepared_commit_oid = prepared_commit_oid.clone();
         async move {
             let paths = dispatcher
                 .refresh_project_mirror(&project)
@@ -745,7 +746,7 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                 Path::new(&project.path),
                 paths.mirror_git_dir.as_path(),
                 &revision.target_ref,
-                &prepared_commit_oid,
+                prepared_commit_oid.as_str(),
             )
             .await
             .map_err(|error| usecase_from_runtime_error(RuntimeError::from(error)))?;
@@ -1380,7 +1381,7 @@ impl JobDispatcher {
                 OperationPayload::CreateJobCommit { .. }
                 | OperationPayload::PrepareConvergenceCommit { .. } => {
                     if let Some(commit_oid) = operation.effective_commit_oid() {
-                        ingot_git::commands::commit_exists(repo_path, commit_oid).await?
+                        ingot_git::commands::commit_exists(repo_path, commit_oid.as_str()).await?
                     } else {
                         false
                     }
@@ -1388,7 +1389,7 @@ impl JobDispatcher {
                 OperationPayload::CreateInvestigationRef {
                     ref_name, new_oid, ..
                 } => {
-                    resolve_ref_oid(repo_path, ref_name).await?.as_deref() == Some(new_oid.as_str())
+                    resolve_ref_oid(repo_path, ref_name).await?.as_ref() == Some(new_oid)
                 }
                 OperationPayload::RemoveWorkspaceRef { ref_name, .. } => {
                     resolve_ref_oid(repo_path, ref_name).await?.is_none()
@@ -1403,7 +1404,7 @@ impl JobDispatcher {
                 } => {
                     let workspace = self.db.get_workspace(*workspace_id).await?;
                     match head_oid(Path::new(&workspace.path)).await {
-                        Ok(actual_head) => actual_head == new_oid.as_str(),
+                        Ok(actual_head) => actual_head == *new_oid,
                         Err(_) => false,
                     }
                 }
@@ -1451,7 +1452,7 @@ impl JobDispatcher {
             context.mirror_target_ref,
         )
         .await?;
-        if current_target_oid.as_deref() != Some(context.prepared_commit_oid) {
+        if !current_target_oid.as_ref().is_some_and(|oid| oid == context.prepared_commit_oid) {
             operation.status = GitOperationStatus::Failed;
             operation.completed_at = Some(Utc::now());
             self.db.update_git_operation(operation).await?;
@@ -1694,8 +1695,8 @@ impl JobDispatcher {
                     workspace
                         .state
                         .head_commit_oid()
-                        .unwrap_or_default()
-                        .to_owned()
+                        .cloned()
+                        .unwrap_or_else(|| ingot_domain::commit_oid::CommitOid::new(""))
                 }),
                 now,
             );
@@ -1753,8 +1754,14 @@ impl JobDispatcher {
         workspace.mark_ready_with_head(
             operation
                 .new_oid()
-                .unwrap_or_else(|| workspace.state.head_commit_oid().unwrap_or_default())
-                .to_owned(),
+                .cloned()
+                .unwrap_or_else(|| {
+                    workspace
+                        .state
+                        .head_commit_oid()
+                        .cloned()
+                        .unwrap_or_else(|| ingot_domain::commit_oid::CommitOid::new(""))
+                }),
             now,
         );
         self.db.update_workspace(&workspace).await?;
@@ -1971,11 +1978,11 @@ impl JobDispatcher {
         }
 
         let findings = self.db.list_findings_by_item(item.id).await?;
-        let head_commit_oid = workspace.state.head_commit_oid().unwrap_or_default();
+        let head_commit_oid = workspace.state.head_commit_oid();
         let blocked = findings.iter().any(|finding| {
             finding.source_item_revision_id == revision.id
                 && finding.triage.is_unresolved()
-                && finding.source_subject_head_commit_oid == head_commit_oid
+                && head_commit_oid.is_some_and(|oid| finding.source_subject_head_commit_oid == *oid)
                 && match workspace.kind {
                     WorkspaceKind::Authoring => {
                         finding.source_subject_kind
@@ -2228,7 +2235,7 @@ impl JobDispatcher {
         convergence: &Convergence,
     ) -> Result<Option<bool>, RuntimeError> {
         let resolved = resolve_ref_oid(repo_path, &convergence.target_ref).await?;
-        Ok(convergence.target_head_valid_for_resolved_oid(resolved.as_deref()))
+        Ok(convergence.target_head_valid_for_resolved_oid(resolved.as_ref()))
     }
 
     async fn prepare_run(&self, queued_job: Job) -> Result<PrepareRunOutcome, RuntimeError> {
@@ -2416,13 +2423,13 @@ impl JobDispatcher {
                     repo_path,
                     Path::new(&existing_workspace.path),
                     &workspace_ref,
-                    &expected_head_commit_oid,
+                    expected_head_commit_oid.as_str(),
                 )
                 .await?;
                 let mut workspace = existing_workspace;
                 workspace.path = provisioned.workspace_path.display().to_string();
                 workspace.workspace_ref = Some(provisioned.workspace_ref);
-                workspace.mark_ready_with_head(provisioned.head_commit_oid, now);
+                workspace.mark_ready_with_head(CommitOid::new(provisioned.head_commit_oid), now);
                 Ok((
                     workspace,
                     WorkspaceLifecycle::PersistentIntegration,
@@ -2440,7 +2447,7 @@ impl JobDispatcher {
                 let workspace_id = WorkspaceId::new();
                 let workspace_path = workspace_root.join(workspace_id.to_string());
                 let provisioned =
-                    provision_review_workspace(repo_path, &workspace_path, &head_commit_oid)
+                    provision_review_workspace(repo_path, &workspace_path, head_commit_oid.as_str())
                         .await?;
                 let workspace = Workspace {
                     id: workspace_id,
@@ -2459,9 +2466,9 @@ impl JobDispatcher {
                         commits: WorkspaceCommitState::new(
                             job.job_input
                                 .base_commit_oid()
-                                .map(ToOwned::to_owned)
-                                .unwrap_or_default(),
-                            provisioned.head_commit_oid,
+                                .cloned()
+                                .unwrap_or_else(|| CommitOid::new("")),
+                            CommitOid::new(provisioned.head_commit_oid),
                         ),
                     },
                 };
@@ -2782,7 +2789,7 @@ impl JobDispatcher {
         }
 
         let commit_oid = self.create_commit(&prepared, &response).await?;
-        self.complete_commit_run(&prepared, &commit_oid).await
+        self.complete_commit_run(&prepared, commit_oid.as_str()).await
     }
 
     async fn finish_report_run(
@@ -2953,8 +2960,8 @@ impl JobDispatcher {
             .ok_or_else(|| RuntimeError::InvalidState("input target commit missing".into()))?;
         let current_target_oid =
             resolve_ref_oid(paths.mirror_git_dir.as_path(), &convergence.target_ref).await?;
-        let target_valid = current_target_oid.as_deref() == Some(prepared_commit_oid.as_str())
-            || current_target_oid.as_deref() == Some(input_target_commit_oid.as_str());
+        let target_valid = current_target_oid.as_ref() == Some(&prepared_commit_oid)
+            || current_target_oid.as_ref() == Some(&input_target_commit_oid);
         if !target_valid {
             return Ok(false);
         }
@@ -3032,8 +3039,8 @@ impl JobDispatcher {
         integration_workspace: &mut Workspace,
         convergence: &mut Convergence,
         operation: &mut GitOperation,
-        source_commit_oids: &[String],
-        prepared_commit_oids: &[String],
+        source_commit_oids: &[CommitOid],
+        prepared_commit_oids: &[CommitOid],
         summary: String,
         failure_kind: PrepareFailureKind,
     ) -> Result<(), RuntimeError> {
@@ -3192,12 +3199,12 @@ impl JobDispatcher {
             repo_path,
             &integration_workspace_path,
             &integration_workspace_ref,
-            &input_target_commit_oid,
+            input_target_commit_oid.as_str(),
         )
         .await?;
         integration_workspace.path = provisioned.workspace_path.display().to_string();
         integration_workspace.workspace_ref = Some(provisioned.workspace_ref);
-        integration_workspace.set_head_commit_oid(provisioned.head_commit_oid, Utc::now());
+        integration_workspace.set_head_commit_oid(CommitOid::new(provisioned.head_commit_oid), Utc::now());
         self.db.update_workspace(&integration_workspace).await?;
 
         let mut convergence = Convergence {
@@ -3231,7 +3238,7 @@ impl JobDispatcher {
             .await?
             .ok_or_else(|| RuntimeError::InvalidState("authoring base commit missing".into()))?;
         let source_commit_oids =
-            list_commits_oldest_first(repo_path, &source_base_commit_oid, &source_head_commit_oid)
+            list_commits_oldest_first(repo_path, source_base_commit_oid.as_str(), source_head_commit_oid.as_str())
                 .await?;
         let mut operation = GitOperation {
             id: GitOperationId::new(),
@@ -3268,7 +3275,7 @@ impl JobDispatcher {
 
         for source_commit_oid in &source_commit_oids {
             if let Err(error) =
-                cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid).await
+                cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid.as_str()).await
             {
                 let _ = abort_cherry_pick(&integration_workspace_dir).await;
                 self.fail_prepare_convergence_attempt(
@@ -3313,7 +3320,7 @@ impl JobDispatcher {
                 continue;
             }
 
-            let original_message = match commit_message(repo_path, source_commit_oid).await {
+            let original_message = match commit_message(repo_path, source_commit_oid.as_str()).await {
                 Ok(message) => message,
                 Err(error) => {
                     self.fail_prepare_convergence_attempt(
@@ -3368,7 +3375,7 @@ impl JobDispatcher {
             if let Some(workspace_ref) = integration_workspace.workspace_ref.as_deref() {
                 if let Err(error) = git(
                     repo_path,
-                    &["update-ref", workspace_ref, &next_prepared_tip],
+                    &["update-ref", workspace_ref, next_prepared_tip.as_str()],
                 )
                 .await
                 {
@@ -3524,7 +3531,7 @@ impl JobDispatcher {
         let actual_ref = resolve_ref_oid(repo_path, workspace_ref).await?;
         let actual_head = head_oid(Path::new(&prepared.workspace.path)).await?;
 
-        if actual_ref.as_deref() != Some(prepared.original_head_commit_oid.as_str())
+        if actual_ref.as_ref() != Some(&prepared.original_head_commit_oid)
             || actual_head != prepared.original_head_commit_oid
         {
             self.reset_workspace(prepared).await?;
@@ -3560,7 +3567,7 @@ impl JobDispatcher {
         &self,
         prepared: &PreparedRun,
         response: &AgentResponse,
-    ) -> Result<String, RuntimeError> {
+    ) -> Result<CommitOid, RuntimeError> {
         let _guard = self
             .project_locks
             .acquire_project_mutation(prepared.job.project_id)
@@ -3615,7 +3622,7 @@ impl JobDispatcher {
             },
         )
         .await?;
-        git(repo_path, &["update-ref", &workspace_ref, &commit_oid]).await?;
+        git(repo_path, &["update-ref", &workspace_ref, commit_oid.as_str()]).await?;
 
         operation.payload.set_job_commit_result(commit_oid.clone());
         operation.status = GitOperationStatus::Applied;
@@ -3954,7 +3961,7 @@ impl JobDispatcher {
                 .unwrap_or(head);
             let project = self.db.get_project(prepared.project_id).await?;
             let paths = self.refresh_project_mirror(&project).await?;
-            changed_paths_between(&paths.mirror_git_dir, base, head)
+            changed_paths_between(&paths.mirror_git_dir, base.as_str(), head.as_str())
                 .await
                 .unwrap_or_default()
         } else {
@@ -4495,7 +4502,7 @@ impl JobDispatcher {
         job_id: ingot_domain::ids::JobId,
         workspace: &Workspace,
         workspace_lifecycle: WorkspaceLifecycle,
-        original_head_commit_oid: &str,
+        original_head_commit_oid: &CommitOid,
         canonical_repo_path: &Path,
     ) -> Result<(), RuntimeError> {
         let _guard = self
@@ -4516,7 +4523,7 @@ impl JobDispatcher {
         let now = Utc::now();
         match workspace_lifecycle {
             WorkspaceLifecycle::PersistentAuthoring | WorkspaceLifecycle::PersistentIntegration => {
-                persisted_workspace.release_with_head(original_head_commit_oid.to_owned(), now);
+                persisted_workspace.release_with_head(original_head_commit_oid.clone(), now);
                 self.db.update_workspace(&persisted_workspace).await?;
             }
             WorkspaceLifecycle::EphemeralReview => {
@@ -4629,7 +4636,7 @@ impl JobDispatcher {
                 let now = Utc::now();
                 workspace.release_to(WorkspaceStatus::Ready, now);
                 if let Some(head_commit_oid) = head_commit_oid {
-                    workspace.set_head_commit_oid(head_commit_oid.to_string(), now);
+                    workspace.set_head_commit_oid(CommitOid::new(head_commit_oid), now);
                 }
                 self.db.update_workspace(&workspace).await?;
             }
@@ -4706,7 +4713,7 @@ impl JobDispatcher {
                 let workspace_path = Path::new(&prepared.workspace.path);
                 git(
                     workspace_path,
-                    &["reset", "--hard", &prepared.original_head_commit_oid],
+                    &["reset", "--hard", prepared.original_head_commit_oid.as_str()],
                 )
                 .await?;
                 git(workspace_path, &["clean", "-fd"]).await?;
@@ -4716,7 +4723,7 @@ impl JobDispatcher {
                         &[
                             "update-ref",
                             workspace_ref,
-                            &prepared.original_head_commit_oid,
+                            prepared.original_head_commit_oid.as_str(),
                         ],
                     )
                     .await?;
@@ -4726,7 +4733,7 @@ impl JobDispatcher {
                 let workspace_path = Path::new(&prepared.workspace.path);
                 git(
                     workspace_path,
-                    &["reset", "--hard", &prepared.original_head_commit_oid],
+                    &["reset", "--hard", prepared.original_head_commit_oid.as_str()],
                 )
                 .await?;
                 git(workspace_path, &["clean", "-fd"]).await?;
@@ -4736,7 +4743,7 @@ impl JobDispatcher {
                         &[
                             "update-ref",
                             workspace_ref,
-                            &prepared.original_head_commit_oid,
+                            prepared.original_head_commit_oid.as_str(),
                         ],
                     )
                     .await?;
@@ -4779,13 +4786,13 @@ impl JobDispatcher {
             .await?;
         let authoring_base_commit_oid = self.effective_authoring_base_commit_oid(&revision).await?;
         let changed_paths = if let (Some(base_commit_oid), Some(head_commit_oid)) = (
-            authoring_base_commit_oid.as_deref(),
-            authoring_head_commit_oid.as_deref(),
+            authoring_base_commit_oid.as_ref(),
+            authoring_head_commit_oid.as_ref(),
         ) {
             changed_paths_between(
                 self.project_paths(&project).mirror_git_dir.as_path(),
-                base_commit_oid,
-                head_commit_oid,
+                base_commit_oid.as_str(),
+                head_commit_oid.as_str(),
             )
             .await?
         } else {
@@ -4808,7 +4815,7 @@ impl JobDispatcher {
         &self,
         revision: &ItemRevision,
         jobs: &[Job],
-    ) -> Result<Option<String>, RuntimeError> {
+    ) -> Result<Option<CommitOid>, RuntimeError> {
         let workspace = self
             .db
             .find_authoring_workspace_for_revision(revision.id)
@@ -4825,7 +4832,7 @@ impl JobDispatcher {
     async fn effective_authoring_base_commit_oid(
         &self,
         revision: &ItemRevision,
-    ) -> Result<Option<String>, RuntimeError> {
+    ) -> Result<Option<CommitOid>, RuntimeError> {
         let workspace = self
             .db
             .find_authoring_workspace_for_revision(revision.id)
@@ -5738,13 +5745,13 @@ mod tests {
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head");
+        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head").into_inner();
         let item = ItemBuilder::new(harness.project.id, revision_id)
             .id(item_id)
             .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
-            .explicit_seed(&seed_commit)
+            .explicit_seed(seed_commit.as_str())
             .build();
         harness
             .db
@@ -5757,7 +5764,7 @@ mod tests {
             .workspace_kind(WorkspaceKind::Authoring)
             .execution_permission(ExecutionPermission::MayMutate)
             .phase_template_slug("author-initial")
-            .job_input(JobInput::authoring_head(seed_commit))
+            .job_input(JobInput::authoring_head(CommitOid::new(seed_commit)))
             .output_artifact_kind(OutputArtifactKind::Commit)
             .build();
         harness.db.create_job(&job).await.expect("create job");
@@ -5837,13 +5844,13 @@ mod tests {
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head");
+        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head").into_inner();
         let item = ItemBuilder::new(harness.project.id, revision_id)
             .id(item_id)
             .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
-            .explicit_seed(&seed_commit)
+            .explicit_seed(seed_commit.as_str())
             .build();
         harness
             .db
@@ -5856,7 +5863,7 @@ mod tests {
             .workspace_kind(WorkspaceKind::Authoring)
             .execution_permission(ExecutionPermission::MayMutate)
             .phase_template_slug("author-initial")
-            .job_input(JobInput::authoring_head(seed_commit))
+            .job_input(JobInput::authoring_head(CommitOid::new(seed_commit)))
             .output_artifact_kind(OutputArtifactKind::Commit)
             .build();
         harness.db.create_job(&job).await.expect("create job");
@@ -5923,13 +5930,13 @@ mod tests {
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head");
+        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head").into_inner();
         let item = ItemBuilder::new(harness.project.id, revision_id)
             .id(item_id)
             .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
-            .explicit_seed(&seed_commit)
+            .explicit_seed(seed_commit.as_str())
             .build();
         harness
             .db
@@ -5942,7 +5949,7 @@ mod tests {
             .workspace_kind(WorkspaceKind::Authoring)
             .execution_permission(ExecutionPermission::MayMutate)
             .phase_template_slug("author-initial")
-            .job_input(JobInput::authoring_head(seed_commit))
+            .job_input(JobInput::authoring_head(CommitOid::new(seed_commit)))
             .output_artifact_kind(OutputArtifactKind::Commit)
             .build();
         harness.db.create_job(&job).await.expect("create job");
@@ -5993,13 +6000,13 @@ mod tests {
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head");
+        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head").into_inner();
         let item = ItemBuilder::new(harness.project.id, revision_id)
             .id(item_id)
             .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
-            .explicit_seed(&seed_commit)
+            .explicit_seed(seed_commit.as_str())
             .build();
         harness
             .db
@@ -6012,7 +6019,7 @@ mod tests {
             .workspace_kind(WorkspaceKind::Authoring)
             .execution_permission(ExecutionPermission::MayMutate)
             .phase_template_slug("author-initial")
-            .job_input(JobInput::authoring_head(&seed_commit))
+            .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
             .output_artifact_kind(OutputArtifactKind::Commit)
             .build();
         harness.db.create_job(&job).await.expect("create job");
@@ -6101,13 +6108,13 @@ mod tests {
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head");
+        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head").into_inner();
         let item = ItemBuilder::new(harness.project.id, revision_id)
             .id(item_id)
             .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
-            .explicit_seed(&seed_commit)
+            .explicit_seed(seed_commit.as_str())
             .build();
         harness
             .db
@@ -6136,8 +6143,8 @@ timeout = "30s"
         .context_policy(ContextPolicy::None)
         .phase_template_slug("")
         .job_input(JobInput::candidate_subject(
-            seed_commit.clone(),
-            seed_commit.clone(),
+            CommitOid::new(seed_commit.clone()),
+            CommitOid::new(seed_commit.clone()),
         ))
         .output_artifact_kind(OutputArtifactKind::ValidationReport)
         .build();
@@ -6224,13 +6231,13 @@ timeout = "30s"
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head");
+        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head").into_inner();
         let item = ItemBuilder::new(harness.project.id, revision_id)
             .id(item_id)
             .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
-            .explicit_seed(&seed_commit)
+            .explicit_seed(seed_commit.as_str())
             .build();
         harness
             .db
@@ -6259,8 +6266,8 @@ timeout = "30s"
         .context_policy(ContextPolicy::None)
         .phase_template_slug("")
         .job_input(JobInput::candidate_subject(
-            seed_commit.clone(),
-            seed_commit.clone(),
+            CommitOid::new(seed_commit.clone()),
+            CommitOid::new(seed_commit.clone()),
         ))
         .output_artifact_kind(OutputArtifactKind::ValidationReport)
         .build();

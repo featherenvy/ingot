@@ -34,7 +34,7 @@ pub(super) async fn reset_workspace_route(
     let expected_head = workspace
         .state
         .head_commit_oid()
-        .map(ToOwned::to_owned)
+        .cloned()
         .ok_or_else(|| {
             ApiError::from(UseCaseError::Internal(
                 "workspace missing head_commit_oid".into(),
@@ -48,7 +48,7 @@ pub(super) async fn reset_workspace_route(
         payload: OperationPayload::ResetWorkspace {
             workspace_id: workspace.id,
             ref_name: workspace.workspace_ref.clone(),
-            expected_old_oid: workspace.state.head_commit_oid().map(ToOwned::to_owned),
+            expected_old_oid: workspace.state.head_commit_oid().cloned(),
             new_oid: expected_head.clone(),
         },
         status: GitOperationStatus::Planned,
@@ -74,7 +74,7 @@ pub(super) async fn reset_workspace_route(
         WorkspaceKind::Authoring | WorkspaceKind::Integration => {
             git(
                 FsPath::new(&workspace.path),
-                &["reset", "--hard", &expected_head],
+                &["reset", "--hard", expected_head.as_str()],
             )
             .await
             .map_err(git_to_internal)?;
@@ -84,7 +84,7 @@ pub(super) async fn reset_workspace_route(
             if let Some(workspace_ref) = workspace.workspace_ref.as_deref() {
                 ingot_git::commands::git(
                     paths.mirror_git_dir.as_path(),
-                    &["update-ref", workspace_ref, &expected_head],
+                    &["update-ref", workspace_ref, expected_head.as_str()],
                 )
                 .await
                 .map_err(git_to_internal)?;
@@ -94,7 +94,7 @@ pub(super) async fn reset_workspace_route(
             provision_review_workspace(
                 paths.mirror_git_dir.as_path(),
                 FsPath::new(&workspace.path),
-                &expected_head,
+                expected_head.as_str(),
             )
             .await
             .map_err(workspace_to_api_error)?;
@@ -198,8 +198,8 @@ pub(super) async fn remove_workspace_route(
             let expected_old_oid = workspace
                 .state
                 .head_commit_oid()
-                .map(ToOwned::to_owned)
-                .unwrap_or_default();
+                .cloned()
+                .unwrap_or_else(|| CommitOid::new(""));
             let mut operation = GitOperation {
                 id: ingot_domain::ids::GitOperationId::new(),
                 project_id,

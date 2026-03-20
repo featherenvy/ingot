@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::commit_oid::CommitOid;
 use crate::ids::{AgentId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
 use crate::workspace::WorkspaceKind;
 
@@ -85,15 +86,15 @@ pub enum JobInput {
     #[default]
     None,
     AuthoringHead {
-        head_commit_oid: String,
+        head_commit_oid: CommitOid,
     },
     CandidateSubject {
-        base_commit_oid: String,
-        head_commit_oid: String,
+        base_commit_oid: CommitOid,
+        head_commit_oid: CommitOid,
     },
     IntegratedSubject {
-        base_commit_oid: String,
-        head_commit_oid: String,
+        base_commit_oid: CommitOid,
+        head_commit_oid: CommitOid,
     },
 }
 
@@ -104,47 +105,39 @@ impl JobInput {
     }
 
     #[must_use]
-    pub fn authoring_head(head_commit_oid: impl Into<String>) -> Self {
-        Self::AuthoringHead {
-            head_commit_oid: head_commit_oid.into(),
-        }
+    pub fn authoring_head(head_commit_oid: CommitOid) -> Self {
+        Self::AuthoringHead { head_commit_oid }
     }
 
-    pub fn candidate_subject(
-        base_commit_oid: impl Into<String>,
-        head_commit_oid: impl Into<String>,
-    ) -> Self {
+    pub fn candidate_subject(base_commit_oid: CommitOid, head_commit_oid: CommitOid) -> Self {
         Self::CandidateSubject {
-            base_commit_oid: base_commit_oid.into(),
-            head_commit_oid: head_commit_oid.into(),
+            base_commit_oid,
+            head_commit_oid,
         }
     }
 
-    pub fn integrated_subject(
-        base_commit_oid: impl Into<String>,
-        head_commit_oid: impl Into<String>,
-    ) -> Self {
+    pub fn integrated_subject(base_commit_oid: CommitOid, head_commit_oid: CommitOid) -> Self {
         Self::IntegratedSubject {
-            base_commit_oid: base_commit_oid.into(),
-            head_commit_oid: head_commit_oid.into(),
+            base_commit_oid,
+            head_commit_oid,
         }
     }
 
     #[must_use]
-    pub fn base_commit_oid(&self) -> Option<&str> {
+    pub fn base_commit_oid(&self) -> Option<&CommitOid> {
         match self {
             Self::CandidateSubject {
                 base_commit_oid, ..
             }
             | Self::IntegratedSubject {
                 base_commit_oid, ..
-            } => Some(base_commit_oid.as_str()),
+            } => Some(base_commit_oid),
             Self::None | Self::AuthoringHead { .. } => None,
         }
     }
 
     #[must_use]
-    pub fn head_commit_oid(&self) -> Option<&str> {
+    pub fn head_commit_oid(&self) -> Option<&CommitOid> {
         match self {
             Self::AuthoringHead { head_commit_oid }
             | Self::CandidateSubject {
@@ -152,14 +145,13 @@ impl JobInput {
             }
             | Self::IntegratedSubject {
                 head_commit_oid, ..
-            } => Some(head_commit_oid.as_str()),
+            } => Some(head_commit_oid),
             Self::None => None,
         }
     }
 
     #[must_use]
-    pub fn with_head(self, head_commit_oid: impl Into<String>) -> Self {
-        let head_commit_oid = head_commit_oid.into();
+    pub fn with_head(self, head_commit_oid: CommitOid) -> Self {
         match self {
             Self::None | Self::AuthoringHead { .. } => Self::AuthoringHead { head_commit_oid },
             Self::CandidateSubject {
@@ -180,8 +172,8 @@ impl JobInput {
     #[must_use]
     pub fn with_candidate_subject(
         self,
-        base_commit_oid: impl Into<String>,
-        head_commit_oid: impl Into<String>,
+        base_commit_oid: CommitOid,
+        head_commit_oid: CommitOid,
     ) -> Self {
         let _ = self;
         Self::candidate_subject(base_commit_oid, head_commit_oid)
@@ -291,7 +283,7 @@ pub enum JobState {
         started_at: Option<DateTime<Utc>>,
         outcome_class: OutcomeClass,
         ended_at: DateTime<Utc>,
-        output_commit_oid: Option<String>,
+        output_commit_oid: Option<CommitOid>,
         result_schema_version: Option<String>,
         result_payload: Option<serde_json::Value>,
     },
@@ -362,11 +354,11 @@ impl JobState {
     }
 
     #[must_use]
-    pub fn output_commit_oid(&self) -> Option<&str> {
+    pub fn output_commit_oid(&self) -> Option<&CommitOid> {
         match self {
             Self::Completed {
                 output_commit_oid, ..
-            } => output_commit_oid.as_deref(),
+            } => output_commit_oid.as_ref(),
             _ => None,
         }
     }
@@ -489,7 +481,7 @@ impl JobState {
         self,
         outcome_class: OutcomeClass,
         ended_at: DateTime<Utc>,
-        output_commit_oid: Option<String>,
+        output_commit_oid: Option<CommitOid>,
         result_schema_version: Option<String>,
         result_payload: Option<serde_json::Value>,
     ) -> Self {
@@ -552,7 +544,7 @@ struct JobWire {
     pub prompt_snapshot: Option<String>,
     pub job_input: JobInput,
     pub output_artifact_kind: OutputArtifactKind,
-    pub output_commit_oid: Option<String>,
+    pub output_commit_oid: Option<CommitOid>,
     pub result_schema_version: Option<String>,
     pub result_payload: Option<serde_json::Value>,
     pub agent_id: Option<AgentId>,
@@ -662,7 +654,7 @@ impl From<Job> for JobWire {
         let agent_id = job.state.agent_id();
         let prompt_snapshot = job.state.prompt_snapshot().map(ToOwned::to_owned);
         let phase_template_digest = job.state.phase_template_digest().map(ToOwned::to_owned);
-        let output_commit_oid = job.state.output_commit_oid().map(ToOwned::to_owned);
+        let output_commit_oid = job.state.output_commit_oid().cloned();
         let result_schema_version = job.state.result_schema_version().map(ToOwned::to_owned);
         let result_payload = job.state.result_payload().cloned();
         let process_pid = job.state.process_pid();
@@ -746,7 +738,7 @@ impl Job {
         &mut self,
         outcome_class: OutcomeClass,
         ended_at: DateTime<Utc>,
-        output_commit_oid: Option<String>,
+        output_commit_oid: Option<CommitOid>,
         result_schema_version: Option<String>,
         result_payload: Option<serde_json::Value>,
     ) {

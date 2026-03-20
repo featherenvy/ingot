@@ -1,5 +1,6 @@
 use chrono::Utc;
 use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::Convergence;
 use ingot_domain::finding::Finding;
 use ingot_domain::ids::ActivityId;
@@ -34,7 +35,7 @@ pub fn should_fill_candidate_subject_from_workspace(step_id: &str) -> bool {
 pub fn current_authoring_head_for_revision(
     jobs: &[Job],
     revision: &ItemRevision,
-) -> Option<String> {
+) -> Option<CommitOid> {
     jobs.iter()
         .filter(|job| job.item_revision_id == revision.id)
         .filter(|job| job.state.status() == JobStatus::Completed)
@@ -58,7 +59,7 @@ pub fn current_authoring_head_for_revision_with_workspace(
     revision: &ItemRevision,
     jobs: &[Job],
     workspace: Option<&Workspace>,
-) -> Option<String> {
+) -> Option<CommitOid> {
     if let Some(commit_oid) = current_authoring_head_for_revision(jobs, revision) {
         return Some(commit_oid);
     }
@@ -71,7 +72,7 @@ pub fn current_authoring_head_for_revision_with_workspace(
 pub fn effective_authoring_base_commit_oid(
     revision: &ItemRevision,
     workspace: Option<&Workspace>,
-) -> Option<String> {
+) -> Option<CommitOid> {
     if let Some(seed_commit_oid) = revision.seed.seed_commit_oid() {
         return Some(seed_commit_oid.to_owned());
     }

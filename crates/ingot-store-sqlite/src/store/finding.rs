@@ -1,4 +1,5 @@
 use chrono::Utc;
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::finding::{Finding, FindingTriage, FindingTriageState};
 use ingot_domain::ids::{FindingId, ItemId, JobId};
 use ingot_domain::item::Item;
@@ -59,8 +60,8 @@ impl Database {
         .bind(&finding.source_report_schema_version)
         .bind(&finding.source_finding_key)
         .bind(encode_enum(&finding.source_subject_kind)?)
-        .bind(finding.source_subject_base_commit_oid.as_deref())
-        .bind(&finding.source_subject_head_commit_oid)
+        .bind(finding.source_subject_base_commit_oid.as_ref().map(CommitOid::as_str))
+        .bind(finding.source_subject_head_commit_oid.as_str())
         .bind(&finding.code)
         .bind(encode_enum(&finding.severity)?)
         .bind(&finding.summary)
@@ -212,8 +213,8 @@ impl Database {
         .bind(encode_enum(&linked_revision.approval_policy)?)
         .bind(serde_json::to_string(&linked_revision.policy_snapshot).map_err(json_err)?)
         .bind(serde_json::to_string(&linked_revision.template_map_snapshot).map_err(json_err)?)
-        .bind(linked_revision.seed.seed_commit_oid())
-        .bind(linked_revision.seed.seed_target_commit_oid())
+        .bind(linked_revision.seed.seed_commit_oid().map(CommitOid::as_str))
+        .bind(linked_revision.seed.seed_target_commit_oid().as_str())
         .bind(
             linked_revision
                 .supersedes_revision_id
@@ -270,8 +271,8 @@ impl Database {
         .bind(&finding.source_step_id)
         .bind(&finding.source_report_schema_version)
         .bind(encode_enum(&finding.source_subject_kind)?)
-        .bind(finding.source_subject_base_commit_oid.as_deref())
-        .bind(&finding.source_subject_head_commit_oid)
+        .bind(finding.source_subject_base_commit_oid.as_ref().map(CommitOid::as_str))
+        .bind(finding.source_subject_head_commit_oid.as_str())
         .bind(&finding.code)
         .bind(encode_enum(&finding.severity)?)
         .bind(&finding.summary)
@@ -370,8 +371,8 @@ pub(super) async fn upsert_finding(
     .bind(&finding.source_report_schema_version)
     .bind(&finding.source_finding_key)
     .bind(encode_enum(&finding.source_subject_kind)?)
-    .bind(finding.source_subject_base_commit_oid.as_deref())
-    .bind(&finding.source_subject_head_commit_oid)
+    .bind(finding.source_subject_base_commit_oid.as_ref().map(CommitOid::as_str))
+    .bind(finding.source_subject_head_commit_oid.as_str())
     .bind(&finding.code)
     .bind(encode_enum(&finding.severity)?)
     .bind(&finding.summary)
@@ -422,11 +423,12 @@ fn map_finding(row: &SqliteRow) -> Result<Finding, RepositoryError> {
         source_finding_key: row.try_get("source_finding_key").map_err(db_err)?,
         source_subject_kind: parse_enum(row.try_get("source_subject_kind").map_err(db_err)?)?,
         source_subject_base_commit_oid: row
-            .try_get("source_subject_base_commit_oid")
-            .map_err(db_err)?,
-        source_subject_head_commit_oid: row
-            .try_get("source_subject_head_commit_oid")
-            .map_err(db_err)?,
+            .try_get::<Option<String>, _>("source_subject_base_commit_oid")
+            .map_err(db_err)?
+            .map(CommitOid::new),
+        source_subject_head_commit_oid: CommitOid::new(row
+            .try_get::<String, _>("source_subject_head_commit_oid")
+            .map_err(db_err)?),
         code: row.try_get("code").map_err(db_err)?,
         severity: parse_enum(row.try_get("severity").map_err(db_err)?)?,
         summary: row.try_get("summary").map_err(db_err)?,

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::ids::ProjectId;
 use ingot_domain::job::Job;
 use ingot_domain::revision::ItemRevision;
@@ -63,7 +64,7 @@ pub async fn provision_authoring_workspace(
     }
 
     let current_ref = resolve_ref_oid(repo_path, workspace_ref).await?;
-    if current_ref.as_deref() != Some(expected_head_oid) {
+    if current_ref.as_ref().map(|o| o.as_str()) != Some(expected_head_oid) {
         git(repo_path, &["update-ref", workspace_ref, expected_head_oid]).await?;
     }
 
@@ -94,18 +95,18 @@ pub async fn verify_authoring_workspace(
     expected_head_oid: &str,
 ) -> Result<ProvisionedAuthoringWorkspace, WorkspaceError> {
     let actual_ref = resolve_ref_oid(repo_path, workspace_ref).await?;
-    if actual_ref.as_deref() != Some(expected_head_oid) {
+    if actual_ref.as_ref().map(|o| o.as_str()) != Some(expected_head_oid) {
         return Err(WorkspaceError::WorkspaceRefMismatch {
             expected: expected_head_oid.to_string(),
-            actual: actual_ref,
+            actual: actual_ref.map(|o| o.into_inner()),
         });
     }
 
     let actual_head = head_oid(workspace_path).await?;
-    if actual_head != expected_head_oid {
+    if actual_head.as_str() != expected_head_oid {
         return Err(WorkspaceError::WorkspaceHeadMismatch {
             expected: expected_head_oid.to_string(),
-            actual: actual_head,
+            actual: actual_head.into_inner(),
         });
     }
 
@@ -178,10 +179,10 @@ pub async fn verify_review_workspace(
     expected_head_oid: &str,
 ) -> Result<ProvisionedReviewWorkspace, WorkspaceError> {
     let actual_head = head_oid(workspace_path).await?;
-    if actual_head != expected_head_oid {
+    if actual_head.as_str() != expected_head_oid {
         return Err(WorkspaceError::WorkspaceHeadMismatch {
             expected: expected_head_oid.to_string(),
-            actual: actual_head,
+            actual: actual_head.into_inner(),
         });
     }
 
@@ -221,12 +222,12 @@ pub async fn ensure_authoring_workspace_state(
         workspace: Option<&Workspace>,
         revision: &ItemRevision,
         job: &Job,
-    ) -> String {
+    ) -> CommitOid {
         workspace
             .and_then(|workspace| workspace.state.base_commit_oid().map(ToOwned::to_owned))
             .or_else(|| revision.seed.seed_commit_oid().map(ToOwned::to_owned))
             .or_else(|| job.job_input.head_commit_oid().map(ToOwned::to_owned))
-            .unwrap_or_default()
+            .unwrap_or_else(|| CommitOid::new(""))
     }
 
     let expected_head_commit_oid = job
@@ -256,7 +257,7 @@ pub async fn ensure_authoring_workspace_state(
             repo_path,
             &workspace_path,
             &workspace_ref,
-            &expected_head_commit_oid,
+            expected_head_commit_oid.as_str(),
         )
         .await?;
         workspace.path = provisioned.workspace_path.display().to_string();
@@ -265,7 +266,7 @@ pub async fn ensure_authoring_workspace_state(
         workspace.mark_ready(
             WorkspaceCommitState::new(
                 resolve_base_commit_oid(Some(&workspace), revision, job),
-                provisioned.head_commit_oid,
+                CommitOid::new(provisioned.head_commit_oid),
             ),
             now,
         );
@@ -275,7 +276,7 @@ pub async fn ensure_authoring_workspace_state(
             repo_path,
             &workspace_path,
             &workspace_ref,
-            &expected_head_commit_oid,
+            expected_head_commit_oid.as_str(),
         )
         .await?;
 
@@ -293,7 +294,7 @@ pub async fn ensure_authoring_workspace_state(
             state: WorkspaceState::Ready {
                 commits: WorkspaceCommitState::new(
                     resolve_base_commit_oid(None, revision, job),
-                    provisioned.head_commit_oid,
+                    CommitOid::new(provisioned.head_commit_oid),
                 ),
             },
             created_at: now,
@@ -388,7 +389,7 @@ mod tests {
         std::fs::write(repo.join("tracked.txt"), "next").expect("write tracked");
         git_sync(&repo, &["add", "tracked.txt"]);
         git_sync(&repo, &["commit", "-m", "next"]);
-        let next_head = head_oid(&repo).await.expect("next head");
+        let next_head = head_oid(&repo).await.expect("next head").into_inner();
 
         git_sync(&workspace_path, &["checkout", &next_head]);
 
@@ -397,7 +398,7 @@ mod tests {
             .expect("re-provision drifted workspace");
 
         assert_eq!(
-            head_oid(&workspace_path).await.expect("workspace head"),
+            head_oid(&workspace_path).await.expect("workspace head").into_inner(),
             base_head
         );
     }
@@ -416,7 +417,7 @@ mod tests {
         std::fs::write(repo.join("tracked.txt"), "next").expect("write tracked");
         git_sync(&repo, &["add", "tracked.txt"]);
         git_sync(&repo, &["commit", "-m", "next"]);
-        let next_head = head_oid(&repo).await.expect("next head");
+        let next_head = head_oid(&repo).await.expect("next head").into_inner();
 
         git_sync(&repo, &["branch", "feature/drift", &next_head]);
         git_sync(&workspace_path, &["checkout", "feature/drift"]);
@@ -426,7 +427,7 @@ mod tests {
             .expect("re-provision drifted workspace");
 
         assert_eq!(
-            head_oid(&workspace_path).await.expect("workspace head"),
+            head_oid(&workspace_path).await.expect("workspace head").into_inner(),
             base_head
         );
         assert_eq!(
@@ -449,7 +450,7 @@ mod tests {
         std::fs::write(repo.join("tracked.txt"), "next").expect("write tracked");
         git_sync(&repo, &["add", "tracked.txt"]);
         git_sync(&repo, &["commit", "-m", "next"]);
-        let next_head = head_oid(&repo).await.expect("next head");
+        let next_head = head_oid(&repo).await.expect("next head").into_inner();
 
         git_sync(&workspace_path, &["checkout", &next_head]);
 
@@ -458,7 +459,7 @@ mod tests {
             .expect("re-provision drifted workspace");
 
         assert_eq!(
-            head_oid(&workspace_path).await.expect("workspace head"),
+            head_oid(&workspace_path).await.expect("workspace head").into_inner(),
             base_head
         );
     }

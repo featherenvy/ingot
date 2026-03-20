@@ -1,3 +1,4 @@
+use ingot_domain::commit_oid::CommitOid;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,11 +37,11 @@ struct BlockedAutoFinalizeFixture {
 
 async fn blocked_auto_finalize_fixture() -> BlockedAutoFinalizeFixture {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let base_commit = head_oid(&repo).await.expect("base head");
+    let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     std::fs::write(repo.join("tracked.txt"), "prepared").expect("write file");
     git_sync(&repo, &["add", "tracked.txt"]);
     git_sync(&repo, &["commit", "-m", "prepared"]);
-    let prepared_commit = head_oid(&repo).await.expect("prepared head");
+    let prepared_commit = head_oid(&repo).await.expect("prepared head").into_inner();
     git_sync(&repo, &["reset", "--hard", &base_commit]);
     git_sync(&repo, &["checkout", "-b", "feature"]);
     let integration_workspace_path = unique_temp_path("ingot-runtime-integration-blocked");
@@ -87,7 +88,7 @@ async fn blocked_auto_finalize_fixture() -> BlockedAutoFinalizeFixture {
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
         .approval_policy(ApprovalPolicy::NotRequired)
-        .explicit_seed(&base_commit)
+        .explicit_seed(base_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -124,9 +125,9 @@ async fn blocked_auto_finalize_fixture() -> BlockedAutoFinalizeFixture {
         .context_policy(ContextPolicy::ResumeContext)
         .phase_template_slug("validate-integrated")
         .job_input(JobInput::integrated_subject(
-            base_commit.clone(),
-            prepared_commit.clone(),
-        ))
+        CommitOid::new(base_commit.clone()),
+        CommitOid::new(prepared_commit.clone()),
+    ))
         .output_artifact_kind(OutputArtifactKind::ValidationReport)
         .result_schema_version("validation_report:v1")
         .result_payload(serde_json::json!({
@@ -214,11 +215,11 @@ async fn assert_blocked_auto_finalize_state(fixture: &BlockedAutoFinalizeFixture
 #[tokio::test]
 async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let base_commit = head_oid(&repo).await.expect("base head");
+    let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     std::fs::write(repo.join("tracked.txt"), "prepared").expect("write file");
     git_sync(&repo, &["add", "tracked.txt"]);
     git_sync(&repo, &["commit", "-m", "prepared"]);
-    let prepared_commit = head_oid(&repo).await.expect("prepared head");
+    let prepared_commit = head_oid(&repo).await.expect("prepared head").into_inner();
     git_sync(&repo, &["reset", "--hard", &base_commit]);
     let integration_workspace_path = unique_temp_path("ingot-runtime-integration");
 
@@ -265,7 +266,7 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
         .approval_policy(ApprovalPolicy::NotRequired)
-        .explicit_seed(&base_commit)
+        .explicit_seed(base_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -302,9 +303,9 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
         .context_policy(ContextPolicy::ResumeContext)
         .phase_template_slug("validate-integrated")
         .job_input(JobInput::integrated_subject(
-            base_commit.clone(),
-            prepared_commit.clone(),
-        ))
+        CommitOid::new(base_commit.clone()),
+        CommitOid::new(prepared_commit.clone()),
+    ))
         .output_artifact_kind(OutputArtifactKind::ValidationReport)
         .result_schema_version("validation_report:v1")
         .result_payload(serde_json::json!({
@@ -376,7 +377,7 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
         .expect("write post-finalize change");
     git_sync(&repo, &["add", "tracked.txt"]);
     git_sync(&repo, &["commit", "-m", "post-finalize refresh"]);
-    let refreshed_head = head_oid(&repo).await.expect("refreshed head");
+    let refreshed_head = head_oid(&repo).await.expect("refreshed head").into_inner();
     let refreshed_paths = dispatcher
         .refresh_project_mirror(&project)
         .await
@@ -385,7 +386,7 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
         resolve_ref_oid(refreshed_paths.mirror_git_dir.as_path(), "refs/heads/main")
             .await
             .expect("resolve mirror head"),
-        Some(refreshed_head)
+        Some(CommitOid::new(refreshed_head))
     );
 }
 
@@ -423,7 +424,7 @@ async fn tick_reports_no_progress_when_auto_finalize_is_blocked() {
 async fn tick_auto_finalizes_not_required_prepared_convergence_even_when_commit_exists_only_in_mirror()
  {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let base_commit = head_oid(&repo).await.expect("base head");
+    let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     let db = migrated_test_db("ingot-runtime-finalize-mirror-only").await;
     let state_root = unique_temp_path("ingot-runtime-finalize-mirror-only-state");
     let dispatcher = JobDispatcher::with_runner(
@@ -466,7 +467,7 @@ async fn tick_auto_finalizes_not_required_prepared_convergence_even_when_commit_
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
         .approval_policy(ingot_domain::revision::ApprovalPolicy::NotRequired)
-        .explicit_seed(&base_commit)
+        .explicit_seed(base_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -503,9 +504,9 @@ async fn tick_auto_finalizes_not_required_prepared_convergence_even_when_commit_
         .context_policy(ContextPolicy::ResumeContext)
         .phase_template_slug("validate-integrated")
         .job_input(JobInput::integrated_subject(
-            base_commit.clone(),
-            prepared_commit.clone(),
-        ))
+        CommitOid::new(base_commit.clone()),
+        CommitOid::new(prepared_commit.clone()),
+    ))
         .output_artifact_kind(OutputArtifactKind::ValidationReport)
         .result_schema_version("validation_report:v1")
         .result_payload(serde_json::json!({
@@ -545,7 +546,7 @@ async fn tick_auto_finalizes_not_required_prepared_convergence_even_when_commit_
     assert!(dispatcher.tick().await.expect("tick should finalize"));
 
     assert_eq!(
-        head_oid(&repo).await.expect("checkout head"),
+        head_oid(&repo).await.expect("checkout head").into_inner(),
         prepared_commit
     );
     let updated_convergence = db
@@ -577,11 +578,11 @@ async fn tick_auto_finalizes_not_required_prepared_convergence_even_when_commit_
 #[tokio::test]
 async fn tick_invalidates_stale_prepared_convergence() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let base_commit = head_oid(&repo).await.expect("base head");
+    let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     std::fs::write(repo.join("tracked.txt"), "prepared").expect("write file");
     git_sync(&repo, &["add", "tracked.txt"]);
     git_sync(&repo, &["commit", "-m", "prepared"]);
-    let prepared_commit = head_oid(&repo).await.expect("prepared head");
+    let prepared_commit = head_oid(&repo).await.expect("prepared head").into_inner();
     git_sync(&repo, &["reset", "--hard", &base_commit]);
     std::fs::write(repo.join("tracked.txt"), "moved target").expect("write moved target");
     git_sync(&repo, &["add", "tracked.txt"]);
@@ -601,7 +602,7 @@ async fn tick_invalidates_stale_prepared_convergence() {
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&base_commit)
+        .explicit_seed(base_commit.as_str())
         .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
@@ -636,9 +637,9 @@ async fn tick_invalidates_stale_prepared_convergence() {
         .context_policy(ContextPolicy::ResumeContext)
         .phase_template_slug("validate-integrated")
         .job_input(JobInput::integrated_subject(
-            base_commit.clone(),
-            prepared_commit.clone(),
-        ))
+        CommitOid::new(base_commit.clone()),
+        CommitOid::new(prepared_commit.clone()),
+    ))
         .output_artifact_kind(OutputArtifactKind::ValidationReport)
         .result_schema_version("validation_report:v1")
         .result_payload(serde_json::json!({
@@ -695,11 +696,11 @@ async fn tick_invalidates_stale_prepared_convergence() {
 #[tokio::test]
 async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prepared_convergence() {
     let repo = temp_git_repo("ingot-runtime-repo");
-    let base_commit = head_oid(&repo).await.expect("base head");
+    let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     std::fs::write(repo.join("tracked.txt"), "prepared").expect("write prepared");
     git_sync(&repo, &["add", "tracked.txt"]);
     git_sync(&repo, &["commit", "-m", "prepared"]);
-    let prepared_commit = head_oid(&repo).await.expect("prepared head");
+    let prepared_commit = head_oid(&repo).await.expect("prepared head").into_inner();
 
     let db = migrated_test_db("ingot-runtime-finalize-reconcile").await;
     let state_root = unique_temp_path("ingot-runtime-finalize-reconcile-state");
@@ -719,7 +720,7 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
         resolve_ref_oid(paths.mirror_git_dir.as_path(), "refs/heads/main")
             .await
             .expect("mirror head"),
-        Some(prepared_commit.clone())
+        Some(CommitOid::new(prepared_commit.clone()))
     );
 
     let item_id = ingot_domain::ids::ItemId::new();
@@ -731,7 +732,7 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
         .approval_policy(ingot_domain::revision::ApprovalPolicy::NotRequired)
-        .explicit_seed(&base_commit)
+        .explicit_seed(base_commit.as_str())
         .build();
     db.create_item_with_revision(&item, &revision)
         .await
@@ -834,7 +835,7 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
 async fn fail_prepare_convergence_attempt_marks_non_conflict_failures_as_step_failed() {
     let h = TestHarness::new(Arc::new(FakeRunner)).await;
 
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let item = ItemBuilder::new(h.project.id, revision_id)
@@ -844,7 +845,7 @@ async fn fail_prepare_convergence_attempt_marks_non_conflict_failures_as_step_fa
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
         .approval_policy(ingot_domain::revision::ApprovalPolicy::NotRequired)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     h.db.create_item_with_revision(&item, &revision)
         .await
@@ -924,7 +925,7 @@ async fn fail_prepare_convergence_attempt_marks_non_conflict_failures_as_step_fa
             &mut integration_workspace,
             &mut convergence,
             &mut operation,
-            std::slice::from_ref(&seed_commit),
+            &[CommitOid::new(seed_commit.clone())],
             &[],
             "non-conflict failure".into(),
             ingot_domain::convergence::PrepareFailureKind::Failed,
@@ -959,14 +960,14 @@ async fn candidate_repair_loop_advances_to_prepare_convergence() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .build();
     let revision = RevisionBuilder::new(item_id)
         .id(revision_id)
-        .explicit_seed(&seed_commit)
+        .explicit_seed(seed_commit.as_str())
         .build();
     h.db.create_item_with_revision(&item, &revision)
         .await

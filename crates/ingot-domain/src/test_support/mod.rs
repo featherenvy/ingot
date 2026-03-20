@@ -29,8 +29,8 @@ pub fn nil_item() -> crate::item::Item {
 pub fn nil_revision() -> crate::revision::ItemRevision {
     RevisionBuilder::nil()
         .seed(crate::revision::AuthoringBaseSeed::Explicit {
-            seed_commit_oid: "seed".into(),
-            seed_target_commit_oid: "target".into(),
+            seed_commit_oid: crate::commit_oid::CommitOid::new("seed"),
+            seed_target_commit_oid: crate::commit_oid::CommitOid::new("target"),
         })
         .build()
 }

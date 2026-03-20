@@ -49,8 +49,8 @@ async fn prepare_convergence_route_queues_lane_head_for_async_prepare() {
             revision
                 .approval_policy(ApprovalPolicy::Required)
                 .seed(AuthoringBaseSeed::Explicit {
-                    seed_commit_oid: base_commit_oid.clone(),
-                    seed_target_commit_oid: base_commit_oid.clone(),
+                    seed_commit_oid: base_commit_oid.clone().into(),
+                    seed_target_commit_oid: base_commit_oid.clone().into(),
                 })
                 .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
         },
@@ -222,8 +222,8 @@ async fn approve_route_atomically_finalizes_convergence_and_closes_item() {
             revision
                 .approval_policy(ApprovalPolicy::Required)
                 .seed(AuthoringBaseSeed::Explicit {
-                    seed_commit_oid: base_commit_oid.clone(),
-                    seed_target_commit_oid: base_commit_oid.clone(),
+                    seed_commit_oid: base_commit_oid.clone().into(),
+                    seed_target_commit_oid: base_commit_oid.clone().into(),
                 })
                 .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
         },
@@ -388,8 +388,8 @@ async fn approve_route_succeeds_when_target_ref_is_already_at_the_prepared_commi
             revision
                 .approval_policy(ApprovalPolicy::Required)
                 .seed(AuthoringBaseSeed::Explicit {
-                    seed_commit_oid: base_commit_oid.clone(),
-                    seed_target_commit_oid: base_commit_oid.clone(),
+                    seed_commit_oid: base_commit_oid.clone().into(),
+                    seed_target_commit_oid: base_commit_oid.clone().into(),
                 })
                 .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
         },
@@ -545,8 +545,8 @@ async fn approve_route_reuses_existing_finalize_op_when_checkout_is_blocked() {
             revision
                 .approval_policy(ApprovalPolicy::Required)
                 .seed(AuthoringBaseSeed::Explicit {
-                    seed_commit_oid: base_commit_oid.clone(),
-                    seed_target_commit_oid: base_commit_oid.clone(),
+                    seed_commit_oid: base_commit_oid.clone().into(),
+                    seed_target_commit_oid: base_commit_oid.clone().into(),
                 })
                 .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
         },
@@ -702,8 +702,8 @@ async fn prepare_convergence_route_only_queues_even_when_future_prepare_would_co
             revision
                 .approval_policy(ApprovalPolicy::Required)
                 .seed(AuthoringBaseSeed::Explicit {
-                    seed_commit_oid: base_commit_oid.clone(),
-                    seed_target_commit_oid: base_commit_oid.clone(),
+                    seed_commit_oid: base_commit_oid.clone().into(),
+                    seed_target_commit_oid: base_commit_oid.clone().into(),
                 })
                 .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
         },
@@ -861,8 +861,8 @@ async fn reject_approval_route_cancels_prepared_convergence_and_creates_supersed
             revision
                 .approval_policy(ApprovalPolicy::Required)
                 .seed(AuthoringBaseSeed::Explicit {
-                    seed_commit_oid: base_commit_oid.clone(),
-                    seed_target_commit_oid: base_commit_oid.clone(),
+                    seed_commit_oid: base_commit_oid.clone().into(),
+                    seed_target_commit_oid: base_commit_oid.clone().into(),
                 })
                 .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
         },

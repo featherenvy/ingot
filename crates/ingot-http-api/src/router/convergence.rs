@@ -35,8 +35,8 @@ fn approval_finalize_readiness(
         .input_target_commit_oid()
         .zip(convergence.state.prepared_commit_oid())
         .is_some_and(|(input_target_commit_oid, prepared_commit_oid)| {
-            resolved_target_oid == Some(input_target_commit_oid)
-                || resolved_target_oid == Some(prepared_commit_oid)
+            resolved_target_oid == Some(input_target_commit_oid.as_str())
+                || resolved_target_oid == Some(prepared_commit_oid.as_str())
         });
     if !target_valid {
         return ApprovalFinalizeReadiness::PreparedConvergenceStale;
@@ -344,7 +344,7 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 finalize_readiness: approval_finalize_readiness(
                     prepared_convergence,
                     queue_entry,
-                    resolved_target_oid.as_deref(),
+                    resolved_target_oid.as_ref().map(|o| o.as_str()),
                 ),
             })
         }
@@ -558,19 +558,17 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
             let prepared_commit_oid = convergence
                 .state
                 .prepared_commit_oid()
-                .map(ToOwned::to_owned)
                 .ok_or(UseCaseError::PreparedConvergenceMissing)?;
             let input_target_commit_oid = convergence
                 .state
                 .input_target_commit_oid()
-                .map(ToOwned::to_owned)
                 .ok_or(UseCaseError::PreparedConvergenceMissing)?;
 
             match finalize_target_ref_in_repo(
                 paths.mirror_git_dir.as_path(),
                 &convergence.target_ref,
-                &prepared_commit_oid,
-                &input_target_commit_oid,
+                prepared_commit_oid.as_str(),
+                input_target_commit_oid.as_str(),
             )
             .await
             .map_err(git_to_internal)
@@ -590,19 +588,19 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         project: &Project,
         item: &Item,
         revision: &ItemRevision,
-        prepared_commit_oid: &str,
+        prepared_commit_oid: &CommitOid,
     ) -> impl std::future::Future<Output = Result<CheckoutFinalizationReadiness, UseCaseError>> + Send
     {
         let state = self.state.clone();
         let project = project.clone();
         let item = item.clone();
         let revision = revision.clone();
-        let prepared_commit_oid = prepared_commit_oid.to_string();
+        let prepared_commit_oid = prepared_commit_oid.clone();
         async move {
             let readiness = match checkout_finalization_status(
                 std::path::Path::new(&project.path),
                 &revision.target_ref,
-                &prepared_commit_oid,
+                prepared_commit_oid.as_str(),
             )
             .await
             .map_err(git_to_internal)
@@ -623,12 +621,12 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         &self,
         project: &Project,
         revision: &ItemRevision,
-        prepared_commit_oid: &str,
+        prepared_commit_oid: &CommitOid,
     ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
         let state = self.state.clone();
         let project = project.clone();
         let revision = revision.clone();
-        let prepared_commit_oid = prepared_commit_oid.to_string();
+        let prepared_commit_oid = prepared_commit_oid.clone();
         async move {
             let paths = refresh_project_mirror(&state, &project)
                 .await
@@ -637,7 +635,7 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                 std::path::Path::new(&project.path),
                 paths.mirror_git_dir.as_path(),
                 &revision.target_ref,
-                &prepared_commit_oid,
+                prepared_commit_oid.as_str(),
             )
             .await
             .map_err(git_to_internal)

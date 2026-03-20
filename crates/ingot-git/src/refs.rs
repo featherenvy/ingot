@@ -309,7 +309,7 @@ async fn ensure_target_ref_matches(
         .await
         .map_err(|err| TargetRefHoldError::Internal(err.to_string()))?;
 
-    if resolved.as_deref() == Some(expected_oid) {
+    if resolved.as_ref().is_some_and(|oid| oid == expected_oid) {
         Ok(())
     } else {
         Err(TargetRefHoldError::Stale)

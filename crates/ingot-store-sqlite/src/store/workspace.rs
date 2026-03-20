@@ -1,3 +1,4 @@
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId, WorkspaceId};
 use ingot_domain::ports::{RepositoryError, WorkspaceRepository};
 use ingot_domain::workspace::{Workspace, WorkspaceCommitState, WorkspaceState, WorkspaceStatus};
@@ -41,8 +42,8 @@ impl Database {
         .bind(workspace.parent_workspace_id.map(|id| id.to_string()))
         .bind(workspace.target_ref.as_deref())
         .bind(workspace.workspace_ref.as_deref())
-        .bind(workspace.state.base_commit_oid())
-        .bind(workspace.state.head_commit_oid())
+        .bind(workspace.state.base_commit_oid().map(CommitOid::as_str))
+        .bind(workspace.state.head_commit_oid().map(CommitOid::as_str))
         .bind(encode_enum(&workspace.retention_policy)?)
         .bind(encode_enum(&workspace.state.status())?)
         .bind(workspace.state.current_job_id().map(|id| id.to_string()))
@@ -65,8 +66,8 @@ impl Database {
         .bind(&workspace.path)
         .bind(workspace.target_ref.as_deref())
         .bind(workspace.workspace_ref.as_deref())
-        .bind(workspace.state.base_commit_oid())
-        .bind(workspace.state.head_commit_oid())
+        .bind(workspace.state.base_commit_oid().map(CommitOid::as_str))
+        .bind(workspace.state.head_commit_oid().map(CommitOid::as_str))
         .bind(encode_enum(&workspace.retention_policy)?)
         .bind(encode_enum(&workspace.state.status())?)
         .bind(workspace.state.current_job_id().map(|id| id.to_string()))
@@ -179,8 +180,8 @@ fn map_workspace(row: &SqliteRow) -> Result<Workspace, RepositoryError> {
     let state = WorkspaceState::from_parts(
         status,
         WorkspaceCommitState::from_option_parts(
-            row.try_get("base_commit_oid").map_err(db_err)?,
-            row.try_get("head_commit_oid").map_err(db_err)?,
+            row.try_get::<Option<String>, _>("base_commit_oid").map_err(db_err)?.map(CommitOid::new),
+            row.try_get::<Option<String>, _>("head_commit_oid").map_err(db_err)?.map(CommitOid::new),
         ),
         current_job_id,
     )

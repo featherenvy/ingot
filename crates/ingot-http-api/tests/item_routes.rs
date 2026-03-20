@@ -247,8 +247,8 @@ async fn defer_and_resume_routes_toggle_parking_state() {
             revision
                 .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
                 .seed(AuthoringBaseSeed::Explicit {
-                    seed_commit_oid: head.clone(),
-                    seed_target_commit_oid: head.clone(),
+                    seed_commit_oid: head.clone().into(),
+                    seed_target_commit_oid: head.clone().into(),
                 })
         },
     )
@@ -307,8 +307,8 @@ async fn resume_route_auto_dispatches_projected_review_job() {
     persist_test_project(&db, &repo, project_id.as_str()).await;
     let revision = test_revision_builder(item_id.as_str(), revision_id.as_str())
         .seed(AuthoringBaseSeed::Explicit {
-            seed_commit_oid: seed_head.clone(),
-            seed_target_commit_oid: seed_head.clone(),
+            seed_commit_oid: seed_head.clone().into(),
+            seed_target_commit_oid: seed_head.clone().into(),
         })
         .build();
     (item, revision).persist(&db).await.expect("insert item");
@@ -506,8 +506,8 @@ async fn defer_route_cancels_lane_head_and_clears_approval_state() {
     persist_test_project(&db, &repo, project_id.as_str()).await;
     let revision = test_revision_builder(item_id.as_str(), revision_id.as_str())
         .seed(AuthoringBaseSeed::Explicit {
-            seed_commit_oid: head.clone(),
-            seed_target_commit_oid: head.clone(),
+            seed_commit_oid: head.clone().into(),
+            seed_target_commit_oid: head.clone().into(),
         })
         .build();
     (item, revision).persist(&db).await.expect("insert item");
@@ -660,8 +660,8 @@ async fn defer_route_refreshes_revision_context_summary_after_cancelling_jobs() 
     let revision = test_revision_builder(item_id, revision_id)
         .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
         .seed(AuthoringBaseSeed::Explicit {
-            seed_commit_oid: head.clone(),
-            seed_target_commit_oid: head.clone(),
+            seed_commit_oid: head.clone().into(),
+            seed_target_commit_oid: head.clone().into(),
         })
         .build();
     (item, revision).persist(&db).await.expect("insert item");
@@ -770,8 +770,8 @@ async fn revise_route_creates_superseding_revision() {
     let mut revision = test_revision_builder(&item_id, &revision_id)
         .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
         .seed(AuthoringBaseSeed::Explicit {
-            seed_commit_oid: head.clone(),
-            seed_target_commit_oid: head.clone(),
+            seed_commit_oid: head.clone().into(),
+            seed_target_commit_oid: head.clone().into(),
         })
         .build();
     revision.policy_snapshot = serde_json::json!({
@@ -871,8 +871,8 @@ async fn revise_route_cancels_current_lane_state() {
         |item| item,
         |revision| {
             revision.seed(AuthoringBaseSeed::Explicit {
-                seed_commit_oid: head.clone(),
-                seed_target_commit_oid: head.clone(),
+                seed_commit_oid: head.clone().into(),
+                seed_target_commit_oid: head.clone().into(),
             })
         },
     )
@@ -981,9 +981,9 @@ async fn revise_route_cancels_current_lane_state() {
                 .parse::<WorkspaceId>()
                 .unwrap(),
             ref_name: Some("refs/ingot/workspaces/revise-source".into()),
-            expected_old_oid: head.clone(),
-            new_oid: Some(head.clone()),
-            commit_oid: Some(head.clone()),
+            expected_old_oid: head.clone().into(),
+            new_oid: Some(head.clone().into()),
+            commit_oid: Some(head.clone().into()),
             replay_metadata: None,
         },
         status: GitOperationStatus::Applied,
@@ -999,9 +999,9 @@ async fn revise_route_cancels_current_lane_state() {
         payload: OperationPayload::FinalizeTargetRef {
             workspace_id: None,
             ref_name: "refs/heads/main".into(),
-            expected_old_oid: head.clone(),
-            new_oid: head.clone(),
-            commit_oid: Some(head.clone()),
+            expected_old_oid: head.clone().into(),
+            new_oid: head.clone().into(),
+            commit_oid: Some(head.clone().into()),
         },
         status: GitOperationStatus::Applied,
         created_at: Utc::now(),
@@ -1092,8 +1092,8 @@ async fn revise_route_rejects_non_branch_target_ref() {
         |item| item,
         |revision| {
             revision.seed(AuthoringBaseSeed::Explicit {
-                seed_commit_oid: head.clone(),
-                seed_target_commit_oid: head.clone(),
+                seed_commit_oid: head.clone().into(),
+                seed_target_commit_oid: head.clone().into(),
             })
         },
     )
@@ -1137,8 +1137,8 @@ async fn revise_route_rejects_git_invalid_branch_name() {
         |item| item,
         |revision| {
             revision.seed(AuthoringBaseSeed::Explicit {
-                seed_commit_oid: head.clone(),
-                seed_target_commit_oid: head.clone(),
+                seed_commit_oid: head.clone().into(),
+                seed_target_commit_oid: head.clone().into(),
             })
         },
     )
@@ -1178,8 +1178,8 @@ async fn dismiss_and_reopen_routes_close_and_reopen_item() {
     let mut revision = test_revision_builder(&item_id, &revision_id)
         .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
         .seed(AuthoringBaseSeed::Explicit {
-            seed_commit_oid: head.clone(),
-            seed_target_commit_oid: head.clone(),
+            seed_commit_oid: head.clone().into(),
+            seed_target_commit_oid: head.clone().into(),
         })
         .build();
     revision.policy_snapshot = serde_json::json!({
@@ -1285,8 +1285,8 @@ async fn dismiss_route_cancels_lane_state() {
     persist_test_project(&db, &repo, &project_id).await;
     let revision = test_revision_builder(&item_id, &revision_id)
         .seed(AuthoringBaseSeed::Explicit {
-            seed_commit_oid: head.clone(),
-            seed_target_commit_oid: head.clone(),
+            seed_commit_oid: head.clone().into(),
+            seed_target_commit_oid: head.clone().into(),
         })
         .build();
     (item, revision).persist(&db).await.expect("insert item");

@@ -1228,7 +1228,7 @@ mod tests {
         .status(status)
         .phase_kind(phase_kind)
         .execution_permission(ingot_domain::job::ExecutionPermission::MustNotMutate)
-        .job_input(JobInput::candidate_subject("base", "head"))
+        .job_input(JobInput::candidate_subject("base".into(), "head".into()))
         .output_artifact_kind(output_artifact_kind)
         .ended_at(Utc::now());
         if let Some(oc) = outcome_class {

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::commit_oid::CommitOid;
 use crate::ids::{ItemRevisionId, JobId, ProjectId, WorkspaceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,23 +42,23 @@ pub enum WorkspaceStatus {
 /// Git commit OIDs that identify a workspace's position. Present once provisioned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceCommitState {
-    pub base_commit_oid: String,
-    pub head_commit_oid: String,
+    pub base_commit_oid: CommitOid,
+    pub head_commit_oid: CommitOid,
 }
 
 impl WorkspaceCommitState {
     #[must_use]
-    pub fn new(base_commit_oid: impl Into<String>, head_commit_oid: impl Into<String>) -> Self {
+    pub fn new(base_commit_oid: CommitOid, head_commit_oid: CommitOid) -> Self {
         Self {
-            base_commit_oid: base_commit_oid.into(),
-            head_commit_oid: head_commit_oid.into(),
+            base_commit_oid,
+            head_commit_oid,
         }
     }
 
     #[must_use]
     pub fn from_option_parts(
-        base_commit_oid: Option<String>,
-        head_commit_oid: Option<String>,
+        base_commit_oid: Option<CommitOid>,
+        head_commit_oid: Option<CommitOid>,
     ) -> Option<Self> {
         match (base_commit_oid, head_commit_oid) {
             (Some(base_commit_oid), Some(head_commit_oid)) => {
@@ -69,12 +70,12 @@ impl WorkspaceCommitState {
 
     #[must_use]
     pub fn empty() -> Self {
-        Self::new(String::new(), String::new())
+        Self::new(CommitOid::new(""), CommitOid::new(""))
     }
 
     #[must_use]
-    pub fn with_head_commit_oid(mut self, head_commit_oid: impl Into<String>) -> Self {
-        self.head_commit_oid = head_commit_oid.into();
+    pub fn with_head_commit_oid(mut self, head_commit_oid: CommitOid) -> Self {
+        self.head_commit_oid = head_commit_oid;
         self
     }
 }
@@ -202,13 +203,13 @@ impl WorkspaceState {
     }
 
     #[must_use]
-    pub fn base_commit_oid(&self) -> Option<&str> {
-        self.commits().map(|c| c.base_commit_oid.as_str())
+    pub fn base_commit_oid(&self) -> Option<&CommitOid> {
+        self.commits().map(|c| &c.base_commit_oid)
     }
 
     #[must_use]
-    pub fn head_commit_oid(&self) -> Option<&str> {
-        self.commits().map(|c| c.head_commit_oid.as_str())
+    pub fn head_commit_oid(&self) -> Option<&CommitOid> {
+        self.commits().map(|c| &c.head_commit_oid)
     }
 
     #[must_use]
@@ -261,7 +262,7 @@ impl WorkspaceState {
 
     /// Busy → Ready with updated head commit OID.
     #[must_use]
-    pub fn into_released_with_head(self, head_commit_oid: String) -> Self {
+    pub fn into_released_with_head(self, head_commit_oid: CommitOid) -> Self {
         match self {
             Self::Busy { mut commits, .. } => {
                 commits.head_commit_oid = head_commit_oid;
@@ -308,7 +309,7 @@ impl WorkspaceState {
 
     /// Update head_commit_oid in place (preserving current variant).
     #[must_use]
-    pub fn with_head_commit_oid(self, head_commit_oid: String) -> Self {
+    pub fn with_head_commit_oid(self, head_commit_oid: CommitOid) -> Self {
         match self {
             Self::Ready { commits } => Self::Ready {
                 commits: commits.with_head_commit_oid(head_commit_oid),
@@ -391,8 +392,12 @@ impl Workspace {
         self.updated_at = now;
     }
 
-    pub fn mark_ready_with_head(&mut self, head_commit_oid: String, now: DateTime<Utc>) {
-        let base_commit_oid = self.state.base_commit_oid().unwrap_or_default().to_owned();
+    pub fn mark_ready_with_head(&mut self, head_commit_oid: CommitOid, now: DateTime<Utc>) {
+        let base_commit_oid = self
+            .state
+            .base_commit_oid()
+            .cloned()
+            .unwrap_or_else(|| CommitOid::new(""));
         self.mark_ready(
             WorkspaceCommitState::new(base_commit_oid, head_commit_oid),
             now,
@@ -416,7 +421,7 @@ impl Workspace {
     }
 
     /// Release workspace from Busy to Ready with updated head commit OID.
-    pub fn release_with_head(&mut self, head_commit_oid: String, now: DateTime<Utc>) {
+    pub fn release_with_head(&mut self, head_commit_oid: CommitOid, now: DateTime<Utc>) {
         self.transition_state(now, |state| state.into_released_with_head(head_commit_oid));
     }
 
@@ -446,7 +451,7 @@ impl Workspace {
     }
 
     /// Update head_commit_oid in place, preserving the current state variant.
-    pub fn set_head_commit_oid(&mut self, head_commit_oid: String, now: DateTime<Utc>) {
+    pub fn set_head_commit_oid(&mut self, head_commit_oid: CommitOid, now: DateTime<Utc>) {
         self.transition_state(now, |state| state.with_head_commit_oid(head_commit_oid));
     }
 }
@@ -464,8 +469,8 @@ struct WorkspaceWire {
     pub parent_workspace_id: Option<WorkspaceId>,
     pub target_ref: Option<String>,
     pub workspace_ref: Option<String>,
-    pub base_commit_oid: Option<String>,
-    pub head_commit_oid: Option<String>,
+    pub base_commit_oid: Option<CommitOid>,
+    pub head_commit_oid: Option<CommitOid>,
     pub retention_policy: RetentionPolicy,
     pub status: WorkspaceStatus,
     pub current_job_id: Option<JobId>,
@@ -513,8 +518,8 @@ impl From<Workspace> for WorkspaceWire {
     fn from(ws: Workspace) -> Self {
         let status = ws.state.status();
         let current_job_id = ws.state.current_job_id();
-        let base_commit_oid = ws.state.base_commit_oid().map(ToOwned::to_owned);
-        let head_commit_oid = ws.state.head_commit_oid().map(ToOwned::to_owned);
+        let base_commit_oid = ws.state.base_commit_oid().cloned();
+        let head_commit_oid = ws.state.head_commit_oid().cloned();
 
         WorkspaceWire {
             id: ws.id,
@@ -577,8 +582,8 @@ mod tests {
 
     fn ready_commits() -> WorkspaceCommitState {
         WorkspaceCommitState {
-            base_commit_oid: "abc123".into(),
-            head_commit_oid: "def456".into(),
+            base_commit_oid: CommitOid::new("abc123"),
+            head_commit_oid: CommitOid::new("def456"),
         }
     }
 
@@ -718,7 +723,10 @@ mod tests {
         };
         let released = state.into_released();
         assert_eq!(released.status(), WorkspaceStatus::Ready);
-        assert_eq!(released.head_commit_oid(), Some("def456"));
+        assert_eq!(
+            released.head_commit_oid(),
+            Some(&CommitOid::new("def456"))
+        );
         assert!(released.current_job_id().is_none());
     }
 
@@ -728,10 +736,16 @@ mod tests {
             commits: ready_commits(),
             current_job_id: JobId::new(),
         };
-        let released = state.into_released_with_head("newhead".into());
+        let released = state.into_released_with_head(CommitOid::new("newhead"));
         assert_eq!(released.status(), WorkspaceStatus::Ready);
-        assert_eq!(released.head_commit_oid(), Some("newhead"));
-        assert_eq!(released.base_commit_oid(), Some("abc123"));
+        assert_eq!(
+            released.head_commit_oid(),
+            Some(&CommitOid::new("newhead"))
+        );
+        assert_eq!(
+            released.base_commit_oid(),
+            Some(&CommitOid::new("abc123"))
+        );
     }
 
     #[test]
@@ -741,9 +755,12 @@ mod tests {
             current_job_id: JobId::new(),
         };
         let job_id = state.current_job_id();
-        let updated = state.with_head_commit_oid("newhead".into());
+        let updated = state.with_head_commit_oid(CommitOid::new("newhead"));
         assert_eq!(updated.status(), WorkspaceStatus::Busy);
-        assert_eq!(updated.head_commit_oid(), Some("newhead"));
+        assert_eq!(
+            updated.head_commit_oid(),
+            Some(&CommitOid::new("newhead"))
+        );
         assert_eq!(updated.current_job_id(), job_id);
     }
 }

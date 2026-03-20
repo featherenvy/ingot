@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::UseCaseError;
 use crate::finding::extract_findings;
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::finding::Finding;
 use ingot_domain::ids::JobId;
@@ -480,7 +481,7 @@ fn completed_job_matches_retry_command(job: &Job, command: &CompleteJobCommand) 
         && job.state.outcome_class() == Some(command.outcome_class)
         && job.state.result_schema_version().map(ToOwned::to_owned) == command.result_schema_version
         && job.state.result_payload().cloned() == command.result_payload
-        && job.state.output_commit_oid().map(ToOwned::to_owned) == command.output_commit_oid
+        && job.state.output_commit_oid().map(|oid| oid.as_str().to_owned()) == command.output_commit_oid
 }
 
 fn completed_job_retry_allowed(job: &Job) -> bool {
@@ -767,8 +768,8 @@ fn job_input_from_prepared_convergence(convergence: &Convergence, integrated: bo
 }
 
 fn job_input_from_range(
-    base_commit_oid: Option<String>,
-    head_commit_oid: Option<String>,
+    base_commit_oid: Option<CommitOid>,
+    head_commit_oid: Option<CommitOid>,
     integrated: bool,
 ) -> JobInput {
     match (base_commit_oid, head_commit_oid) {
@@ -829,14 +830,14 @@ fn should_clear_item_escalation_on_success(item: &Item, job: &Job) -> bool {
         )
 }
 
-fn current_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<String> {
+fn current_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<CommitOid> {
     successful_commit_oids(jobs, revision)
         .last()
         .cloned()
         .or_else(|| revision.seed.seed_commit_oid().map(ToOwned::to_owned))
 }
 
-fn previous_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<String> {
+fn previous_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<CommitOid> {
     let commit_oids = successful_commit_oids(jobs, revision);
     commit_oids
         .iter()
@@ -846,7 +847,7 @@ fn previous_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<Stri
         .or_else(|| revision.seed.seed_commit_oid().map(ToOwned::to_owned))
 }
 
-fn successful_commit_oids(jobs: &[Job], revision: &ItemRevision) -> Vec<String> {
+fn successful_commit_oids(jobs: &[Job], revision: &ItemRevision) -> Vec<CommitOid> {
     let mut commit_jobs = jobs
         .iter()
         .filter(|job| job.item_revision_id == revision.id)
@@ -918,7 +919,7 @@ fn prepared_convergence_guard(
         convergence_id: prepared_convergence.id,
         item_revision_id: job.item_revision_id,
         target_ref: prepared_convergence.target_ref.clone(),
-        expected_target_head_oid: expected_target_oid.into(),
+        expected_target_head_oid: expected_target_oid.as_str().to_owned(),
         next_approval_state: desired_completion_approval_state(item, revision, job),
     }))
 }
@@ -1113,8 +1114,8 @@ mod tests {
         .expect("dispatch after repair");
 
         assert_eq!(job.step_id, "review_incremental_repair");
-        assert_eq!(job.job_input.base_commit_oid(), Some("commit-1"));
-        assert_eq!(job.job_input.head_commit_oid(), Some("commit-2"));
+        assert_eq!(job.job_input.base_commit_oid().map(CommitOid::as_str), Some("commit-1"));
+        assert_eq!(job.job_input.head_commit_oid().map(CommitOid::as_str), Some("commit-2"));
     }
 
     #[test]
@@ -1213,8 +1214,8 @@ mod tests {
         )
         .expect("dispatch validation");
         assert_eq!(validation_job.step_id, "validate_candidate_repair");
-        assert_eq!(validation_job.job_input.base_commit_oid(), Some("seed"));
-        assert_eq!(validation_job.job_input.head_commit_oid(), Some("commit-2"));
+        assert_eq!(validation_job.job_input.base_commit_oid().map(CommitOid::as_str), Some("seed"));
+        assert_eq!(validation_job.job_input.head_commit_oid().map(CommitOid::as_str), Some("commit-2"));
     }
 
     #[tokio::test]
@@ -1750,7 +1751,7 @@ mod tests {
         .execution_permission(ExecutionPermission::MustNotMutate)
         .context_policy(ContextPolicy::ResumeContext)
         .phase_template_slug("validate-integrated")
-        .job_input(JobInput::integrated_subject("target", "prepared-head"))
+        .job_input(JobInput::integrated_subject("target".into(), "prepared-head".into()))
         .output_artifact_kind(output_artifact_kind)
         .build()
     }
@@ -1874,7 +1875,7 @@ mod tests {
                     started_at: state.context.job.state.started_at(),
                     outcome_class: mutation.outcome_class,
                     ended_at: chrono::Utc::now(),
-                    output_commit_oid: mutation.output_commit_oid.clone(),
+                    output_commit_oid: mutation.output_commit_oid.clone().map(CommitOid::new),
                     result_schema_version: mutation.result_schema_version.clone(),
                     result_payload: mutation.result_payload.clone(),
                 };

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::item::Item;
 use ingot_domain::job::{Job, JobStatus, OutputArtifactKind, PhaseKind};
 use ingot_domain::revision::ItemRevision;
@@ -11,7 +12,7 @@ pub fn rebuild_revision_context(
     item: &Item,
     revision: &ItemRevision,
     jobs: &[Job],
-    authoring_head_commit_oid: Option<String>,
+    authoring_head_commit_oid: Option<CommitOid>,
     changed_paths: Vec<String>,
     updated_from_job_id: Option<ingot_domain::ids::JobId>,
     updated_at: DateTime<Utc>,

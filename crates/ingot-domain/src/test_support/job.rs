@@ -1,3 +1,4 @@
+use crate::commit_oid::CommitOid;
 use crate::ids;
 use crate::job::{
     ContextPolicy, ExecutionPermission, Job, JobAssignment, JobInput, JobLease, JobState,
@@ -29,7 +30,7 @@ pub struct JobBuilder {
     prompt_snapshot: Option<String>,
     job_input: JobInput,
     output_artifact_kind: OutputArtifactKind,
-    output_commit_oid: Option<String>,
+    output_commit_oid: Option<CommitOid>,
     result_schema_version: Option<String>,
     result_payload: Option<serde_json::Value>,
     agent_id: Option<ids::AgentId>,
@@ -153,7 +154,7 @@ impl JobBuilder {
         self
     }
 
-    pub fn output_commit_oid(mut self, output_commit_oid: impl Into<String>) -> Self {
+    pub fn output_commit_oid(mut self, output_commit_oid: impl Into<CommitOid>) -> Self {
         self.output_commit_oid = Some(output_commit_oid.into());
         self
     }
@@ -294,6 +295,7 @@ impl JobBuilder {
 
 #[cfg(test)]
 mod tests {
+    use crate::commit_oid::CommitOid;
     use crate::job::JobInput;
 
     use super::super::timestamps::default_timestamp;
@@ -305,11 +307,14 @@ mod tests {
         let item_id = crate::ids::ItemId::new();
         let revision_id = crate::ids::ItemRevisionId::new();
         let job = JobBuilder::new(project_id, item_id, revision_id, "review_candidate_initial")
-            .job_input(JobInput::candidate_subject("base", "head"))
+            .job_input(JobInput::candidate_subject(
+                CommitOid::new("base"),
+                CommitOid::new("head"),
+            ))
             .created_at(default_timestamp())
             .build();
 
-        assert_eq!(job.job_input.base_commit_oid(), Some("base"));
-        assert_eq!(job.job_input.head_commit_oid(), Some("head"));
+        assert_eq!(job.job_input.base_commit_oid(), Some(&CommitOid::from("base")));
+        assert_eq!(job.job_input.head_commit_oid(), Some(&CommitOid::from("head")));
     }
 }
