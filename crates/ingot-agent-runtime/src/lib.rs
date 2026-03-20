@@ -1342,6 +1342,9 @@ impl JobDispatcher {
                 JobStatus::Running => {
                     made_progress |= self.reconcile_running_job(job).await?;
                 }
+                JobStatus::Assigned => {
+                    made_progress |= self.reconcile_inert_assigned_dispatch_job(job).await?;
+                }
                 _ => {}
             }
         }
@@ -1798,6 +1801,44 @@ impl JobDispatcher {
         }
 
         Ok(())
+    }
+
+    async fn reconcile_inert_assigned_dispatch_job(&self, job: Job) -> Result<bool, RuntimeError> {
+        if !is_inert_assigned_authoring_dispatch_residue(&job) {
+            return Ok(false);
+        }
+
+        let _guard = self
+            .project_locks
+            .acquire_project_mutation(job.project_id)
+            .await;
+        let mut job = self.db.get_job(job.id).await?;
+        if !is_inert_assigned_authoring_dispatch_residue(&job) {
+            return Ok(false);
+        }
+
+        let item = self.db.get_item(job.item_id).await?;
+        if item.current_revision_id != job.item_revision_id {
+            return Ok(false);
+        }
+
+        let Some(workspace_id) = job.state.workspace_id() else {
+            return Ok(false);
+        };
+        let workspace = self.db.get_workspace(workspace_id).await?;
+        if workspace.kind != WorkspaceKind::Authoring
+            || workspace.project_id != job.project_id
+            || workspace.created_for_revision_id != Some(job.item_revision_id)
+            || workspace.state.status() != WorkspaceStatus::Ready
+            || workspace.state.current_job_id().is_some()
+        {
+            return Ok(false);
+        }
+
+        job.state = JobState::Queued;
+        self.db.update_job(&job).await?;
+
+        Ok(true)
     }
 
     async fn reconcile_running_job(&self, job: Job) -> Result<bool, RuntimeError> {
@@ -4942,6 +4983,23 @@ fn supports_job(agent: &Agent, job: &Job) -> bool {
 fn is_daemon_only_validation(job: &Job) -> bool {
     job.execution_permission == ExecutionPermission::DaemonOnly
         && job.phase_kind == PhaseKind::Validate
+}
+
+fn is_inert_assigned_authoring_dispatch_residue(job: &Job) -> bool {
+    job.state.status() == JobStatus::Assigned
+        && job.phase_kind == PhaseKind::Author
+        && job.workspace_kind == WorkspaceKind::Authoring
+        && job.execution_permission == ExecutionPermission::MayMutate
+        && job.output_artifact_kind == OutputArtifactKind::Commit
+        && job.state.workspace_id().is_some()
+        && job.state.agent_id().is_none()
+        && job.state.prompt_snapshot().is_none()
+        && job.state.phase_template_digest().is_none()
+        && job.state.process_pid().is_none()
+        && job.state.lease_owner_id().is_none()
+        && job.state.heartbeat_at().is_none()
+        && job.state.lease_expires_at().is_none()
+        && job.state.started_at().is_none()
 }
 
 fn read_harness_profile_if_present(

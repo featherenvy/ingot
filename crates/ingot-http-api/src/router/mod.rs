@@ -48,15 +48,13 @@ use ingot_domain::item::{
     ApprovalState, Classification, DoneReason, Escalation, EscalationReason, Item, Lifecycle,
     Priority, ResolutionSource,
 };
-use ingot_domain::job::{Job, JobAssignment, JobStatus, OutcomeClass};
+use ingot_domain::job::{Job, JobStatus, OutcomeClass};
 use ingot_domain::ports::{ProjectMutationLockPort, RepositoryError};
 use ingot_domain::project::Project;
 use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
 use ingot_git::GitJobCompletionPort;
-use ingot_git::commands::{
-    delete_ref, git, is_commit_reachable_from_any_ref, resolve_ref_oid, update_ref,
-};
+use ingot_git::commands::{delete_ref, git, is_commit_reachable_from_any_ref, resolve_ref_oid};
 use ingot_git::commit::{
     ConvergenceCommitTrailers, abort_cherry_pick, cherry_pick_no_commit, commit_message,
     create_daemon_convergence_commit, list_commits_oldest_first, working_tree_has_changes,
@@ -75,7 +73,6 @@ use ingot_usecases::item::{
     CreateItemInput, approval_state_for_policy, create_manual_item, default_policy_snapshot,
     default_template_map_snapshot, normalize_target_ref, rework_budgets_from_policy_snapshot,
 };
-use ingot_usecases::job::{DispatchJobCommand, dispatch_job, retry_job};
 use ingot_usecases::{
     CompleteJobCommand, CompleteJobService, DispatchNotify, ProjectLocks, UseCaseError,
     rebuild_revision_context,

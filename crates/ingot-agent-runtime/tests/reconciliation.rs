@@ -236,6 +236,159 @@ async fn reconcile_active_jobs_leaves_assigned_rows_for_startup_recovery() {
 }
 
 #[tokio::test]
+async fn reconcile_active_jobs_repairs_inert_assigned_authoring_dispatch_residue() {
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let created_at = default_timestamp();
+    let job_id = ingot_domain::ids::JobId::new();
+    let workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
+        .path(
+            unique_temp_path("ingot-runtime-assigned-dispatch-residue")
+                .display()
+                .to_string(),
+        )
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Ready)
+        .base_commit_oid(&seed_commit)
+        .head_commit_oid(&seed_commit)
+        .workspace_ref("refs/ingot/workspaces/assigned-dispatch-residue")
+        .created_at(created_at)
+        .build();
+    h.db.create_workspace(&workspace)
+        .await
+        .expect("create workspace");
+
+    let assigned_job = JobBuilder::new(h.project.id, item_id, revision_id, "author_initial")
+        .id(job_id)
+        .status(JobStatus::Assigned)
+        .workspace_id(workspace.id)
+        .workspace_kind(WorkspaceKind::Authoring)
+        .execution_permission(ExecutionPermission::MayMutate)
+        .phase_kind(PhaseKind::Author)
+        .phase_template_slug("author-initial")
+        .job_input(JobInput::authoring_head(&seed_commit))
+        .output_artifact_kind(OutputArtifactKind::Commit)
+        .created_at(created_at)
+        .build();
+    h.db.create_job(&assigned_job)
+        .await
+        .expect("create assigned job");
+
+    let made_progress = h
+        .dispatcher
+        .reconcile_active_jobs()
+        .await
+        .expect("reconcile active jobs");
+
+    assert!(made_progress);
+    let updated_job = h.db.get_job(assigned_job.id).await.expect("updated job");
+    assert_eq!(updated_job.state.status(), JobStatus::Queued);
+    assert_eq!(updated_job.state.workspace_id(), None);
+
+    let updated_workspace = h.db.get_workspace(workspace.id).await.expect("workspace");
+    assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Ready);
+    assert_eq!(updated_workspace.state.current_job_id(), None);
+}
+
+#[tokio::test]
+async fn reconcile_active_jobs_does_not_repair_daemon_validation_assigned_handoff() {
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let seed_commit = head_oid(&h.repo_path).await.expect("seed head");
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(&seed_commit)
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let created_at = default_timestamp();
+    let job_id = ingot_domain::ids::JobId::new();
+    let workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
+        .path(
+            unique_temp_path("ingot-runtime-daemon-validation-assigned")
+                .display()
+                .to_string(),
+        )
+        .created_for_revision_id(revision.id)
+        .status(WorkspaceStatus::Busy)
+        .current_job_id(job_id)
+        .base_commit_oid(&seed_commit)
+        .head_commit_oid(&seed_commit)
+        .workspace_ref("refs/ingot/workspaces/daemon-validation-assigned")
+        .created_at(created_at)
+        .build();
+    h.db.create_workspace(&workspace)
+        .await
+        .expect("create workspace");
+
+    let assigned_job = JobBuilder::new(
+        h.project.id,
+        item_id,
+        revision_id,
+        step::VALIDATE_CANDIDATE_INITIAL,
+    )
+    .id(job_id)
+    .status(JobStatus::Assigned)
+    .workspace_id(workspace.id)
+    .workspace_kind(WorkspaceKind::Authoring)
+    .execution_permission(ExecutionPermission::DaemonOnly)
+    .context_policy(ContextPolicy::None)
+    .phase_kind(PhaseKind::Validate)
+    .phase_template_slug("")
+    .job_input(JobInput::candidate_subject(
+        seed_commit.clone(),
+        seed_commit.clone(),
+    ))
+    .output_artifact_kind(OutputArtifactKind::ValidationReport)
+    .created_at(created_at)
+    .build();
+    h.db.create_job(&assigned_job)
+        .await
+        .expect("create assigned job");
+
+    let made_progress = h
+        .dispatcher
+        .reconcile_active_jobs()
+        .await
+        .expect("reconcile active jobs");
+
+    assert!(!made_progress);
+    let updated_job = h.db.get_job(assigned_job.id).await.expect("updated job");
+    assert_eq!(updated_job.state.status(), JobStatus::Assigned);
+    assert_eq!(updated_job.state.workspace_id(), Some(workspace.id));
+
+    let updated_workspace = h.db.get_workspace(workspace.id).await.expect("workspace");
+    assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Busy);
+    assert_eq!(
+        updated_workspace.state.current_job_id(),
+        Some(assigned_job.id)
+    );
+}
+
+#[tokio::test]
 async fn reconcile_startup_fails_inflight_convergences_and_marks_workspace_stale() {
     let h = TestHarness::new(Arc::new(FakeRunner)).await;
 

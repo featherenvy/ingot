@@ -66,16 +66,23 @@ async fn dispatch_item_job_route_creates_queued_author_initial_job_and_workspace
     let json: serde_json::Value = serde_json::from_slice(&body).expect("dispatch json");
 
     assert_eq!(json["step_id"].as_str(), Some("author_initial"));
-    assert_eq!(json["status"].as_str(), Some("assigned"));
+    assert_eq!(json["status"].as_str(), Some("queued"));
     assert_eq!(json["phase_template_slug"].as_str(), Some("author-initial"));
     assert_eq!(json["job_input"]["kind"].as_str(), Some("authoring_head"));
     assert_eq!(
         json["job_input"]["head_commit_oid"].as_str(),
         Some(seed_head.as_str())
     );
-    let workspace_id = json["workspace_id"]
-        .as_str()
-        .expect("workspace id assigned on dispatch");
+    assert!(json["workspace_id"].is_null());
+
+    let queued_job: (String, Option<String>) =
+        sqlx::query_as("SELECT status, workspace_id FROM jobs WHERE id = ?")
+            .bind(json["id"].as_str().expect("job id"))
+            .fetch_one(&db.pool)
+            .await
+            .expect("queued job");
+    assert_eq!(queued_job.0, "queued");
+    assert_eq!(queued_job.1, None);
 
     let detail_response = app
         .oneshot(
@@ -101,10 +108,7 @@ async fn dispatch_item_job_route_creates_queued_author_initial_job_and_workspace
         Some("running")
     );
     assert_eq!(detail_json["workspaces"].as_array().map(Vec::len), Some(1));
-    assert_eq!(
-        detail_json["workspaces"][0]["id"].as_str(),
-        Some(workspace_id)
-    );
+    assert!(detail_json["workspaces"][0]["id"].is_string());
     assert_eq!(
         detail_json["workspaces"][0]["kind"].as_str(),
         Some("authoring")
@@ -180,9 +184,10 @@ async fn dispatch_item_job_route_binds_implicit_author_initial_from_target_head(
         .await
         .expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("dispatch json");
-    let workspace_id = json["workspace_id"].as_str().expect("workspace id");
 
     assert_eq!(json["step_id"].as_str(), Some("author_initial"));
+    assert_eq!(json["status"].as_str(), Some("queued"));
+    assert!(json["workspace_id"].is_null());
     assert_eq!(json["job_input"]["kind"].as_str(), Some("authoring_head"));
     assert_eq!(
         json["job_input"]["head_commit_oid"].as_str(),
@@ -204,6 +209,9 @@ async fn dispatch_item_job_route_binds_implicit_author_initial_from_target_head(
         .await
         .expect("detail body");
     let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).expect("detail json");
+    let workspace_id = detail_json["workspaces"][0]["id"]
+        .as_str()
+        .expect("workspace id");
     assert_eq!(
         detail_json["workspaces"][0]["id"].as_str(),
         Some(workspace_id)
@@ -604,6 +612,7 @@ async fn dispatch_item_job_route_reuses_existing_authoring_workspace_for_revisio
 
     let app = test_router(db.clone());
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -620,7 +629,8 @@ async fn dispatch_item_job_route_reuses_existing_authoring_workspace_for_revisio
         .await
         .expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("dispatch json");
-    assert_eq!(json["workspace_id"].as_str(), Some(workspace_id.as_str()));
+    assert_eq!(json["status"].as_str(), Some("queued"));
+    assert!(json["workspace_id"].is_null());
 
     let workspace_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM workspaces WHERE created_for_revision_id = ?")
@@ -629,4 +639,23 @@ async fn dispatch_item_job_route_reuses_existing_authoring_workspace_for_revisio
             .await
             .expect("workspace count");
     assert_eq!(workspace_count, 1);
+
+    let detail_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{project_id}/items/{item_id}"))
+                .body(Body::empty())
+                .expect("build detail request"),
+        )
+        .await
+        .expect("detail response");
+    let detail_body = to_bytes(detail_response.into_body(), usize::MAX)
+        .await
+        .expect("read detail body");
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).expect("detail json");
+    assert_eq!(detail_json["workspaces"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        detail_json["workspaces"][0]["id"].as_str(),
+        Some(workspace_id.as_str())
+    );
 }

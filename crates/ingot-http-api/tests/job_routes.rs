@@ -212,10 +212,124 @@ async fn retry_route_requeues_terminal_non_success_job_on_current_revision() {
     assert_eq!(json["semantic_attempt_no"].as_u64(), Some(1));
     assert_eq!(json["retry_no"].as_u64(), Some(1));
     assert_eq!(json["supersedes_job_id"].as_str(), Some(job_id.as_str()));
-    assert!(
-        matches!(json["status"].as_str(), Some("queued") | Some("assigned")),
-        "retried job should be queued or assigned, got {:?}",
-        json["status"]
+    assert_eq!(json["status"].as_str(), Some("queued"));
+    assert!(json["workspace_id"].is_null());
+}
+
+#[tokio::test]
+async fn retry_route_requeues_authoring_job_without_persisting_assigned_state() {
+    let repo = temp_git_repo("ingot-http-api");
+    let seed_commit_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    let db = migrated_test_db("ingot-http-api-db").await;
+    let project_id = "prj_00000000000000000000000000000068".to_string();
+    let item_id = "itm_00000000000000000000000000000068".to_string();
+    let revision_id = "rev_00000000000000000000000000000068".to_string();
+    let failed_job_id = "job_00000000000000000000000000000068".to_string();
+
+    persist_test_change(
+        &db,
+        &repo,
+        &project_id,
+        &item_id,
+        &revision_id,
+        |item| item.escalated(EscalationReason::StepFailed),
+        |revision| revision.explicit_seed(&seed_commit_oid),
+    )
+    .await;
+
+    insert_test_job_row(
+        &db,
+        TestJobInsert {
+            id: &failed_job_id,
+            project_id: &project_id,
+            item_id: &item_id,
+            item_revision_id: &revision_id,
+            step_id: "author_initial",
+            status: JobStatus::Failed,
+            outcome_class: Some(OutcomeClass::TerminalFailure),
+            phase_kind: PhaseKind::Author,
+            workspace_kind: WorkspaceKind::Authoring,
+            execution_permission: ExecutionPermission::MayMutate,
+            context_policy: ContextPolicy::Fresh,
+            phase_template_slug: "author-initial",
+            output_artifact_kind: OutputArtifactKind::Commit,
+            job_input: TestJobInput::AuthoringHead(&seed_commit_oid),
+            error_code: Some("step_failed"),
+            created_at: "2026-03-12T00:00:00Z",
+            ended_at: Some("2026-03-12T00:05:00Z"),
+            ..TestJobInsert::new(
+                &failed_job_id,
+                &project_id,
+                &item_id,
+                &revision_id,
+                "author_initial",
+            )
+        },
+    )
+    .await;
+
+    let app = test_router(db.clone());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/projects/{project_id}/items/{item_id}/jobs/{failed_job_id}/retry"
+                ))
+                .method("POST")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("route response");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let retried_job_id = json["id"].as_str().expect("retried job id");
+
+    assert_eq!(json["step_id"].as_str(), Some("author_initial"));
+    assert_eq!(json["status"].as_str(), Some("queued"));
+    assert!(json["workspace_id"].is_null());
+    assert_eq!(
+        json["supersedes_job_id"].as_str(),
+        Some(failed_job_id.as_str())
+    );
+
+    let retried_job: (String, Option<String>) =
+        sqlx::query_as("SELECT status, workspace_id FROM jobs WHERE id = ?")
+            .bind(retried_job_id)
+            .fetch_one(&db.pool)
+            .await
+            .expect("retried job row");
+    assert_eq!(retried_job.0, "queued");
+    assert_eq!(retried_job.1, None);
+
+    let detail_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{project_id}/items/{item_id}"))
+                .body(Body::empty())
+                .expect("build detail request"),
+        )
+        .await
+        .expect("detail route response");
+    assert_eq!(detail_response.status(), StatusCode::OK);
+    let detail_body = to_bytes(detail_response.into_body(), usize::MAX)
+        .await
+        .expect("read detail body");
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).expect("detail json");
+    assert_eq!(detail_json["workspaces"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        detail_json["workspaces"][0]["kind"].as_str(),
+        Some("authoring")
+    );
+    assert_eq!(
+        detail_json["workspaces"][0]["status"].as_str(),
+        Some("ready")
     );
 }
 

@@ -5,6 +5,8 @@ use super::items::{
 use super::support::*;
 use super::types::*;
 use super::*;
+use ingot_git::commands::update_ref;
+use ingot_usecases::job::{DispatchJobCommand, dispatch_job, retry_job};
 
 pub(super) async fn dispatch_item_job(
     State(state): State<AppState>,
@@ -94,34 +96,8 @@ pub(super) async fn dispatch_item_job(
     )
     .await?;
 
-    if let Some(workspace) = precreated_authoring_workspace {
-        link_job_to_workspace_or_cleanup(
-            &state,
-            &project,
-            &mut job,
-            workspace,
-            pending_investigation_ref.as_ref(),
-            true,
-        )
-        .await?;
-    } else if job.workspace_kind == WorkspaceKind::Authoring {
-        let had_existing_workspace = state
-            .db
-            .find_authoring_workspace_for_revision(current_revision.id)
-            .await
-            .map_err(repo_to_internal)?
-            .is_some();
-        let workspace =
-            ensure_authoring_workspace(&state, &project, &current_revision, &job).await?;
-        link_job_to_workspace_or_cleanup(
-            &state,
-            &project,
-            &mut job,
-            workspace,
-            pending_investigation_ref.as_ref(),
-            !had_existing_workspace,
-        )
-        .await?;
+    if precreated_authoring_workspace.is_none() && job.workspace_kind == WorkspaceKind::Authoring {
+        let _ = ensure_authoring_workspace(&state, &project, &current_revision, &job).await?;
     }
     append_activity(
         &state,
@@ -265,32 +241,6 @@ pub(super) async fn apply_pending_investigation_ref_or_cleanup(
             .execute(&state.db.pool)
             .await;
         return Err(error);
-    }
-    Ok(())
-}
-
-pub(super) async fn link_job_to_workspace_or_cleanup(
-    state: &AppState,
-    project: &Project,
-    job: &mut Job,
-    workspace: Workspace,
-    investigation_ref_name: Option<&PendingInvestigationRef>,
-    cleanup_workspace_on_failure: bool,
-) -> Result<(), ApiError> {
-    job.assign(JobAssignment::new(workspace.id));
-    if let Err(error) = state.db.update_job(job).await {
-        cleanup_failed_dispatch_side_effects(
-            state,
-            project,
-            cleanup_workspace_on_failure.then_some(&workspace),
-            investigation_ref_name.map(|pending| pending.ref_name.as_str()),
-        )
-        .await;
-        let _ = sqlx::query("DELETE FROM jobs WHERE id = ?")
-            .bind(job.id.to_string())
-            .execute(&state.db.pool)
-            .await;
-        return Err(repo_to_internal(error));
     }
     Ok(())
 }
@@ -612,34 +562,8 @@ pub(super) async fn retry_item_job(
         precreated_authoring_workspace.as_ref(),
     )
     .await?;
-    if let Some(workspace) = precreated_authoring_workspace {
-        link_job_to_workspace_or_cleanup(
-            &state,
-            &project,
-            &mut job,
-            workspace,
-            pending_investigation_ref.as_ref(),
-            true,
-        )
-        .await?;
-    } else if job.workspace_kind == WorkspaceKind::Authoring {
-        let had_existing_workspace = state
-            .db
-            .find_authoring_workspace_for_revision(current_revision.id)
-            .await
-            .map_err(repo_to_internal)?
-            .is_some();
-        let workspace =
-            ensure_authoring_workspace(&state, &project, &current_revision, &job).await?;
-        link_job_to_workspace_or_cleanup(
-            &state,
-            &project,
-            &mut job,
-            workspace,
-            pending_investigation_ref.as_ref(),
-            !had_existing_workspace,
-        )
-        .await?;
+    if precreated_authoring_workspace.is_none() && job.workspace_kind == WorkspaceKind::Authoring {
+        let _ = ensure_authoring_workspace(&state, &project, &current_revision, &job).await?;
     }
     append_activity(
         &state,
@@ -674,7 +598,7 @@ mod tests {
     use ingot_git::commands::resolve_ref_oid;
     use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
     use ingot_test_support::fixtures::{
-        DEFAULT_TEST_TIMESTAMP, ItemBuilder, JobBuilder, RevisionBuilder, WorkspaceBuilder,
+        ItemBuilder, JobBuilder, RevisionBuilder, WorkspaceBuilder,
     };
     use ingot_test_support::git::{
         git_output as support_git_output, run_git as support_git,
@@ -687,9 +611,6 @@ mod tests {
     use crate::error::ApiError;
 
     use super::super::test_helpers::{test_app_state, test_project};
-
-    const TS: &str = DEFAULT_TEST_TIMESTAMP;
-
     fn temp_git_repo() -> PathBuf {
         support_temp_git_repo("ingot-http-api")
     }
@@ -1185,127 +1106,5 @@ mod tests {
         .await
         .expect("operation count");
         assert_eq!(op_count, 0);
-    }
-
-    #[tokio::test]
-    async fn link_job_to_workspace_or_cleanup_deletes_job_row_on_update_failure() {
-        let repo = temp_git_repo();
-        let head = git_output(&repo, &["rev-parse", "HEAD"]);
-        let state = test_app_state().await;
-        let project = test_project(repo.clone());
-        state
-            .db
-            .create_project(&project)
-            .await
-            .expect("create project");
-
-        let paths = project_repo_paths(state.state_root.as_path(), project.id, &repo);
-        ensure_mirror(&paths).await.expect("ensure mirror");
-        let item_id = ItemId::from_uuid(Uuid::now_v7());
-        let revision_id = ItemRevisionId::from_uuid(Uuid::now_v7());
-        sqlx::query(
-            "INSERT INTO items (
-                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-                approval_state, escalation_state, current_revision_id, origin_kind, origin_finding_id,
-                priority, labels, created_at, updated_at
-             ) VALUES (?, ?, 'change', 'delivery:v1', 'open', 'active', 'not_requested', 'none', ?, 'manual', NULL, 'major', '[]', ?, ?)",
-        )
-        .bind(item_id.to_string())
-        .bind(project.id.to_string())
-        .bind(revision_id.to_string())
-        .bind(TS)
-        .bind(TS)
-        .execute(&state.db.pool)
-        .await
-        .expect("insert item");
-        sqlx::query(
-            "INSERT INTO item_revisions (
-                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-                seed_target_commit_oid, supersedes_revision_id, created_at
-             ) VALUES (?, ?, 1, 'Title', 'Desc', 'AC', 'refs/heads/main', 'required', '{}', '{}', ?, ?, NULL, ?)",
-        )
-        .bind(revision_id.to_string())
-        .bind(item_id.to_string())
-        .bind(Some(head.clone()))
-        .bind(Some(head.clone()))
-        .bind(TS)
-        .execute(&state.db.pool)
-        .await
-        .expect("insert revision");
-        let workspace_id = WorkspaceId::from_uuid(Uuid::now_v7());
-        let workspace_ref = format!("refs/ingot/workspaces/{workspace_id}");
-        git(
-            &paths.mirror_git_dir,
-            &["update-ref", &workspace_ref, &head],
-        );
-        let workspace_path = state
-            .state_root
-            .join(format!("link-job-workspace-{}", Uuid::now_v7()));
-        git(
-            &paths.mirror_git_dir,
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                workspace_path.to_str().expect("workspace path"),
-                &workspace_ref,
-            ],
-        );
-        let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Authoring)
-            .id(workspace_id)
-            .path(workspace_path.display().to_string())
-            .workspace_ref(workspace_ref.clone())
-            .base_commit_oid(head.clone())
-            .head_commit_oid(head.clone())
-            .status(WorkspaceStatus::Ready)
-            .created_at(Utc::now())
-            .build();
-        state
-            .db
-            .create_workspace(&workspace)
-            .await
-            .expect("create workspace row");
-
-        let mut job = test_job("author_initial", OutputArtifactKind::Commit);
-        job.project_id = project.id;
-        job.item_id = item_id;
-        job.item_revision_id = revision_id;
-        state.db.create_job(&job).await.expect("create job row");
-        sqlx::query("DELETE FROM jobs WHERE id = ?")
-            .bind(job.id.to_string())
-            .execute(&state.db.pool)
-            .await
-            .expect("delete job row");
-
-        let result = link_job_to_workspace_or_cleanup(
-            &state,
-            &project,
-            &mut job,
-            workspace.clone(),
-            None,
-            true,
-        )
-        .await;
-        assert!(result.is_err(), "update failure should propagate");
-        let workspace_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM workspaces WHERE id = ?")
-                .bind(workspace.id.to_string())
-                .fetch_one(&state.db.pool)
-                .await
-                .expect("workspace count");
-        assert_eq!(workspace_count, 0);
-        let job_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE id = ?")
-            .bind(job.id.to_string())
-            .fetch_one(&state.db.pool)
-            .await
-            .expect("job count");
-        assert_eq!(job_count, 0);
-        assert_eq!(
-            resolve_ref_oid(paths.mirror_git_dir.as_path(), &workspace_ref)
-                .await
-                .expect("resolve workspace ref"),
-            None
-        );
     }
 }
