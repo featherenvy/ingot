@@ -23,7 +23,8 @@ You will see the fix in three places. First, the dispatch route will return a qu
 - [x] (2026-03-20 10:23Z) Audited the adjacent tests and found three dispatch route tests and one dispatch-module helper test that encode the old `workspace_id`-on-response contract, plus an existing reconciliation regression that must stay green for busy assigned rows.
 - [x] (2026-03-20 10:29Z) Re-read the store and adjacent dispatch helpers and found two more contract boundaries the plan must preserve explicitly: `reconcile_assigned_job(...)` is shared by startup recovery and supervised-task cleanup, and `start_job_execution(...)` must keep accepting `assigned` because daemon-only validation still performs an explicit `assign(...)` before start.
 - [x] (2026-03-20 10:38Z) Re-read the earlier handoff ExecPlan, `crates/ingot-http-api/tests/job_routes.rs`, `crates/ingot-store-sqlite/src/store/job.rs`, and `Makefile`, and found that the generic review retry regression still permits the stale `assigned` status while the repo already has exact store/runtime boundary tests and top-level lint targets that should be named directly in this plan.
-- [x] (2026-03-20 10:39Z) Re-read `JobDispatcher::reconcile_startup()`, `drive_non_job_work()`, `crates/ingot-usecases/src/reconciliation.rs`, and the reconciliation test suite, and found that the plan still needed one more cross-path guard: startup has its own broad assigned-row recovery entrypoint, but the repository has no explicit regression yet proving that path still works after the new steady-state predicate is added.
+- [x] (2026-03-20 10:39Z) Re-read `JobDispatcher::reconcile_startup()`, `drive_non_job_work()`, `crates/ingot-usecases/src/reconciliation.rs`, and the reconciliation test suite, and found that the plan still needed one more cross-path guard: startup has its own broad assigned-row recovery entrypoint, but the validation section had not yet anchored that boundary to the repository’s existing startup reconciliation coverage.
+- [x] (2026-03-20 10:58Z) Re-read `crates/ingot-agent-runtime/tests/reconciliation.rs` and `crates/ingot-http-api/tests/common/mod.rs` and found one remaining plan mismatch: startup compatibility is already covered by `reconcile_startup_handles_mixed_inflight_states_conservatively`, so the plan should extend or preserve that real regression instead of inventing a redundant startup test, and the new authoring retry-route test should follow the existing `insert_test_job_row(...)` helper pattern.
 - [x] (2026-03-20 10:10Z) Authored this ExecPlan in `.agent/dispatch-assigned-authoring-regression.md`.
 - [ ] Implement the dispatch contract change for initial dispatch and retry dispatch.
 - [ ] Add targeted maintenance recovery for already-stranded dispatch-created `assigned` rows.
@@ -71,8 +72,14 @@ You will see the fix in three places. First, the dispatch route will return a qu
 - Observation: the repository already contains exact claim-boundary regressions that should remain part of the validation story for this fix.
   Evidence: `crates/ingot-store-sqlite/src/store/job.rs` already has `claim_queued_agent_job_execution_persists_assignment_and_running_lease` and `claim_queued_agent_job_execution_rejects_rows_that_left_queued`, and `crates/ingot-agent-runtime/src/lib.rs` already has `run_with_heartbeats_claims_running_job_with_configured_lease_ttl` plus `prepare_harness_validation_uses_configured_lease_ttl`.
 
-- Observation: startup compatibility is preserved by a separate runtime entrypoint, not by the steady-state maintenance loop, and that path still lacks a dedicated regression in the repository.
+- Observation: startup compatibility is preserved by a separate runtime entrypoint, not by the steady-state maintenance loop, so the plan must tie that path to explicit validation instead of assuming the maintenance tests cover it.
   Evidence: `JobDispatcher::reconcile_startup()` calls `reconcile_startup_assigned_jobs()` before it hands off to `ReconciliationService::reconcile_startup()`, while `tick()` and `run_supervisor_iteration()` only reach `reconcile_active_jobs()` through `drive_non_job_work()` and `ReconciliationService::tick_maintenance()`.
+
+- Observation: the repository already has a startup reconciliation regression that exercises broad assigned-row recovery; the plan’s previously proposed new startup test name was redundant rather than code-grounded.
+  Evidence: `crates/ingot-agent-runtime/tests/reconciliation.rs::reconcile_startup_handles_mixed_inflight_states_conservatively` seeds one `Assigned` authoring job plus one stale `Running` job, then proves `reconcile_startup()` requeues the assigned row while expiring the running row.
+
+- Observation: the new authoring retry-route regression should be built with the shared HTTP test helper instead of hand-written inserts.
+  Evidence: `crates/ingot-http-api/tests/common/mod.rs::insert_test_job_row(...)` is the integration-test helper already used by `crates/ingot-http-api/tests/job_routes.rs` to seed terminal jobs, including authoring rows with explicit `workspace_id`.
 
 ## Decision Log
 
@@ -120,8 +127,12 @@ You will see the fix in three places. First, the dispatch route will return a qu
   Rationale: that test already exercises `retry_item_job(...)`, and because the inserted step is `review_candidate_initial`, it should assert the true invariant of the non-authoring retry path: the response remains `queued`.
   Date/Author: 2026-03-20 / Codex
 
-- Decision: add an explicit startup-recovery regression instead of relying only on prose that startup must stay broader than steady-state maintenance.
-  Rationale: `reconcile_startup_assigned_jobs()` is a separate lifecycle path from `reconcile_active_jobs()`. Without a direct test, an implementation could accidentally narrow startup behavior while focusing only on the new maintenance predicate.
+- Decision: preserve explicit startup-recovery coverage instead of relying only on prose that startup must stay broader than steady-state maintenance.
+  Rationale: `reconcile_startup_assigned_jobs()` is a separate lifecycle path from `reconcile_active_jobs()`. Without tying the plan to a direct startup-focused regression, an implementation could accidentally narrow startup behavior while focusing only on the new maintenance predicate.
+  Date/Author: 2026-03-20 / Codex
+
+- Decision: reuse and, if needed, extend `reconcile_startup_handles_mixed_inflight_states_conservatively` instead of inventing a brand-new startup-path test name.
+  Rationale: that integration test already exercises the broad startup reconciliation entrypoint with mixed `Assigned` and `Running` state, so anchoring the plan to the real existing regression avoids redundant coverage and gives the implementer a concrete fixture pattern to follow.
   Date/Author: 2026-03-20 / Codex
 
 ## Outcomes & Retrospective
@@ -140,7 +151,7 @@ The reconciliation service facade in `crates/ingot-usecases/src/reconciliation.r
 
 The workflow evaluator lives in `crates/ingot-workflow/src/evaluator.rs`. It treats any active job as “running” from the board’s perspective, where “active” includes queued, assigned, and running. This plan preserves that high-level workflow interpretation.
 
-The route tests that currently encode the broken contract live in `crates/ingot-http-api/tests/dispatch_routes.rs`, and there is also a dispatch-module unit test at the bottom of `crates/ingot-http-api/src/router/dispatch.rs` for the helper that mutates the job after creation. Shared helpers for route-test fixtures live in `crates/ingot-http-api/tests/common/mod.rs`. Some UI tests in `ui/src/test/item-detail-page.test.tsx` already understand queued jobs, which is useful because it means the frontend is not relying exclusively on `assigned`.
+The route tests that currently encode the broken contract live in `crates/ingot-http-api/tests/dispatch_routes.rs`, and there is also a dispatch-module unit test at the bottom of `crates/ingot-http-api/src/router/dispatch.rs` for the helper that mutates the job after creation. Shared helpers for route-test fixtures live in `crates/ingot-http-api/tests/common/mod.rs`; in particular, `insert_test_job_row(...)` is the existing pattern for seeding retry-path jobs in `crates/ingot-http-api/tests/job_routes.rs`. Some UI tests in `ui/src/test/item-detail-page.test.tsx` already understand queued jobs, which is useful because it means the frontend is not relying exclusively on `assigned`.
 
 The local reproduction that motivated this plan is in `~/.ingot/ingot.db`, where job `job_019d0a49a57f7b83ab2824287d15acb8` for item `001 — Scaffold the project` was left `assigned` with no lease or runner metadata, while its workspace was already `ready`. That exact signature should be encoded into recovery tests so the bug never returns silently.
 
@@ -162,7 +173,7 @@ Second, update every backend test that truly depends on the old dispatch respons
 
 Third, add a narrow maintenance repair path in `crates/ingot-agent-runtime/src/lib.rs` for already-broken rows created by the old dispatch code. The repair should apply only to authoring commit jobs, which in this repository means `workspace_kind = Authoring`, `execution_permission = MayMutate`, `output_artifact_kind = Commit`, and `phase_kind = Author`, and only when they still have `status = assigned` but clearly never entered either runtime launch path: no agent metadata, no lease metadata, the owning item still points at `job.item_revision_id`, and a linked authoring workspace that is already `ready`, has `current_job_id = NULL`, and still belongs to that same revision. Those rows should be requeued during steady-state maintenance so a long-running daemon can recover them without restart. Because both `tick()` and supervisor mode reach maintenance through `drive_non_job_work()`, this branch belongs under `reconcile_active_jobs()` or a helper it calls, not in `crates/ingot-usecases/src/reconciliation.rs`. The existing broad startup-only `assigned` repair must remain in place for older binaries and for non-authoring leftovers, and the new steady-state branch must not reuse the broad `reconcile_assigned_job(...)` helper that startup and supervised-task cleanup already share.
 
-Fourth, add targeted runtime tests that pin down the inert-assigned recovery predicate and its boundaries. One test should seed the exact broken signature from the local database and prove that `reconcile_active_jobs()` requeues it and leaves the workspace usable. Another test should continue to prove that busy assigned rows are still left alone during maintenance. A third test should prove that daemon-only validation handoff is not mistaken for inert dispatch residue even if it passes briefly through `Assigned`. A fourth test should prove that `reconcile_startup()` still requeues broader assigned leftovers that do not match the new steady-state predicate, because backward compatibility for older residue depends on that separate startup-only entrypoint. The implementation should prefer small, explicit predicates over fuzzy time-based heuristics.
+Fourth, add targeted runtime tests that pin down the inert-assigned recovery predicate and its boundaries. One test should seed the exact broken signature from the local database and prove that `reconcile_active_jobs()` requeues it and leaves the workspace usable. Another test should continue to prove that busy assigned rows are still left alone during maintenance. A third test should prove that daemon-only validation handoff is not mistaken for inert dispatch residue even if it passes briefly through `Assigned`. For startup compatibility, preserve and, if necessary, extend the existing `reconcile_startup_handles_mixed_inflight_states_conservatively` integration test so it still proves `reconcile_startup()` requeues broader assigned leftovers that do not match the new steady-state predicate while simultaneously expiring stale running work. The implementation should prefer small, explicit predicates over fuzzy time-based heuristics.
 
 Fifth, preserve the runtime hardening boundary introduced in `2a56e40` across both execution entry points. This patch must not change `run_with_heartbeats()` back to accepting live `assigned` rows for ordinary agent-backed work, and it must not bypass `next_runnable_job()` or `launch_supervised_jobs()` with a new alternate selector. The contract after this patch is: HTTP authoring dispatch creates `queued`, both runtime execution modes only select queued work, the runtime claim writes assignment and lease metadata, and maintenance only repairs authoring `assigned` rows that are demonstrably dispatch residue rather than real in-flight launches.
 
@@ -192,6 +203,7 @@ Work from `/Users/aa/Documents/ingot`.
 
        crates/ingot-http-api/tests/dispatch_routes.rs
        crates/ingot-http-api/tests/job_routes.rs
+       crates/ingot-http-api/tests/common/mod.rs
        crates/ingot-http-api/src/router/dispatch.rs
 
    Implement:
@@ -240,8 +252,8 @@ Work from `/Users/aa/Documents/ingot`.
        - `reconcile_active_jobs_does_not_repair_daemon_validation_assigned_handoff`
        - `reconcile_active_jobs_leaves_assigned_rows_for_startup_recovery`
          Keep this existing test green; it is the boundary check that proves the new repair stays narrow.
-       - `reconcile_startup_requeues_assigned_rows_outside_steady_state_predicate`
-         Add this new startup-path regression in `crates/ingot-agent-runtime/tests/reconciliation.rs` so the broader compatibility path remains covered independently of maintenance.
+       - `reconcile_startup_handles_mixed_inflight_states_conservatively`
+         Keep this existing startup-path regression green and extend it, if needed, so the assigned row intentionally falls outside the new steady-state predicate while still being requeued during startup reconciliation.
 
 5. Validate incrementally, then broadly.
 
@@ -258,7 +270,7 @@ Work from `/Users/aa/Documents/ingot`.
        cargo test -p ingot-agent-runtime reconcile_active_jobs_repairs_inert_assigned_authoring_dispatch_residue -- --exact
        cargo test -p ingot-agent-runtime reconcile_active_jobs_does_not_repair_daemon_validation_assigned_handoff -- --exact
        cargo test -p ingot-agent-runtime reconcile_active_jobs_leaves_assigned_rows_for_startup_recovery -- --exact
-       cargo test -p ingot-agent-runtime reconcile_startup_requeues_assigned_rows_outside_steady_state_predicate -- --exact
+       cargo test -p ingot-agent-runtime reconcile_startup_handles_mixed_inflight_states_conservatively -- --exact
        cargo test -p ingot-agent-runtime run_with_heartbeats_claims_running_job_with_configured_lease_ttl -- --exact
        cargo test -p ingot-agent-runtime prepare_harness_validation_uses_configured_lease_ttl -- --exact
        cargo test -p ingot-http-api
@@ -279,9 +291,9 @@ Acceptance is reached when all of the following are true.
 
 3. A row matching the exact broken signature observed locally on 2026-03-20 can be repaired during ordinary maintenance without daemon restart: `status = assigned`, `phase_kind = author`, `workspace_kind = authoring`, `execution_permission = may_mutate`, `output_artifact_kind = commit`, no agent metadata, no lease metadata, the owning item still points at `job.item_revision_id`, and the linked authoring workspace is `ready`, has `current_job_id = NULL`, and still belongs to that same revision.
 
-4. Legitimate non-broken states are preserved. In particular, daemon-only validation must not be requeued by the new steady-state repair, busy assigned rows must still be left alone during maintenance, `reconcile_assigned_job(...)` must remain the broad helper used by startup recovery and supervised-task cleanup, `start_job_execution(...)` must still accept the daemon-validation `assigned -> running` handoff, and startup reconciliation must still handle broader legacy assigned rows.
+4. Legitimate non-broken states are preserved. In particular, daemon-only validation must not be requeued by the new steady-state repair, busy assigned rows must still be left alone during maintenance, `reconcile_assigned_job(...)` must remain the broad helper used by startup recovery and supervised-task cleanup, `start_job_execution(...)` must still accept the daemon-validation `assigned -> running` handoff, and startup reconciliation must still handle broader legacy assigned rows as proven by the existing mixed-inflight startup regression.
 
-5. The focused tests listed above pass, including the pre-existing store/runtime claim-boundary regressions, the tightened review retry regression, and the new startup-path regression that proves broader assigned recovery still exists after the steady-state predicate is introduced. After that, the crate-level backend test suites and the repo-level `make test` plus `make lint` targets must pass. The updated route tests must fail before the implementation and pass after it.
+5. The focused tests listed above pass, including the pre-existing store/runtime claim-boundary regressions, the tightened review retry regression, and the existing mixed-inflight startup regression that proves broader assigned recovery still exists after the steady-state predicate is introduced. After that, the crate-level backend test suites and the repo-level `make test` plus `make lint` targets must pass. The updated route tests must fail before the implementation and pass after it.
 
 6. Manual spot-check of the local DB is consistent with the new contract. After dispatching a fresh authoring job in a dev environment, a query like the following should first show `queued`, then later `running` only after the runtime claims it:
 
@@ -334,3 +346,4 @@ Revision note: revised on 2026-03-20 after deep-reading the referenced files and
 Revision note: revised again on 2026-03-20 after auditing the remaining helper asymmetries. This pass made the plan preserve the broad `reconcile_assigned_job(...)` helper for startup and supervised-task cleanup, preserved the `start_job_execution(...)` `assigned -> running` path required by daemon validation, added the current-revision and workspace-revision guards to the steady-state repair criteria, and pointed to `auto_dispatch_review(...)` as the adjacent queued-dispatch pattern to follow.
 Revision note: revised again on 2026-03-20 after re-checking adjacent tests and verification commands. This pass pulled the stale `queued or assigned` assertion out of the existing review retry regression, added the exact store/runtime claim-boundary tests that already exist in the repository to the validation section, and switched the final verification step from an ad hoc formatting command to the repo’s actual `make lint` target.
 Revision note: revised again on 2026-03-20 after re-reading the runtime reconciliation entrypoints. This pass made the plan pin the separate startup-assigned recovery path with its own explicit regression, clarified that steady-state repair is reached through `drive_non_job_work()` in both `tick()` and supervisor mode, tightened the response contract to `workspace_id = null` based on `JobWire` serialization, and made it explicit that `crates/ingot-usecases/src/reconciliation.rs` should stay as orchestration only.
+Revision note: revised again on 2026-03-20 after re-reading adjacent test modules. This pass replaced an invented startup-test name with the real existing regression `reconcile_startup_handles_mixed_inflight_states_conservatively`, and it called out `crates/ingot-http-api/tests/common/mod.rs::insert_test_job_row(...)` as the actual helper pattern the new authoring retry-route test should follow.
