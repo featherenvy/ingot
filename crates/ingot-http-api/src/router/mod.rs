@@ -316,9 +316,13 @@ async fn dispatch_notify_layer(
     next: middleware::Next,
 ) -> Response {
     let should_notify = is_dispatch_write(request.method());
+    let notify_reason =
+        should_notify.then(|| format!("http {} {}", request.method(), request.uri().path()));
     let response = next.run(request).await;
     if should_notify && response.status().is_success() {
-        state.dispatch_notify.notify();
+        state.dispatch_notify.notify_with_reason(
+            notify_reason.expect("write requests should always have a notify reason"),
+        );
     }
     response
 }

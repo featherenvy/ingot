@@ -962,8 +962,12 @@ impl JobDispatcher {
 
             let wait_result: Result<(), RuntimeError> = if running.is_empty() {
                 tokio::select! {
-                    () = dispatch_listener.notified() => {
-                        debug!("dispatcher woken by notification");
+                    notification = dispatch_listener.notified() => {
+                        debug!(
+                            generation = notification.generation(),
+                            reason = %notification.reason(),
+                            "dispatcher woken by notification"
+                        );
                         Ok(())
                     }
                     () = sleep(self.config.poll_interval) => Ok(()),
@@ -982,8 +986,12 @@ impl JobDispatcher {
                             Ok(())
                         }
                     }
-                    () = dispatch_listener.notified() => {
-                        debug!("dispatcher woken by notification");
+                    notification = dispatch_listener.notified() => {
+                        debug!(
+                            generation = notification.generation(),
+                            reason = %notification.reason(),
+                            "dispatcher woken by notification"
+                        );
                         Ok(())
                     }
                     () = sleep(self.config.poll_interval) => Ok(()),
@@ -2084,7 +2092,7 @@ impl JobDispatcher {
                     warn!(job_id = %prepared.job.id, timeout_seconds = timeout_duration.as_secs(), "job execution timed out");
                     return AgentRunOutcome::TimedOut;
                 }
-                _ = dispatch_listener.notified() => {
+                notification = dispatch_listener.notified() => {
                     match self.db.get_job(prepared.job.id).await {
                         Ok(job) if job.state.status() == JobStatus::Cancelled => {
                             handle.abort();
@@ -2097,10 +2105,21 @@ impl JobDispatcher {
                             return AgentRunOutcome::OwnershipLostDuringRun;
                         }
                         Ok(_) => {
-                            debug!(job_id = %prepared.job.id, "running job woke on unrelated dispatcher notification");
+                            debug!(
+                                job_id = %prepared.job.id,
+                                generation = notification.generation(),
+                                reason = %notification.reason(),
+                                "running job woke on unrelated dispatcher notification"
+                            );
                         }
                         Err(error) => {
-                            warn!(?error, job_id = %prepared.job.id, "failed to load job after dispatcher notification");
+                            warn!(
+                                ?error,
+                                job_id = %prepared.job.id,
+                                generation = notification.generation(),
+                                reason = %notification.reason(),
+                                "failed to load job after dispatcher notification"
+                            );
                         }
                     }
                 }
@@ -4069,7 +4088,7 @@ impl JobDispatcher {
                         notes,
                     );
                 }
-                _ = dispatch_listener.notified() => {
+                notification = dispatch_listener.notified() => {
                     match self.db.get_job(prepared.job_id).await {
                         Ok(job) if job.state.status() == JobStatus::Cancelled => {
                             let mut notes = vec!["command cancelled".to_string()];
@@ -4092,6 +4111,8 @@ impl JobDispatcher {
                             debug!(
                                 job_id = %prepared.job_id,
                                 command = %command_spec.name,
+                                generation = notification.generation(),
+                                reason = %notification.reason(),
                                 "harness command woke on unrelated dispatcher notification"
                             );
                         }
@@ -4100,6 +4121,8 @@ impl JobDispatcher {
                                 ?error,
                                 job_id = %prepared.job_id,
                                 command = %command_spec.name,
+                                generation = notification.generation(),
+                                reason = %notification.reason(),
                                 "failed to load harness job after dispatcher notification"
                             );
                         }
