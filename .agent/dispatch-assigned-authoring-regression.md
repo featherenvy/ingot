@@ -18,11 +18,14 @@ You will see the fix in three places. First, the dispatch route will return a qu
 - [x] (2026-03-20 09:37Z) Confirmed that `Database::list_queued_jobs()` only selects `status = 'queued'` while `JobDispatcher::reconcile_active_jobs()` intentionally ignores `assigned` during steady-state operation, which explains why the broken row becomes invisible until restart.
 - [x] (2026-03-20 10:04Z) Created and claimed beads issue `ingot-1kw` to track the bug and attach the production evidence.
 - [x] (2026-03-20 10:08Z) Inspected the route tests, workflow evaluator, and UI tests to determine whether the fix should change persistence only or also change workflow/UI semantics.
+- [x] (2026-03-20 10:17Z) Read `crates/ingot-usecases/src/job.rs` and confirmed that `dispatch_job(...)` and `retry_job(...)` already create `JobState::Queued`; the incorrect `Assigned` transition is introduced only later by the HTTP dispatch layer.
+- [x] (2026-03-20 10:19Z) Read `crates/ingot-agent-runtime/src/lib.rs` around `next_runnable_job()`, `launch_supervised_jobs()`, `reconcile_startup()`, `cleanup_supervised_task()`, and `prepare_harness_validation()` to trace every runtime path that selects queued work or still uses transient `Assigned`.
+- [x] (2026-03-20 10:23Z) Audited the adjacent tests and found three dispatch route tests and one dispatch-module helper test that encode the old `workspace_id`-on-response contract, plus an existing reconciliation regression that must stay green for busy assigned rows.
 - [x] (2026-03-20 10:10Z) Authored this ExecPlan in `.agent/dispatch-assigned-authoring-regression.md`.
 - [ ] Implement the dispatch contract change for initial dispatch and retry dispatch.
 - [ ] Add targeted maintenance recovery for already-stranded dispatch-created `assigned` rows.
-- [ ] Update tests to encode the new contract and preserve the existing evaluator semantics for queued work.
-- [ ] Validate with focused backend tests, then broader checks, and finish the required `bd dolt push` and `git push` workflow.
+- [ ] Update every affected backend test that currently expects `workspace_id` or `assigned` on newly dispatched authoring jobs, while leaving unrelated review-job retry coverage intact.
+- [ ] Validate with focused backend tests, then broader project commands, and finish the required `bd dolt push` and `git push` workflow.
 
 ## Surprises & Discoveries
 
@@ -43,6 +46,15 @@ You will see the fix in three places. First, the dispatch route will return a qu
 
 - Observation: dispatch currently uses `Assigned` as a proxy for “job knows its workspace” because the domain model has no separate queued-with-workspace state.
   Evidence: `JobWire.workspace_id` is derived from `job.state.workspace_id()`, which is `None` for `JobState::Queued`, and the only public helper for attaching a workspace to a non-terminal job is `Job::assign(...)`.
+
+- Observation: both runtime execution modes, the inline `tick()` path and the background supervisor path, select only queued jobs.
+  Evidence: `next_runnable_job()` and `launch_supervised_jobs()` both iterate `self.db.list_queued_jobs(32)`, so a dispatch-created `assigned` row is invisible to both execution modes, not just one of them.
+
+- Observation: the narrow recovery predicate cannot rely only on `status = assigned`, `workspace ready`, and `current_job_id = NULL` because daemon-only validation transiently uses `Assigned` too.
+  Evidence: `prepare_harness_validation()` still does `job.assign(...)` followed immediately by `start_job_execution(...)`, and it does so for `ExecutionPermission::DaemonOnly` jobs, often before any workspace-side busy marker is set.
+
+- Observation: more route tests depend on the old response shape than the first draft of this plan accounted for.
+  Evidence: `dispatch_item_job_route_binds_implicit_author_initial_from_target_head` and `dispatch_item_job_route_reuses_existing_authoring_workspace_for_revision` both currently read `json["workspace_id"]` from the dispatch response, and the dispatch module also has `link_job_to_workspace_or_cleanup_deletes_job_row_on_update_failure()` because the helper currently mutates the job row after creation.
 
 ## Decision Log
 
@@ -66,35 +78,57 @@ You will see the fix in three places. First, the dispatch route will return a qu
   Rationale: `prepare_harness_validation()` still uses a tightly coupled, lock-held handoff to `start_job_execution(...)`. This plan should not conflate that path with the broken HTTP authoring dispatch contract.
   Date/Author: 2026-03-20 / Codex
 
+- Decision: do not change `dispatch_job(...)` or `retry_job(...)` in `crates/ingot-usecases/src/job.rs`.
+  Rationale: those usecase constructors already create `JobState::Queued` and preserve the revision-aware active-work guard via `ensure_no_active_execution(...)`. The regression is introduced only after those functions return.
+  Date/Author: 2026-03-20 / Codex
+
+- Decision: the steady-state repair predicate must be defined in terms of the same classification fields the runtime already uses: `workspace_kind`, `execution_permission`, and `output_artifact_kind`, plus missing assignment and lease metadata.
+  Rationale: those fields are what `is_supported_runtime_job(...)` and `is_daemon_only_validation(...)` already use to distinguish agent-backed authoring work from daemon validation and read-only report jobs. Reusing them makes the recovery rule specific and auditable.
+  Date/Author: 2026-03-20 / Codex
+
+- Decision: preserve the existing busy-assigned maintenance regression and add new tests around it, rather than replacing it.
+  Rationale: `reconcile_active_jobs_leaves_assigned_rows_for_startup_recovery` already proves that ordinary busy `Assigned` rows are left untouched during maintenance. The new repair must be additive and narrower than that existing expectation.
+  Date/Author: 2026-03-20 / Codex
+
 ## Outcomes & Retrospective
 
 This plan is not implemented yet. The repository now has a precise diagnosis, a tracked bug (`ingot-1kw`), and a scoped implementation plan that keeps the runtime hardening intact while fixing the dispatch contract and recovering already-bad rows. The main remaining risk is over-broad recovery logic that accidentally touches legitimate transient `assigned` rows, so the implementation must keep the recovery predicate narrow and heavily tested.
 
 ## Context and Orientation
 
-The core authoring dispatch path lives in `crates/ingot-http-api/src/router/dispatch.rs`. Both the initial dispatch route and the retry route create a `Job`, optionally ensure an authoring workspace exists, and then currently call `link_job_to_workspace_or_cleanup(...)`. That helper persists `JobStatus::Assigned` solely to put `workspace_id` onto the job row.
+The core authoring dispatch path lives in `crates/ingot-http-api/src/router/dispatch.rs`. Both the initial dispatch route and the retry route call the usecase-layer constructors in `crates/ingot-usecases/src/job.rs`, which already return `JobState::Queued`. After `state.db.create_job(&job)`, the HTTP layer currently calls `link_job_to_workspace_or_cleanup(...)`, and that helper alone is what flips the queued row into `Assigned` solely to put `workspace_id` onto the job response and row.
 
-The runtime launch path lives in `crates/ingot-agent-runtime/src/lib.rs`. The important functions are `prepare_run()`, which provisions and attaches the real workspace, `run_with_heartbeats()`, which now claims queued work to running atomically, `reconcile_active_jobs()`, which only repairs running rows during steady-state maintenance, and `reconcile_startup_assigned_jobs()`, which repairs legacy assigned rows only during startup reconciliation.
+The runtime launch path lives in `crates/ingot-agent-runtime/src/lib.rs`. The important functions are `next_runnable_job()` for the inline `tick()` path, `launch_supervised_jobs()` for the background supervisor path, `prepare_run()`, which provisions and attaches the real workspace, `run_with_heartbeats()`, which now claims queued work to running atomically, `reconcile_active_jobs()`, which only repairs running rows during steady-state maintenance, and `reconcile_startup_assigned_jobs()`, which repairs legacy assigned rows only during startup reconciliation.
 
 The SQLite store logic for job selection and lifecycle transitions lives in `crates/ingot-store-sqlite/src/store/job.rs`. `list_queued_jobs()` selects only `status = 'queued'`. That is the key reason a dispatch-created `assigned` row becomes invisible to ordinary job launch.
 
 The workflow evaluator lives in `crates/ingot-workflow/src/evaluator.rs`. It treats any active job as “running” from the board’s perspective, where “active” includes queued, assigned, and running. This plan preserves that high-level workflow interpretation.
 
-The route tests that currently encode the broken contract live in `crates/ingot-http-api/tests/dispatch_routes.rs`. Shared helpers for route-test fixtures live in `crates/ingot-http-api/tests/common/mod.rs`. Some UI tests in `ui/src/test/item-detail-page.test.tsx` already understand queued jobs, which is useful because it means the frontend is not relying exclusively on `assigned`.
+The route tests that currently encode the broken contract live in `crates/ingot-http-api/tests/dispatch_routes.rs`, and there is also a dispatch-module unit test at the bottom of `crates/ingot-http-api/src/router/dispatch.rs` for the helper that mutates the job after creation. Shared helpers for route-test fixtures live in `crates/ingot-http-api/tests/common/mod.rs`. Some UI tests in `ui/src/test/item-detail-page.test.tsx` already understand queued jobs, which is useful because it means the frontend is not relying exclusively on `assigned`.
 
 The local reproduction that motivated this plan is in `~/.ingot/ingot.db`, where job `job_019d0a49a57f7b83ab2824287d15acb8` for item `001 — Scaffold the project` was left `assigned` with no lease or runner metadata, while its workspace was already `ready`. That exact signature should be encoded into recovery tests so the bug never returns silently.
 
+### Invariant-bearing fields
+
+The primary stale-work guard is `job.item_revision_id`. It is created in `dispatch_job(...)` and `retry_job(...)` from `item.current_revision_id`, it is checked by `prepare_run()` and `prepare_harness_validation()` before launch, and it is enforced again by the store helpers `claim_queued_agent_job_execution(...)`, `start_job_execution(...)`, `heartbeat_job_execution(...)`, and `finish_job_non_success(...)`. Any recovery or cleanup path introduced by this plan must preserve that same revision discipline instead of mutating rows unconditionally.
+
+The runtime state boundary is encoded by `status`, `workspace_id`, `agent_id`, `prompt_snapshot`, `phase_template_digest`, `lease_owner_id`, `heartbeat_at`, `lease_expires_at`, and `started_at`. For ordinary agent-backed authoring work, those fields are supposed to appear only when the runtime claims the queued row in `run_with_heartbeats()`. The broken dispatch path violates that contract by writing only `status = assigned` and `workspace_id`, which is why the plan must keep the runtime claim boundary unchanged.
+
+The job-type classifier fields are `workspace_kind`, `execution_permission`, `output_artifact_kind`, and `phase_kind`. They determine whether a row is an authoring commit job, a read-only report job, or a daemon-only validation job. The repair logic must inspect these fields explicitly so it repairs only the observed bad authoring-dispatch signature.
+
+The workspace-side guard is the pair `WorkspaceStatus` and `current_job_id`. The broken local row had a workspace already `ready` with `current_job_id = NULL`, while live agent preparation normally makes the workspace busy and `cleanup_unclaimed_prepared_agent_run(...)` checks that `current_job_id` still matches before releasing it. This distinction is the main reason the repair can be narrow instead of broad.
+
 ## Plan of Work
 
-First, fix the HTTP dispatch contract for authoring jobs in `crates/ingot-http-api/src/router/dispatch.rs`. Replace the current helper that mutates the job into `Assigned` with a helper whose responsibility is only “ensure the authoring workspace exists or clean it up on failure.” The initial dispatch route and the retry route should continue to create or reuse the authoring workspace, but they must leave the new authoring job row `Queued`. The job returned from the API will therefore no longer carry `workspace_id` immediately, because queued jobs do not persist assignment metadata in the current domain model.
+First, keep the usecase creation path untouched and fix the HTTP post-processing instead. `dispatch_job(...)` and `retry_job(...)` in `crates/ingot-usecases/src/job.rs` already create queued jobs and enforce the current-revision active-work guard through `ensure_no_active_execution(...)`. The change belongs in `crates/ingot-http-api/src/router/dispatch.rs`: replace or remove the helper that mutates the already-created job into `Assigned`, and leave authoring jobs queued while still provisioning or reusing the authoring workspace.
 
-Second, update the route tests to codify the new dispatch contract. In `crates/ingot-http-api/tests/dispatch_routes.rs`, rewrite `dispatch_item_job_route_creates_queued_author_initial_job_and_workspace` so it expects `status = queued`, keeps verifying that the workspace exists in item detail, and stops asserting that the job itself is already assigned to that workspace. Review the retry-route tests in `crates/ingot-http-api/tests/job_routes.rs` and any helper assumptions in `crates/ingot-http-api/tests/common/mod.rs` so authoring retries also encode queued-after-dispatch semantics.
+Second, update every backend test that truly depends on the old authoring-dispatch response contract. In `crates/ingot-http-api/tests/dispatch_routes.rs`, rewrite `dispatch_item_job_route_creates_queued_author_initial_job_and_workspace`, `dispatch_item_job_route_binds_implicit_author_initial_from_target_head`, and `dispatch_item_job_route_reuses_existing_authoring_workspace_for_revision` so they no longer require `workspace_id` on the dispatch response, while still verifying that the item detail shows the expected authoring workspace. In `crates/ingot-http-api/tests/job_routes.rs`, add an authoring-specific retry test rather than broadening or rewriting the existing review-job retry regression, because the generic review retry path does not use the authoring workspace helper.
 
-Third, add a narrow maintenance repair path in `crates/ingot-agent-runtime/src/lib.rs` for already-broken rows created by the old dispatch code. The repair should apply only to authoring jobs that still have `status = assigned` but clearly never entered the runtime claim path: no lease metadata, no agent metadata, and a linked authoring workspace that is already `ready` with no `current_job_id`. Those rows should be requeued during steady-state maintenance so a long-running daemon can recover them without restart. The existing broad startup-only `assigned` repair must remain in place for older binaries and non-authoring leftovers.
+Third, add a narrow maintenance repair path in `crates/ingot-agent-runtime/src/lib.rs` for already-broken rows created by the old dispatch code. The repair should apply only to authoring commit jobs, which in this repository means `workspace_kind = Authoring`, `execution_permission = MayMutate`, and `output_artifact_kind = Commit`, and only when they still have `status = assigned` but clearly never entered either runtime launch path: no agent metadata, no lease metadata, and a linked authoring workspace that is already `ready` with no `current_job_id`. Those rows should be requeued during steady-state maintenance so a long-running daemon can recover them without restart. The existing broad startup-only `assigned` repair must remain in place for older binaries and for non-authoring leftovers.
 
-Fourth, add targeted runtime tests that pin down the inert-assigned recovery predicate. One test should seed the exact broken signature from the local database and prove that `reconcile_active_jobs()` requeues it and leaves the workspace usable. Another test should prove that legitimate runtime states are not affected, especially daemon-only validation and already-running jobs. The implementation should prefer small, explicit predicates over fuzzy time-based heuristics.
+Fourth, add targeted runtime tests that pin down the inert-assigned recovery predicate and its boundaries. One test should seed the exact broken signature from the local database and prove that `reconcile_active_jobs()` requeues it and leaves the workspace usable. Another test should continue to prove that busy assigned rows are still left alone during maintenance. A third test should prove that daemon-only validation handoff is not mistaken for inert dispatch residue even if it passes briefly through `Assigned`. The implementation should prefer small, explicit predicates over fuzzy time-based heuristics.
 
-Fifth, preserve the runtime hardening boundary introduced in `2a56e40`. This patch must not change `run_with_heartbeats()` back to accepting live `assigned` rows for ordinary agent-backed work. The contract after this patch is: HTTP authoring dispatch creates `queued`, the runtime claims `queued -> running`, and maintenance only repairs authoring `assigned` rows that are demonstrably dispatch residue rather than real in-flight launches.
+Fifth, preserve the runtime hardening boundary introduced in `2a56e40` across both execution entry points. This patch must not change `run_with_heartbeats()` back to accepting live `assigned` rows for ordinary agent-backed work, and it must not bypass `next_runnable_job()` or `launch_supervised_jobs()` with a new alternate selector. The contract after this patch is: HTTP authoring dispatch creates `queued`, both runtime execution modes only select queued work, the runtime claim writes assignment and lease metadata, and maintenance only repairs authoring `assigned` rows that are demonstrably dispatch residue rather than real in-flight launches.
 
 ## Concrete Steps
 
@@ -106,12 +140,14 @@ Work from `/Users/aa/Documents/ingot`.
 
        crates/ingot-http-api/src/router/dispatch.rs
        crates/ingot-domain/src/job.rs
+       crates/ingot-usecases/src/job.rs
 
    Implement:
 
-       - remove the `job.assign(...)` write from the authoring dispatch helper path
-       - rename the helper if needed so its name matches its new responsibility
-       - apply the same change to both initial dispatch and retry dispatch
+       - keep `dispatch_job(...)` and `retry_job(...)` queued
+       - remove the `job.assign(...)` write from the authoring HTTP helper path
+       - rename or delete `link_job_to_workspace_or_cleanup(...)` if its old name or test surface no longer matches reality
+       - apply the same HTTP-layer change to both initial dispatch and retry dispatch
        - keep workspace creation and cleanup behavior intact
 
 2. Update backend route tests to reflect the new contract.
@@ -120,14 +156,15 @@ Work from `/Users/aa/Documents/ingot`.
 
        crates/ingot-http-api/tests/dispatch_routes.rs
        crates/ingot-http-api/tests/job_routes.rs
-       crates/ingot-http-api/tests/common/mod.rs
+       crates/ingot-http-api/src/router/dispatch.rs
 
    Implement:
 
-       - change the initial authoring dispatch test to expect `queued`
+       - change the initial and implicit authoring dispatch route tests to expect `queued`
+       - change the existing-authoring-workspace route test to stop expecting `workspace_id` on the dispatch response
        - keep the assertions that the authoring workspace exists and is usable
-       - add or tighten a retry-route test so authoring retry dispatch also remains queued
-       - remove any helper assumptions that queued authoring rows always have `workspace_id`
+       - add an authoring-specific retry-route regression so authoring retry dispatch also remains queued
+       - remove or replace the dispatch-module helper test whose only purpose was to cover post-create job mutation failure, because that failure mode should disappear if the helper no longer updates the job row
 
 3. Add targeted runtime recovery for inert dispatch residue.
 
@@ -136,12 +173,13 @@ Work from `/Users/aa/Documents/ingot`.
        crates/ingot-agent-runtime/src/lib.rs
        crates/ingot-agent-runtime/tests/reconciliation.rs
        crates/ingot-store-sqlite/src/store/job.rs
+       crates/ingot-usecases/src/reconciliation.rs
 
    Implement:
 
-       - a predicate for “dispatch-created inert assigned authoring row”
+       - a predicate for “dispatch-created inert assigned authoring row” that checks the actual classifier and lease fields used in this codebase
        - a steady-state repair branch that requeues only rows matching that predicate
-       - preservation of the existing startup-only broad assigned recovery
+       - preservation of the existing startup-only broad assigned recovery and the existing busy-assigned maintenance behavior
        - no change to `run_with_heartbeats()` or the queued-to-running claim contract for agent-backed jobs
 
 4. Add regression coverage for the observed root-cause signature.
@@ -150,9 +188,15 @@ Work from `/Users/aa/Documents/ingot`.
 
        - `dispatch_item_job_route_creates_queued_author_initial_job_and_workspace`
          Update this existing test rather than renaming it.
+       - `dispatch_item_job_route_binds_implicit_author_initial_from_target_head`
+         Update this existing test rather than renaming it.
+       - `dispatch_item_job_route_reuses_existing_authoring_workspace_for_revision`
+         Update this existing test rather than renaming it.
        - `retry_route_requeues_authoring_job_without_persisting_assigned_state`
        - `reconcile_active_jobs_repairs_inert_assigned_authoring_dispatch_residue`
        - `reconcile_active_jobs_does_not_repair_daemon_validation_assigned_handoff`
+       - `reconcile_active_jobs_leaves_assigned_rows_for_startup_recovery`
+         Keep this existing test green; it is the boundary check that proves the new repair stays narrow.
 
 5. Validate incrementally, then broadly.
 
@@ -160,11 +204,15 @@ Work from `/Users/aa/Documents/ingot`.
 
        cd /Users/aa/Documents/ingot
        cargo test -p ingot-http-api dispatch_item_job_route_creates_queued_author_initial_job_and_workspace -- --exact
+       cargo test -p ingot-http-api dispatch_item_job_route_binds_implicit_author_initial_from_target_head -- --exact
+       cargo test -p ingot-http-api dispatch_item_job_route_reuses_existing_authoring_workspace_for_revision -- --exact
        cargo test -p ingot-http-api retry_route_requeues_authoring_job_without_persisting_assigned_state -- --exact
        cargo test -p ingot-agent-runtime reconcile_active_jobs_repairs_inert_assigned_authoring_dispatch_residue -- --exact
        cargo test -p ingot-agent-runtime reconcile_active_jobs_does_not_repair_daemon_validation_assigned_handoff -- --exact
+       cargo test -p ingot-agent-runtime reconcile_active_jobs_leaves_assigned_rows_for_startup_recovery -- --exact
        cargo test -p ingot-http-api
        cargo test -p ingot-agent-runtime
+       make test
        cargo fmt --all --check
 
    If a stable test name changes during implementation, update this plan immediately before stopping.
@@ -173,15 +221,15 @@ Work from `/Users/aa/Documents/ingot`.
 
 Acceptance is reached when all of the following are true.
 
-1. Dispatching `author_initial` through the HTTP route creates a job row whose durable status is `queued`, not `assigned`, while the authoring workspace still exists for the current revision.
+1. Dispatching `author_initial` through the HTTP route creates a job row whose durable status is `queued`, not `assigned`, while the authoring workspace still exists for the current revision. In the dispatch response, `workspace_id` is absent or `null` because the queued state does not persist assignment metadata.
 
-2. The runtime continues to launch ordinary agent-backed work only by claiming `queued -> running` in `run_with_heartbeats()`. There must be no new fallback path that treats `assigned` as launchable for ordinary authoring jobs.
+2. The runtime continues to launch ordinary agent-backed work only by claiming `queued -> running` in `run_with_heartbeats()`. There must be no new fallback path that treats `assigned` as launchable for ordinary authoring jobs, and both runtime selectors, `next_runnable_job()` and `launch_supervised_jobs()`, must continue to read queued rows only.
 
-3. A row matching the exact broken signature observed locally on 2026-03-20 can be repaired during ordinary maintenance without daemon restart: `status = assigned`, authoring workspace kind, no lease metadata, no agent metadata, workspace `ready`, and `current_job_id = NULL`.
+3. A row matching the exact broken signature observed locally on 2026-03-20 can be repaired during ordinary maintenance without daemon restart: `status = assigned`, `workspace_kind = authoring`, `execution_permission = may_mutate`, `output_artifact_kind = commit`, no agent metadata, no lease metadata, workspace `ready`, and `current_job_id = NULL`.
 
-4. Legitimate non-broken states are preserved. In particular, daemon-only validation must not be requeued by the new steady-state repair, and startup reconciliation must still handle broader legacy assigned rows.
+4. Legitimate non-broken states are preserved. In particular, daemon-only validation must not be requeued by the new steady-state repair, busy assigned rows must still be left alone during maintenance, and startup reconciliation must still handle broader legacy assigned rows.
 
-5. The focused tests listed above pass, followed by the crate-level backend test suites. The updated route test must fail before the implementation and pass after it.
+5. The focused tests listed above pass, followed by the crate-level backend test suites and `make test`. The updated route tests must fail before the implementation and pass after it.
 
 6. Manual spot-check of the local DB is consistent with the new contract. After dispatching a fresh authoring job in a dev environment, a query like the following should first show `queued`, then later `running` only after the runtime claims it:
 
@@ -195,7 +243,7 @@ Acceptance is reached when all of the following are true.
 
 ## Idempotence and Recovery
 
-This plan does not require a schema migration. The code changes are retry-safe because dispatching the same item again is already governed by the existing active-job checks, and the recovery logic only requeues rows that match a narrow inert signature. If implementation fails halfway, it is safe to rerun the focused tests and continue editing.
+This plan does not require a schema migration or a persisted payload shape change. `JobStatus::Assigned` remains part of the model for compatibility, so existing rows from older binaries continue to deserialize. The code changes are retry-safe because dispatching the same item again is already governed by the existing `ensure_no_active_execution(...)` guard, and the recovery logic only requeues rows that match a narrow inert signature. If implementation fails halfway, it is safe to rerun the focused tests and continue editing.
 
 If a local environment already contains a broken row from the old code, the intended recovery after implementation is automatic maintenance repair. Until that code exists, restarting the daemon remains the operational fallback because startup reconciliation still requeues broad `assigned` residue. This fallback should be documented in the implementation notes but must not be the only fix.
 
@@ -221,10 +269,11 @@ Key evidence gathered before implementation:
 
 ## Interfaces and Dependencies
 
-In `crates/ingot-http-api/src/router/dispatch.rs`, the authoring-dispatch helper at the end of the file must no longer require mutable job-state assignment as part of workspace provisioning. If renaming improves clarity, keep the replacement helper local to this module and make it explicit that it is about workspace persistence and cleanup, not job-state mutation.
+In `crates/ingot-http-api/src/router/dispatch.rs`, the authoring-dispatch helper at the end of the file must no longer require mutable job-state assignment as part of workspace provisioning. If renaming improves clarity, keep the replacement helper local to this module and make it explicit that it is about workspace persistence and cleanup, not job-state mutation. If the helper disappears entirely, remove the now-obsolete unit test that only existed to validate post-create job-row mutation failure.
 
-In `crates/ingot-agent-runtime/src/lib.rs`, define a small, explicit predicate or helper function for the inert assigned authoring signature rather than scattering the checks inline. The predicate should inspect both the job row and, when needed, the linked workspace row so the recovery logic remains explainable and testable.
+In `crates/ingot-agent-runtime/src/lib.rs`, define a small, explicit predicate or helper function for the inert assigned authoring signature rather than scattering the checks inline. The predicate should inspect the actual classifier fields already used by `is_supported_runtime_job(...)` and `is_daemon_only_validation(...)`, plus the assignment and lease metadata and, when needed, the linked workspace row, so the recovery logic remains explainable and testable.
 
-Do not change the public `JobRepository::start_execution` interface or the agent claim helper introduced by the earlier handoff hardening. This plan depends on preserving the existing runtime boundary: dispatch creates `queued`, the runtime claim writes assignment and lease metadata, and terminal lifecycle code continues to rely on the existing revision guard.
+Do not change the public `JobRepository::start_execution` interface, the agent claim helper introduced by the earlier handoff hardening, or the queued constructors in `dispatch_job(...)` and `retry_job(...)`. This plan depends on preserving the existing runtime boundary: the usecase layer creates queued jobs with the current revision, the HTTP layer stops overriding that state for authoring jobs, the runtime claim writes assignment and lease metadata, and terminal lifecycle code continues to rely on the existing revision guard.
 
 Revision note: created on 2026-03-20 to turn the local `author_initial` stuck-state investigation into an implementation-ready plan after confirming that the root cause is in HTTP dispatch, not in the already-hardened runtime claim path.
+Revision note: revised on 2026-03-20 after deep-reading the referenced files and adjacent code. This pass corrected the plan to account for the real queued constructors in `crates/ingot-usecases/src/job.rs`, both runtime queued selectors, the additional dispatch route tests and helper unit test that encode the old response contract, and the exact classifier and lease fields needed to make steady-state repair narrow enough to avoid daemon-validation handoff.
