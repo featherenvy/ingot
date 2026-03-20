@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use chrono::Utc;
-use ingot_domain::activity::{Activity, ActivityEventType};
+use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::Finding;
@@ -11,8 +11,8 @@ use ingot_domain::item::ApprovalState;
 use ingot_domain::job::Job;
 use ingot_domain::ports::ConvergenceQueuePrepareContext;
 use ingot_domain::ports::{
-    ActivityRepository, ConvergenceQueueRepository, ConvergenceRepository, ItemRepository,
-    WorkspaceRepository,
+    ActivityRepository, ConvergenceQueueRepository, InvalidatePreparedConvergenceMutation,
+    InvalidatePreparedConvergenceRepository, WorkspaceRepository,
 };
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
@@ -56,7 +56,7 @@ pub enum ApprovalFinalizeReadiness {
     ConvergenceNotQueued,
     ConvergenceNotLaneHead,
     Ready {
-        convergence: Convergence,
+        convergence: Box<Convergence>,
         queue_entry: ConvergenceQueueEntry,
     },
 }
@@ -65,6 +65,11 @@ pub enum ApprovalFinalizeReadiness {
 pub enum FinalizePreparedTrigger {
     ApprovalCommand,
     SystemCommand,
+}
+
+pub struct FinalizationTarget<'a> {
+    pub convergence: &'a Convergence,
+    pub queue_entry: &'a ConvergenceQueueEntry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,8 +221,7 @@ pub trait PreparedConvergenceFinalizePort: Send + Sync {
         project: &Project,
         item: &ingot_domain::item::Item,
         revision: &ItemRevision,
-        convergence: &Convergence,
-        queue_entry: &ConvergenceQueueEntry,
+        target: FinalizationTarget<'_>,
         operation: &GitOperation,
     ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
 }
@@ -307,8 +311,10 @@ where
         project,
         item,
         revision,
-        convergence,
-        queue_entry,
+        FinalizationTarget {
+            convergence,
+            queue_entry,
+        },
         &operation,
     )
     .await?;
@@ -376,7 +382,7 @@ where
                     id: ActivityId::new(),
                     project_id: context.project.id,
                     event_type: ActivityEventType::ConvergenceQueued,
-                    entity_type: "queue_entry".into(),
+                    entity_type: ActivityEntityType::QueueEntry,
                     entity_id: queue_entry.id.to_string(),
                     payload: serde_json::json!({
                         "item_id": context.item.id,
@@ -399,7 +405,7 @@ where
                     id: ActivityId::new(),
                     project_id: context.project.id,
                     event_type: ActivityEventType::ConvergenceLaneAcquired,
-                    entity_type: "queue_entry".into(),
+                    entity_type: ActivityEntityType::QueueEntry,
                     entity_id: queue_entry.id.to_string(),
                     payload: serde_json::json!({
                         "item_id": context.item.id,
@@ -471,7 +477,7 @@ where
                 id: ActivityId::new(),
                 project_id,
                 event_type: ActivityEventType::ApprovalApproved,
-                entity_type: "item".into(),
+                entity_type: ActivityEntityType::Item,
                 entity_id: item.id.to_string(),
                 payload: serde_json::json!({
                     "convergence_id": convergence.id,
@@ -580,17 +586,16 @@ where
                         && evaluation.next_recommended_action
                             == RecommendedAction::FinalizePreparedConvergence;
 
-                    if should_finalize {
-                        if self
+                    if should_finalize
+                        && self
                             .port
                             .auto_finalize_prepared_convergence(
                                 project_state.project.id,
                                 state.item_id,
                             )
                             .await?
-                        {
-                            return Ok(true);
-                        }
+                    {
+                        return Ok(true);
                     }
                 }
             }
@@ -636,7 +641,7 @@ where
                 id: ActivityId::new(),
                 project_id,
                 event_type: ActivityEventType::ConvergenceLaneAcquired,
-                entity_type: "queue_entry".into(),
+                entity_type: ActivityEntityType::QueueEntry,
                 entity_id: entry.id.to_string(),
                 payload: serde_json::json!({ "item_id": entry.item_id, "target_ref": entry.target_ref }),
                 created_at: Utc::now(),
@@ -652,22 +657,22 @@ where
 /// Invalidate a prepared convergence whose target ref has moved.
 /// Pure DB: marks convergence as failed, sets integration workspace to Stale,
 /// resets approval state, appends activity.
+///
+/// All writes are applied atomically via `InvalidatePreparedConvergenceRepository`.
 /// Returns true if a convergence was invalidated.
-pub async fn invalidate_prepared_convergence<C, W, IR, A>(
-    convergence_repo: &C,
+pub async fn invalidate_prepared_convergence<W, T>(
     workspace_repo: &W,
-    item_repo: &IR,
-    activity_repo: &A,
+    invalidate_repo: &T,
     item: &mut ingot_domain::item::Item,
     revision: &ItemRevision,
     convergences: &[Convergence],
 ) -> Result<bool, UseCaseError>
 where
-    C: ConvergenceRepository,
     W: WorkspaceRepository,
-    IR: ItemRepository,
-    A: ActivityRepository,
+    T: InvalidatePreparedConvergenceRepository,
 {
+    // --- Read/Compute phase ---
+
     let mut convergence = match convergences
         .iter()
         .find(|convergence| {
@@ -681,27 +686,37 @@ where
     };
 
     convergence.transition_to_failed(Some("target_ref_moved".into()), Utc::now());
-    convergence_repo.update(&convergence).await?;
 
-    if let Some(workspace_id) = convergence.state.integration_workspace_id() {
+    let workspace_update = if let Some(workspace_id) = convergence.state.integration_workspace_id()
+    {
         let mut workspace = workspace_repo.get(workspace_id).await?;
         workspace.mark_stale(Utc::now());
-        workspace_repo.update(&workspace).await?;
-    }
+        Some(workspace)
+    } else {
+        None
+    };
 
     item.approval_state = approval_state_for_policy(revision.approval_policy);
     item.updated_at = Utc::now();
-    item_repo.update(item).await?;
 
-    activity_repo
-        .append(&Activity {
-            id: ActivityId::new(),
-            project_id: convergence.project_id,
-            event_type: ActivityEventType::ConvergenceFailed,
-            entity_type: "convergence".into(),
-            entity_id: convergence.id.to_string(),
-            payload: serde_json::json!({ "item_id": item.id, "reason": "target_ref_moved" }),
-            created_at: Utc::now(),
+    let activity = Activity {
+        id: ActivityId::new(),
+        project_id: convergence.project_id,
+        event_type: ActivityEventType::ConvergenceFailed,
+        entity_type: ActivityEntityType::Convergence,
+        entity_id: convergence.id.to_string(),
+        payload: serde_json::json!({ "item_id": item.id, "reason": "target_ref_moved" }),
+        created_at: Utc::now(),
+    };
+
+    // --- Apply phase (single atomic write) ---
+
+    invalidate_repo
+        .apply_invalidate_prepared_convergence(InvalidatePreparedConvergenceMutation {
+            convergence,
+            workspace_update,
+            item: item.clone(),
+            activity,
         })
         .await?;
 
@@ -715,6 +730,8 @@ mod tests {
 
     use chrono::Utc;
     use ingot_domain::activity::Activity;
+
+    use super::FinalizationTarget;
     use ingot_domain::convergence::{Convergence, ConvergenceStatus};
     use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
     use ingot_domain::git_operation::GitOperation;
@@ -769,16 +786,18 @@ mod tests {
                 has_active_job: false,
                 has_active_convergence: false,
                 finalize_readiness: ApprovalFinalizeReadiness::Ready {
-                    convergence: ingot_test_support::fixtures::ConvergenceBuilder::new(
-                        ProjectId::from_uuid(nil),
-                        ItemId::from_uuid(nil),
-                        ItemRevisionId::from_uuid(nil),
-                    )
-                    .id(ConvergenceId::from_uuid(Uuid::nil()))
-                    .status(ingot_domain::convergence::ConvergenceStatus::Prepared)
-                    .target_head_valid(true)
-                    .created_at(Utc::now())
-                    .build(),
+                    convergence: Box::new(
+                        ingot_test_support::fixtures::ConvergenceBuilder::new(
+                            ProjectId::from_uuid(nil),
+                            ItemId::from_uuid(nil),
+                            ItemRevisionId::from_uuid(nil),
+                        )
+                        .id(ConvergenceId::from_uuid(Uuid::nil()))
+                        .status(ingot_domain::convergence::ConvergenceStatus::Prepared)
+                        .target_head_valid(true)
+                        .created_at(Utc::now())
+                        .build(),
+                    ),
                     queue_entry: ConvergenceQueueEntry {
                         id: ingot_domain::ids::ConvergenceQueueEntryId::from_uuid(Uuid::nil()),
                         project_id: ProjectId::from_uuid(Uuid::nil()),
@@ -1083,13 +1102,12 @@ mod tests {
             _project: &Project,
             item: &ingot_domain::item::Item,
             _revision: &ItemRevision,
-            convergence: &Convergence,
-            _queue_entry: &ConvergenceQueueEntry,
+            target: FinalizationTarget<'_>,
             _operation: &GitOperation,
         ) -> impl Future<Output = Result<(), UseCaseError>> + Send {
             self.calls.lock().expect("calls lock").push(format!(
                 "apply_successful_finalization:{trigger:?}:{}:{}",
-                item.id, convergence.id
+                item.id, target.convergence.id
             ));
             ready(if self.apply_successful_finalization_should_fail {
                 Err(UseCaseError::Internal("boom".into()))

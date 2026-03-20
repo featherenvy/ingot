@@ -35,9 +35,9 @@ fn make_runtime_workspace(
     path: &Path,
     revision_id: ingot_domain::ids::ItemRevisionId,
     workspace_ref: impl Into<String>,
-    base_commit_oid: impl Into<String>,
-    head_commit_oid: impl Into<String>,
+    commit_oids: (impl Into<String>, impl Into<String>),
 ) -> ingot_domain::workspace::Workspace {
+    let (base_commit_oid, head_commit_oid) = commit_oids;
     WorkspaceBuilder::new(project_id, kind)
         .id(workspace_id)
         .path(path.display().to_string())
@@ -74,8 +74,7 @@ async fn create_authoring_validation_workspace(
         provisioned.workspace_path.as_path(),
         revision_id,
         provisioned.workspace_ref,
-        base_commit_oid,
-        provisioned.head_commit_oid,
+        (base_commit_oid, provisioned.head_commit_oid),
     );
     h.db.create_workspace(&workspace)
         .await
@@ -750,8 +749,7 @@ async fn daemon_only_validation_job_executes_on_tick() {
         &h.repo_path,
         revision_id,
         format!("refs/ingot/workspaces/{workspace_id}"),
-        seed_commit.clone(),
-        candidate_head.clone(),
+        (seed_commit.clone(), candidate_head.clone()),
     );
     h.db.create_workspace(&workspace)
         .await
@@ -1227,8 +1225,7 @@ async fn harness_validation_with_commands_produces_findings_on_failure() {
         &h.repo_path,
         revision_id,
         format!("refs/ingot/workspaces/{workspace_id}"),
-        seed_commit.clone(),
-        candidate_head.clone(),
+        (seed_commit.clone(), candidate_head.clone()),
     );
     h.db.create_workspace(&workspace)
         .await
@@ -1865,8 +1862,7 @@ async fn daemon_validation_resyncs_integration_workspace_before_running_harness(
         provisioned.workspace_path.as_path(),
         revision_id,
         provisioned.workspace_ref,
-        seed_commit.clone(),
-        provisioned.head_commit_oid,
+        (seed_commit.clone(), provisioned.head_commit_oid),
     );
     h.db.create_workspace(&workspace)
         .await

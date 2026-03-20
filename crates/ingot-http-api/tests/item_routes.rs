@@ -652,12 +652,12 @@ async fn defer_route_refreshes_revision_context_summary_after_cancelling_jobs() 
         "operator_notes_excerpt": serde_json::Value::Null,
     });
 
-    let mut item = test_item_builder(&project_id, &revision_id, &item_id).build();
+    let mut item = test_item_builder(project_id, revision_id, item_id).build();
     item.escalation = Escalation::OperatorRequired {
         reason: EscalationReason::StepFailed,
     };
-    persist_test_project(&db, &repo, &project_id).await;
-    let revision = test_revision_builder(&item_id, &revision_id)
+    persist_test_project(&db, &repo, project_id).await;
+    let revision = test_revision_builder(item_id, revision_id)
         .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
         .seed(AuthoringBaseSeed::Explicit {
             seed_commit_oid: head.clone(),

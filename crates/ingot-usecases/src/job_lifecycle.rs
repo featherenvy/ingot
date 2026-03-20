@@ -1,5 +1,5 @@
 use chrono::Utc;
-use ingot_domain::activity::{Activity, ActivityEventType};
+use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
 use ingot_domain::ids::{ActivityId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::item::{EscalationReason, Item};
 use ingot_domain::job::{Job, JobStatus, OutcomeClass};
@@ -76,7 +76,7 @@ where
             id: ActivityId::new(),
             project_id: job.project_id,
             event_type: ActivityEventType::JobCancelled,
-            entity_type: "job".into(),
+            entity_type: ActivityEntityType::Job,
             entity_id: job.id.to_string(),
             payload: serde_json::json!({ "item_id": item.id, "reason": cancel_reason }),
             created_at: Utc::now(),
@@ -155,7 +155,7 @@ where
                 id: ActivityId::new(),
                 project_id: job.project_id,
                 event_type: ActivityEventType::ItemEscalated,
-                entity_type: "item".into(),
+                entity_type: ActivityEntityType::Item,
                 entity_id: item.id.to_string(),
                 payload: serde_json::json!({ "reason": escalation_reason }),
                 created_at: Utc::now(),
@@ -173,7 +173,7 @@ where
             id: ActivityId::new(),
             project_id: job.project_id,
             event_type,
-            entity_type: "job".into(),
+            entity_type: ActivityEntityType::Job,
             entity_id: job.id.to_string(),
             payload: serde_json::json!({ "item_id": item.id, "error_code": error_code }),
             created_at: Utc::now(),
@@ -239,7 +239,7 @@ where
             id: ActivityId::new(),
             project_id: job.project_id,
             event_type: ActivityEventType::JobFailed,
-            entity_type: "job".into(),
+            entity_type: ActivityEntityType::Job,
             entity_id: job.id.to_string(),
             payload: serde_json::json!({ "item_id": item.id, "error_code": "job_expired" }),
             created_at: Utc::now(),

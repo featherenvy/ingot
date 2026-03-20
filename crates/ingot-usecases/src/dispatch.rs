@@ -1,5 +1,5 @@
 use chrono::Utc;
-use ingot_domain::activity::{Activity, ActivityEventType};
+use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
 use ingot_domain::convergence::Convergence;
 use ingot_domain::finding::Finding;
 use ingot_domain::ids::ActivityId;
@@ -203,7 +203,7 @@ where
             id: ActivityId::new(),
             project_id: project.id,
             event_type: ActivityEventType::JobDispatched,
-            entity_type: "job".into(),
+            entity_type: ActivityEntityType::Job,
             entity_id: job.id.to_string(),
             payload: serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
             created_at: Utc::now(),

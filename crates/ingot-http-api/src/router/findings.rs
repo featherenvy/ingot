@@ -255,7 +255,7 @@ pub(super) async fn apply_finding_triage(
         state,
         source_item.project_id,
         ActivityEventType::FindingTriaged,
-        "finding",
+        ActivityEntityType::Finding,
         applied.finding.id,
         serde_json::json!({
             "item_id": source_item.id,
@@ -413,7 +413,7 @@ pub(super) async fn maybe_enter_approval_after_finding_triage(
                 state,
                 item.project_id,
                 ActivityEventType::ApprovalRequested,
-                "item",
+                ActivityEntityType::Item,
                 item.id,
                 serde_json::json!({ "source": "finding_triage" }),
             )

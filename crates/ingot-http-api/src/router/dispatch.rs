@@ -103,7 +103,7 @@ pub(super) async fn dispatch_item_job(
         &state,
         project_id,
         ActivityEventType::JobDispatched,
-        "job",
+        ActivityEntityType::Job,
         job.id,
         serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
     )
@@ -312,7 +312,7 @@ pub(super) async fn plan_and_apply_investigation_ref(
         state,
         project_id,
         ActivityEventType::GitOperationPlanned,
-        "git_operation",
+        ActivityEntityType::GitOperation,
         operation.id,
         serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
     )
@@ -395,7 +395,7 @@ pub(super) async fn maybe_cleanup_investigation_ref(
         state,
         project_id,
         ActivityEventType::GitOperationPlanned,
-        "git_operation",
+        ActivityEntityType::GitOperation,
         operation.id,
         serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
     )
@@ -569,7 +569,7 @@ pub(super) async fn retry_item_job(
         &state,
         project_id,
         ActivityEventType::JobDispatched,
-        "job",
+        ActivityEntityType::Job,
         job.id,
         serde_json::json!({
             "item_id": item.id,

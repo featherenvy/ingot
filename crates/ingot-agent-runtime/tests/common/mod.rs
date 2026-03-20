@@ -512,7 +512,7 @@ impl AgentRunner for BlockingRunner {
             self.launch_notify.notify_waiters();
 
             loop {
-                if {
+                let can_release = {
                     let mut state = self.state.lock().expect("blocking runner state");
                     if state.release_budget > 0 {
                         state.release_budget -= 1;
@@ -520,7 +520,8 @@ impl AgentRunner for BlockingRunner {
                     } else {
                         false
                     }
-                } {
+                };
+                if can_release {
                     break;
                 }
                 self.release_notify.notified().await;

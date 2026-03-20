@@ -1,5 +1,5 @@
 use chrono::Utc;
-use ingot_domain::activity::{Activity, ActivityEventType};
+use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
 use ingot_domain::convergence::ConvergenceStatus;
 use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
 use ingot_domain::git_operation::{GitEntityType, GitOperationStatus, OperationKind};
@@ -9,8 +9,9 @@ use ingot_domain::ids::{
 };
 use ingot_domain::job::{JobStatus, OutcomeClass};
 use ingot_domain::ports::{
-    ActivityRepository, ConvergenceQueueRepository, ConvergenceRepository,
-    FinishJobNonSuccessParams, GitOperationRepository, JobRepository, WorkspaceRepository,
+    ConvergenceQueueRepository, ConvergenceRepository, FinishJobNonSuccessParams,
+    GitOperationRepository, JobRepository, RevisionLaneTeardownMutation,
+    RevisionLaneTeardownRepository, TeardownJobCancellation, WorkspaceRepository,
 };
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::workspace::WorkspaceStatus;
@@ -54,14 +55,16 @@ impl RevisionLaneTeardownResult {
 ///
 /// Cancels active jobs, convergences, queue entries, and reconciles git operations.
 /// Does NOT perform filesystem cleanup or refresh_revision_context — callers do that.
+///
+/// All writes are applied atomically via `RevisionLaneTeardownRepository`.
 #[allow(clippy::too_many_arguments)]
-pub async fn teardown_revision_lane<J, C, CQ, W, GO, A>(
+pub async fn teardown_revision_lane<J, C, CQ, W, GO, T>(
     job_repo: &J,
     convergence_repo: &C,
     queue_repo: &CQ,
     workspace_repo: &W,
     git_op_repo: &GO,
-    activity_repo: &A,
+    teardown_repo: &T,
     project_id: ProjectId,
     item_id: ItemId,
     revision: &ItemRevision,
@@ -72,59 +75,21 @@ where
     CQ: ConvergenceQueueRepository,
     W: WorkspaceRepository,
     GO: GitOperationRepository,
-    A: ActivityRepository,
+    T: RevisionLaneTeardownRepository,
 {
     let mut result = RevisionLaneTeardownResult::default();
+    let mut mutation = RevisionLaneTeardownMutation::default();
 
-    // 1. Cancel active jobs for this revision
-    for job in job_repo
+    // --- Read phase ---
+
+    let active_jobs: Vec<_> = job_repo
         .list_by_item(item_id)
         .await?
         .into_iter()
         .filter(|job| job.item_revision_id == revision.id && job.state.is_active())
-    {
-        job_repo
-            .finish_non_success(FinishJobNonSuccessParams {
-                job_id: job.id,
-                item_id,
-                expected_item_revision_id: revision.id,
-                status: JobStatus::Cancelled,
-                outcome_class: Some(OutcomeClass::Cancelled),
-                error_code: Some("item_mutation_cancelled".into()),
-                error_message: None,
-                escalation_reason: None,
-            })
-            .await
-            .map_err(|error| {
-                map_finish_non_success_error(
-                    error,
-                    "job failure does not match the current item revision",
-                )
-            })?;
-        result.cancelled_job_ids.push(job.id);
+        .collect();
 
-        if let Some(workspace_id) = job.state.workspace_id() {
-            let mut workspace = workspace_repo.get(workspace_id).await?;
-            workspace.release_to(WorkspaceStatus::Ready, Utc::now());
-            workspace_repo.update(&workspace).await?;
-            result.cancelled_job_workspace_ids.push(workspace_id);
-        }
-
-        activity_repo
-            .append(&Activity {
-                id: ActivityId::new(),
-                project_id,
-                event_type: ActivityEventType::JobCancelled,
-                entity_type: "job".into(),
-                entity_id: job.id.to_string(),
-                payload: serde_json::json!({ "item_id": item_id, "reason": "item_mutation_cancelled" }),
-                created_at: Utc::now(),
-            })
-            .await?;
-    }
-
-    // 2. Cancel active convergences for this revision
-    for mut convergence in convergence_repo
+    let active_convergences: Vec<_> = convergence_repo
         .list_by_item(item_id)
         .await?
         .into_iter()
@@ -137,32 +102,81 @@ where
                         | ConvergenceStatus::Prepared
                 )
         })
-    {
-        convergence.transition_to_cancelled(Utc::now());
-        convergence_repo.update(&convergence).await?;
-        result.cancelled_convergence_ids.push(convergence.id);
+        .collect();
 
-        if let Some(workspace_id) = convergence.state.integration_workspace_id() {
+    let active_queue_entry = queue_repo.find_active_for_revision(revision.id).await?;
+
+    // --- Compute phase ---
+
+    // 1. Build job cancellations
+    for job in &active_jobs {
+        let params = FinishJobNonSuccessParams {
+            job_id: job.id,
+            item_id,
+            expected_item_revision_id: revision.id,
+            status: JobStatus::Cancelled,
+            outcome_class: Some(OutcomeClass::Cancelled),
+            error_code: Some("item_mutation_cancelled".into()),
+            error_message: None,
+            escalation_reason: None,
+        };
+
+        let workspace_update = if let Some(workspace_id) = job.state.workspace_id() {
+            let mut workspace = workspace_repo.get(workspace_id).await?;
+            workspace.release_to(WorkspaceStatus::Ready, Utc::now());
+            result.cancelled_job_workspace_ids.push(workspace_id);
+            Some(workspace)
+        } else {
+            None
+        };
+
+        let activity = Activity {
+            id: ActivityId::new(),
+            project_id,
+            event_type: ActivityEventType::JobCancelled,
+            entity_type: ActivityEntityType::Job,
+            entity_id: job.id.to_string(),
+            payload: serde_json::json!({ "item_id": item_id, "reason": "item_mutation_cancelled" }),
+            created_at: Utc::now(),
+        };
+
+        mutation.job_cancellations.push(TeardownJobCancellation {
+            params,
+            workspace_update,
+            activity,
+        });
+        result.cancelled_job_ids.push(job.id);
+    }
+
+    // 2. Build convergence cancellations
+    for convergence in active_convergences {
+        let mut cancelled = convergence;
+        cancelled.transition_to_cancelled(Utc::now());
+        result.cancelled_convergence_ids.push(cancelled.id);
+
+        if let Some(workspace_id) = cancelled.state.integration_workspace_id() {
             let workspace = workspace_repo.get(workspace_id).await?;
             if workspace.state.status() != WorkspaceStatus::Abandoned {
                 let mut abandoned_workspace = workspace;
                 abandoned_workspace.mark_abandoned(Utc::now());
-                workspace_repo.update(&abandoned_workspace).await?;
+                mutation.workspace_abandonments.push(abandoned_workspace);
             }
             result.integration_workspace_ids.push(workspace_id);
         }
+
+        mutation.convergence_updates.push(cancelled);
     }
 
-    // 3. Cancel active queue entry for this revision
-    if let Some(mut queue_entry) = queue_repo.find_active_for_revision(revision.id).await? {
+    // 3. Build queue entry cancellation
+    if let Some(mut queue_entry) = active_queue_entry {
         queue_entry.status = ConvergenceQueueEntryStatus::Cancelled;
         queue_entry.released_at = Some(Utc::now());
         queue_entry.updated_at = Utc::now();
-        queue_repo.update(&queue_entry).await?;
         result.cancelled_queue_entry_ids.push(queue_entry.id);
+        mutation.queue_entry_update = Some(queue_entry);
     }
 
-    // 4. Reconcile/fail unresolved git operations for cancelled convergences
+    // 4. Build git operation reconciliations
     if result.has_cancelled_convergence() {
         let cancelled_ids: Vec<String> = result
             .cancelled_convergence_ids
@@ -188,25 +202,23 @@ where
                 OperationKind::PrepareConvergenceCommit => {
                     operation.status = GitOperationStatus::Reconciled;
                     operation.completed_at = Some(Utc::now());
-                    git_op_repo.update(&operation).await?;
-                    activity_repo
-                        .append(&Activity {
-                            id: ActivityId::new(),
-                            project_id,
-                            event_type: ActivityEventType::GitOperationReconciled,
-                            entity_type: "git_operation".into(),
-                            entity_id: operation.id.to_string(),
-                            payload: serde_json::json!({ "operation_kind": operation.operation_kind() }),
-                            created_at: Utc::now(),
-                        })
-                        .await?;
+                    mutation.git_operation_activities.push(Activity {
+                        id: ActivityId::new(),
+                        project_id,
+                        event_type: ActivityEventType::GitOperationReconciled,
+                        entity_type: ActivityEntityType::GitOperation,
+                        entity_id: operation.id.to_string(),
+                        payload: serde_json::json!({ "operation_kind": operation.operation_kind() }),
+                        created_at: Utc::now(),
+                    });
                     result.reconciled_git_operation_ids.push(operation.id);
+                    mutation.git_operation_updates.push(operation);
                 }
                 OperationKind::FinalizeTargetRef => {
                     operation.status = GitOperationStatus::Failed;
                     operation.completed_at = Some(Utc::now());
-                    git_op_repo.update(&operation).await?;
                     result.failed_git_operation_ids.push(operation.id);
+                    mutation.git_operation_updates.push(operation);
                 }
                 OperationKind::CreateJobCommit
                 | OperationKind::CreateInvestigationRef
@@ -217,6 +229,18 @@ where
         }
     }
 
+    // --- Apply phase (single atomic write) ---
+
+    teardown_repo
+        .apply_revision_lane_teardown(mutation)
+        .await
+        .map_err(|error| {
+            map_finish_non_success_error(
+                error,
+                "job failure does not match the current item revision",
+            )
+        })?;
+
     Ok(result)
 }
 
@@ -225,7 +249,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::Utc;
-    use ingot_domain::activity::Activity;
     use ingot_domain::convergence::Convergence;
     use ingot_domain::convergence_queue::ConvergenceQueueEntry;
     use ingot_domain::git_operation::GitOperation;
@@ -234,7 +257,9 @@ mod tests {
         WorkspaceId,
     };
     use ingot_domain::job::{Job, JobStatus};
-    use ingot_domain::ports::{RepositoryError, StartJobExecutionParams};
+    use ingot_domain::ports::{
+        RepositoryError, RevisionLaneTeardownMutation, StartJobExecutionParams,
+    };
     use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
     use ingot_test_support::fixtures::{JobBuilder, RevisionBuilder, WorkspaceBuilder};
     use uuid::Uuid;
@@ -244,42 +269,50 @@ mod tests {
     #[tokio::test]
     async fn teardown_maps_job_not_active_conflict() {
         let revision = test_revision();
-        let job_repo = FakeJobRepository::with_jobs_and_error(
-            vec![test_active_job(revision.id, None)],
-            RepositoryError::Conflict("job_not_active".into()),
-        );
+        let workspace = test_workspace();
+        let job = test_active_job(revision.id, Some(workspace.id));
+        let job_repo = FakeJobRepository::with_jobs(vec![job]);
+        let workspace_repo = FakeWorkspaceRepository::with_workspace(workspace);
+        let teardown_repo =
+            FakeTeardownRepository::with_error(RepositoryError::Conflict("job_not_active".into()));
 
         let result = teardown_revision_lane(
             &job_repo,
             &FakeConvergenceRepository,
             &FakeQueueRepository,
-            &FakeWorkspaceRepository::default(),
+            &workspace_repo,
             &FakeGitOperationRepository,
-            &FakeActivityRepository,
+            &teardown_repo,
             ProjectId::from_uuid(Uuid::nil()),
             revision.item_id,
             &revision,
         )
         .await;
 
-        assert!(matches!(result, Err(UseCaseError::JobNotActive)));
+        assert!(
+            matches!(result, Err(UseCaseError::JobNotActive)),
+            "expected JobNotActive, got: {result:?}"
+        );
     }
 
     #[tokio::test]
     async fn teardown_maps_revision_stale_conflict() {
         let revision = test_revision();
-        let job_repo = FakeJobRepository::with_jobs_and_error(
-            vec![test_active_job(revision.id, None)],
-            RepositoryError::Conflict("job_revision_stale".into()),
-        );
+        let workspace = test_workspace();
+        let job = test_active_job(revision.id, Some(workspace.id));
+        let job_repo = FakeJobRepository::with_jobs(vec![job]);
+        let workspace_repo = FakeWorkspaceRepository::with_workspace(workspace);
+        let teardown_repo = FakeTeardownRepository::with_error(RepositoryError::Conflict(
+            "job_revision_stale".into(),
+        ));
 
         let result = teardown_revision_lane(
             &job_repo,
             &FakeConvergenceRepository,
             &FakeQueueRepository,
-            &FakeWorkspaceRepository::default(),
+            &workspace_repo,
             &FakeGitOperationRepository,
-            &FakeActivityRepository,
+            &teardown_repo,
             ProjectId::from_uuid(Uuid::nil()),
             revision.item_id,
             &revision,
@@ -300,6 +333,7 @@ mod tests {
         let job = test_active_job(revision.id, Some(workspace.id));
         let job_repo = FakeJobRepository::with_jobs(vec![job.clone()]);
         let workspace_repo = FakeWorkspaceRepository::with_workspace(workspace);
+        let teardown_repo = FakeTeardownRepository::default();
 
         let result = teardown_revision_lane(
             &job_repo,
@@ -307,7 +341,7 @@ mod tests {
             &FakeQueueRepository,
             &workspace_repo,
             &FakeGitOperationRepository,
-            &FakeActivityRepository,
+            &teardown_repo,
             job.project_id,
             job.item_id,
             &revision,
@@ -321,9 +355,16 @@ mod tests {
             vec![WorkspaceId::from_uuid(Uuid::nil())]
         );
 
-        let updated_workspace = workspace_repo.last_updated().expect("updated workspace");
-        assert_eq!(updated_workspace.state.current_job_id(), None);
-        assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Ready);
+        let captured = teardown_repo.captured_mutation();
+        assert_eq!(captured.job_cancellations.len(), 1);
+        let cancellation = &captured.job_cancellations[0];
+        assert_eq!(cancellation.params.job_id, job.id);
+        let ws_update = cancellation
+            .workspace_update
+            .as_ref()
+            .expect("workspace update");
+        assert_eq!(ws_update.state.current_job_id(), None);
+        assert_eq!(ws_update.state.status(), WorkspaceStatus::Ready);
     }
 
     fn test_revision() -> ItemRevision {
@@ -366,25 +407,12 @@ mod tests {
     #[derive(Default)]
     struct FakeJobRepositoryState {
         jobs: Vec<Job>,
-        finish_error: Option<RepositoryError>,
     }
 
     impl FakeJobRepository {
         fn with_jobs(jobs: Vec<Job>) -> Self {
             Self {
-                state: Arc::new(Mutex::new(FakeJobRepositoryState {
-                    jobs,
-                    finish_error: None,
-                })),
-            }
-        }
-
-        fn with_jobs_and_error(jobs: Vec<Job>, finish_error: RepositoryError) -> Self {
-            Self {
-                state: Arc::new(Mutex::new(FakeJobRepositoryState {
-                    jobs,
-                    finish_error: Some(finish_error),
-                })),
+                state: Arc::new(Mutex::new(FakeJobRepositoryState { jobs })),
             }
         }
     }
@@ -458,11 +486,7 @@ mod tests {
             &self,
             _params: FinishJobNonSuccessParams,
         ) -> Result<(), RepositoryError> {
-            let mut state = self.state.lock().expect("job state lock");
-            if let Some(error) = state.finish_error.take() {
-                return Err(error);
-            }
-            Ok(())
+            async { unreachable!("unused in test") }.await
         }
     }
 
@@ -588,7 +612,6 @@ mod tests {
     #[derive(Default)]
     struct FakeWorkspaceRepositoryState {
         workspace: Option<Workspace>,
-        updated: Option<Workspace>,
     }
 
     impl FakeWorkspaceRepository {
@@ -596,17 +619,8 @@ mod tests {
             Self {
                 state: Arc::new(Mutex::new(FakeWorkspaceRepositoryState {
                     workspace: Some(workspace),
-                    updated: None,
                 })),
             }
-        }
-
-        fn last_updated(&self) -> Option<Workspace> {
-            self.state
-                .lock()
-                .expect("workspace state lock")
-                .updated
-                .clone()
         }
     }
 
@@ -632,12 +646,8 @@ mod tests {
             async { unreachable!("unused in test") }.await
         }
 
-        async fn update(&self, workspace: &Workspace) -> Result<(), RepositoryError> {
-            let workspace = workspace.clone();
-            let mut state = self.state.lock().expect("workspace state lock");
-            state.updated = Some(workspace.clone());
-            state.workspace = Some(workspace);
-            Ok(())
+        async fn update(&self, _workspace: &Workspace) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
 
         async fn find_authoring_for_revision(
@@ -677,20 +687,47 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct FakeActivityRepository;
+    struct FakeTeardownRepository {
+        state: Arc<Mutex<FakeTeardownRepositoryState>>,
+    }
 
-    impl ActivityRepository for FakeActivityRepository {
-        async fn append(&self, _activity: &Activity) -> Result<(), RepositoryError> {
-            Ok(())
+    #[derive(Default)]
+    struct FakeTeardownRepositoryState {
+        apply_error: Option<RepositoryError>,
+        captured_mutation: Option<RevisionLaneTeardownMutation>,
+    }
+
+    impl FakeTeardownRepository {
+        fn with_error(error: RepositoryError) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(FakeTeardownRepositoryState {
+                    apply_error: Some(error),
+                    captured_mutation: None,
+                })),
+            }
         }
 
-        async fn list_by_project(
+        fn captured_mutation(&self) -> RevisionLaneTeardownMutation {
+            self.state
+                .lock()
+                .expect("teardown state lock")
+                .captured_mutation
+                .clone()
+                .expect("mutation should have been captured")
+        }
+    }
+
+    impl RevisionLaneTeardownRepository for FakeTeardownRepository {
+        async fn apply_revision_lane_teardown(
             &self,
-            _project_id: ProjectId,
-            _limit: u32,
-            _offset: u32,
-        ) -> Result<Vec<Activity>, RepositoryError> {
-            async { unreachable!("unused in test") }.await
+            mutation: RevisionLaneTeardownMutation,
+        ) -> Result<(), RepositoryError> {
+            let mut state = self.state.lock().expect("teardown state lock");
+            state.captured_mutation = Some(mutation);
+            if let Some(error) = state.apply_error.take() {
+                return Err(error);
+            }
+            Ok(())
         }
     }
 }

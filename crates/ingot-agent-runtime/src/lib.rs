@@ -16,7 +16,7 @@ use ingot_agent_adapters::codex::CodexCliAdapter;
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
-use ingot_domain::activity::{Activity, ActivityEventType};
+use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
 use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
 use ingot_domain::convergence::{Convergence, ConvergenceStatus, PrepareFailureKind};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
@@ -60,9 +60,9 @@ use ingot_store_sqlite::{
     StartJobExecutionParams,
 };
 use ingot_usecases::convergence::{
-    CheckoutFinalizationReadiness, ConvergenceSystemActionPort, FinalizePreparedTrigger,
-    FinalizeTargetRefResult, PreparedConvergenceFinalizePort, SystemActionItemState,
-    SystemActionProjectState, finalize_prepared_convergence,
+    CheckoutFinalizationReadiness, ConvergenceSystemActionPort, FinalizationTarget,
+    FinalizePreparedTrigger, FinalizeTargetRefResult, PreparedConvergenceFinalizePort,
+    SystemActionItemState, SystemActionProjectState, finalize_prepared_convergence,
 };
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
 use ingot_usecases::reconciliation::ReconciliationPort;
@@ -354,7 +354,7 @@ struct RunningJobResult {
 
 #[derive(Debug, Clone)]
 enum RunningJobMeta {
-    Agent(PreparedRun),
+    Agent(Box<PreparedRun>),
     HarnessValidation(PreparedHarnessValidation),
 }
 
@@ -613,7 +613,7 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                         .append_activity(
                             operation.project_id,
                             ActivityEventType::GitOperationPlanned,
-                            "git_operation",
+                            ActivityEntityType::GitOperation,
                             operation.id.to_string(),
                             serde_json::json!({
                                 "operation_kind": operation.operation_kind(),
@@ -775,12 +775,11 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
         project: &Project,
         item: &ingot_domain::item::Item,
         _revision: &ItemRevision,
-        convergence: &Convergence,
-        _queue_entry: &ConvergenceQueueEntry,
+        target: FinalizationTarget<'_>,
         operation: &GitOperation,
     ) -> impl Future<Output = Result<(), ingot_usecases::UseCaseError>> + Send {
         let dispatcher = self.dispatcher.clone();
-        let convergence = convergence.clone();
+        let convergence = target.convergence.clone();
         let operation = operation.clone();
         async move {
             dispatcher
@@ -791,7 +790,7 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                 .append_activity(
                     project.id,
                     ActivityEventType::ConvergenceFinalized,
-                    "convergence",
+                    ActivityEntityType::Convergence,
                     convergence.id.to_string(),
                     serde_json::json!({ "item_id": item.id }),
                 )
@@ -1226,7 +1225,7 @@ impl JobDispatcher {
                         self.append_activity(
                             prepared.project_id,
                             ActivityEventType::JobFailed,
-                            "job",
+                            ActivityEntityType::Job,
                             prepared.job_id.to_string(),
                             serde_json::json!({ "item_id": prepared.item_id, "error_code": "supervised_task_failed" }),
                         )
@@ -1316,7 +1315,7 @@ impl JobDispatcher {
                         permit,
                     ));
                     running_job_ids.insert(prepared.job.id);
-                    running_meta.insert(handle.id(), RunningJobMeta::Agent(prepared));
+                    running_meta.insert(handle.id(), RunningJobMeta::Agent(Box::new(prepared)));
                     made_progress = true;
                 }
                 Err(RuntimeError::Workspace(WorkspaceError::Busy))
@@ -1434,7 +1433,7 @@ impl JobDispatcher {
         self.append_activity(
             operation.project_id,
             ActivityEventType::GitOperationReconciled,
-            "git_operation",
+            ActivityEntityType::GitOperation,
             operation.id.to_string(),
             serde_json::json!({ "operation_kind": operation.operation_kind() }),
         )
@@ -1570,7 +1569,7 @@ impl JobDispatcher {
         self.append_activity(
             job.project_id,
             ActivityEventType::JobCompleted,
-            "job",
+            ActivityEntityType::Job,
             job.id.to_string(),
             serde_json::json!({ "item_id": job.item_id, "outcome": "clean", "reconciled": true }),
         )
@@ -1882,7 +1881,7 @@ impl JobDispatcher {
         self.append_activity(
             job.project_id,
             ActivityEventType::JobFailed,
-            "job",
+            ActivityEntityType::Job,
             job.id.to_string(),
             serde_json::json!({ "item_id": job.item_id, "error_code": "heartbeat_expired" }),
         )
@@ -1918,7 +1917,7 @@ impl JobDispatcher {
             self.append_activity(
                 convergence.project_id,
                 ActivityEventType::ConvergenceFailed,
-                "convergence",
+                ActivityEntityType::Convergence,
                 convergence.id.to_string(),
                 serde_json::json!({ "item_id": convergence.item_id, "reason": "startup_recovery_required" }),
             )
@@ -2024,7 +2023,7 @@ impl JobDispatcher {
             self.append_activity(
                 project.id,
                 ActivityEventType::GitOperationPlanned,
-                "git_operation",
+                ActivityEntityType::GitOperation,
                 operation.id.to_string(),
                 serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
             )
@@ -2863,7 +2862,7 @@ impl JobDispatcher {
         self.append_activity(
             prepared.project.id,
             ActivityEventType::JobCompleted,
-            "job",
+            ActivityEntityType::Job,
             prepared.job.id.to_string(),
             serde_json::json!({ "item_id": prepared.item.id, "outcome": outcome_class_name(outcome_class) }),
         )
@@ -2874,7 +2873,7 @@ impl JobDispatcher {
                 self.append_activity(
                     prepared.project.id,
                     ActivityEventType::ApprovalRequested,
-                    "item",
+                    ActivityEntityType::Item,
                     prepared.item.id.to_string(),
                     serde_json::json!({ "job_id": prepared.job.id }),
                 )
@@ -3010,8 +3009,6 @@ impl JobDispatcher {
         let invalidated = ingot_usecases::convergence::invalidate_prepared_convergence(
             &self.db,
             &self.db,
-            &self.db,
-            &self.db,
             &mut item,
             &revision,
             &convergences,
@@ -3091,7 +3088,7 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             event_type,
-            "convergence",
+            ActivityEntityType::Convergence,
             convergence.id.to_string(),
             serde_json::json!({ "item_id": item.id, "summary": summary }),
         )
@@ -3099,7 +3096,7 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             ActivityEventType::ItemEscalated,
-            "item",
+            ActivityEntityType::Item,
             item.id.to_string(),
             serde_json::json!({ "reason": escalation_reason }),
         )
@@ -3223,7 +3220,7 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             ActivityEventType::ConvergenceStarted,
-            "convergence",
+            ActivityEntityType::Convergence,
             convergence.id.to_string(),
             serde_json::json!({ "item_id": item.id, "queue_entry_id": queue_entry.id }),
         )
@@ -3259,7 +3256,7 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             ActivityEventType::GitOperationPlanned,
-            "git_operation",
+            ActivityEntityType::GitOperation,
             operation.id.to_string(),
             serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
         )
@@ -3430,7 +3427,7 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             ActivityEventType::ConvergencePrepared,
-            "convergence",
+            ActivityEntityType::Convergence,
             convergence.id.to_string(),
             serde_json::json!({ "item_id": item.id, "validation_job_id": validation_job.id }),
         )
@@ -3438,7 +3435,7 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             ActivityEventType::JobDispatched,
-            "job",
+            ActivityEntityType::Job,
             validation_job.id.to_string(),
             serde_json::json!({ "item_id": item.id, "step_id": validation_job.step_id }),
         )
@@ -3470,7 +3467,7 @@ impl JobDispatcher {
                     self.append_activity(
                         project.id,
                         ActivityEventType::CheckoutSyncCleared,
-                        "item",
+                        ActivityEntityType::Item,
                         item.id.to_string(),
                         serde_json::json!({}),
                     )
@@ -3478,7 +3475,7 @@ impl JobDispatcher {
                     self.append_activity(
                         project.id,
                         ActivityEventType::ItemEscalationCleared,
-                        "item",
+                        ActivityEntityType::Item,
                         item.id.to_string(),
                         serde_json::json!({ "reason": "checkout_sync_ready" }),
                     )
@@ -3495,7 +3492,7 @@ impl JobDispatcher {
                     self.append_activity(
                         project.id,
                         ActivityEventType::CheckoutSyncBlocked,
-                        "item",
+                        ActivityEntityType::Item,
                         item.id.to_string(),
                         serde_json::json!({ "message": message }),
                     )
@@ -3503,7 +3500,7 @@ impl JobDispatcher {
                     self.append_activity(
                         project.id,
                         ActivityEventType::ItemEscalated,
-                        "item",
+                        ActivityEntityType::Item,
                         item.id.to_string(),
                         serde_json::json!({ "reason": EscalationReason::CheckoutSyncBlocked }),
                     )
@@ -3594,7 +3591,7 @@ impl JobDispatcher {
         self.append_activity(
             prepared.project.id,
             ActivityEventType::GitOperationPlanned,
-            "git_operation",
+            ActivityEntityType::GitOperation,
             operation.id.to_string(),
             serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
         )
@@ -3656,7 +3653,7 @@ impl JobDispatcher {
         self.append_activity(
             prepared.project.id,
             ActivityEventType::JobCompleted,
-            "job",
+            ActivityEntityType::Job,
             prepared.job.id.to_string(),
             serde_json::json!({ "item_id": prepared.item.id, "outcome": "clean" }),
         )
@@ -3912,7 +3909,7 @@ impl JobDispatcher {
         self.append_activity(
             prepared.project_id,
             ActivityEventType::JobCompleted,
-            "job",
+            ActivityEntityType::Job,
             prepared.job_id.to_string(),
             serde_json::json!({ "item_id": prepared.item_id, "outcome": outcome }),
         )
@@ -3924,7 +3921,7 @@ impl JobDispatcher {
                 self.append_activity(
                     prepared.project_id,
                     ActivityEventType::ApprovalRequested,
-                    "item",
+                    ActivityEntityType::Item,
                     prepared.item_id.to_string(),
                     serde_json::json!({ "job_id": prepared.job_id }),
                 )
@@ -4401,7 +4398,7 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             ActivityEventType::JobDispatched,
-            "job",
+            ActivityEntityType::Job,
             job.id.to_string(),
             serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
         )
@@ -4449,7 +4446,7 @@ impl JobDispatcher {
         self.append_activity(
             prepared.project.id,
             event_type,
-            "job",
+            ActivityEntityType::Job,
             prepared.job.id.to_string(),
             serde_json::json!({ "item_id": prepared.item.id, "error_code": error_code }),
         )
@@ -4458,7 +4455,7 @@ impl JobDispatcher {
             self.append_activity(
                 prepared.project.id,
                 ActivityEventType::ItemEscalated,
-                "item",
+                ActivityEntityType::Item,
                 prepared.item.id.to_string(),
                 serde_json::json!({ "reason": escalation_reason }),
             )
@@ -4558,7 +4555,7 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             ActivityEventType::JobFailed,
-            "job",
+            ActivityEntityType::Job,
             job.id.to_string(),
             serde_json::json!({ "item_id": item.id, "error_code": error_code }),
         )
@@ -4567,7 +4564,7 @@ impl JobDispatcher {
             self.append_activity(
                 project.id,
                 ActivityEventType::ItemEscalated,
-                "item",
+                ActivityEntityType::Item,
                 item.id.to_string(),
                 serde_json::json!({ "reason": escalation_reason }),
             )
@@ -4607,7 +4604,7 @@ impl JobDispatcher {
         self.append_activity(
             prepared.project.id,
             ActivityEventType::ItemEscalationCleared,
-            "item",
+            ActivityEntityType::Item,
             prepared.item.id.to_string(),
             serde_json::json!({ "reason": "successful_retry", "job_id": prepared.job.id }),
         )
@@ -4855,7 +4852,7 @@ impl JobDispatcher {
         &self,
         project_id: ingot_domain::ids::ProjectId,
         event_type: ActivityEventType,
-        entity_type: &str,
+        entity_type: ActivityEntityType,
         entity_id: String,
         payload: serde_json::Value,
     ) -> Result<(), RuntimeError> {
@@ -4864,7 +4861,7 @@ impl JobDispatcher {
                 id: ingot_domain::ids::ActivityId::new(),
                 project_id,
                 event_type,
-                entity_type: entity_type.into(),
+                entity_type,
                 entity_id,
                 payload,
                 created_at: Utc::now(),
@@ -5644,7 +5641,7 @@ mod tests {
                 self.launch_notify.notify_waiters();
 
                 loop {
-                    if {
+                    let can_release = {
                         let mut state = self.state.lock().expect("blocking runner state");
                         if state.release_budget > 0 {
                             state.release_budget -= 1;
@@ -5652,7 +5649,8 @@ mod tests {
                         } else {
                             false
                         }
-                    } {
+                    };
+                    if can_release {
                         break;
                     }
                     self.release_notify.notified().await;
@@ -5970,7 +5968,7 @@ mod tests {
         harness
             .dispatcher
             .cleanup_supervised_task(
-                RunningJobMeta::Agent(prepared.clone()),
+                RunningJobMeta::Agent(Box::new(prepared.clone())),
                 "supervised task failed".into(),
             )
             .await

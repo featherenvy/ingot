@@ -19,7 +19,7 @@ impl Database {
         .bind(activity.id.to_string())
         .bind(activity.project_id.to_string())
         .bind(encode_enum(&activity.event_type)?)
-        .bind(&activity.entity_type)
+        .bind(encode_enum(&activity.entity_type)?)
         .bind(&activity.entity_id)
         .bind(serde_json::to_string(&activity.payload).map_err(json_err)?)
         .bind(activity.created_at)
@@ -74,7 +74,7 @@ fn map_activity(row: &SqliteRow) -> Result<Activity, RepositoryError> {
         id: parse_id(row.try_get("id").map_err(db_err)?)?,
         project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
         event_type: parse_enum(row.try_get("event_type").map_err(db_err)?)?,
-        entity_type: row.try_get("entity_type").map_err(db_err)?,
+        entity_type: parse_enum(row.try_get("entity_type").map_err(db_err)?)?,
         entity_id: row.try_get("entity_id").map_err(db_err)?,
         payload: parse_json(row.try_get("payload").map_err(db_err)?)?,
         created_at: row.try_get("created_at").map_err(db_err)?,

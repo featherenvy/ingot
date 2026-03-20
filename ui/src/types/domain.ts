@@ -133,11 +133,13 @@ export interface Project {
   color: string
 }
 
+export type ActivityEntityType = 'job' | 'item' | 'queue_entry' | 'convergence' | 'git_operation' | 'finding' | 'workspace'
+
 export interface Activity {
   id: string
   project_id: string
   event_type: ActivityEventType
-  entity_type: string
+  entity_type: ActivityEntityType
   entity_id: string
   payload: JsonValue
   created_at: string

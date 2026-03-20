@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::finding::FindingTriageState;
 use crate::ids::*;
+use crate::item::EscalationReason;
+use crate::job::OutcomeClass;
 
 /// Domain events emitted by command handlers.
 /// These are used for activity logging and WebSocket broadcasting.
@@ -36,7 +39,7 @@ pub enum DomainEvent {
     },
     ItemEscalated {
         item_id: ItemId,
-        reason: String,
+        reason: EscalationReason,
     },
     ItemEscalationCleared {
         item_id: ItemId,
@@ -49,7 +52,7 @@ pub enum DomainEvent {
     JobCompleted {
         job_id: JobId,
         item_id: ItemId,
-        outcome: String,
+        outcome: OutcomeClass,
     },
     JobFailed {
         job_id: JobId,
@@ -72,7 +75,7 @@ pub enum DomainEvent {
     FindingTriaged {
         finding_id: FindingId,
         item_id: ItemId,
-        triage_state: String,
+        triage_state: FindingTriageState,
     },
     ApprovalRequested {
         item_id: ItemId,

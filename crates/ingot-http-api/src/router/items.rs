@@ -74,7 +74,7 @@ pub(super) async fn create_item(
         &state,
         project_id,
         ActivityEventType::ItemCreated,
-        "item",
+        ActivityEntityType::Item,
         item.id,
         serde_json::json!({ "revision_id": revision.id }),
     )
@@ -190,7 +190,7 @@ pub(super) async fn update_item(
         &state,
         project_id,
         ActivityEventType::ItemUpdated,
-        "item",
+        ActivityEntityType::Item,
         item.id,
         serde_json::json!({}),
     )
@@ -271,7 +271,7 @@ pub(super) async fn revise_item(
         &state,
         project_id,
         ActivityEventType::ItemRevisionCreated,
-        "item",
+        ActivityEntityType::Item,
         item.id,
         serde_json::json!({ "revision_id": next_revision.id, "kind": "revise" }),
     )
@@ -281,7 +281,7 @@ pub(super) async fn revise_item(
             &state,
             project_id,
             ActivityEventType::ItemEscalationCleared,
-            "item",
+            ActivityEntityType::Item,
             item.id,
             serde_json::json!({ "reason": "revise" }),
         )
@@ -336,7 +336,7 @@ pub(super) async fn defer_item(
         &state,
         project_id,
         ActivityEventType::ItemDeferred,
-        "item",
+        ActivityEntityType::Item,
         item.id,
         serde_json::json!({}),
     )
@@ -381,7 +381,7 @@ pub(super) async fn resume_item(
         &state,
         project_id,
         ActivityEventType::ItemResumed,
-        "item",
+        ActivityEntityType::Item,
         item.id,
         serde_json::json!({}),
     )
@@ -499,7 +499,7 @@ pub(super) async fn reopen_item(
         &state,
         project_id,
         ActivityEventType::ItemReopened,
-        "item",
+        ActivityEntityType::Item,
         item.id,
         serde_json::json!({ "revision_id": next_revision.id }),
     )
@@ -509,7 +509,7 @@ pub(super) async fn reopen_item(
             &state,
             project_id,
             ActivityEventType::ItemEscalationCleared,
-            "item",
+            ActivityEntityType::Item,
             item.id,
             serde_json::json!({ "reason": "reopen" }),
         )
@@ -624,7 +624,7 @@ pub(crate) async fn append_activity(
     state: &AppState,
     project_id: ProjectId,
     event_type: ActivityEventType,
-    entity_type: &'static str,
+    entity_type: ActivityEntityType,
     entity_id: impl ToString,
     payload: serde_json::Value,
 ) -> Result<(), ApiError> {
@@ -634,7 +634,7 @@ pub(crate) async fn append_activity(
             id: ingot_domain::ids::ActivityId::new(),
             project_id,
             event_type,
-            entity_type: entity_type.into(),
+            entity_type,
             entity_id: entity_id.to_string(),
             payload,
             created_at: Utc::now(),
@@ -953,7 +953,7 @@ pub(super) async fn finish_item_manually(
         &state,
         project_id,
         event_type,
-        "item",
+        ActivityEntityType::Item,
         item.id,
         serde_json::json!({ "done_reason": item.lifecycle.done_reason() }),
     )
@@ -1187,7 +1187,7 @@ pub(super) async fn prepare_convergence_workspace(
         state,
         project.id,
         ActivityEventType::ConvergenceStarted,
-        "convergence",
+        ActivityEntityType::Convergence,
         convergence.id,
         serde_json::json!({ "item_id": item.id }),
     )
@@ -1232,7 +1232,7 @@ pub(super) async fn prepare_convergence_workspace(
         state,
         project.id,
         ActivityEventType::GitOperationPlanned,
-        "git_operation",
+        ActivityEntityType::GitOperation,
         operation.id,
         serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
     )
@@ -1262,7 +1262,7 @@ pub(super) async fn prepare_convergence_workspace(
                 state,
                 project.id,
                 ActivityEventType::ConvergenceConflicted,
-                "convergence",
+                ActivityEntityType::Convergence,
                 convergence.id,
                 serde_json::json!({ "item_id": item.id }),
             )
@@ -1271,7 +1271,7 @@ pub(super) async fn prepare_convergence_workspace(
                 state,
                 project.id,
                 ActivityEventType::ItemEscalated,
-                "item",
+                ActivityEntityType::Item,
                 item.id,
                 serde_json::json!({ "reason": EscalationReason::ConvergenceConflict }),
             )
@@ -1330,7 +1330,7 @@ pub(super) async fn prepare_convergence_workspace(
                     state,
                     project.id,
                     ActivityEventType::ConvergenceFailed,
-                    "convergence",
+                    ActivityEntityType::Convergence,
                     convergence.id,
                     serde_json::json!({ "item_id": item.id, "summary": error.to_string() }),
                 )
@@ -1339,7 +1339,7 @@ pub(super) async fn prepare_convergence_workspace(
                     state,
                     project.id,
                     ActivityEventType::ItemEscalated,
-                    "item",
+                    ActivityEntityType::Item,
                     item.id,
                     serde_json::json!({ "reason": EscalationReason::StepFailed }),
                 )
@@ -1390,7 +1390,7 @@ pub(super) async fn prepare_convergence_workspace(
                     state,
                     project.id,
                     ActivityEventType::ConvergenceFailed,
-                    "convergence",
+                    ActivityEntityType::Convergence,
                     convergence.id,
                     serde_json::json!({ "item_id": item.id, "summary": error.to_string() }),
                 )
@@ -1399,7 +1399,7 @@ pub(super) async fn prepare_convergence_workspace(
                     state,
                     project.id,
                     ActivityEventType::ItemEscalated,
-                    "item",
+                    ActivityEntityType::Item,
                     item.id,
                     serde_json::json!({ "reason": EscalationReason::StepFailed }),
                 )
@@ -1442,7 +1442,7 @@ pub(super) async fn prepare_convergence_workspace(
                     state,
                     project.id,
                     ActivityEventType::ConvergenceFailed,
-                    "convergence",
+                    ActivityEntityType::Convergence,
                     convergence.id,
                     serde_json::json!({ "item_id": item.id, "summary": error.to_string() }),
                 )
@@ -1451,7 +1451,7 @@ pub(super) async fn prepare_convergence_workspace(
                     state,
                     project.id,
                     ActivityEventType::ItemEscalated,
-                    "item",
+                    ActivityEntityType::Item,
                     item.id,
                     serde_json::json!({ "reason": EscalationReason::StepFailed }),
                 )

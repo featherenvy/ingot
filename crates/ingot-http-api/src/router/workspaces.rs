@@ -64,7 +64,7 @@ pub(super) async fn reset_workspace_route(
         &state,
         project_id,
         ActivityEventType::GitOperationPlanned,
-        "git_operation",
+        ActivityEntityType::GitOperation,
         operation.id,
         serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
     )
@@ -222,7 +222,7 @@ pub(super) async fn remove_workspace_route(
                 &state,
                 project_id,
                 ActivityEventType::GitOperationPlanned,
-                "git_operation",
+                ActivityEntityType::GitOperation,
                 operation.id,
                 serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
             )

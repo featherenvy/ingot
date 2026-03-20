@@ -34,7 +34,7 @@ use chrono::Utc;
 use ingot_agent_adapters::registry::{default_agent_capabilities, probe_and_apply};
 use ingot_config::IngotConfig;
 use ingot_config::loader::load_config;
-use ingot_domain::activity::{Activity, ActivityEventType};
+use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
 use ingot_domain::agent::{Agent, AgentStatus};
 
 use ingot_domain::convergence::Convergence;

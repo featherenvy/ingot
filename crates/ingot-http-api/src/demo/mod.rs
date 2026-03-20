@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use ingot_domain::activity::ActivityEventType;
+use ingot_domain::activity::{ActivityEntityType, ActivityEventType};
 use ingot_domain::ids::ProjectId;
 use ingot_domain::ports::ProjectMutationLockPort;
 use ingot_domain::project::Project;
@@ -245,7 +245,7 @@ pub async fn create_demo_project(
             &state,
             project.id,
             ActivityEventType::ItemCreated,
-            "item",
+            ActivityEntityType::Item,
             item.id,
             serde_json::json!({ "revision_id": revision.id }),
         )

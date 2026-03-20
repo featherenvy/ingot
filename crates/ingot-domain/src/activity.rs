@@ -39,12 +39,24 @@ pub enum ActivityEventType {
     GitOperationReconciled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityEntityType {
+    Job,
+    Item,
+    QueueEntry,
+    Convergence,
+    GitOperation,
+    Finding,
+    Workspace,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Activity {
     pub id: ActivityId,
     pub project_id: ProjectId,
     pub event_type: ActivityEventType,
-    pub entity_type: String,
+    pub entity_type: ActivityEntityType,
     pub entity_id: String,
     pub payload: serde_json::Value,
     pub created_at: DateTime<Utc>,

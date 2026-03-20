@@ -297,6 +297,7 @@ pub struct StartJobExecutionParams {
     pub lease_expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
 pub struct FinishJobNonSuccessParams {
     pub job_id: JobId,
     pub item_id: ItemId,
@@ -362,6 +363,49 @@ pub trait JobCompletionRepository: Send + Sync {
     fn apply_job_completion(
         &self,
         mutation: JobCompletionMutation,
+    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
+}
+
+// --- Revision lane teardown types ---
+
+#[derive(Debug, Clone)]
+pub struct TeardownJobCancellation {
+    pub params: FinishJobNonSuccessParams,
+    pub workspace_update: Option<Workspace>,
+    pub activity: Activity,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RevisionLaneTeardownMutation {
+    pub job_cancellations: Vec<TeardownJobCancellation>,
+    pub convergence_updates: Vec<Convergence>,
+    pub workspace_abandonments: Vec<Workspace>,
+    pub queue_entry_update: Option<ConvergenceQueueEntry>,
+    pub git_operation_updates: Vec<GitOperation>,
+    pub git_operation_activities: Vec<Activity>,
+}
+
+pub trait RevisionLaneTeardownRepository: Send + Sync {
+    fn apply_revision_lane_teardown(
+        &self,
+        mutation: RevisionLaneTeardownMutation,
+    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
+}
+
+// --- Invalidate prepared convergence types ---
+
+#[derive(Debug, Clone)]
+pub struct InvalidatePreparedConvergenceMutation {
+    pub convergence: Convergence,
+    pub workspace_update: Option<Workspace>,
+    pub item: Item,
+    pub activity: Activity,
+}
+
+pub trait InvalidatePreparedConvergenceRepository: Send + Sync {
+    fn apply_invalidate_prepared_convergence(
+        &self,
+        mutation: InvalidatePreparedConvergenceMutation,
     ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
 }
 

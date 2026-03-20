@@ -65,3 +65,4 @@ thiserror = "2"
 anyhow = "1"
 toml = "0.8"
 indexmap = { version = "2", features = ["serde"] }
+libc = "0.2"

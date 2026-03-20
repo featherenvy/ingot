@@ -12,8 +12,8 @@ use ingot_git::project_repo::{
     checkout_sync_status, sync_checkout_to_commit,
 };
 use ingot_usecases::convergence::{
-    ApprovalFinalizeReadiness, CheckoutFinalizationReadiness, FinalizePreparedTrigger,
-    FinalizeTargetRefResult, PreparedConvergenceFinalizePort,
+    ApprovalFinalizeReadiness, CheckoutFinalizationReadiness, FinalizationTarget,
+    FinalizePreparedTrigger, FinalizeTargetRefResult, PreparedConvergenceFinalizePort,
 };
 
 #[derive(Clone)]
@@ -50,7 +50,7 @@ fn approval_finalize_readiness(
     }
 
     ApprovalFinalizeReadiness::Ready {
-        convergence,
+        convergence: Box::new(convergence),
         queue_entry,
     }
 }
@@ -90,7 +90,7 @@ async fn reconcile_checkout_sync_state_http(
                     state,
                     project.id,
                     ActivityEventType::CheckoutSyncCleared,
-                    "item",
+                    ActivityEntityType::Item,
                     item.id,
                     serde_json::json!({}),
                 )
@@ -100,7 +100,7 @@ async fn reconcile_checkout_sync_state_http(
                     state,
                     project.id,
                     ActivityEventType::ItemEscalationCleared,
-                    "item",
+                    ActivityEntityType::Item,
                     item.id,
                     serde_json::json!({ "reason": "checkout_sync_ready" }),
                 )
@@ -123,7 +123,7 @@ async fn reconcile_checkout_sync_state_http(
                     state,
                     project.id,
                     ActivityEventType::CheckoutSyncBlocked,
-                    "item",
+                    ActivityEntityType::Item,
                     item.id,
                     serde_json::json!({ "message": message }),
                 )
@@ -511,7 +511,7 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                         &state,
                         operation.project_id,
                         ActivityEventType::GitOperationPlanned,
-                        "git_operation",
+                        ActivityEntityType::GitOperation,
                         operation.id,
                         serde_json::json!({
                             "operation_kind": operation.operation_kind(),
@@ -668,15 +668,14 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         project: &Project,
         item: &Item,
         _revision: &ItemRevision,
-        convergence: &Convergence,
-        queue_entry: &ConvergenceQueueEntry,
+        target: FinalizationTarget<'_>,
         operation: &GitOperation,
     ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
         let state = self.state.clone();
         let project = project.clone();
         let mut item = item.clone();
-        let mut convergence = convergence.clone();
-        let mut queue_entry = queue_entry.clone();
+        let mut convergence = target.convergence.clone();
+        let mut queue_entry = target.queue_entry.clone();
         let operation = operation.clone();
         async move {
             let now = Utc::now();
@@ -756,7 +755,7 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                 &state,
                 project.id,
                 ActivityEventType::ConvergenceFinalized,
-                "convergence",
+                ActivityEntityType::Convergence,
                 convergence.id,
                 serde_json::json!({ "item_id": item.id }),
             )
@@ -904,7 +903,7 @@ pub(super) async fn reject_item_approval(
         &state,
         project_id,
         ActivityEventType::ApprovalRejected,
-        "item",
+        ActivityEntityType::Item,
         item.id,
         serde_json::json!({
             "new_revision_id": next_revision.id,
@@ -918,7 +917,7 @@ pub(super) async fn reject_item_approval(
             &state,
             project_id,
             ActivityEventType::ItemEscalationCleared,
-            "item",
+            ActivityEntityType::Item,
             item.id,
             serde_json::json!({ "reason": "approval_reject" }),
         )

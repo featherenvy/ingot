@@ -125,12 +125,16 @@ impl AgentAdapter for CodexCliAdapter {
             "launching codex exec"
         );
 
-        let mut child = Command::new(&self.cli_path)
+        let mut command = Command::new(&self.cli_path);
+        command
             .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command
             .spawn()
             .map_err(|err| AgentError::LaunchFailed(err.to_string()))?;
         debug!("spawned codex subprocess");
@@ -196,10 +200,31 @@ impl AgentAdapter for CodexCliAdapter {
         })
     }
 
-    async fn cancel(&self, _pid: u32) -> Result<(), AgentError> {
-        Err(AgentError::ProcessError(
-            "codex subprocess cancellation is not implemented yet".into(),
-        ))
+    async fn cancel(&self, pid: u32) -> Result<(), AgentError> {
+        #[cfg(unix)]
+        {
+            // The child was spawned with process_group(0), so its pid is also
+            // its process-group id. killpg sends the signal to the entire tree.
+            let result = unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+            if result == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                // Already gone — not an error.
+                return Ok(());
+            }
+            return Err(AgentError::ProcessError(format!(
+                "killpg({pid}) failed: {error}"
+            )));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            Err(AgentError::ProcessError(
+                "codex subprocess cancellation is only supported on unix".into(),
+            ))
+        }
     }
 }
 
