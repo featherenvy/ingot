@@ -113,7 +113,7 @@ pub trait JobRepository: Send + Sync {
         job_id: JobId,
         item_id: ItemId,
         revision_id: ItemRevisionId,
-        lease_owner_id: &str,
+        lease_owner_id: &crate::lease_owner_id::LeaseOwnerId,
         lease_expires_at: DateTime<Utc>,
     ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
     fn finish_non_success(
@@ -294,7 +294,7 @@ pub struct StartJobExecutionParams {
     pub expected_item_revision_id: ItemRevisionId,
     pub workspace_id: Option<WorkspaceId>,
     pub agent_id: Option<AgentId>,
-    pub lease_owner_id: String,
+    pub lease_owner_id: crate::lease_owner_id::LeaseOwnerId,
     pub process_pid: Option<u32>,
     pub lease_expires_at: DateTime<Utc>,
 }

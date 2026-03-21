@@ -29,6 +29,7 @@ use ingot_domain::git_operation::{
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::harness::{HarnessCommand, HarnessProfile, HarnessProfileError};
 use ingot_domain::ids::{GitOperationId, WorkspaceId};
+use ingot_domain::lease_owner_id::LeaseOwnerId;
 use ingot_domain::item::{
     ApprovalState, DoneReason, Escalation, EscalationReason, Lifecycle, ResolutionSource,
 };
@@ -162,7 +163,7 @@ pub struct JobDispatcher {
     db: Database,
     project_locks: ProjectLocks,
     config: DispatcherConfig,
-    lease_owner_id: String,
+    lease_owner_id: LeaseOwnerId,
     runner: Arc<dyn AgentRunner>,
     dispatch_notify: DispatchNotify,
     #[cfg(test)]
@@ -882,7 +883,7 @@ impl JobDispatcher {
             db,
             project_locks,
             config,
-            lease_owner_id: format!("ingotd:{}", std::process::id()),
+            lease_owner_id: LeaseOwnerId::new(format!("ingotd:{}", std::process::id())),
             runner,
             dispatch_notify,
             #[cfg(test)]
@@ -1851,7 +1852,7 @@ impl JobDispatcher {
             .state
             .lease_expires_at()
             .is_none_or(|lease| lease <= Utc::now());
-        let foreign_owner = job.state.lease_owner_id() != Some(self.lease_owner_id.as_str());
+        let foreign_owner = job.state.lease_owner_id() != Some(&self.lease_owner_id);
         if !expired && !foreign_owner {
             return Ok(false);
         }

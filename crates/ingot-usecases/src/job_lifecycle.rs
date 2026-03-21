@@ -517,7 +517,7 @@ mod tests {
             _job_id: JobId,
             _item_id: ItemId,
             _revision_id: ItemRevisionId,
-            _lease_owner_id: &str,
+            _lease_owner_id: &ingot_domain::lease_owner_id::LeaseOwnerId,
             _lease_expires_at: chrono::DateTime<Utc>,
         ) -> Result<(), RepositoryError> {
             async { unreachable!("unused in test") }.await

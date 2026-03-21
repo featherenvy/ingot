@@ -238,7 +238,7 @@ impl JobAssignment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobLease {
     pub process_pid: Option<u32>,
-    pub lease_owner_id: String,
+    pub lease_owner_id: crate::lease_owner_id::LeaseOwnerId,
     pub heartbeat_at: DateTime<Utc>,
     pub lease_expires_at: DateTime<Utc>,
     pub started_at: DateTime<Utc>,
@@ -457,8 +457,8 @@ impl JobState {
     }
 
     #[must_use]
-    pub fn lease_owner_id(&self) -> Option<&str> {
-        self.lease().map(|l| l.lease_owner_id.as_str())
+    pub fn lease_owner_id(&self) -> Option<&crate::lease_owner_id::LeaseOwnerId> {
+        self.lease().map(|l| &l.lease_owner_id)
     }
 
     #[must_use]
@@ -562,7 +562,7 @@ struct JobWire {
     pub result_payload: Option<serde_json::Value>,
     pub agent_id: Option<AgentId>,
     pub process_pid: Option<u32>,
-    pub lease_owner_id: Option<String>,
+    pub lease_owner_id: Option<crate::lease_owner_id::LeaseOwnerId>,
     pub heartbeat_at: Option<DateTime<Utc>>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub error_code: Option<String>,
@@ -671,7 +671,7 @@ impl From<Job> for JobWire {
         let result_schema_version = job.state.result_schema_version().map(ToOwned::to_owned);
         let result_payload = job.state.result_payload().cloned();
         let process_pid = job.state.process_pid();
-        let lease_owner_id = job.state.lease_owner_id().map(ToOwned::to_owned);
+        let lease_owner_id = job.state.lease_owner_id().cloned();
         let heartbeat_at = job.state.heartbeat_at();
         let lease_expires_at = job.state.lease_expires_at();
         let error_code = job.state.error_code().map(ToOwned::to_owned);

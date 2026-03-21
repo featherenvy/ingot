@@ -12,6 +12,7 @@ pub mod harness;
 pub mod ids;
 pub mod item;
 pub mod job;
+pub mod lease_owner_id;
 pub mod ports;
 pub mod project;
 pub mod revision;

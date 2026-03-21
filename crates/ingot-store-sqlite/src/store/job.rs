@@ -3,6 +3,7 @@ use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::ids::{AgentId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::item::Escalation;
 use ingot_domain::job::{Job, JobAssignment, JobInput, JobLease, JobState, TerminalStatus};
+use ingot_domain::lease_owner_id::LeaseOwnerId;
 use ingot_domain::ports::{
     FinishJobNonSuccessParams, JobRepository, RepositoryError, StartJobExecutionParams,
 };
@@ -21,7 +22,7 @@ pub struct ClaimQueuedAgentJobExecutionParams {
     pub item_id: ItemId,
     pub expected_item_revision_id: ItemRevisionId,
     pub assignment: JobAssignment,
-    pub lease_owner_id: String,
+    pub lease_owner_id: LeaseOwnerId,
     pub lease_expires_at: DateTime<Utc>,
 }
 
@@ -276,7 +277,7 @@ impl Database {
         job_id: JobId,
         item_id: ItemId,
         expected_item_revision_id: ItemRevisionId,
-        lease_owner_id: &str,
+        lease_owner_id: &LeaseOwnerId,
         lease_expires_at: chrono::DateTime<Utc>,
     ) -> Result<(), RepositoryError> {
         let result = sqlx::query(
@@ -615,7 +616,7 @@ impl JobRepository for Database {
         job_id: JobId,
         item_id: ItemId,
         revision_id: ItemRevisionId,
-        lease_owner_id: &str,
+        lease_owner_id: &LeaseOwnerId,
         lease_expires_at: chrono::DateTime<Utc>,
     ) -> Result<(), RepositoryError> {
         self.heartbeat_job_execution(
@@ -740,7 +741,7 @@ fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {
         .try_get::<Option<i64>, _>("process_pid")
         .map_err(db_err)?
         .map(|value| value as u32);
-    let lease_owner_id: Option<String> = row.try_get("lease_owner_id").map_err(db_err)?;
+    let lease_owner_id: Option<LeaseOwnerId> = row.try_get("lease_owner_id").map_err(db_err)?;
     let heartbeat_at: Option<chrono::DateTime<chrono::Utc>> =
         row.try_get("heartbeat_at").map_err(db_err)?;
     let lease_expires_at: Option<chrono::DateTime<chrono::Utc>> =
@@ -859,6 +860,7 @@ mod tests {
     use chrono::Utc;
     use ingot_domain::agent::AgentCapability;
     use ingot_domain::ids::{ItemId, ItemRevisionId, JobId};
+    use ingot_domain::lease_owner_id::LeaseOwnerId;
     use ingot_domain::item::EscalationReason;
     use ingot_domain::job::{
         ContextPolicy, ExecutionPermission, JobAssignment, JobStatus, OutcomeClass,
@@ -1172,7 +1174,10 @@ mod tests {
             persisted_job.state.phase_template_digest(),
             Some("template-digest")
         );
-        assert_eq!(persisted_job.state.lease_owner_id(), Some("ingotd:test"));
+        assert_eq!(
+            persisted_job.state.lease_owner_id(),
+            Some(&LeaseOwnerId::new("ingotd:test"))
+        );
         assert!(persisted_job.state.heartbeat_at().is_some());
         assert_eq!(
             persisted_job.state.lease_expires_at(),

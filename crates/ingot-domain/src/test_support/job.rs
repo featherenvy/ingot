@@ -4,6 +4,7 @@ use crate::job::{
     ContextPolicy, ExecutionPermission, Job, JobAssignment, JobInput, JobLease, JobState,
     JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind, TerminalStatus,
 };
+use crate::lease_owner_id::LeaseOwnerId;
 use crate::step_id::StepId;
 use crate::workspace::WorkspaceKind;
 use chrono::{DateTime, Utc};
@@ -36,7 +37,7 @@ pub struct JobBuilder {
     result_payload: Option<serde_json::Value>,
     agent_id: Option<ids::AgentId>,
     process_pid: Option<u32>,
-    lease_owner_id: Option<String>,
+    lease_owner_id: Option<LeaseOwnerId>,
     heartbeat_at: Option<DateTime<Utc>>,
     lease_expires_at: Option<DateTime<Utc>>,
     error_code: Option<String>,
@@ -181,7 +182,7 @@ impl JobBuilder {
         self
     }
 
-    pub fn lease_owner_id(mut self, lease_owner_id: impl Into<String>) -> Self {
+    pub fn lease_owner_id(mut self, lease_owner_id: impl Into<LeaseOwnerId>) -> Self {
         self.lease_owner_id = Some(lease_owner_id.into());
         self
     }
@@ -236,7 +237,7 @@ impl JobBuilder {
                 None => JobState::Queued,
             },
             JobStatus::Running => {
-                let lease_owner_id = self.lease_owner_id.unwrap_or_else(|| "test".into());
+                let lease_owner_id = self.lease_owner_id.unwrap_or_else(|| LeaseOwnerId::new("test"));
                 let assignment = assignment.unwrap_or_else(|| JobAssignment {
                     workspace_id: ids::WorkspaceId::new(),
                     agent_id: self.agent_id,
