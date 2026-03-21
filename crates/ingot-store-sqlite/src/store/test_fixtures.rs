@@ -1,4 +1,5 @@
 use ingot_domain::convergence::Convergence;
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::finding::Finding;
 use ingot_domain::item::Item;
 use ingot_domain::job::Job;
@@ -47,15 +48,17 @@ impl PersistFixture for Job {
         if let Some(workspace_id) = self.state.workspace_id() {
             if db.get_workspace(workspace_id).await.is_err() {
                 let workspace_is_active = self.state.is_active();
-                let empty_commits = WorkspaceCommitState::empty();
+                let placeholder = CommitOid::new("workspace-placeholder");
+                let placeholder_commits =
+                    WorkspaceCommitState::new(placeholder.clone(), placeholder);
                 let state = if workspace_is_active {
                     WorkspaceState::Busy {
-                        commits: empty_commits.clone(),
+                        commits: placeholder_commits.clone(),
                         current_job_id: self.id,
                     }
                 } else {
                     WorkspaceState::Ready {
-                        commits: empty_commits,
+                        commits: placeholder_commits,
                     }
                 };
                 let workspace = Workspace {

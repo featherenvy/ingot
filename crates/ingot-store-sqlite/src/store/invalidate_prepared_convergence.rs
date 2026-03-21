@@ -1,4 +1,3 @@
-use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::ports::{
     InvalidatePreparedConvergenceMutation, InvalidatePreparedConvergenceRepository, RepositoryError,
 };
@@ -25,13 +24,13 @@ impl Database {
              WHERE id = ?",
         )
         .bind(state.integration_workspace_id().map(|id| id.to_string()))
-        .bind(convergence.source_head_commit_oid.as_str())
+        .bind(convergence.source_head_commit_oid.clone())
         .bind(&convergence.target_ref)
         .bind(encode_enum(&convergence.strategy)?)
         .bind(encode_enum(&state.status())?)
-        .bind(state.input_target_commit_oid().map(CommitOid::as_str))
-        .bind(state.prepared_commit_oid().map(CommitOid::as_str))
-        .bind(state.final_target_commit_oid().map(CommitOid::as_str))
+        .bind(state.input_target_commit_oid().cloned())
+        .bind(state.prepared_commit_oid().cloned())
+        .bind(state.final_target_commit_oid().cloned())
         .bind(state.conflict_summary())
         .bind(state.completed_at())
         .bind(convergence.id.to_string())
@@ -53,10 +52,10 @@ impl Database {
                  WHERE id = ?",
             )
             .bind(&workspace.path)
-            .bind(workspace.target_ref.as_deref())
-            .bind(workspace.workspace_ref.as_deref())
-            .bind(workspace.state.base_commit_oid().map(CommitOid::as_str))
-            .bind(workspace.state.head_commit_oid().map(CommitOid::as_str))
+            .bind(workspace.target_ref.clone())
+            .bind(workspace.workspace_ref.clone())
+            .bind(workspace.state.base_commit_oid().cloned())
+            .bind(workspace.state.head_commit_oid().cloned())
             .bind(encode_enum(&workspace.retention_policy)?)
             .bind(encode_enum(&workspace.state.status())?)
             .bind(workspace.state.current_job_id().map(|id| id.to_string()))

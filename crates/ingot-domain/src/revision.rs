@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::commit_oid::CommitOid;
+use crate::git_ref::GitRef;
 use crate::ids::{ItemId, ItemRevisionId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,7 +76,7 @@ struct ItemRevisionWire {
     pub title: String,
     pub description: String,
     pub acceptance_criteria: String,
-    pub target_ref: String,
+    pub target_ref: GitRef,
     pub approval_policy: ApprovalPolicy,
     pub policy_snapshot: serde_json::Value,
     pub template_map_snapshot: serde_json::Value,
@@ -151,7 +152,7 @@ pub struct ItemRevision {
     pub title: String,
     pub description: String,
     pub acceptance_criteria: String,
-    pub target_ref: String,
+    pub target_ref: GitRef,
     pub approval_policy: ApprovalPolicy,
     pub policy_snapshot: serde_json::Value,
     pub template_map_snapshot: serde_json::Value,

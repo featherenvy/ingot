@@ -201,12 +201,12 @@ pub async fn create_demo_project(
     let config = load_effective_config(Some(&project))?;
     let configured_approval_policy = parse_config_approval_policy(&config)?;
     let target_ref = normalize_target_ref(&project.default_branch)?;
-    ensure_git_valid_target_ref(&target_ref).await?;
+    ensure_git_valid_target_ref(target_ref.as_str()).await?;
     let repo_path = std::path::Path::new(&project.path);
     let resolved_target_head = resolve_ref_oid(repo_path, &target_ref)
         .await
         .map_err(git_to_internal)?
-        .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.clone()))?;
+        .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.to_string()))?;
 
     let _guard = state
         .project_locks

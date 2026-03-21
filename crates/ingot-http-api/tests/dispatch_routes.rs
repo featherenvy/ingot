@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use ingot_domain::finding::FindingSeverity;
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::ProjectId;
 use ingot_domain::item::ParkingState;
 use ingot_domain::job::{
@@ -395,7 +396,10 @@ async fn investigate_item_dispatch_creates_and_triage_removes_anchor_ref() {
     ensure_mirror(&paths).await.expect("ensure mirror");
     let investigation_ref = format!("refs/ingot/investigations/{job_id}");
     assert_eq!(
-        resolve_ref_oid(paths.mirror_git_dir.as_path(), &investigation_ref)
+        resolve_ref_oid(
+            paths.mirror_git_dir.as_path(),
+            &GitRef::new(&investigation_ref),
+        )
             .await
             .expect("resolve investigation ref")
             .as_ref()
@@ -439,7 +443,10 @@ async fn investigate_item_dispatch_creates_and_triage_removes_anchor_ref() {
         .expect("triage response");
     assert_eq!(triage_response.status(), StatusCode::OK);
     assert_eq!(
-        resolve_ref_oid(paths.mirror_git_dir.as_path(), &investigation_ref)
+        resolve_ref_oid(
+            paths.mirror_git_dir.as_path(),
+            &GitRef::new(&investigation_ref),
+        )
             .await
             .expect("resolve deleted investigation ref"),
         None
@@ -557,7 +564,7 @@ async fn investigate_item_dispatch_uses_existing_authoring_workspace_subject() {
     assert_eq!(
         resolve_ref_oid(
             paths.mirror_git_dir.as_path(),
-            &format!("refs/ingot/investigations/{job_id}")
+            &GitRef::new(format!("refs/ingot/investigations/{job_id}"))
         )
         .await
         .expect("resolve no investigation ref"),

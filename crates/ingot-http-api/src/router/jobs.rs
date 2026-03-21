@@ -262,8 +262,8 @@ pub(super) async fn refresh_revision_context_for_job_like(
         current_authoring_head_for_revision_with_workspace(state, revision, &jobs).await?;
     let authoring_base_commit_oid = effective_authoring_base_commit_oid(state, revision).await?;
     let changed_paths = if let (Some(base_commit_oid), Some(head_commit_oid)) = (
-        authoring_base_commit_oid.as_deref(),
-        authoring_head_commit_oid.as_deref(),
+        authoring_base_commit_oid.as_ref(),
+        authoring_head_commit_oid.as_ref(),
     ) {
         changed_paths_between(repo_path, base_commit_oid, head_commit_oid)
             .await
@@ -275,7 +275,7 @@ pub(super) async fn refresh_revision_context_for_job_like(
         item,
         revision,
         &jobs,
-        authoring_head_commit_oid.map(CommitOid::new),
+        authoring_head_commit_oid,
         changed_paths,
         jobs.first().map(|job| job.id),
         Utc::now(),

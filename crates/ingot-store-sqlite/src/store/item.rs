@@ -1,4 +1,3 @@
-use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::ids::{ItemId, ProjectId};
 use ingot_domain::item::{Escalation, Item, Lifecycle, Origin};
 use ingot_domain::ports::{ItemRepository, RepositoryError};
@@ -107,8 +106,8 @@ impl Database {
         .bind(encode_enum(&revision.approval_policy)?)
         .bind(serde_json::to_string(&revision.policy_snapshot).map_err(json_err)?)
         .bind(serde_json::to_string(&revision.template_map_snapshot).map_err(json_err)?)
-        .bind(revision.seed.seed_commit_oid().map(CommitOid::as_str))
-        .bind(revision.seed.seed_target_commit_oid().as_str())
+        .bind(revision.seed.seed_commit_oid().cloned())
+        .bind(revision.seed.seed_target_commit_oid().clone())
         .bind(revision.supersedes_revision_id.map(|id| id.to_string()))
         .bind(revision.created_at)
         .execute(&mut *tx)

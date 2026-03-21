@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use ingot_domain::commit_oid::CommitOid;
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::ProjectId;
 use tokio::process::Command;
 
@@ -87,18 +89,24 @@ pub async fn ensure_mirror(paths: &ProjectRepoPaths) -> Result<(), GitCommandErr
             .await?
             .is_some()
     {
-        git(&paths.mirror_git_dir, &["symbolic-ref", "HEAD", &head_ref]).await?;
+        git(
+            &paths.mirror_git_dir,
+            &["symbolic-ref", "HEAD", head_ref.as_str()],
+        )
+        .await?;
     }
     Ok(())
 }
 
 pub async fn checkout_sync_status(
     checkout_path: &Path,
-    target_ref: &str,
+    target_ref: &GitRef,
 ) -> Result<CheckoutSyncStatus, GitCommandError> {
     let current_head_ref = current_head_ref(checkout_path).await?;
-    if current_head_ref.as_deref() != Some(target_ref) {
-        let current = current_head_ref.unwrap_or_else(|| "detached".into());
+    if current_head_ref.as_ref() != Some(target_ref) {
+        let current = current_head_ref
+            .map(|ref_name| ref_name.to_string())
+            .unwrap_or_else(|| "detached".into());
         return Ok(CheckoutSyncStatus::Blocked {
             code: "checkout_wrong_branch",
             message: format!(
@@ -120,8 +128,8 @@ pub async fn checkout_sync_status(
 
 pub async fn checkout_finalization_status(
     checkout_path: &Path,
-    target_ref: &str,
-    commit_oid: &str,
+    target_ref: &GitRef,
+    commit_oid: &CommitOid,
 ) -> Result<CheckoutFinalizationStatus, GitCommandError> {
     match checkout_sync_status(checkout_path, target_ref).await? {
         CheckoutSyncStatus::Ready => {
@@ -140,16 +148,17 @@ pub async fn checkout_finalization_status(
 pub async fn sync_checkout_to_commit(
     checkout_path: &Path,
     mirror_git_dir: &Path,
-    target_ref: &str,
-    commit_oid: &str,
+    target_ref: &GitRef,
+    commit_oid: &CommitOid,
 ) -> Result<(), GitCommandError> {
     let sync_ref = format!(
         "refs/ingot/sync-targets/{}",
         target_ref
+            .as_str()
             .trim_start_matches("refs/")
             .replace(['/', ':'], "_")
     );
-    let fetch_spec = format!("{target_ref}:{sync_ref}");
+    let fetch_spec = format!("{}:{sync_ref}", target_ref.as_str());
     let mirror_path = mirror_git_dir.to_string_lossy().into_owned();
     git(
         checkout_path,
@@ -161,6 +170,7 @@ pub async fn sync_checkout_to_commit(
         ],
     )
     .await?;
+    let sync_ref = GitRef::new(sync_ref);
     let fetched_oid = resolve_ref_oid(checkout_path, &sync_ref).await?;
     if !fetched_oid.as_ref().is_some_and(|oid| oid == commit_oid) {
         let _ = crate::commands::delete_ref(checkout_path, &sync_ref).await;
@@ -171,7 +181,7 @@ pub async fn sync_checkout_to_commit(
                 .unwrap_or_else(|| "missing".into())
         )));
     }
-    let reset_result = git(checkout_path, &["reset", "--hard", commit_oid]).await;
+    let reset_result = git(checkout_path, &["reset", "--hard", commit_oid.as_str()]).await;
     let _ = crate::commands::delete_ref(checkout_path, &sync_ref).await;
     reset_result?;
     Ok(())
@@ -201,6 +211,7 @@ mod tests {
     use super::{ensure_mirror, project_repo_paths, sync_checkout_to_commit};
     use crate::commands::{current_head_ref, resolve_ref_oid};
     use ingot_domain::commit_oid::CommitOid;
+    use ingot_domain::git_ref::GitRef;
     use ingot_domain::ids::ProjectId;
     use ingot_test_support::git::{
         git_output, run_git as git_sync, temp_git_repo, unique_temp_path,
@@ -241,37 +252,37 @@ mod tests {
         ensure_mirror(&paths).await.expect("refresh mirror");
 
         assert_eq!(
-            resolve_ref_oid(&paths.mirror_git_dir, "refs/ingot/workspaces/wrk_test")
+            resolve_ref_oid(&paths.mirror_git_dir, &GitRef::new("refs/ingot/workspaces/wrk_test"))
                 .await
                 .expect("resolve daemon ref"),
             Some(CommitOid::from(initial_head))
         );
         assert_eq!(
-            resolve_ref_oid(&paths.mirror_git_dir, "refs/heads/main")
+            resolve_ref_oid(&paths.mirror_git_dir, &GitRef::new("refs/heads/main"))
                 .await
                 .expect("resolve main"),
             Some(CommitOid::from(updated_head.clone()))
         );
         assert_eq!(
-            resolve_ref_oid(&paths.mirror_git_dir, "refs/heads/fresh-branch")
+            resolve_ref_oid(&paths.mirror_git_dir, &GitRef::new("refs/heads/fresh-branch"))
                 .await
                 .expect("resolve fresh branch"),
             Some(CommitOid::from(updated_head.clone()))
         );
         assert_eq!(
-            resolve_ref_oid(&paths.mirror_git_dir, "refs/heads/stale-branch")
+            resolve_ref_oid(&paths.mirror_git_dir, &GitRef::new("refs/heads/stale-branch"))
                 .await
                 .expect("resolve stale branch"),
             None
         );
         assert_eq!(
-            resolve_ref_oid(&paths.mirror_git_dir, "refs/tags/stale-tag")
+            resolve_ref_oid(&paths.mirror_git_dir, &GitRef::new("refs/tags/stale-tag"))
                 .await
                 .expect("resolve stale tag"),
             None
         );
         assert_eq!(
-            resolve_ref_oid(&paths.mirror_git_dir, "refs/tags/fresh-tag")
+            resolve_ref_oid(&paths.mirror_git_dir, &GitRef::new("refs/tags/fresh-tag"))
                 .await
                 .expect("resolve fresh tag"),
             Some(CommitOid::from(updated_head))
@@ -280,7 +291,7 @@ mod tests {
             current_head_ref(&paths.mirror_git_dir)
                 .await
                 .expect("resolve mirror head ref"),
-            Some("refs/heads/main".into())
+            Some(GitRef::new("refs/heads/main"))
         );
     }
 
@@ -301,8 +312,8 @@ mod tests {
         let error = sync_checkout_to_commit(
             &checkout_path,
             &paths.mirror_git_dir,
-            "refs/heads/main",
-            &initial_head,
+            &GitRef::new("refs/heads/main"),
+            &CommitOid::new(initial_head),
         )
         .await
         .expect_err("sync should fail on fetched oid mismatch");
@@ -311,7 +322,7 @@ mod tests {
             "error should describe fetched oid mismatch"
         );
         assert_eq!(
-            resolve_ref_oid(&checkout_path, "refs/ingot/sync-targets/heads_main")
+            resolve_ref_oid(&checkout_path, &GitRef::new("refs/ingot/sync-targets/heads_main"))
                 .await
                 .expect("resolve scratch ref"),
             None,

@@ -17,6 +17,7 @@ use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
 use ingot_domain::commit_oid::CommitOid;
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
 use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
 use ingot_domain::convergence::{Convergence, ConvergenceStatus, PrepareFailureKind};
@@ -94,8 +95,8 @@ struct FinalizeOperationContext<'a> {
     project: &'a Project,
     item_id: ingot_domain::ids::ItemId,
     revision: &'a ItemRevision,
-    mirror_target_ref: &'a str,
-    prepared_commit_oid: &'a str,
+    mirror_target_ref: &'a GitRef,
+    prepared_commit_oid: &'a CommitOid,
     paths: &'a ingot_git::project_repo::ProjectRepoPaths,
 }
 
@@ -671,8 +672,8 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
             match finalize_target_ref_in_repo(
                 paths.mirror_git_dir.as_path(),
                 &convergence.target_ref,
-                prepared_commit_oid.as_str(),
-                input_target_commit_oid.as_str(),
+                &prepared_commit_oid,
+                &input_target_commit_oid,
             )
             .await
             .map_err(|error| usecase_from_runtime_error(RuntimeError::from(error)))?
@@ -710,7 +711,7 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                 CheckoutSyncStatus::Ready => match checkout_finalization_status(
                     Path::new(&project.path),
                     &revision.target_ref,
-                    prepared_commit_oid.as_str(),
+                    &prepared_commit_oid,
                 )
                 .await
                 .map_err(|error| usecase_from_runtime_error(RuntimeError::from(error)))?
@@ -746,7 +747,7 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                 Path::new(&project.path),
                 paths.mirror_git_dir.as_path(),
                 &revision.target_ref,
-                prepared_commit_oid.as_str(),
+                &prepared_commit_oid,
             )
             .await
             .map_err(|error| usecase_from_runtime_error(RuntimeError::from(error)))?;
@@ -1381,7 +1382,7 @@ impl JobDispatcher {
                 OperationPayload::CreateJobCommit { .. }
                 | OperationPayload::PrepareConvergenceCommit { .. } => {
                     if let Some(commit_oid) = operation.effective_commit_oid() {
-                        ingot_git::commands::commit_exists(repo_path, commit_oid.as_str()).await?
+                        ingot_git::commands::commit_exists(repo_path, commit_oid).await?
                     } else {
                         false
                     }
@@ -1689,17 +1690,15 @@ impl JobDispatcher {
         if let Some(workspace_id) = convergence.state.integration_workspace_id() {
             let mut workspace = self.db.get_workspace(workspace_id).await?;
             let now = Utc::now();
-            let head_commit_oid = operation.effective_commit_oid().map(ToOwned::to_owned);
-            workspace.mark_ready_with_head(
-                head_commit_oid.unwrap_or_else(|| {
-                    workspace
-                        .state
-                        .head_commit_oid()
-                        .cloned()
-                        .unwrap_or_else(|| ingot_domain::commit_oid::CommitOid::new(""))
-                }),
-                now,
-            );
+            if let Some(head_commit_oid) = operation
+                .effective_commit_oid()
+                .cloned()
+                .or_else(|| workspace.state.head_commit_oid().cloned())
+            {
+                workspace.mark_ready_with_head(head_commit_oid, now);
+            } else {
+                workspace.release_to(WorkspaceStatus::Ready, now);
+            }
             self.db.update_workspace(&workspace).await?;
         }
 
@@ -1721,13 +1720,13 @@ impl JobDispatcher {
         let revision = self.db.get_revision(convergence.item_revision_id).await?;
         let target_ref = operation
             .ref_name()
-            .unwrap_or(convergence.target_ref.as_str())
-            .to_string();
+            .cloned()
+            .unwrap_or(convergence.target_ref.clone());
         let prepared_commit_oid = operation
             .new_oid()
             .or(operation.commit_oid())
             .ok_or_else(|| RuntimeError::InvalidState("finalize operation missing new oid".into()))?
-            .to_string();
+            .clone();
         Ok(!matches!(
             self.complete_finalize_target_ref_operation(
                 FinalizeOperationContext {
@@ -1751,19 +1750,15 @@ impl JobDispatcher {
         };
         let mut workspace = self.db.get_workspace(workspace_id).await?;
         let now = Utc::now();
-        workspace.mark_ready_with_head(
-            operation
-                .new_oid()
-                .cloned()
-                .unwrap_or_else(|| {
-                    workspace
-                        .state
-                        .head_commit_oid()
-                        .cloned()
-                        .unwrap_or_else(|| ingot_domain::commit_oid::CommitOid::new(""))
-                }),
-            now,
-        );
+        if let Some(head_commit_oid) = operation
+            .new_oid()
+            .cloned()
+            .or_else(|| workspace.state.head_commit_oid().cloned())
+        {
+            workspace.mark_ready_with_head(head_commit_oid, now);
+        } else {
+            workspace.release_to(WorkspaceStatus::Ready, now);
+        }
         self.db.update_workspace(&workspace).await?;
         Ok(())
     }
@@ -2010,7 +2005,7 @@ impl JobDispatcher {
             remove_workspace(repo_path.as_path(), path).await?;
         }
 
-        if let Some(workspace_ref) = workspace.workspace_ref.as_deref()
+        if let Some(workspace_ref) = workspace.workspace_ref.as_ref()
             && let Some(current_oid) = resolve_ref_oid(repo_path.as_path(), workspace_ref).await?
         {
             let mut operation = GitOperation {
@@ -2019,7 +2014,7 @@ impl JobDispatcher {
                 entity_id: workspace.id.to_string(),
                 payload: OperationPayload::RemoveWorkspaceRef {
                     workspace_id: workspace.id,
-                    ref_name: workspace_ref.into(),
+                    ref_name: workspace_ref.clone(),
                     expected_old_oid: current_oid,
                 },
                 status: GitOperationStatus::Planned,
@@ -2423,13 +2418,13 @@ impl JobDispatcher {
                     repo_path,
                     Path::new(&existing_workspace.path),
                     &workspace_ref,
-                    expected_head_commit_oid.as_str(),
+                    &expected_head_commit_oid,
                 )
                 .await?;
                 let mut workspace = existing_workspace;
                 workspace.path = provisioned.workspace_path.display().to_string();
                 workspace.workspace_ref = Some(provisioned.workspace_ref);
-                workspace.mark_ready_with_head(CommitOid::new(provisioned.head_commit_oid), now);
+                workspace.mark_ready_with_head(provisioned.head_commit_oid, now);
                 Ok((
                     workspace,
                     WorkspaceLifecycle::PersistentIntegration,
@@ -2447,7 +2442,7 @@ impl JobDispatcher {
                 let workspace_id = WorkspaceId::new();
                 let workspace_path = workspace_root.join(workspace_id.to_string());
                 let provisioned =
-                    provision_review_workspace(repo_path, &workspace_path, head_commit_oid.as_str())
+                    provision_review_workspace(repo_path, &workspace_path, &head_commit_oid)
                         .await?;
                 let workspace = Workspace {
                     id: workspace_id,
@@ -2467,8 +2462,8 @@ impl JobDispatcher {
                             job.job_input
                                 .base_commit_oid()
                                 .cloned()
-                                .unwrap_or_else(|| CommitOid::new("")),
-                            CommitOid::new(provisioned.head_commit_oid),
+                                .unwrap_or_else(|| provisioned.head_commit_oid.clone()),
+                            provisioned.head_commit_oid,
                         ),
                     },
                 };
@@ -2789,7 +2784,7 @@ impl JobDispatcher {
         }
 
         let commit_oid = self.create_commit(&prepared, &response).await?;
-        self.complete_commit_run(&prepared, commit_oid.as_str()).await
+        self.complete_commit_run(&prepared, &commit_oid).await
     }
 
     async fn finish_report_run(
@@ -3171,7 +3166,9 @@ impl JobDispatcher {
         let integration_workspace_path = paths
             .worktree_root
             .join(integration_workspace_id.to_string());
-        let integration_workspace_ref = format!("refs/ingot/workspaces/{integration_workspace_id}");
+        let integration_workspace_ref = GitRef::new(format!(
+            "refs/ingot/workspaces/{integration_workspace_id}"
+        ));
         let now = Utc::now();
         let mut integration_workspace = Workspace {
             id: integration_workspace_id,
@@ -3199,12 +3196,12 @@ impl JobDispatcher {
             repo_path,
             &integration_workspace_path,
             &integration_workspace_ref,
-            input_target_commit_oid.as_str(),
+            &input_target_commit_oid,
         )
         .await?;
         integration_workspace.path = provisioned.workspace_path.display().to_string();
         integration_workspace.workspace_ref = Some(provisioned.workspace_ref);
-        integration_workspace.set_head_commit_oid(CommitOid::new(provisioned.head_commit_oid), Utc::now());
+        integration_workspace.set_head_commit_oid(provisioned.head_commit_oid, Utc::now());
         self.db.update_workspace(&integration_workspace).await?;
 
         let mut convergence = Convergence {
@@ -3238,7 +3235,7 @@ impl JobDispatcher {
             .await?
             .ok_or_else(|| RuntimeError::InvalidState("authoring base commit missing".into()))?;
         let source_commit_oids =
-            list_commits_oldest_first(repo_path, source_base_commit_oid.as_str(), source_head_commit_oid.as_str())
+            list_commits_oldest_first(repo_path, &source_base_commit_oid, &source_head_commit_oid)
                 .await?;
         let mut operation = GitOperation {
             id: GitOperationId::new(),
@@ -3274,9 +3271,7 @@ impl JobDispatcher {
         let mut prepared_commit_oids = Vec::with_capacity(source_commit_oids.len());
 
         for source_commit_oid in &source_commit_oids {
-            if let Err(error) =
-                cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid.as_str()).await
-            {
+            if let Err(error) = cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid).await {
                 let _ = abort_cherry_pick(&integration_workspace_dir).await;
                 self.fail_prepare_convergence_attempt(
                     project,
@@ -3320,7 +3315,7 @@ impl JobDispatcher {
                 continue;
             }
 
-            let original_message = match commit_message(repo_path, source_commit_oid.as_str()).await {
+            let original_message = match commit_message(repo_path, source_commit_oid).await {
                 Ok(message) => message,
                 Err(error) => {
                     self.fail_prepare_convergence_attempt(
@@ -3372,10 +3367,10 @@ impl JobDispatcher {
                     return Ok(());
                 }
             };
-            if let Some(workspace_ref) = integration_workspace.workspace_ref.as_deref() {
+            if let Some(workspace_ref) = integration_workspace.workspace_ref.as_ref() {
                 if let Err(error) = git(
                     repo_path,
-                    &["update-ref", workspace_ref, next_prepared_tip.as_str()],
+                    &["update-ref", workspace_ref.as_str(), next_prepared_tip.as_str()],
                 )
                 .await
                 {
@@ -3525,7 +3520,7 @@ impl JobDispatcher {
     ) -> Result<(), RuntimeError> {
         let repo_path = prepared.canonical_repo_path.as_path();
         let workspace_ref =
-            prepared.workspace.workspace_ref.as_deref().ok_or_else(|| {
+            prepared.workspace.workspace_ref.as_ref().ok_or_else(|| {
                 RuntimeError::InvalidState("authoring workspace missing ref".into())
             })?;
         let actual_ref = resolve_ref_oid(repo_path, workspace_ref).await?;
@@ -3622,7 +3617,7 @@ impl JobDispatcher {
             },
         )
         .await?;
-        git(repo_path, &["update-ref", &workspace_ref, commit_oid.as_str()]).await?;
+        git(repo_path, &["update-ref", workspace_ref.as_str(), commit_oid.as_str()]).await?;
 
         operation.payload.set_job_commit_result(commit_oid.clone());
         operation.status = GitOperationStatus::Applied;
@@ -3635,7 +3630,7 @@ impl JobDispatcher {
     async fn complete_commit_run(
         &self,
         prepared: &PreparedRun,
-        commit_oid: &str,
+        commit_oid: &CommitOid,
     ) -> Result<(), RuntimeError> {
         self.finalize_workspace_after_success(prepared, Some(commit_oid))
             .await?;
@@ -3652,7 +3647,7 @@ impl JobDispatcher {
                 ),
                 result_schema_version: None,
                 result_payload: None,
-                output_commit_oid: Some(commit_oid.to_string()),
+                output_commit_oid: Some(commit_oid.clone()),
                 findings: vec![],
                 prepared_convergence_guard: None,
             })
@@ -3672,7 +3667,7 @@ impl JobDispatcher {
         self.auto_dispatch_projected_review(prepared.project.id, prepared.item.id)
             .await?;
 
-        info!(job_id = %prepared.job.id, commit_oid, "completed authoring job");
+        info!(job_id = %prepared.job.id, commit_oid = %commit_oid, "completed authoring job");
 
         Ok(())
     }
@@ -3961,7 +3956,7 @@ impl JobDispatcher {
                 .unwrap_or(head);
             let project = self.db.get_project(prepared.project_id).await?;
             let paths = self.refresh_project_mirror(&project).await?;
-            changed_paths_between(&paths.mirror_git_dir, base.as_str(), head.as_str())
+            changed_paths_between(&paths.mirror_git_dir, base, head)
                 .await
                 .unwrap_or_default()
         } else {
@@ -4623,7 +4618,7 @@ impl JobDispatcher {
     async fn finalize_workspace_after_success(
         &self,
         prepared: &PreparedRun,
-        head_commit_oid: Option<&str>,
+        head_commit_oid: Option<&CommitOid>,
     ) -> Result<(), RuntimeError> {
         let _guard = self
             .project_locks
@@ -4636,7 +4631,7 @@ impl JobDispatcher {
                 let now = Utc::now();
                 workspace.release_to(WorkspaceStatus::Ready, now);
                 if let Some(head_commit_oid) = head_commit_oid {
-                    workspace.set_head_commit_oid(CommitOid::new(head_commit_oid), now);
+                    workspace.set_head_commit_oid(head_commit_oid.clone(), now);
                 }
                 self.db.update_workspace(&workspace).await?;
             }
@@ -4717,12 +4712,12 @@ impl JobDispatcher {
                 )
                 .await?;
                 git(workspace_path, &["clean", "-fd"]).await?;
-                if let Some(workspace_ref) = prepared.workspace.workspace_ref.as_deref() {
+                if let Some(workspace_ref) = prepared.workspace.workspace_ref.as_ref() {
                     git(
                         prepared.canonical_repo_path.as_path(),
                         &[
                             "update-ref",
-                            workspace_ref,
+                            workspace_ref.as_str(),
                             prepared.original_head_commit_oid.as_str(),
                         ],
                     )
@@ -4737,12 +4732,12 @@ impl JobDispatcher {
                 )
                 .await?;
                 git(workspace_path, &["clean", "-fd"]).await?;
-                if let Some(workspace_ref) = prepared.workspace.workspace_ref.as_deref() {
+                if let Some(workspace_ref) = prepared.workspace.workspace_ref.as_ref() {
                     git(
                         prepared.canonical_repo_path.as_path(),
                         &[
                             "update-ref",
-                            workspace_ref,
+                            workspace_ref.as_str(),
                             prepared.original_head_commit_oid.as_str(),
                         ],
                     )
@@ -4791,8 +4786,8 @@ impl JobDispatcher {
         ) {
             changed_paths_between(
                 self.project_paths(&project).mirror_git_dir.as_path(),
-                base_commit_oid.as_str(),
-                head_commit_oid.as_str(),
+                base_commit_oid,
+                head_commit_oid,
             )
             .await?
         } else {

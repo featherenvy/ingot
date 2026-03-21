@@ -1,4 +1,5 @@
 use crate::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
+use crate::git_ref::GitRef;
 use crate::ids;
 use chrono::{DateTime, Utc};
 
@@ -9,7 +10,7 @@ pub struct ConvergenceQueueEntryBuilder {
     project_id: ids::ProjectId,
     item_id: ids::ItemId,
     item_revision_id: ids::ItemRevisionId,
-    target_ref: String,
+    target_ref: GitRef,
     status: ConvergenceQueueEntryStatus,
     head_acquired_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -29,7 +30,7 @@ impl ConvergenceQueueEntryBuilder {
             project_id,
             item_id,
             item_revision_id,
-            target_ref: "refs/heads/main".into(),
+            target_ref: GitRef::new("refs/heads/main"),
             status: ConvergenceQueueEntryStatus::Head,
             head_acquired_at: Some(now),
             created_at: now,

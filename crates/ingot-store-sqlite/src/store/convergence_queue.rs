@@ -1,4 +1,5 @@
 use ingot_domain::convergence_queue::ConvergenceQueueEntry;
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::{ConvergenceQueueEntryId, ItemId, ItemRevisionId, ProjectId};
 use ingot_domain::ports::{ConvergenceQueueRepository, RepositoryError};
 use sqlx::Row;
@@ -65,7 +66,7 @@ impl Database {
     pub async fn find_queue_head(
         &self,
         project_id: ProjectId,
-        target_ref: &str,
+        target_ref: &GitRef,
     ) -> Result<Option<ConvergenceQueueEntry>, RepositoryError> {
         let row = sqlx::query(
             "SELECT *
@@ -87,7 +88,7 @@ impl Database {
     pub async fn find_next_queued_entry(
         &self,
         project_id: ProjectId,
-        target_ref: &str,
+        target_ref: &GitRef,
     ) -> Result<Option<ConvergenceQueueEntry>, RepositoryError> {
         let row = sqlx::query(
             "SELECT *
@@ -110,7 +111,7 @@ impl Database {
     pub async fn list_active_queue_entries_for_lane(
         &self,
         project_id: ProjectId,
-        target_ref: &str,
+        target_ref: &GitRef,
     ) -> Result<Vec<ConvergenceQueueEntry>, RepositoryError> {
         let rows = sqlx::query(
             "SELECT *
@@ -223,14 +224,14 @@ impl ConvergenceQueueRepository for Database {
     async fn find_head(
         &self,
         project_id: ProjectId,
-        target_ref: &str,
+        target_ref: &GitRef,
     ) -> Result<Option<ConvergenceQueueEntry>, RepositoryError> {
         self.find_queue_head(project_id, target_ref).await
     }
     async fn find_next_queued(
         &self,
         project_id: ProjectId,
-        target_ref: &str,
+        target_ref: &GitRef,
     ) -> Result<Option<ConvergenceQueueEntry>, RepositoryError> {
         self.find_next_queued_entry(project_id, target_ref).await
     }
@@ -243,7 +244,7 @@ impl ConvergenceQueueRepository for Database {
     async fn list_active_for_lane(
         &self,
         project_id: ProjectId,
-        target_ref: &str,
+        target_ref: &GitRef,
     ) -> Result<Vec<ConvergenceQueueEntry>, RepositoryError> {
         self.list_active_queue_entries_for_lane(project_id, target_ref)
             .await

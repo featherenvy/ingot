@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::commit_oid::CommitOid;
+use crate::git_ref::GitRef;
 use crate::ids::{GitOperationId, ProjectId, WorkspaceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,14 +45,14 @@ pub struct ConvergenceReplayMetadata {
 pub enum OperationPayload {
     CreateJobCommit {
         workspace_id: WorkspaceId,
-        ref_name: String,
+        ref_name: GitRef,
         expected_old_oid: CommitOid,
         new_oid: Option<CommitOid>,
         commit_oid: Option<CommitOid>,
     },
     PrepareConvergenceCommit {
         workspace_id: WorkspaceId,
-        ref_name: Option<String>,
+        ref_name: Option<GitRef>,
         expected_old_oid: CommitOid,
         new_oid: Option<CommitOid>,
         commit_oid: Option<CommitOid>,
@@ -59,29 +60,29 @@ pub enum OperationPayload {
     },
     FinalizeTargetRef {
         workspace_id: Option<WorkspaceId>,
-        ref_name: String,
+        ref_name: GitRef,
         expected_old_oid: CommitOid,
         new_oid: CommitOid,
         commit_oid: Option<CommitOid>,
     },
     CreateInvestigationRef {
-        ref_name: String,
+        ref_name: GitRef,
         new_oid: CommitOid,
         commit_oid: Option<CommitOid>,
     },
     RemoveInvestigationRef {
-        ref_name: String,
+        ref_name: GitRef,
         expected_old_oid: CommitOid,
     },
     ResetWorkspace {
         workspace_id: WorkspaceId,
-        ref_name: Option<String>,
+        ref_name: Option<GitRef>,
         expected_old_oid: Option<CommitOid>,
         new_oid: CommitOid,
     },
     RemoveWorkspaceRef {
         workspace_id: WorkspaceId,
-        ref_name: String,
+        ref_name: GitRef,
         expected_old_oid: CommitOid,
     },
 }
@@ -129,7 +130,7 @@ impl OperationPayload {
     }
 
     #[must_use]
-    pub fn ref_name(&self) -> Option<&str> {
+    pub fn ref_name(&self) -> Option<&GitRef> {
         match self {
             Self::CreateJobCommit { ref_name, .. }
             | Self::FinalizeTargetRef { ref_name, .. }
@@ -137,7 +138,7 @@ impl OperationPayload {
             | Self::RemoveInvestigationRef { ref_name, .. }
             | Self::RemoveWorkspaceRef { ref_name, .. } => Some(ref_name),
             Self::PrepareConvergenceCommit { ref_name, .. }
-            | Self::ResetWorkspace { ref_name, .. } => ref_name.as_deref(),
+            | Self::ResetWorkspace { ref_name, .. } => ref_name.as_ref(),
         }
     }
 
@@ -276,7 +277,7 @@ impl GitOperation {
     }
 
     #[must_use]
-    pub fn ref_name(&self) -> Option<&str> {
+    pub fn ref_name(&self) -> Option<&GitRef> {
         self.payload.ref_name()
     }
 
@@ -309,7 +310,7 @@ pub struct GitOperationWire {
     pub entity_type: GitEntityType,
     pub entity_id: String,
     pub workspace_id: Option<WorkspaceId>,
-    pub ref_name: Option<String>,
+    pub ref_name: Option<GitRef>,
     pub expected_old_oid: Option<CommitOid>,
     pub new_oid: Option<CommitOid>,
     pub commit_oid: Option<CommitOid>,
@@ -449,7 +450,7 @@ impl From<&GitOperation> for GitOperationWire {
             entity_type: op.entity_type(),
             entity_id: op.entity_id.clone(),
             workspace_id: op.workspace_id(),
-            ref_name: op.ref_name().map(ToOwned::to_owned),
+            ref_name: op.ref_name().cloned(),
             expected_old_oid: op.expected_old_oid().cloned(),
             new_oid: op.new_oid().cloned(),
             commit_oid: op.commit_oid().cloned(),
@@ -501,7 +502,7 @@ mod tests {
     fn create_job_commit_accessors() {
         let payload = OperationPayload::CreateJobCommit {
             workspace_id: test_workspace_id(),
-            ref_name: "refs/ingot/workspaces/auth".into(),
+            ref_name: GitRef::new("refs/ingot/workspaces/auth"),
             expected_old_oid: "aaa".into(),
             new_oid: None,
             commit_oid: None,
@@ -509,7 +510,7 @@ mod tests {
         assert_eq!(payload.operation_kind(), OperationKind::CreateJobCommit);
         assert_eq!(payload.entity_type(), GitEntityType::Job);
         assert_eq!(payload.workspace_id(), Some(test_workspace_id()));
-        assert_eq!(payload.ref_name(), Some("refs/ingot/workspaces/auth"));
+        assert_eq!(payload.ref_name(), Some(&GitRef::new("refs/ingot/workspaces/auth")));
         assert_eq!(payload.expected_old_oid(), Some(&CommitOid::from("aaa")));
         assert_eq!(payload.new_oid(), None);
         assert_eq!(payload.commit_oid(), None);
@@ -520,7 +521,7 @@ mod tests {
     fn effective_commit_oid_prefers_commit_oid() {
         let payload = OperationPayload::CreateJobCommit {
             workspace_id: test_workspace_id(),
-            ref_name: "ref".into(),
+            ref_name: GitRef::new("ref"),
             expected_old_oid: "old".into(),
             new_oid: Some("new".into()),
             commit_oid: Some("commit".into()),
@@ -532,7 +533,7 @@ mod tests {
     fn effective_commit_oid_falls_back_to_new_oid() {
         let payload = OperationPayload::FinalizeTargetRef {
             workspace_id: None,
-            ref_name: "ref".into(),
+            ref_name: GitRef::new("ref"),
             expected_old_oid: "old".into(),
             new_oid: "new".into(),
             commit_oid: None,
@@ -544,7 +545,7 @@ mod tests {
     fn set_job_commit_result_sets_both_fields() {
         let mut payload = OperationPayload::CreateJobCommit {
             workspace_id: test_workspace_id(),
-            ref_name: "ref".into(),
+            ref_name: GitRef::new("ref"),
             expected_old_oid: "old".into(),
             new_oid: None,
             commit_oid: None,
@@ -601,7 +602,7 @@ mod tests {
             (
                 OperationPayload::CreateJobCommit {
                     workspace_id: test_workspace_id(),
-                    ref_name: "r".into(),
+                    ref_name: GitRef::new("r"),
                     expected_old_oid: "o".into(),
                     new_oid: None,
                     commit_oid: None,
@@ -622,7 +623,7 @@ mod tests {
             (
                 OperationPayload::FinalizeTargetRef {
                     workspace_id: None,
-                    ref_name: "r".into(),
+                    ref_name: GitRef::new("r"),
                     expected_old_oid: "o".into(),
                     new_oid: "n".into(),
                     commit_oid: None,
@@ -631,7 +632,7 @@ mod tests {
             ),
             (
                 OperationPayload::CreateInvestigationRef {
-                    ref_name: "r".into(),
+                    ref_name: GitRef::new("r"),
                     new_oid: "n".into(),
                     commit_oid: None,
                 },
@@ -639,7 +640,7 @@ mod tests {
             ),
             (
                 OperationPayload::RemoveInvestigationRef {
-                    ref_name: "r".into(),
+                    ref_name: GitRef::new("r"),
                     expected_old_oid: "o".into(),
                 },
                 GitEntityType::Job,
@@ -656,7 +657,7 @@ mod tests {
             (
                 OperationPayload::RemoveWorkspaceRef {
                     workspace_id: test_workspace_id(),
-                    ref_name: "r".into(),
+                    ref_name: GitRef::new("r"),
                     expected_old_oid: "o".into(),
                 },
                 GitEntityType::Workspace,
@@ -694,7 +695,7 @@ mod tests {
         assert_eq!(restored.operation_kind(), OperationKind::CreateJobCommit);
         assert_eq!(
             restored.payload.ref_name(),
-            Some("refs/ingot/workspaces/auth")
+            Some(&GitRef::new("refs/ingot/workspaces/auth"))
         );
         assert_eq!(restored.payload.new_oid(), Some(&CommitOid::from("bbb")));
     }
@@ -746,7 +747,7 @@ mod tests {
             entity_type: GitEntityType::Job,
             entity_id: "j1".into(),
             workspace_id: None, // required!
-            ref_name: Some("r".into()),
+            ref_name: Some(GitRef::new("r")),
             expected_old_oid: Some("o".into()),
             new_oid: None,
             commit_oid: None,

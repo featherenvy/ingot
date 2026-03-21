@@ -567,7 +567,7 @@ mod tests {
         async fn find_head(
             &self,
             _project_id: ProjectId,
-            _target_ref: &str,
+            _target_ref: &ingot_domain::git_ref::GitRef,
         ) -> Result<Option<ConvergenceQueueEntry>, RepositoryError> {
             async { unreachable!("unused in test") }.await
         }
@@ -575,7 +575,7 @@ mod tests {
         async fn find_next_queued(
             &self,
             _project_id: ProjectId,
-            _target_ref: &str,
+            _target_ref: &ingot_domain::git_ref::GitRef,
         ) -> Result<Option<ConvergenceQueueEntry>, RepositoryError> {
             async { unreachable!("unused in test") }.await
         }
@@ -594,7 +594,7 @@ mod tests {
         async fn list_active_for_lane(
             &self,
             _project_id: ProjectId,
-            _target_ref: &str,
+            _target_ref: &ingot_domain::git_ref::GitRef,
         ) -> Result<Vec<ConvergenceQueueEntry>, RepositoryError> {
             async { unreachable!("unused in test") }.await
         }

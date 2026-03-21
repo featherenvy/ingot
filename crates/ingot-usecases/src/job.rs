@@ -27,7 +27,7 @@ pub struct CompleteJobCommand {
     pub outcome_class: OutcomeClass,
     pub result_schema_version: Option<String>,
     pub result_payload: Option<Value>,
-    pub output_commit_oid: Option<String>,
+    pub output_commit_oid: Option<CommitOid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +57,7 @@ struct JobCompletionPlan {
     outcome_class: OutcomeClass,
     result_schema_version: Option<String>,
     result_payload: Option<Value>,
-    output_commit_oid: Option<String>,
+    output_commit_oid: Option<CommitOid>,
     findings: Vec<ingot_domain::finding::Finding>,
     prepared_convergence_guard: Option<PreparedConvergenceGuard>,
 }
@@ -67,7 +67,7 @@ struct NormalizedCompleteJobCommand {
     outcome_class: OutcomeClass,
     result_schema_version: Option<String>,
     result_payload: Option<Value>,
-    output_commit_oid: Option<String>,
+    output_commit_oid: Option<CommitOid>,
 }
 
 enum LoadedCompletionContext {
@@ -379,7 +379,7 @@ fn normalize_completion_command(
             let output_commit_oid = command
                 .output_commit_oid
                 .clone()
-                .filter(|value| !value.trim().is_empty())
+                .filter(|value| !value.as_str().trim().is_empty())
                 .ok_or_else(|| CompleteJobError::BadRequest {
                     code: "missing_output_commit_oid",
                     message: "Commit-producing jobs must include output_commit_oid".into(),
@@ -481,7 +481,7 @@ fn completed_job_matches_retry_command(job: &Job, command: &CompleteJobCommand) 
         && job.state.outcome_class() == Some(command.outcome_class)
         && job.state.result_schema_version().map(ToOwned::to_owned) == command.result_schema_version
         && job.state.result_payload().cloned() == command.result_payload
-        && job.state.output_commit_oid().map(|oid| oid.as_str().to_owned()) == command.output_commit_oid
+        && job.state.output_commit_oid() == command.output_commit_oid.as_ref()
 }
 
 fn completed_job_retry_allowed(job: &Job) -> bool {
@@ -919,7 +919,7 @@ fn prepared_convergence_guard(
         convergence_id: prepared_convergence.id,
         item_revision_id: job.item_revision_id,
         target_ref: prepared_convergence.target_ref.clone(),
-        expected_target_head_oid: expected_target_oid.as_str().to_owned(),
+        expected_target_head_oid: expected_target_oid.clone(),
         next_approval_state: desired_completion_approval_state(item, revision, job),
     }))
 }
@@ -1241,7 +1241,10 @@ mod tests {
 
         let mutation = repository.last_mutation().expect("captured mutation");
         assert_eq!(result.finding_count, 0);
-        assert_eq!(mutation.output_commit_oid.as_deref(), Some("commit-oid"));
+        assert_eq!(
+            mutation.output_commit_oid.as_ref().map(CommitOid::as_str),
+            Some("commit-oid")
+        );
         assert!(mutation.result_schema_version.is_none());
     }
 
@@ -1875,7 +1878,7 @@ mod tests {
                     started_at: state.context.job.state.started_at(),
                     outcome_class: mutation.outcome_class,
                     ended_at: chrono::Utc::now(),
-                    output_commit_oid: mutation.output_commit_oid.clone().map(CommitOid::new),
+                    output_commit_oid: mutation.output_commit_oid.clone(),
                     result_schema_version: mutation.result_schema_version.clone(),
                     result_payload: mutation.result_payload.clone(),
                 };
@@ -1939,7 +1942,7 @@ mod tests {
         fn commit_exists(
             &self,
             _repo_path: &Path,
-            _commit_oid: &str,
+            _commit_oid: &CommitOid,
         ) -> impl std::future::Future<Output = Result<bool, GitPortError>> + Send {
             let commit_exists = self.commit_exists;
             async move { Ok(commit_exists) }
@@ -1948,8 +1951,8 @@ mod tests {
         fn verify_and_hold_target_ref(
             &self,
             _repo_path: &Path,
-            _target_ref: &str,
-            _expected_oid: &str,
+            _target_ref: &ingot_domain::git_ref::GitRef,
+            _expected_oid: &CommitOid,
         ) -> impl std::future::Future<Output = Result<Self::Hold, TargetRefHoldError>> + Send
         {
             let hold_error = self.hold_error.clone();

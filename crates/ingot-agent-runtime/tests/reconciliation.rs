@@ -6,6 +6,7 @@ use ingot_agent_runtime::{DispatcherConfig, JobDispatcher};
 use ingot_domain::activity::ActivityEventType;
 use ingot_domain::convergence::ConvergenceStatus;
 use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::git_operation::{GitEntityType, GitOperationStatus, OperationKind};
 use ingot_domain::item::{
     ApprovalState, DoneReason, Escalation, EscalationReason, ResolutionSource,
@@ -701,9 +702,9 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
         .expect("refresh mirror");
     compare_and_swap_ref(
         paths.mirror_git_dir.as_path(),
-        "refs/heads/main",
-        &prepared_commit,
-        &base_commit,
+        &GitRef::new("refs/heads/main"),
+        &CommitOid::new(prepared_commit.clone()),
+        &CommitOid::new(base_commit.clone()),
     )
     .await
     .expect("move mirror ref");
@@ -852,9 +853,9 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
         .expect("refresh mirror");
     compare_and_swap_ref(
         paths.mirror_git_dir.as_path(),
-        "refs/heads/main",
-        &prepared_commit,
-        &base_commit,
+        &GitRef::new("refs/heads/main"),
+        &CommitOid::new(prepared_commit.clone()),
+        &CommitOid::new(base_commit.clone()),
     )
     .await
     .expect("move mirror ref");
@@ -1519,7 +1520,10 @@ async fn reconcile_startup_adopts_remove_workspace_ref_operation() {
             "refs/ingot/workspaces/remove-adopt",
         ],
     );
-    delete_ref(&paths.mirror_git_dir, "refs/ingot/workspaces/remove-adopt")
+    delete_ref(
+        &paths.mirror_git_dir,
+        &GitRef::new("refs/ingot/workspaces/remove-adopt"),
+    )
         .await
         .expect("delete ref");
     let workspace = WorkspaceBuilder::new(project.id, WorkspaceKind::Review)

@@ -80,9 +80,7 @@ pub(super) async fn dispatch_item_job(
             &state,
             &project,
             precreated_authoring_workspace.as_ref(),
-            pending_investigation_ref
-                .as_ref()
-                .map(|pending| pending.ref_name.as_str()),
+            pending_investigation_ref.as_ref().map(|pending| &pending.ref_name),
         )
         .await;
         return Err(repo_to_internal(error));
@@ -112,8 +110,8 @@ pub(super) async fn dispatch_item_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
-pub(super) fn investigation_ref_name(job_id: JobId) -> String {
-    format!("refs/ingot/investigations/{job_id}")
+pub(super) fn investigation_ref_name(job_id: JobId) -> GitRef {
+    GitRef::new(format!("refs/ingot/investigations/{job_id}"))
 }
 
 pub(super) fn should_fill_candidate_subject_from_workspace(step_id: &str) -> bool {
@@ -122,8 +120,8 @@ pub(super) fn should_fill_candidate_subject_from_workspace(step_id: &str) -> boo
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PendingInvestigationRef {
-    pub(super) ref_name: String,
-    pub(super) commit_oid: String,
+    pub(super) ref_name: GitRef,
+    pub(super) commit_oid: CommitOid,
 }
 
 pub(super) async fn bind_dispatch_subjects_if_needed(
@@ -144,15 +142,15 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
         let resolved_head = resolve_ref_oid(repo_path, &revision.target_ref)
             .await
             .map_err(git_to_internal)?
-            .ok_or_else(|| UseCaseError::TargetRefUnresolved(revision.target_ref.clone()))?;
+            .ok_or_else(|| UseCaseError::TargetRefUnresolved(revision.target_ref.to_string()))?;
         job.job_input = ingot_domain::job::JobInput::authoring_head(resolved_head);
         let workspace = ensure_authoring_workspace(state, project, revision, job).await?;
         *precreated_authoring_workspace = Some(workspace);
         return Ok(None);
     }
 
-    let mut base_commit_oid = job.job_input.base_commit_oid().map(|o| o.as_str().to_owned());
-    let mut head_commit_oid = job.job_input.head_commit_oid().map(|o| o.as_str().to_owned());
+    let mut base_commit_oid = job.job_input.base_commit_oid().cloned();
+    let mut head_commit_oid = job.job_input.head_commit_oid().cloned();
 
     if should_fill_candidate_subject_from_workspace(&job.step_id) {
         if base_commit_oid.is_none() {
@@ -166,8 +164,8 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
             (base_commit_oid.clone(), head_commit_oid.clone())
         {
             job.job_input = ingot_domain::job::JobInput::candidate_subject(
-                CommitOid::new(base_commit_oid),
-                CommitOid::new(head_commit_oid),
+                base_commit_oid,
+                head_commit_oid,
             );
             return Ok(None);
         }
@@ -187,7 +185,7 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
         let resolved_head = resolve_ref_oid(repo_path, &revision.target_ref)
             .await
             .map_err(git_to_internal)?
-            .ok_or_else(|| UseCaseError::TargetRefUnresolved(revision.target_ref.clone()))?;
+            .ok_or_else(|| UseCaseError::TargetRefUnresolved(revision.target_ref.to_string()))?;
         let ref_name = investigation_ref_name(job.id);
         job.job_input = ingot_domain::job::JobInput::candidate_subject(
             resolved_head.clone(),
@@ -195,7 +193,7 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
         );
         return Ok(Some(PendingInvestigationRef {
             ref_name,
-            commit_oid: resolved_head.into_inner(),
+            commit_oid: resolved_head,
         }));
     }
 
@@ -251,7 +249,7 @@ pub(super) async fn cleanup_failed_dispatch_side_effects(
     state: &AppState,
     project: &Project,
     precreated_authoring_workspace: Option<&Workspace>,
-    investigation_ref_name: Option<&str>,
+    investigation_ref_name: Option<&GitRef>,
 ) {
     let mirror_paths = refresh_project_mirror(state, project).await.ok();
 
@@ -262,7 +260,7 @@ pub(super) async fn cleanup_failed_dispatch_side_effects(
                 FsPath::new(&workspace.path),
             )
             .await;
-            if let Some(workspace_ref) = workspace.workspace_ref.as_deref() {
+            if let Some(workspace_ref) = workspace.workspace_ref.as_ref() {
                 let _ = delete_ref(paths.mirror_git_dir.as_path(), workspace_ref).await;
             }
         }
@@ -289,17 +287,17 @@ pub(super) async fn plan_and_apply_investigation_ref(
     state: &AppState,
     project_id: ProjectId,
     entity_id: String,
-    ref_name: &str,
-    commit_oid: &str,
+    ref_name: &GitRef,
+    commit_oid: &CommitOid,
 ) -> Result<(), ApiError> {
     let mut operation = GitOperation {
         id: ingot_domain::ids::GitOperationId::new(),
         project_id,
         entity_id,
         payload: OperationPayload::CreateInvestigationRef {
-            ref_name: ref_name.into(),
-            new_oid: CommitOid::new(commit_oid),
-            commit_oid: Some(CommitOid::new(commit_oid)),
+            ref_name: ref_name.clone(),
+            new_oid: commit_oid.clone(),
+            commit_oid: Some(commit_oid.clone()),
         },
         status: GitOperationStatus::Planned,
         created_at: Utc::now(),
@@ -382,7 +380,7 @@ pub(super) async fn maybe_cleanup_investigation_ref(
         entity_id: finding.source_job_id.to_string(),
         payload: OperationPayload::RemoveInvestigationRef {
             ref_name: ref_name.clone(),
-            expected_old_oid: existing_oid,
+            expected_old_oid: existing_oid.clone(),
         },
         status: GitOperationStatus::Planned,
         created_at: Utc::now(),
@@ -549,9 +547,7 @@ pub(super) async fn retry_item_job(
             &state,
             &project,
             precreated_authoring_workspace.as_ref(),
-            pending_investigation_ref
-                .as_ref()
-                .map(|pending| pending.ref_name.as_str()),
+            pending_investigation_ref.as_ref().map(|pending| &pending.ref_name),
         )
         .await;
         return Err(repo_to_internal(error));
@@ -698,7 +694,7 @@ mod tests {
         let operation_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM git_operations WHERE operation_kind = 'create_investigation_ref' AND ref_name = ?",
         )
-        .bind(&pending_investigation_ref.ref_name)
+        .bind(pending_investigation_ref.ref_name.as_str())
         .fetch_one(&state.db.pool)
         .await
         .expect("git operation count");
@@ -979,7 +975,7 @@ mod tests {
                 project_id: project.id,
                 entity_id: JobId::from_uuid(Uuid::now_v7()).to_string(),
                 payload: OperationPayload::CreateInvestigationRef {
-                    ref_name: investigation_ref.clone(),
+                    ref_name: GitRef::new(&investigation_ref),
                     new_oid: CommitOid::new(&head),
                     commit_oid: Some(CommitOid::new(&head)),
                 },
@@ -994,19 +990,19 @@ mod tests {
             &state,
             &project,
             Some(&workspace),
-            Some(&investigation_ref),
+            Some(&GitRef::new(&investigation_ref)),
         )
         .await;
 
         assert!(!workspace_path.exists(), "workspace path removed");
         assert_eq!(
-            resolve_ref_oid(paths.mirror_git_dir.as_path(), &workspace_ref)
+            resolve_ref_oid(paths.mirror_git_dir.as_path(), &GitRef::new(&workspace_ref))
                 .await
                 .expect("resolve workspace ref"),
             None
         );
         assert_eq!(
-            resolve_ref_oid(paths.mirror_git_dir.as_path(), &investigation_ref)
+            resolve_ref_oid(paths.mirror_git_dir.as_path(), &GitRef::new(&investigation_ref))
                 .await
                 .expect("resolve investigation ref"),
             None
@@ -1076,7 +1072,7 @@ mod tests {
                 project_id: project.id,
                 entity_id: JobId::from_uuid(Uuid::now_v7()).to_string(),
                 payload: OperationPayload::CreateInvestigationRef {
-                    ref_name: investigation_ref.clone(),
+                    ref_name: GitRef::new(&investigation_ref),
                     new_oid: CommitOid::new("deadbeef".repeat(5)),
                     commit_oid: Some(CommitOid::new("deadbeef".repeat(5))),
                 },
@@ -1091,7 +1087,7 @@ mod tests {
             &state,
             &project,
             Some(&workspace),
-            Some(&investigation_ref),
+            Some(&GitRef::new(&investigation_ref)),
         )
         .await;
 

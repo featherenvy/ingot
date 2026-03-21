@@ -93,7 +93,7 @@ pub(crate) async fn resolve_default_branch(
     };
 
     let target_ref = normalize_target_ref(&branch)?;
-    ensure_git_valid_target_ref(&target_ref).await?;
+    ensure_git_valid_target_ref(target_ref.as_str()).await?;
     let resolved = resolve_ref_oid(repo_path, &target_ref)
         .await
         .map_err(|error| ApiError::BadRequest {

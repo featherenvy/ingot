@@ -1,11 +1,13 @@
 use std::path::Path;
 
+use ingot_domain::commit_oid::CommitOid;
+
 use crate::commands::{GitCommandError, git};
 
 pub async fn changed_paths_between(
     repo_path: &Path,
-    base_commit_oid: &str,
-    head_commit_oid: &str,
+    base_commit_oid: &CommitOid,
+    head_commit_oid: &CommitOid,
 ) -> Result<Vec<String>, GitCommandError> {
     if base_commit_oid == head_commit_oid {
         return Ok(vec![]);

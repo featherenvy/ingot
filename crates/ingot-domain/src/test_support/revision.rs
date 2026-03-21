@@ -1,4 +1,5 @@
 use crate::commit_oid::CommitOid;
+use crate::git_ref::GitRef;
 use crate::ids;
 use crate::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use chrono::{DateTime, Utc};
@@ -14,7 +15,7 @@ pub struct RevisionBuilder {
     title: String,
     description: String,
     acceptance_criteria: String,
-    target_ref: String,
+    target_ref: GitRef,
     approval_policy: ApprovalPolicy,
     policy_snapshot: serde_json::Value,
     template_map_snapshot: serde_json::Value,
@@ -36,7 +37,7 @@ impl RevisionBuilder {
             title: "Test item".into(),
             description: "Test item".into(),
             acceptance_criteria: "Test item".into(),
-            target_ref: "refs/heads/main".into(),
+            target_ref: GitRef::new("refs/heads/main"),
             approval_policy: ApprovalPolicy::Required,
             policy_snapshot: json!({}),
             template_map_snapshot: json!({}),

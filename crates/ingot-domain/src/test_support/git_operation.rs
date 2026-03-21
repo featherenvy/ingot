@@ -1,4 +1,5 @@
 use crate::commit_oid::CommitOid;
+use crate::git_ref::GitRef;
 use crate::git_operation::{
     ConvergenceReplayMetadata, GitEntityType, GitOperation, GitOperationStatus, OperationKind,
     OperationPayload,
@@ -15,7 +16,7 @@ pub struct GitOperationBuilder {
     _entity_type: GitEntityType,
     entity_id: String,
     workspace_id: Option<ids::WorkspaceId>,
-    ref_name: Option<String>,
+    ref_name: Option<GitRef>,
     expected_old_oid: Option<CommitOid>,
     new_oid: Option<CommitOid>,
     commit_oid: Option<CommitOid>,
@@ -60,7 +61,7 @@ impl GitOperationBuilder {
         self
     }
 
-    pub fn ref_name(mut self, ref_name: impl Into<String>) -> Self {
+    pub fn ref_name(mut self, ref_name: impl Into<GitRef>) -> Self {
         self.ref_name = Some(ref_name.into());
         self
     }

@@ -6,6 +6,7 @@ use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::finding::{
     Finding, FindingSeverity, FindingSubjectKind, FindingTriage, FindingTriageState,
 };
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::{FindingId, ItemId, ItemRevisionId};
 use ingot_domain::item::{
     ApprovalState, Classification, Escalation, Item, Lifecycle, Origin, ParkingState,
@@ -18,7 +19,7 @@ use crate::UseCaseError;
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct BacklogFindingOverrides {
-    pub target_ref: Option<String>,
+    pub target_ref: Option<GitRef>,
     pub approval_policy: Option<ApprovalPolicy>,
 }
 
@@ -49,8 +50,8 @@ struct ValidationReportV1 {
 
 #[derive(Debug, Deserialize)]
 struct ReviewSubjectV1 {
-    base_commit_oid: String,
-    head_commit_oid: String,
+    base_commit_oid: CommitOid,
+    head_commit_oid: CommitOid,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,10 +137,8 @@ pub fn extract_findings(
             let outcome_class =
                 validate_review_report(&report.outcome, &report.findings, &report.summary)?;
 
-            if job.job_input.base_commit_oid().map(CommitOid::as_str)
-                != Some(report.review_subject.base_commit_oid.as_str())
-                || job.job_input.head_commit_oid().map(CommitOid::as_str)
-                    != Some(report.review_subject.head_commit_oid.as_str())
+            if job.job_input.base_commit_oid() != Some(&report.review_subject.base_commit_oid)
+                || job.job_input.head_commit_oid() != Some(&report.review_subject.head_commit_oid)
             {
                 return Err(UseCaseError::ProtocolViolation(
                     "review subject does not match job input commits".into(),
@@ -371,7 +370,7 @@ pub fn backlog_finding(
                 FindingSubjectKind::Integrated => finding
                     .source_subject_base_commit_oid
                     .clone()
-                    .unwrap_or_else(|| CommitOid::new("")),
+                    .unwrap_or_else(|| finding.source_subject_head_commit_oid.clone()),
                 FindingSubjectKind::Candidate => {
                     source_revision.seed.seed_target_commit_oid().to_owned()
                 }

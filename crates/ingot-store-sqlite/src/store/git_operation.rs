@@ -1,4 +1,3 @@
-use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::git_operation::{GitOperation, GitOperationWire};
 use ingot_domain::ids::ConvergenceId;
 use ingot_domain::ports::{GitOperationRepository, RepositoryError};
@@ -28,10 +27,10 @@ impl Database {
         .bind(encode_enum(&wire.entity_type)?)
         .bind(&wire.entity_id)
         .bind(wire.workspace_id.map(|id| id.to_string()))
-        .bind(wire.ref_name.as_deref())
-        .bind(wire.expected_old_oid.as_ref().map(CommitOid::as_str))
-        .bind(wire.new_oid.as_ref().map(CommitOid::as_str))
-        .bind(wire.commit_oid.as_ref().map(CommitOid::as_str))
+        .bind(wire.ref_name.clone())
+        .bind(wire.expected_old_oid.clone())
+        .bind(wire.new_oid.clone())
+        .bind(wire.commit_oid.clone())
         .bind(encode_enum(&wire.status)?)
         .bind(
             wire.metadata
@@ -61,10 +60,10 @@ impl Database {
              WHERE id = ?",
         )
         .bind(wire.workspace_id.map(|id| id.to_string()))
-        .bind(wire.ref_name.as_deref())
-        .bind(wire.expected_old_oid.as_ref().map(CommitOid::as_str))
-        .bind(wire.new_oid.as_ref().map(CommitOid::as_str))
-        .bind(wire.commit_oid.as_ref().map(CommitOid::as_str))
+        .bind(wire.ref_name.clone())
+        .bind(wire.expected_old_oid.clone())
+        .bind(wire.new_oid.clone())
+        .bind(wire.commit_oid.clone())
         .bind(encode_enum(&wire.status)?)
         .bind(
             wire.metadata
@@ -158,9 +157,9 @@ fn map_git_operation(row: &SqliteRow) -> Result<GitOperation, RepositoryError> {
             .map(parse_id)
             .transpose()?,
         ref_name: row.try_get("ref_name").map_err(db_err)?,
-        expected_old_oid: row.try_get::<Option<String>, _>("expected_old_oid").map_err(db_err)?.map(CommitOid::new),
-        new_oid: row.try_get::<Option<String>, _>("new_oid").map_err(db_err)?.map(CommitOid::new),
-        commit_oid: row.try_get::<Option<String>, _>("commit_oid").map_err(db_err)?.map(CommitOid::new),
+        expected_old_oid: row.try_get("expected_old_oid").map_err(db_err)?,
+        new_oid: row.try_get("new_oid").map_err(db_err)?,
+        commit_oid: row.try_get("commit_oid").map_err(db_err)?,
         status: parse_enum(row.try_get("status").map_err(db_err)?)?,
         metadata: row
             .try_get::<Option<String>, _>("metadata")

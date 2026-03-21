@@ -81,10 +81,10 @@ pub(super) async fn reset_workspace_route(
             git(FsPath::new(&workspace.path), &["clean", "-fd"])
                 .await
                 .map_err(git_to_internal)?;
-            if let Some(workspace_ref) = workspace.workspace_ref.as_deref() {
+            if let Some(workspace_ref) = workspace.workspace_ref.as_ref() {
                 ingot_git::commands::git(
                     paths.mirror_git_dir.as_path(),
-                    &["update-ref", workspace_ref, expected_head.as_str()],
+                    &["update-ref", workspace_ref.as_str(), expected_head.as_str()],
                 )
                 .await
                 .map_err(git_to_internal)?;
@@ -94,7 +94,7 @@ pub(super) async fn reset_workspace_route(
             provision_review_workspace(
                 paths.mirror_git_dir.as_path(),
                 FsPath::new(&workspace.path),
-                expected_head.as_str(),
+                &expected_head,
             )
             .await
             .map_err(workspace_to_api_error)?;
@@ -188,25 +188,19 @@ pub(super) async fn remove_workspace_route(
             .await
             .map_err(workspace_to_api_error)?;
     }
-    if let Some(workspace_ref) = workspace.workspace_ref.as_deref() {
-        let mirror_ref_exists = resolve_ref_oid(paths.mirror_git_dir.as_path(), workspace_ref)
+    if let Some(workspace_ref) = workspace.workspace_ref.as_ref() {
+        let current_ref_oid = resolve_ref_oid(paths.mirror_git_dir.as_path(), workspace_ref)
             .await
-            .map_err(git_to_internal)?
-            .is_some();
-        if mirror_ref_exists {
+            .map_err(git_to_internal)?;
+        if let Some(expected_old_oid) = current_ref_oid {
             let now = Utc::now();
-            let expected_old_oid = workspace
-                .state
-                .head_commit_oid()
-                .cloned()
-                .unwrap_or_else(|| CommitOid::new(""));
             let mut operation = GitOperation {
                 id: ingot_domain::ids::GitOperationId::new(),
                 project_id,
                 entity_id: workspace.id.to_string(),
                 payload: OperationPayload::RemoveWorkspaceRef {
                     workspace_id: workspace.id,
-                    ref_name: workspace_ref.into(),
+                    ref_name: workspace_ref.clone(),
                     expected_old_oid,
                 },
                 status: GitOperationStatus::Planned,

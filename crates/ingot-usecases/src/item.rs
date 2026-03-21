@@ -7,6 +7,8 @@ use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use ingot_workflow::step::DELIVERY_V1_STEPS;
 use serde_json::{Map, Value, json};
 
+use ingot_domain::git_ref::GitRef;
+
 use crate::UseCaseError;
 
 const DELIVERY_WORKFLOW_VERSION: &str = "delivery:v1";
@@ -20,7 +22,7 @@ pub struct CreateItemInput {
     pub title: String,
     pub description: String,
     pub acceptance_criteria: String,
-    pub target_ref: String,
+    pub target_ref: GitRef,
     pub approval_policy: ApprovalPolicy,
     pub candidate_rework_budget: u32,
     pub integration_rework_budget: u32,
@@ -91,10 +93,10 @@ pub fn create_manual_item(
     (item, revision)
 }
 
-pub fn normalize_target_ref(target_ref: &str) -> Result<String, UseCaseError> {
+pub fn normalize_target_ref(target_ref: &str) -> Result<GitRef, UseCaseError> {
     if let Some(branch_name) = target_ref.strip_prefix("refs/heads/") {
         validate_branch_name(target_ref, branch_name)?;
-        return Ok(target_ref.into());
+        return Ok(GitRef::new(target_ref));
     }
 
     if target_ref.starts_with("refs/") {
@@ -102,7 +104,7 @@ pub fn normalize_target_ref(target_ref: &str) -> Result<String, UseCaseError> {
     }
 
     validate_branch_name(target_ref, target_ref)
-        .map(|branch_name| format!("refs/heads/{branch_name}"))
+        .map(|branch_name| GitRef::new(format!("refs/heads/{branch_name}")))
 }
 
 pub fn approval_state_for_policy(approval_policy: ApprovalPolicy) -> ApprovalState {

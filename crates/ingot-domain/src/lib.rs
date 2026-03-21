@@ -6,6 +6,7 @@ pub mod convergence_queue;
 pub mod events;
 pub mod finding;
 pub mod git_operation;
+pub mod git_ref;
 pub mod harness;
 pub mod ids;
 pub mod item;

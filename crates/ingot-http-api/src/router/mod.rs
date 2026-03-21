@@ -38,6 +38,7 @@ use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
 use ingot_domain::agent::{Agent, AgentStatus};
 
 use ingot_domain::commit_oid::CommitOid;
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::convergence::Convergence;
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::{Finding, FindingTriageState};

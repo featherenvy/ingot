@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-ingot-domain = { workspace = true }
+ingot-domain = { workspace = true, features = ["sqlx"] }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

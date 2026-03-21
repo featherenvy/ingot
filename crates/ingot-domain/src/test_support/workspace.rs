@@ -1,4 +1,5 @@
 use crate::commit_oid::CommitOid;
+use crate::git_ref::GitRef;
 use crate::ids;
 use crate::workspace::{
     RetentionPolicy, Workspace, WorkspaceCommitState, WorkspaceKind, WorkspaceState,
@@ -15,8 +16,8 @@ pub struct WorkspaceBuilder {
     kind: WorkspaceKind,
     path: String,
     created_for_revision_id: Option<ids::ItemRevisionId>,
-    target_ref: Option<String>,
-    workspace_ref: Option<String>,
+    target_ref: Option<GitRef>,
+    workspace_ref: Option<GitRef>,
     base_commit_oid: Option<CommitOid>,
     head_commit_oid: Option<CommitOid>,
     retention_policy: RetentionPolicy,
@@ -38,8 +39,8 @@ impl WorkspaceBuilder {
                 .display()
                 .to_string(),
             created_for_revision_id: None,
-            target_ref: Some("refs/heads/main".into()),
-            workspace_ref: Some(format!("refs/ingot/workspaces/{}", Uuid::now_v7().simple())),
+            target_ref: Some(GitRef::new("refs/heads/main")),
+            workspace_ref: Some(GitRef::new(format!("refs/ingot/workspaces/{}", Uuid::now_v7().simple()))),
             base_commit_oid: None,
             head_commit_oid: None,
             retention_policy: RetentionPolicy::Persistent,
@@ -76,7 +77,7 @@ impl WorkspaceBuilder {
     }
 
     pub fn workspace_ref(mut self, workspace_ref: impl Into<String>) -> Self {
-        self.workspace_ref = Some(workspace_ref.into());
+        self.workspace_ref = Some(GitRef::new(workspace_ref.into()));
         self
     }
 
@@ -118,13 +119,15 @@ impl WorkspaceBuilder {
             self.status,
             WorkspaceStatus::Ready
                 | WorkspaceStatus::Busy
-                | WorkspaceStatus::Stale
                 | WorkspaceStatus::RetainedForDebug
         );
         let state = WorkspaceState::from_parts(
             self.status,
             if required_commits {
-                Some(commits.unwrap_or_else(WorkspaceCommitState::empty))
+                Some(commits.unwrap_or_else(|| {
+                    let placeholder = CommitOid::new("workspace-placeholder");
+                    WorkspaceCommitState::new(placeholder.clone(), placeholder)
+                }))
             } else {
                 commits
             },

@@ -94,8 +94,11 @@ pub async fn create_daemon_commit_from_staged(
     head_oid(repo_path).await
 }
 
-pub async fn commit_message(repo_path: &Path, commit_oid: &str) -> Result<String, GitCommandError> {
-    let output = git(repo_path, &["show", "-s", "--format=%B", commit_oid]).await?;
+pub async fn commit_message(
+    repo_path: &Path,
+    commit_oid: &CommitOid,
+) -> Result<String, GitCommandError> {
+    let output = git(repo_path, &["show", "-s", "--format=%B", commit_oid.as_str()]).await?;
     Ok(String::from_utf8_lossy(&output.stdout)
         .trim_end()
         .to_string())
@@ -103,8 +106,8 @@ pub async fn commit_message(repo_path: &Path, commit_oid: &str) -> Result<String
 
 pub async fn list_commits_oldest_first(
     repo_path: &Path,
-    base_commit_oid: &str,
-    head_commit_oid: &str,
+    base_commit_oid: &CommitOid,
+    head_commit_oid: &CommitOid,
 ) -> Result<Vec<CommitOid>, GitCommandError> {
     if base_commit_oid == head_commit_oid {
         return Ok(vec![]);
@@ -122,9 +125,9 @@ pub async fn list_commits_oldest_first(
 
 pub async fn cherry_pick_no_commit(
     repo_path: &Path,
-    commit_oid: &str,
+    commit_oid: &CommitOid,
 ) -> Result<(), GitCommandError> {
-    git(repo_path, &["cherry-pick", "--no-commit", commit_oid]).await?;
+    git(repo_path, &["cherry-pick", "--no-commit", commit_oid.as_str()]).await?;
     Ok(())
 }
 

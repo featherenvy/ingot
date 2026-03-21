@@ -1,4 +1,6 @@
 use chrono::Utc;
+use ingot_domain::commit_oid::CommitOid;
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::JobId;
 use ingot_domain::item::Escalation;
 use ingot_domain::job::JobStatus;
@@ -96,7 +98,7 @@ impl Database {
             .bind(encode_enum(&mutation.outcome_class)?)
             .bind(mutation.result_schema_version.as_deref())
             .bind(&serialized_result_payload)
-            .bind(mutation.output_commit_oid.as_deref())
+            .bind(mutation.output_commit_oid.clone())
             .bind(Utc::now())
             .bind(mutation.job_id.to_string())
             .bind(mutation.item_id.to_string())
@@ -104,7 +106,7 @@ impl Database {
             .bind(prepared_convergence_guard.convergence_id.to_string())
             .bind(prepared_convergence_guard.item_revision_id.to_string())
             .bind(&prepared_convergence_guard.target_ref)
-            .bind(&prepared_convergence_guard.expected_target_head_oid)
+            .bind(prepared_convergence_guard.expected_target_head_oid.clone())
             .execute(&mut *tx)
             .await
             .map_err(db_err)?
@@ -129,7 +131,7 @@ impl Database {
             .bind(encode_enum(&mutation.outcome_class)?)
             .bind(mutation.result_schema_version.as_deref())
             .bind(&serialized_result_payload)
-            .bind(mutation.output_commit_oid.as_deref())
+            .bind(mutation.output_commit_oid.clone())
             .bind(Utc::now())
             .bind(mutation.job_id.to_string())
             .bind(mutation.item_id.to_string())
@@ -246,15 +248,14 @@ async fn classify_job_completion_conflict(
         };
 
         let prepared_convergence_id: String = prepared_convergence.try_get("id").map_err(db_err)?;
-        let prepared_target_ref: String =
-            prepared_convergence.try_get("target_ref").map_err(db_err)?;
-        let input_target_commit_oid: Option<String> = prepared_convergence
+        let prepared_target_ref: GitRef = prepared_convergence.try_get("target_ref").map_err(db_err)?;
+        let input_target_commit_oid: Option<CommitOid> = prepared_convergence
             .try_get("input_target_commit_oid")
             .map_err(db_err)?;
         if prepared_convergence_id != prepared_convergence_guard.convergence_id.to_string()
             || prepared_target_ref != prepared_convergence_guard.target_ref
-            || input_target_commit_oid.as_deref()
-                != Some(prepared_convergence_guard.expected_target_head_oid.as_str())
+            || input_target_commit_oid.as_ref()
+                != Some(&prepared_convergence_guard.expected_target_head_oid)
         {
             return Ok(RepositoryError::Conflict(
                 "prepared_convergence_stale".into(),
@@ -267,6 +268,7 @@ async fn classify_job_completion_conflict(
 
 #[cfg(test)]
 mod tests {
+    use ingot_domain::commit_oid::CommitOid;
     use ingot_domain::convergence::{Convergence, ConvergenceStatus};
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId, WorkspaceId};
     use ingot_domain::item::{ApprovalState, Classification, Item, Origin};
@@ -589,7 +591,7 @@ mod tests {
                     convergence_id: convergence.id,
                     item_revision_id: revision.id,
                     target_ref: "refs/heads/main".into(),
-                    expected_target_head_oid: "moved-target".into(),
+                    expected_target_head_oid: CommitOid::new("moved-target"),
                     next_approval_state: Some(ApprovalState::Pending),
                 }),
             })
@@ -654,7 +656,7 @@ mod tests {
                     convergence_id: convergence.id,
                     item_revision_id: revision.id,
                     target_ref: "refs/heads/release".into(),
-                    expected_target_head_oid: "expected-target".into(),
+                    expected_target_head_oid: CommitOid::new("expected-target"),
                     next_approval_state: Some(ApprovalState::Pending),
                 }),
             })

@@ -1,5 +1,7 @@
 use ingot_domain::agent::{AdapterKind, AgentCapability};
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::finding::{Finding, FindingTriageState};
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::item::{Classification, Item, Priority};
 use ingot_domain::job::{Job, OutcomeClass};
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
@@ -24,9 +26,9 @@ pub struct ItemSummaryResponse {
 pub struct ConvergenceResponse {
     pub id: String,
     pub status: String,
-    pub input_target_commit_oid: Option<String>,
-    pub prepared_commit_oid: Option<String>,
-    pub final_target_commit_oid: Option<String>,
+    pub input_target_commit_oid: Option<CommitOid>,
+    pub prepared_commit_oid: Option<CommitOid>,
+    pub final_target_commit_oid: Option<CommitOid>,
     pub target_head_valid: bool,
 }
 
@@ -35,7 +37,7 @@ pub struct QueueStatusResponse {
     pub state: Option<String>,
     pub position: Option<u32>,
     pub lane_owner_item_id: Option<String>,
-    pub lane_target_ref: Option<String>,
+    pub lane_target_ref: Option<GitRef>,
     pub checkout_sync_blocked: bool,
     pub checkout_sync_message: Option<String>,
 }
@@ -140,10 +142,10 @@ pub struct CreateItemRequest {
     pub priority: Option<Priority>,
     pub labels: Option<Vec<String>>,
     pub operator_notes: Option<String>,
-    pub target_ref: Option<String>,
+    pub target_ref: Option<GitRef>,
     pub approval_policy: Option<ApprovalPolicy>,
-    pub seed_commit_oid: Option<String>,
-    pub seed_target_commit_oid: Option<String>,
+    pub seed_commit_oid: Option<CommitOid>,
+    pub seed_target_commit_oid: Option<CommitOid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,7 +158,7 @@ pub struct TriageFindingRequest {
     pub triage_state: FindingTriageState,
     pub triage_note: Option<String>,
     pub linked_item_id: Option<String>,
-    pub target_ref: Option<String>,
+    pub target_ref: Option<GitRef>,
     pub approval_policy: Option<ApprovalPolicy>,
 }
 
@@ -167,7 +169,7 @@ pub struct DispatchJobRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct PromoteFindingRequest {
-    pub target_ref: Option<String>,
+    pub target_ref: Option<GitRef>,
     pub approval_policy: Option<ApprovalPolicy>,
 }
 
@@ -176,10 +178,10 @@ pub struct RejectApprovalRequest {
     pub title: Option<String>,
     pub description: Option<String>,
     pub acceptance_criteria: Option<String>,
-    pub target_ref: Option<String>,
+    pub target_ref: Option<GitRef>,
     pub approval_policy: Option<ApprovalPolicy>,
-    pub seed_commit_oid: Option<String>,
-    pub seed_target_commit_oid: Option<String>,
+    pub seed_commit_oid: Option<CommitOid>,
+    pub seed_target_commit_oid: Option<CommitOid>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -187,10 +189,10 @@ pub struct ReviseItemRequest {
     pub title: Option<String>,
     pub description: Option<String>,
     pub acceptance_criteria: Option<String>,
-    pub target_ref: Option<String>,
+    pub target_ref: Option<GitRef>,
     pub approval_policy: Option<ApprovalPolicy>,
-    pub seed_commit_oid: Option<String>,
-    pub seed_target_commit_oid: Option<String>,
+    pub seed_commit_oid: Option<CommitOid>,
+    pub seed_target_commit_oid: Option<CommitOid>,
 }
 
 impl From<RejectApprovalRequest> for ReviseItemRequest {
@@ -212,7 +214,7 @@ pub struct CompleteJobRequest {
     pub outcome_class: OutcomeClass,
     pub result_schema_version: Option<String>,
     pub result_payload: Option<serde_json::Value>,
-    pub output_commit_oid: Option<String>,
+    pub output_commit_oid: Option<CommitOid>,
 }
 
 #[derive(Debug, Deserialize)]

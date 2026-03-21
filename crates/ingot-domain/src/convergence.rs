@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::commit_oid::CommitOid;
+use crate::git_ref::GitRef;
 use crate::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId, WorkspaceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,7 +320,7 @@ pub struct Convergence {
     pub item_revision_id: ItemRevisionId,
     pub source_workspace_id: WorkspaceId,
     pub source_head_commit_oid: CommitOid,
-    pub target_ref: String,
+    pub target_ref: GitRef,
     pub strategy: ConvergenceStrategy,
     pub created_at: DateTime<Utc>,
     pub target_head_valid: Option<bool>,
@@ -396,7 +397,7 @@ impl Convergence {
                 ConvergenceState::Finalized {
                     integration_workspace_id: Some(integration_workspace_id),
                     input_target_commit_oid,
-                    prepared_commit_oid: CommitOid::new(""),
+                    prepared_commit_oid: final_oid.clone(),
                     final_target_commit_oid: final_oid,
                     completed_at,
                 }
@@ -437,7 +438,7 @@ struct ConvergenceWire {
     pub source_workspace_id: WorkspaceId,
     pub integration_workspace_id: Option<WorkspaceId>,
     pub source_head_commit_oid: CommitOid,
-    pub target_ref: String,
+    pub target_ref: GitRef,
     pub strategy: ConvergenceStrategy,
     pub status: ConvergenceStatus,
     pub input_target_commit_oid: Option<CommitOid>,

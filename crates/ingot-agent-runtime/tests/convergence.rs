@@ -10,6 +10,7 @@ use ingot_domain::job::{
 };
 use ingot_domain::revision::ApprovalPolicy;
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
+use ingot_domain::git_ref::GitRef;
 use ingot_git::commands::{head_oid, resolve_ref_oid};
 use ingot_usecases::{DispatchNotify, ProjectLocks};
 
@@ -383,7 +384,10 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
         .await
         .expect("refresh mirror");
     assert_eq!(
-        resolve_ref_oid(refreshed_paths.mirror_git_dir.as_path(), "refs/heads/main")
+        resolve_ref_oid(
+            refreshed_paths.mirror_git_dir.as_path(),
+            &GitRef::new("refs/heads/main"),
+        )
             .await
             .expect("resolve mirror head"),
         Some(CommitOid::new(refreshed_head))
@@ -717,7 +721,7 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
     db.create_project(&project).await.expect("create project");
     let paths = ensure_test_mirror(state_root.as_path(), &project).await;
     assert_eq!(
-        resolve_ref_oid(paths.mirror_git_dir.as_path(), "refs/heads/main")
+        resolve_ref_oid(paths.mirror_git_dir.as_path(), &GitRef::new("refs/heads/main"))
             .await
             .expect("mirror head"),
         Some(CommitOid::new(prepared_commit.clone()))

@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::commit_oid::CommitOid;
+use crate::git_ref::GitRef;
 use crate::ids::{ItemRevisionId, JobId, ProjectId, WorkspaceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,11 +70,6 @@ impl WorkspaceCommitState {
     }
 
     #[must_use]
-    pub fn empty() -> Self {
-        Self::new(CommitOid::new(""), CommitOid::new(""))
-    }
-
-    #[must_use]
     pub fn with_head_commit_oid(mut self, head_commit_oid: CommitOid) -> Self {
         self.head_commit_oid = head_commit_oid;
         self
@@ -99,7 +95,9 @@ pub enum WorkspaceState {
     },
 
     /// Workspace contents are stale (e.g., target ref moved, heartbeat expiry).
-    Stale { commits: WorkspaceCommitState },
+    Stale {
+        commits: Option<WorkspaceCommitState>,
+    },
 
     /// Retained for post-mortem debugging. No job attached.
     RetainedForDebug { commits: WorkspaceCommitState },
@@ -143,13 +141,7 @@ impl WorkspaceState {
                 )?,
                 current_job_id: required_workspace_field(status, "current_job_id", current_job_id)?,
             }),
-            WorkspaceStatus::Stale => Ok(Self::Stale {
-                commits: required_workspace_field(
-                    status,
-                    "base_commit_oid/head_commit_oid",
-                    commits,
-                )?,
-            }),
+            WorkspaceStatus::Stale => Ok(Self::Stale { commits }),
             WorkspaceStatus::RetainedForDebug => Ok(Self::RetainedForDebug {
                 commits: required_workspace_field(
                     status,
@@ -217,9 +209,9 @@ impl WorkspaceState {
         match self {
             Self::Ready { commits }
             | Self::Busy { commits, .. }
-            | Self::Stale { commits }
             | Self::RetainedForDebug { commits } => Some(commits),
-            Self::Provisioning { commits }
+            Self::Stale { commits }
+            | Self::Provisioning { commits }
             | Self::Error { commits }
             | Self::Removing { commits }
             | Self::Abandoned { commits } => commits.as_ref(),
@@ -275,11 +267,8 @@ impl WorkspaceState {
     /// Any active → Stale.
     #[must_use]
     pub fn into_stale(self) -> Self {
-        match self.into_commits() {
-            Some(commits) => Self::Stale { commits },
-            None => Self::Stale {
-                commits: WorkspaceCommitState::empty(),
-            },
+        Self::Stale {
+            commits: self.into_commits(),
         }
     }
 
@@ -322,7 +311,7 @@ impl WorkspaceState {
                 current_job_id,
             },
             Self::Stale { commits } => Self::Stale {
-                commits: commits.with_head_commit_oid(head_commit_oid),
+                commits: commits.map(|commits| commits.with_head_commit_oid(head_commit_oid)),
             },
             Self::RetainedForDebug { commits } => Self::RetainedForDebug {
                 commits: commits.with_head_commit_oid(head_commit_oid),
@@ -330,28 +319,48 @@ impl WorkspaceState {
             Self::Provisioning { commits } => Self::Provisioning {
                 commits: Some(
                     commits
-                        .unwrap_or_else(WorkspaceCommitState::empty)
+                        .unwrap_or_else(|| {
+                            WorkspaceCommitState::new(
+                                head_commit_oid.clone(),
+                                head_commit_oid.clone(),
+                            )
+                        })
                         .with_head_commit_oid(head_commit_oid),
                 ),
             },
             Self::Error { commits } => Self::Error {
                 commits: Some(
                     commits
-                        .unwrap_or_else(WorkspaceCommitState::empty)
+                        .unwrap_or_else(|| {
+                            WorkspaceCommitState::new(
+                                head_commit_oid.clone(),
+                                head_commit_oid.clone(),
+                            )
+                        })
                         .with_head_commit_oid(head_commit_oid),
                 ),
             },
             Self::Removing { commits } => Self::Removing {
                 commits: Some(
                     commits
-                        .unwrap_or_else(WorkspaceCommitState::empty)
+                        .unwrap_or_else(|| {
+                            WorkspaceCommitState::new(
+                                head_commit_oid.clone(),
+                                head_commit_oid.clone(),
+                            )
+                        })
                         .with_head_commit_oid(head_commit_oid),
                 ),
             },
             Self::Abandoned { commits } => Self::Abandoned {
                 commits: Some(
                     commits
-                        .unwrap_or_else(WorkspaceCommitState::empty)
+                        .unwrap_or_else(|| {
+                            WorkspaceCommitState::new(
+                                head_commit_oid.clone(),
+                                head_commit_oid.clone(),
+                            )
+                        })
                         .with_head_commit_oid(head_commit_oid),
                 ),
             },
@@ -363,9 +372,9 @@ impl WorkspaceState {
         match self {
             Self::Ready { commits }
             | Self::Busy { commits, .. }
-            | Self::Stale { commits }
             | Self::RetainedForDebug { commits } => Some(commits),
-            Self::Provisioning { commits }
+            Self::Stale { commits }
+            | Self::Provisioning { commits }
             | Self::Error { commits }
             | Self::Removing { commits }
             | Self::Abandoned { commits } => commits,
@@ -397,7 +406,7 @@ impl Workspace {
             .state
             .base_commit_oid()
             .cloned()
-            .unwrap_or_else(|| CommitOid::new(""));
+            .unwrap_or_else(|| head_commit_oid.clone());
         self.mark_ready(
             WorkspaceCommitState::new(base_commit_oid, head_commit_oid),
             now,
@@ -467,8 +476,8 @@ struct WorkspaceWire {
     pub path: String,
     pub created_for_revision_id: Option<ItemRevisionId>,
     pub parent_workspace_id: Option<WorkspaceId>,
-    pub target_ref: Option<String>,
-    pub workspace_ref: Option<String>,
+    pub target_ref: Option<GitRef>,
+    pub workspace_ref: Option<GitRef>,
     pub base_commit_oid: Option<CommitOid>,
     pub head_commit_oid: Option<CommitOid>,
     pub retention_policy: RetentionPolicy,
@@ -557,8 +566,8 @@ pub struct Workspace {
 
     // Mutable, not status-dependent
     pub path: String,
-    pub target_ref: Option<String>,
-    pub workspace_ref: Option<String>,
+    pub target_ref: Option<GitRef>,
+    pub workspace_ref: Option<GitRef>,
     pub updated_at: DateTime<Utc>,
 
     // Lifecycle state (replaces status + current_job_id + base/head commit OIDs)
@@ -644,20 +653,15 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_rejects_stale_without_commits() {
+    fn deserialize_allows_stale_without_commits() {
         let ws = base_workspace(WorkspaceState::Stale {
-            commits: ready_commits(),
+            commits: Some(ready_commits()),
         });
         let mut value = serde_json::to_value(ws).expect("serialize");
         value.as_object_mut().unwrap().remove("base_commit_oid");
 
-        let error = serde_json::from_value::<Workspace>(value).expect_err("missing commits");
-        assert!(
-            error
-                .to_string()
-                .contains("base_commit_oid/head_commit_oid"),
-            "unexpected error: {error}"
-        );
+        let roundtripped = serde_json::from_value::<Workspace>(value).expect("stale without commits");
+        assert!(roundtripped.state.commits().is_none());
     }
 
     #[test]
@@ -675,7 +679,7 @@ mod tests {
                 current_job_id: JobId::new(),
             }),
             base_workspace(WorkspaceState::Stale {
-                commits: ready_commits(),
+                commits: Some(ready_commits()),
             }),
             base_workspace(WorkspaceState::RetainedForDebug {
                 commits: ready_commits(),

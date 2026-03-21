@@ -2,6 +2,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
+use ingot_domain::commit_oid::CommitOid;
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::ports::{GitPortError, JobCompletionGitPort, TargetRefHoldError};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
@@ -36,7 +38,7 @@ impl JobCompletionGitPort for GitJobCompletionPort {
     async fn commit_exists(
         &self,
         repo_path: &Path,
-        commit_oid: &str,
+        commit_oid: &CommitOid,
     ) -> Result<bool, GitPortError> {
         commit_exists(repo_path, commit_oid)
             .await
@@ -46,8 +48,8 @@ impl JobCompletionGitPort for GitJobCompletionPort {
     async fn verify_and_hold_target_ref(
         &self,
         repo_path: &Path,
-        target_ref: &str,
-        expected_oid: &str,
+        target_ref: &GitRef,
+        expected_oid: &CommitOid,
     ) -> Result<Self::Hold, TargetRefHoldError> {
         verify_and_hold_target_ref_with_timeout(
             repo_path,
@@ -68,8 +70,8 @@ impl JobCompletionGitPort for GitJobCompletionPort {
 
 async fn verify_and_hold_target_ref_with_timeout(
     repo_path: &Path,
-    target_ref: &str,
-    expected_oid: &str,
+    target_ref: &GitRef,
+    expected_oid: &CommitOid,
     ready_timeout: Duration,
     shutdown_timeout: Duration,
 ) -> Result<GitTargetRefHold, TargetRefHoldError> {
@@ -81,7 +83,11 @@ async fn verify_and_hold_target_ref_with_timeout(
             transaction.stdin.as_mut().ok_or_else(|| {
                 TargetRefHoldError::Internal("git update-ref missing stdin".into())
             })?,
-            &format!("start\nverify {target_ref} {expected_oid}\nprepare\n"),
+            &format!(
+                "start\nverify {} {}\nprepare\n",
+                target_ref.as_str(),
+                expected_oid.as_str()
+            ),
         )
         .await?;
 
@@ -166,8 +172,8 @@ async fn write_update_ref_commands(
 async fn wait_for_prepare_ok(
     transaction: &mut UpdateRefTransaction,
     repo_path: &Path,
-    target_ref: &str,
-    expected_oid: &str,
+    target_ref: &GitRef,
+    expected_oid: &CommitOid,
     ready_timeout: Duration,
 ) -> Result<(), TargetRefHoldError> {
     let deadline = Instant::now() + ready_timeout;
@@ -222,8 +228,8 @@ async fn classify_exited_transaction(
     transaction: &mut UpdateRefTransaction,
     status: std::process::ExitStatus,
     repo_path: &Path,
-    target_ref: &str,
-    expected_oid: &str,
+    target_ref: &GitRef,
+    expected_oid: &CommitOid,
 ) -> Result<(), TargetRefHoldError> {
     let stdout = drain_stdout(&mut transaction.stdout)
         .await
@@ -302,8 +308,8 @@ fn remaining_until(deadline: Instant) -> Duration {
 
 async fn ensure_target_ref_matches(
     repo_path: &Path,
-    target_ref: &str,
-    expected_oid: &str,
+    target_ref: &GitRef,
+    expected_oid: &CommitOid,
 ) -> Result<(), TargetRefHoldError> {
     let resolved = resolve_ref_oid(repo_path, target_ref)
         .await
@@ -377,16 +383,16 @@ mod tests {
     async fn verify_and_hold_target_ref_rejects_concurrent_update_ref_until_released() {
         let repo = temp_git_repo();
         let port = GitJobCompletionPort;
-        let current = git_output(&repo, &["rev-parse", "HEAD"]);
-        let next = detached_commit(&repo, &current);
+        let current = CommitOid::new(git_output(&repo, &["rev-parse", "HEAD"]));
+        let next = detached_commit(&repo, current.as_str());
 
         let hold = port
-            .verify_and_hold_target_ref(&repo, "refs/heads/main", &current)
+            .verify_and_hold_target_ref(&repo, &GitRef::new("refs/heads/main"), &current)
             .await
             .expect("acquire target ref hold");
 
         let output = StdCommand::new("git")
-            .args(["update-ref", "refs/heads/main", &next, &current])
+            .args(["update-ref", "refs/heads/main", &next, current.as_str()])
             .current_dir(&repo)
             .output()
             .expect("run concurrent update-ref");
@@ -402,7 +408,7 @@ mod tests {
         port.release_hold(hold).await.expect("release hold");
 
         let status = StdCommand::new("git")
-            .args(["update-ref", "refs/heads/main", &next, &current])
+            .args(["update-ref", "refs/heads/main", &next, current.as_str()])
             .current_dir(&repo)
             .status()
             .expect("rerun update-ref after release");
@@ -416,7 +422,11 @@ mod tests {
         let port = GitJobCompletionPort;
 
         let result = port
-            .verify_and_hold_target_ref(&repo, "refs/heads/main", "deadbeef")
+            .verify_and_hold_target_ref(
+                &repo,
+                &GitRef::new("refs/heads/main"),
+                &CommitOid::new("deadbeef"),
+            )
             .await;
 
         assert!(matches!(result, Err(TargetRefHoldError::Stale)));
@@ -425,10 +435,11 @@ mod tests {
     #[tokio::test]
     async fn verify_and_hold_target_ref_waits_for_its_own_prepare_ack() {
         let repo = temp_git_repo();
-        let current = git_output(&repo, &["rev-parse", "HEAD"]);
+        let current = CommitOid::new(git_output(&repo, &["rev-parse", "HEAD"]));
+        let target_ref = GitRef::new("refs/heads/main");
         let external_hold = verify_and_hold_target_ref_with_timeout(
             &repo,
-            "refs/heads/main",
+            &target_ref,
             &current,
             HOLD_READY_TIMEOUT,
             HOLD_SHUTDOWN_TIMEOUT,
@@ -438,10 +449,11 @@ mod tests {
 
         let repo_for_task = repo.clone();
         let current_for_task = current.clone();
+        let target_ref_for_task = target_ref.clone();
         let mut acquisition = tokio::spawn(async move {
             verify_and_hold_target_ref_with_timeout(
                 &repo_for_task,
-                "refs/heads/main",
+                &target_ref_for_task,
                 &current_for_task,
                 Duration::from_secs(1),
                 HOLD_SHUTDOWN_TIMEOUT,
@@ -475,10 +487,11 @@ mod tests {
     #[tokio::test]
     async fn verify_and_hold_target_ref_times_out_without_hanging_shutdown() {
         let repo = temp_git_repo();
-        let current = git_output(&repo, &["rev-parse", "HEAD"]);
+        let current = CommitOid::new(git_output(&repo, &["rev-parse", "HEAD"]));
+        let target_ref = GitRef::new("refs/heads/main");
         let external_hold = verify_and_hold_target_ref_with_timeout(
             &repo,
-            "refs/heads/main",
+            &target_ref,
             &current,
             HOLD_READY_TIMEOUT,
             HOLD_SHUTDOWN_TIMEOUT,
@@ -489,7 +502,7 @@ mod tests {
         let started = Instant::now();
         let result = verify_and_hold_target_ref_with_timeout(
             &repo,
-            "refs/heads/main",
+            &target_ref,
             &current,
             Duration::from_millis(100),
             Duration::from_millis(100),

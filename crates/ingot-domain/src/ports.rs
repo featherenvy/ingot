@@ -5,10 +5,12 @@ use chrono::{DateTime, Utc};
 
 use crate::activity::Activity;
 use crate::agent::Agent;
+use crate::commit_oid::CommitOid;
 use crate::convergence::Convergence;
 use crate::convergence_queue::ConvergenceQueueEntry;
 use crate::finding::Finding;
 use crate::git_operation::GitOperation;
+use crate::git_ref::GitRef;
 use crate::ids::*;
 use crate::item::{EscalationReason, Item};
 use crate::job::{Job, JobStatus, OutcomeClass};
@@ -258,12 +260,12 @@ pub trait ConvergenceQueueRepository: Send + Sync {
     fn find_head(
         &self,
         project_id: ProjectId,
-        target_ref: &str,
+        target_ref: &GitRef,
     ) -> impl Future<Output = Result<Option<ConvergenceQueueEntry>, RepositoryError>> + Send;
     fn find_next_queued(
         &self,
         project_id: ProjectId,
-        target_ref: &str,
+        target_ref: &GitRef,
     ) -> impl Future<Output = Result<Option<ConvergenceQueueEntry>, RepositoryError>> + Send;
     fn list_active_by_project(
         &self,
@@ -272,7 +274,7 @@ pub trait ConvergenceQueueRepository: Send + Sync {
     fn list_active_for_lane(
         &self,
         project_id: ProjectId,
-        target_ref: &str,
+        target_ref: &GitRef,
     ) -> impl Future<Output = Result<Vec<ConvergenceQueueEntry>, RepositoryError>> + Send;
     fn create(
         &self,
@@ -324,8 +326,8 @@ pub struct JobCompletionContext {
 pub struct PreparedConvergenceGuard {
     pub convergence_id: ConvergenceId,
     pub item_revision_id: ItemRevisionId,
-    pub target_ref: String,
-    pub expected_target_head_oid: String,
+    pub target_ref: GitRef,
+    pub expected_target_head_oid: CommitOid,
     pub next_approval_state: Option<ApprovalState>,
 }
 
@@ -338,7 +340,7 @@ pub struct JobCompletionMutation {
     pub clear_item_escalation: bool,
     pub result_schema_version: Option<String>,
     pub result_payload: Option<serde_json::Value>,
-    pub output_commit_oid: Option<String>,
+    pub output_commit_oid: Option<CommitOid>,
     pub findings: Vec<Finding>,
     pub prepared_convergence_guard: Option<PreparedConvergenceGuard>,
 }
@@ -546,14 +548,14 @@ pub trait JobCompletionGitPort: Send + Sync {
     fn commit_exists(
         &self,
         repo_path: &Path,
-        commit_oid: &str,
+        commit_oid: &CommitOid,
     ) -> impl Future<Output = Result<bool, GitPortError>> + Send;
 
     fn verify_and_hold_target_ref(
         &self,
         repo_path: &Path,
-        target_ref: &str,
-        expected_oid: &str,
+        target_ref: &GitRef,
+        expected_oid: &CommitOid,
     ) -> impl Future<Output = Result<Self::Hold, TargetRefHoldError>> + Send;
 
     fn release_hold(

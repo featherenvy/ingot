@@ -25,26 +25,27 @@ pub(super) async fn create_item(
     let target_ref = normalize_target_ref(
         request
             .target_ref
-            .as_deref()
+            .as_ref()
+            .map(GitRef::as_str)
             .unwrap_or(project.default_branch.as_str()),
     )?;
-    ensure_git_valid_target_ref(&target_ref).await?;
+    ensure_git_valid_target_ref(target_ref.as_str()).await?;
     let repo_path = paths.mirror_git_dir.as_path();
     let resolved_target_head = resolve_ref_oid(repo_path, &target_ref)
         .await
         .map_err(git_to_internal)?
-        .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.clone()))?;
+        .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.to_string()))?;
 
     let seed_commit_oid = validate_seed_commit_oid(repo_path, request.seed_commit_oid).await?;
     let seed_target_commit_oid = resolve_seed_target_commit_oid(
         repo_path,
         request.seed_target_commit_oid,
-        resolved_target_head.into_inner(),
+        resolved_target_head,
     )
     .await?;
     let seed = AuthoringBaseSeed::from_parts(
-        seed_commit_oid.map(CommitOid::new),
-        CommitOid::new(seed_target_commit_oid),
+        seed_commit_oid,
+        seed_target_commit_oid,
     );
 
     let (item, revision) = create_manual_item(
@@ -673,18 +674,9 @@ pub(super) fn convergence_response(convergence: Convergence) -> ConvergenceRespo
             .ok()
             .and_then(|value| value.as_str().map(ToOwned::to_owned))
             .unwrap_or_else(|| "unknown".into()),
-        input_target_commit_oid: convergence
-            .state
-            .input_target_commit_oid()
-            .map(|o| o.as_str().to_owned()),
-        prepared_commit_oid: convergence
-            .state
-            .prepared_commit_oid()
-            .map(|o| o.as_str().to_owned()),
-        final_target_commit_oid: convergence
-            .state
-            .final_target_commit_oid()
-            .map(|o| o.as_str().to_owned()),
+        input_target_commit_oid: convergence.state.input_target_commit_oid().cloned(),
+        prepared_commit_oid: convergence.state.prepared_commit_oid().cloned(),
+        final_target_commit_oid: convergence.state.final_target_commit_oid().cloned(),
         target_head_valid: convergence.target_head_valid.unwrap_or(true),
     }
 }
@@ -782,7 +774,7 @@ pub(super) async fn load_queue_status(
         ),
         position,
         lane_owner_item_id,
-        lane_target_ref: Some(active_entry.target_ref),
+        lane_target_ref: Some(active_entry.target_ref.clone()),
         checkout_sync_blocked: false,
         checkout_sync_message: None,
     };
@@ -833,7 +825,7 @@ pub(super) async fn compute_target_head_valid(
 pub(super) async fn ensure_reachable_seed(
     repo_path: &FsPath,
     seed_name: &str,
-    commit_oid: &str,
+    commit_oid: &CommitOid,
 ) -> Result<(), ApiError> {
     let reachable = is_commit_reachable_from_any_ref(repo_path, commit_oid)
         .await
@@ -848,8 +840,8 @@ pub(super) async fn ensure_reachable_seed(
 
 pub(super) async fn validate_seed_commit_oid(
     repo_path: &FsPath,
-    seed_commit_oid: Option<String>,
-) -> Result<Option<String>, ApiError> {
+    seed_commit_oid: Option<CommitOid>,
+) -> Result<Option<CommitOid>, ApiError> {
     match seed_commit_oid {
         Some(seed_commit_oid) => {
             ensure_reachable_seed(repo_path, "seed_commit_oid", &seed_commit_oid).await?;
@@ -861,9 +853,9 @@ pub(super) async fn validate_seed_commit_oid(
 
 pub(super) async fn resolve_seed_target_commit_oid(
     repo_path: &FsPath,
-    seed_target_commit_oid: Option<String>,
-    default_seed_target_commit_oid: String,
-) -> Result<String, ApiError> {
+    seed_target_commit_oid: Option<CommitOid>,
+    default_seed_target_commit_oid: CommitOid,
+) -> Result<CommitOid, ApiError> {
     match seed_target_commit_oid {
         Some(seed_target_commit_oid) => {
             ensure_reachable_seed(repo_path, "seed_target_commit_oid", &seed_target_commit_oid)
@@ -976,16 +968,17 @@ pub(super) async fn build_superseding_revision(
     let target_ref = normalize_target_ref(
         request
             .target_ref
-            .as_deref()
+            .as_ref()
+            .map(GitRef::as_str)
             .unwrap_or(current_revision.target_ref.as_str()),
     )?;
-    ensure_git_valid_target_ref(&target_ref).await?;
+    ensure_git_valid_target_ref(target_ref.as_str()).await?;
     let paths = refresh_project_mirror(state, project).await?;
     let repo_path = paths.mirror_git_dir.as_path();
     let derived_target_head = resolve_ref_oid(repo_path, &target_ref)
         .await
         .map_err(git_to_internal)?
-        .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.clone()))?;
+        .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.to_string()))?;
 
     let requested_seed_commit_oid =
         validate_seed_commit_oid(repo_path, request.seed_commit_oid).await?;
@@ -993,23 +986,15 @@ pub(super) async fn build_superseding_revision(
         Some(seed_commit_oid) => Some(seed_commit_oid),
         None => current_authoring_head_for_revision_with_workspace(state, current_revision, jobs)
             .await?
-            .or_else(|| {
-                current_revision
-                    .seed
-                    .seed_commit_oid()
-                    .map(|o| o.as_str().to_owned())
-            }),
+            .or_else(|| current_revision.seed.seed_commit_oid().cloned()),
     };
     let seed_target_commit_oid = resolve_seed_target_commit_oid(
         repo_path,
         request.seed_target_commit_oid,
-        derived_target_head.into_inner(),
+        derived_target_head,
     )
     .await?;
-    let seed = AuthoringBaseSeed::from_parts(
-        seed_commit_oid.map(CommitOid::new),
-        CommitOid::new(seed_target_commit_oid),
-    );
+    let seed = AuthoringBaseSeed::from_parts(seed_commit_oid, seed_target_commit_oid);
     let approval_policy = request
         .approval_policy
         .unwrap_or(current_revision.approval_policy);
@@ -1110,20 +1095,20 @@ pub(super) async fn prepare_convergence_workspace(
     item: &Item,
     revision: &ItemRevision,
     source_workspace: &Workspace,
-    source_head_commit_oid: &str,
+    source_head_commit_oid: &CommitOid,
 ) -> Result<Convergence, ApiError> {
     let paths = refresh_project_mirror(state, project).await?;
     let repo_path = paths.mirror_git_dir.as_path();
     let input_target_commit_oid = resolve_ref_oid(repo_path, &revision.target_ref)
         .await
         .map_err(git_to_internal)?
-        .ok_or_else(|| UseCaseError::TargetRefUnresolved(revision.target_ref.clone()))?;
+        .ok_or_else(|| UseCaseError::TargetRefUnresolved(revision.target_ref.to_string()))?;
 
     let integration_workspace_id = WorkspaceId::new();
     let integration_workspace_path = paths
         .worktree_root
         .join(integration_workspace_id.to_string());
-    let integration_workspace_ref = format!("refs/ingot/workspaces/{integration_workspace_id}");
+    let integration_workspace_ref = GitRef::new(format!("refs/ingot/workspaces/{integration_workspace_id}"));
     let now = Utc::now();
     let mut integration_workspace = Workspace {
         id: integration_workspace_id,
@@ -1155,13 +1140,13 @@ pub(super) async fn prepare_convergence_workspace(
         repo_path,
         &integration_workspace_path,
         &integration_workspace_ref,
-        input_target_commit_oid.as_str(),
+        &input_target_commit_oid,
     )
     .await
     .map_err(workspace_to_api_error)?;
     integration_workspace.path = provisioned.workspace_path.display().to_string();
     integration_workspace.workspace_ref = Some(provisioned.workspace_ref);
-    integration_workspace.mark_ready_with_head(CommitOid::new(provisioned.head_commit_oid), Utc::now());
+    integration_workspace.mark_ready_with_head(provisioned.head_commit_oid, Utc::now());
     state
         .db
         .update_workspace(&integration_workspace)
@@ -1174,7 +1159,7 @@ pub(super) async fn prepare_convergence_workspace(
         item_id: item.id,
         item_revision_id: revision.id,
         source_workspace_id: source_workspace.id,
-        source_head_commit_oid: CommitOid::new(source_head_commit_oid),
+        source_head_commit_oid: source_head_commit_oid.clone(),
         target_ref: revision.target_ref.clone(),
         strategy: ingot_domain::convergence::ConvergenceStrategy::RebaseThenFastForward,
         target_head_valid: Some(true),
@@ -1249,8 +1234,7 @@ pub(super) async fn prepare_convergence_workspace(
     let mut prepared_commit_oids = Vec::with_capacity(source_commit_oids.len());
 
     for source_commit_oid in &source_commit_oids {
-        if let Err(error) =
-            cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid.as_str()).await
+        if let Err(error) = cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid).await
         {
             let _ = abort_cherry_pick(&integration_workspace_dir).await;
             integration_workspace.mark_error(Utc::now());
@@ -1306,7 +1290,7 @@ pub(super) async fn prepare_convergence_workspace(
             continue;
         }
 
-        let original_message = match commit_message(repo_path, source_commit_oid.as_str()).await {
+        let original_message = match commit_message(repo_path, source_commit_oid).await {
             Ok(message) => message,
             Err(error) => {
                 integration_workspace.mark_error(Utc::now());
@@ -1414,10 +1398,10 @@ pub(super) async fn prepare_convergence_workspace(
                 return Err(git_to_internal(error));
             }
         };
-        if let Some(workspace_ref) = integration_workspace.workspace_ref.as_deref() {
+        if let Some(workspace_ref) = integration_workspace.workspace_ref.as_ref() {
             if let Err(error) = ingot_git::commands::git(
                 repo_path,
-                &["update-ref", workspace_ref, next_prepared_tip.as_str()],
+                &["update-ref", workspace_ref.as_str(), next_prepared_tip.as_str()],
             )
             .await
             {
@@ -1518,7 +1502,7 @@ pub(super) async fn current_authoring_head_for_revision_with_workspace(
     state: &AppState,
     revision: &ItemRevision,
     jobs: &[Job],
-) -> Result<Option<String>, ApiError> {
+) -> Result<Option<CommitOid>, ApiError> {
     let workspace = state
         .db
         .find_authoring_workspace_for_revision(revision.id)
@@ -1530,14 +1514,13 @@ pub(super) async fn current_authoring_head_for_revision_with_workspace(
             jobs,
             workspace.as_ref(),
         )
-        .map(|o| o.into_inner()),
     )
 }
 
 pub(super) async fn effective_authoring_base_commit_oid(
     state: &AppState,
     revision: &ItemRevision,
-) -> Result<Option<String>, ApiError> {
+) -> Result<Option<CommitOid>, ApiError> {
     let workspace = state
         .db
         .find_authoring_workspace_for_revision(revision.id)
@@ -1545,7 +1528,6 @@ pub(super) async fn effective_authoring_base_commit_oid(
         .map_err(repo_to_internal)?;
     Ok(
         ingot_usecases::dispatch::effective_authoring_base_commit_oid(revision, workspace.as_ref())
-            .map(|o| o.into_inner()),
     )
 }
 

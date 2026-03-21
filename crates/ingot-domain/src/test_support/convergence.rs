@@ -1,5 +1,6 @@
 use crate::commit_oid::CommitOid;
 use crate::convergence::{Convergence, ConvergenceState, ConvergenceStatus, ConvergenceStrategy};
+use crate::git_ref::GitRef;
 use crate::ids;
 use chrono::{DateTime, Utc};
 
@@ -13,7 +14,7 @@ pub struct ConvergenceBuilder {
     source_workspace_id: ids::WorkspaceId,
     integration_workspace_id: Option<ids::WorkspaceId>,
     source_head_commit_oid: CommitOid,
-    target_ref: String,
+    target_ref: GitRef,
     strategy: ConvergenceStrategy,
     status: ConvergenceStatus,
     input_target_commit_oid: Option<CommitOid>,
@@ -39,7 +40,7 @@ impl ConvergenceBuilder {
             source_workspace_id: ids::WorkspaceId::new(),
             integration_workspace_id: Some(ids::WorkspaceId::new()),
             source_head_commit_oid: CommitOid::new("head"),
-            target_ref: "refs/heads/main".into(),
+            target_ref: GitRef::new("refs/heads/main"),
             strategy: ConvergenceStrategy::RebaseThenFastForward,
             status: ConvergenceStatus::Prepared,
             input_target_commit_oid: Some(CommitOid::new("base")),
