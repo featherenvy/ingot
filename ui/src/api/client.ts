@@ -85,7 +85,7 @@ export const createAgent = (payload: {
   slug?: string
   name: string
   adapter_kind: 'claude_code' | 'codex'
-  provider: string
+  provider: 'anthropic' | 'openai'
   model: string
   cli_path: string
   capabilities?: string[]

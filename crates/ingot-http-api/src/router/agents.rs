@@ -20,8 +20,8 @@ pub(super) async fn create_agent(
         slug: normalize_agent_slug(request.slug.as_deref(), &request.name)?,
         name: normalize_non_empty("agent name", &request.name)?,
         adapter_kind: request.adapter_kind,
-        provider: normalize_non_empty("provider", &request.provider)?,
-        model: normalize_non_empty("model", &request.model)?,
+        provider: request.provider,
+        model: request.model,
         cli_path: PathBuf::from(normalize_non_empty("cli path", &request.cli_path)?),
         capabilities: request
             .capabilities
@@ -48,7 +48,7 @@ pub(super) async fn update_agent(
     let existing = state.db.get_agent(agent_id).await.map_err(repo_to_agent)?;
     let existing_name = existing.name.clone();
     let existing_slug = existing.slug.clone();
-    let existing_provider = existing.provider.clone();
+    let existing_provider = existing.provider;
     let existing_model = existing.model.clone();
     let existing_cli_path = existing.cli_path.clone();
     let existing_capabilities = existing.capabilities.clone();
@@ -66,14 +66,8 @@ pub(super) async fn update_agent(
         },
         name,
         adapter_kind,
-        provider: match request.provider.as_deref() {
-            Some(provider) => normalize_non_empty("provider", provider)?,
-            None => existing_provider,
-        },
-        model: match request.model.as_deref() {
-            Some(model) => normalize_non_empty("model", model)?,
-            None => existing_model,
-        },
+        provider: request.provider.unwrap_or(existing_provider),
+        model: request.model.unwrap_or(existing_model),
         cli_path: match request.cli_path.as_deref() {
             Some(cli_path) => PathBuf::from(normalize_non_empty("cli path", cli_path)?),
             None => existing_cli_path,

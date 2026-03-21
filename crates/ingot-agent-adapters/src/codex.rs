@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
+use ingot_domain::agent_model::AgentModel;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -11,11 +12,11 @@ use tracing::{debug, info, warn};
 #[derive(Debug, Clone)]
 pub struct CodexCliAdapter {
     cli_path: PathBuf,
-    model: String,
+    model: AgentModel,
 }
 
 impl CodexCliAdapter {
-    pub fn new(cli_path: impl Into<PathBuf>, model: impl Into<String>) -> Self {
+    pub fn new(cli_path: impl Into<PathBuf>, model: impl Into<AgentModel>) -> Self {
         Self {
             cli_path: cli_path.into(),
             model: model.into(),
@@ -52,7 +53,7 @@ impl CodexCliAdapter {
             "-C".into(),
             request.working_dir.to_string_lossy().into_owned(),
             "-m".into(),
-            self.model.clone(),
+            self.model.to_string(),
             "--json".into(),
             "--output-schema".into(),
             schema_path

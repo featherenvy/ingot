@@ -1,19 +1,20 @@
 use std::path::{Path, PathBuf};
 
-use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
+use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentProvider, AgentStatus};
+use ingot_domain::agent_model::AgentModel;
 use ingot_domain::ids::AgentId;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 pub const DEFAULT_CODEX_SLUG: &str = "codex";
 pub const DEFAULT_CODEX_NAME: &str = "Codex";
-pub const DEFAULT_CODEX_PROVIDER: &str = "openai";
+pub const DEFAULT_CODEX_PROVIDER: AgentProvider = AgentProvider::OpenAi;
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.4";
 pub const DEFAULT_CODEX_CLI_PATH: &str = "codex";
 
 pub const DEFAULT_CLAUDE_CODE_SLUG: &str = "claude-code";
 pub const DEFAULT_CLAUDE_CODE_NAME: &str = "Claude Code";
-pub const DEFAULT_CLAUDE_CODE_PROVIDER: &str = "anthropic";
+pub const DEFAULT_CLAUDE_CODE_PROVIDER: AgentProvider = AgentProvider::Anthropic;
 pub const DEFAULT_CLAUDE_CODE_MODEL: &str = "claude-sonnet-4-6";
 pub const DEFAULT_CLAUDE_CODE_CLI_PATH: &str = "claude";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -37,13 +38,13 @@ pub fn bootstrap_codex_agent() -> Agent {
     bootstrap_codex_agent_with(DEFAULT_CODEX_CLI_PATH, DEFAULT_CODEX_MODEL)
 }
 
-pub fn bootstrap_codex_agent_with(cli_path: impl Into<PathBuf>, model: impl Into<String>) -> Agent {
+pub fn bootstrap_codex_agent_with(cli_path: impl Into<PathBuf>, model: impl Into<AgentModel>) -> Agent {
     Agent {
         id: AgentId::new(),
         slug: DEFAULT_CODEX_SLUG.into(),
         name: DEFAULT_CODEX_NAME.into(),
         adapter_kind: AdapterKind::Codex,
-        provider: DEFAULT_CODEX_PROVIDER.into(),
+        provider: DEFAULT_CODEX_PROVIDER,
         model: model.into(),
         cli_path: cli_path.into(),
         capabilities: default_agent_capabilities(AdapterKind::Codex),
@@ -58,14 +59,14 @@ pub fn bootstrap_claude_code_agent() -> Agent {
 
 pub fn bootstrap_claude_code_agent_with(
     cli_path: impl Into<PathBuf>,
-    model: impl Into<String>,
+    model: impl Into<AgentModel>,
 ) -> Agent {
     Agent {
         id: AgentId::new(),
         slug: DEFAULT_CLAUDE_CODE_SLUG.into(),
         name: DEFAULT_CLAUDE_CODE_NAME.into(),
         adapter_kind: AdapterKind::ClaudeCode,
-        provider: DEFAULT_CLAUDE_CODE_PROVIDER.into(),
+        provider: DEFAULT_CLAUDE_CODE_PROVIDER,
         model: model.into(),
         cli_path: cli_path.into(),
         capabilities: default_agent_capabilities(AdapterKind::ClaudeCode),
@@ -215,10 +216,11 @@ fn validate_codex_exec_probe(output: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_CLAUDE_CODE_CLI_PATH, DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CODEX_CLI_PATH,
-        DEFAULT_CODEX_MODEL, bootstrap_claude_code_agent, bootstrap_claude_code_agent_with,
-        bootstrap_codex_agent, bootstrap_codex_agent_with, default_agent_capabilities,
-        probe_and_apply, probe_and_apply_with_timeout,
+        DEFAULT_CLAUDE_CODE_CLI_PATH, DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CLAUDE_CODE_PROVIDER,
+        DEFAULT_CODEX_CLI_PATH, DEFAULT_CODEX_MODEL, DEFAULT_CODEX_PROVIDER,
+        bootstrap_claude_code_agent, bootstrap_claude_code_agent_with, bootstrap_codex_agent,
+        bootstrap_codex_agent_with, default_agent_capabilities, probe_and_apply,
+        probe_and_apply_with_timeout,
     };
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -234,7 +236,7 @@ mod tests {
 
         assert_eq!(agent.slug, "codex");
         assert_eq!(agent.name, "Codex");
-        assert_eq!(agent.provider, "openai");
+        assert_eq!(agent.provider, DEFAULT_CODEX_PROVIDER);
         assert_eq!(agent.model, DEFAULT_CODEX_MODEL);
         assert_eq!(agent.cli_path, PathBuf::from(DEFAULT_CODEX_CLI_PATH));
         assert_eq!(
@@ -302,7 +304,7 @@ mod tests {
 
         assert_eq!(agent.slug, "claude-code");
         assert_eq!(agent.name, "Claude Code");
-        assert_eq!(agent.provider, "anthropic");
+        assert_eq!(agent.provider, DEFAULT_CLAUDE_CODE_PROVIDER);
         assert_eq!(agent.model, DEFAULT_CLAUDE_CODE_MODEL);
         assert_eq!(agent.cli_path, PathBuf::from(DEFAULT_CLAUDE_CODE_CLI_PATH));
         assert_eq!(

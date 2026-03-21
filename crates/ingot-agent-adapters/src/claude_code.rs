@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
+use ingot_domain::agent_model::AgentModel;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
@@ -10,11 +11,11 @@ use tracing::{debug, info, warn};
 #[derive(Debug, Clone)]
 pub struct ClaudeCodeCliAdapter {
     cli_path: PathBuf,
-    model: String,
+    model: AgentModel,
 }
 
 impl ClaudeCodeCliAdapter {
-    pub fn new(cli_path: impl Into<PathBuf>, model: impl Into<String>) -> Self {
+    pub fn new(cli_path: impl Into<PathBuf>, model: impl Into<AgentModel>) -> Self {
         Self {
             cli_path: cli_path.into(),
             model: model.into(),
@@ -33,7 +34,7 @@ impl ClaudeCodeCliAdapter {
             "--output-format".into(),
             "json".into(),
             "--model".into(),
-            self.model.clone(),
+            self.model.to_string(),
             "--no-session-persistence".into(),
             "--bare".into(),
             "--dangerously-skip-permissions".into(),

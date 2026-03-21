@@ -153,6 +153,7 @@ export interface Activity {
 }
 
 export type AdapterKind = 'claude_code' | 'codex'
+export type AgentProvider = 'anthropic' | 'openai'
 export type AgentStatus = 'available' | 'unavailable' | 'probing'
 export type AgentCapability = 'read_only_jobs' | 'mutating_jobs' | 'structured_output' | 'streaming_progress'
 
@@ -161,7 +162,7 @@ export interface Agent {
   slug: string
   name: string
   adapter_kind: AdapterKind
-  provider: string
+  provider: AgentProvider
   model: string
   cli_path: string
   capabilities: AgentCapability[]

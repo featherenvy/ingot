@@ -1,6 +1,7 @@
 use axum::extract::{FromRequest, Json, Request};
 use axum::response::{IntoResponse, Response};
-use ingot_domain::agent::{AdapterKind, AgentCapability};
+use ingot_domain::agent::{AdapterKind, AgentCapability, AgentProvider};
+use ingot_domain::agent_model::AgentModel;
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::ConvergenceStatus;
 use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
@@ -166,8 +167,8 @@ pub struct CreateAgentRequest {
     pub slug: Option<String>,
     pub name: String,
     pub adapter_kind: AdapterKind,
-    pub provider: String,
-    pub model: String,
+    pub provider: AgentProvider,
+    pub model: AgentModel,
     pub cli_path: String,
     pub capabilities: Option<Vec<AgentCapability>>,
 }
@@ -177,8 +178,8 @@ pub struct UpdateAgentRequest {
     pub slug: Option<String>,
     pub name: Option<String>,
     pub adapter_kind: Option<AdapterKind>,
-    pub provider: Option<String>,
-    pub model: Option<String>,
+    pub provider: Option<AgentProvider>,
+    pub model: Option<AgentModel>,
     pub cli_path: Option<String>,
     pub capabilities: Option<Vec<AgentCapability>>,
 }
