@@ -35,9 +35,11 @@ pub struct CompleteJobResult {
     pub finding_count: usize,
 }
 
+use ingot_domain::step_id::StepId;
+
 #[derive(Debug, Clone)]
 pub struct DispatchJobCommand {
-    pub step_id: Option<String>,
+    pub step_id: Option<StepId>,
 }
 
 #[derive(Debug)]
@@ -489,7 +491,8 @@ fn completed_job_retry_allowed(job: &Job) -> bool {
 }
 
 fn completed_job_uses_target_ref_hold(job: &Job) -> bool {
-    job.step_id == "validate_integrated" && job.state.outcome_class() == Some(OutcomeClass::Clean)
+    job.step_id == StepId::ValidateIntegrated
+        && job.state.outcome_class() == Some(OutcomeClass::Clean)
 }
 
 fn validate_completion_context(context: &JobCompletionContext) -> Result<(), CompleteJobError> {
@@ -517,7 +520,7 @@ fn desired_completion_approval_state(
     revision: &ItemRevision,
     job: &Job,
 ) -> Option<ApprovalState> {
-    if job.step_id != "validate_integrated"
+    if job.step_id != StepId::ValidateIntegrated
         || job.state.outcome_class() != Some(OutcomeClass::Clean)
     {
         return None;
@@ -547,9 +550,8 @@ pub fn dispatch_job(
     ensure_no_active_execution(item.current_revision_id, jobs, convergences)?;
 
     let evaluation = Evaluator::new().evaluate(item, revision, jobs, findings, convergences);
-    let step_id = select_dispatch_step(&evaluation, command.step_id.as_deref())?;
-    let contract = step::find_step(&step_id)
-        .ok_or_else(|| UseCaseError::IllegalStepDispatch(format!("Unknown step: {step_id}")))?;
+    let step_id = select_dispatch_step(&evaluation, command.step_id)?;
+    let contract = step::find_step(step_id);
 
     if !contract.is_dispatchable_job() {
         return Err(UseCaseError::IllegalStepDispatch(format!(
@@ -557,9 +559,9 @@ pub fn dispatch_job(
         )));
     }
 
-    let template_slug = template_slug_for_step(revision, &step_id, contract.default_template_slug);
-    let job_input = job_input_for_step(&step_id, revision, jobs, convergences);
-    let semantic_attempt_no = next_semantic_attempt_no(jobs, item.current_revision_id, &step_id);
+    let template_slug = template_slug_for_step(revision, step_id, contract.default_template_slug);
+    let job_input = job_input_for_step(step_id, revision, jobs, convergences);
+    let semantic_attempt_no = next_semantic_attempt_no(jobs, item.current_revision_id, step_id);
 
     Ok(Job {
         id: JobId::new(),
@@ -612,9 +614,7 @@ pub fn retry_job(
     }
 
     let evaluation = Evaluator::new().evaluate(item, revision, jobs, findings, convergences);
-    let contract = step::find_step(&previous_job.step_id).ok_or_else(|| {
-        UseCaseError::IllegalStepDispatch(format!("Unknown step: {}", previous_job.step_id))
-    })?;
+    let contract = step::find_step(previous_job.step_id);
 
     if contract.execution_permission == ingot_domain::job::ExecutionPermission::DaemonOnly {
         return Err(UseCaseError::IllegalStepDispatch(
@@ -622,8 +622,7 @@ pub fn retry_job(
         ));
     }
 
-    let closure_position_allows_retry =
-        evaluation.current_step_id.as_deref() == Some(previous_job.step_id.as_str());
+    let closure_position_allows_retry = evaluation.current_step_id == Some(previous_job.step_id);
     let report_only_retry = evaluation
         .auxiliary_dispatchable_step_ids
         .iter()
@@ -638,10 +637,10 @@ pub fn retry_job(
 
     let template_slug = template_slug_for_step(
         revision,
-        &previous_job.step_id,
+        previous_job.step_id,
         contract.default_template_slug,
     );
-    let job_input = job_input_for_step(&previous_job.step_id, revision, jobs, convergences);
+    let job_input = job_input_for_step(previous_job.step_id, revision, jobs, convergences);
     let retry_no = jobs
         .iter()
         .filter(|job| job.item_revision_id == item.current_revision_id)
@@ -657,7 +656,7 @@ pub fn retry_job(
         project_id: item.project_id,
         item_id: item.id,
         item_revision_id: item.current_revision_id,
-        step_id: previous_job.step_id.clone(),
+        step_id: previous_job.step_id,
         semantic_attempt_no: previous_job.semantic_attempt_no,
         retry_no,
         supersedes_job_id: Some(previous_job.id),
@@ -675,16 +674,16 @@ pub fn retry_job(
 
 fn select_dispatch_step(
     evaluation: &Evaluation,
-    requested_step_id: Option<&str>,
-) -> Result<String, UseCaseError> {
+    requested_step_id: Option<StepId>,
+) -> Result<StepId, UseCaseError> {
     if let Some(requested_step_id) = requested_step_id {
-        if evaluation.dispatchable_step_id.as_deref() == Some(requested_step_id)
+        if evaluation.dispatchable_step_id == Some(requested_step_id)
             || evaluation
                 .auxiliary_dispatchable_step_ids
                 .iter()
-                .any(|step_id| step_id == requested_step_id)
+                .any(|step_id| *step_id == requested_step_id)
         {
-            return Ok(requested_step_id.to_string());
+            return Ok(requested_step_id);
         }
 
         return Err(UseCaseError::IllegalStepDispatch(format!(
@@ -692,7 +691,7 @@ fn select_dispatch_step(
         )));
     }
 
-    evaluation.dispatchable_step_id.clone().ok_or_else(|| {
+    evaluation.dispatchable_step_id.ok_or_else(|| {
         UseCaseError::IllegalStepDispatch(
             "No closure-relevant step is dispatchable in the current state".into(),
         )
@@ -701,12 +700,12 @@ fn select_dispatch_step(
 
 fn template_slug_for_step(
     revision: &ItemRevision,
-    step_id: &str,
+    step_id: StepId,
     default_template_slug: Option<&'static str>,
 ) -> String {
     revision
         .template_map_snapshot
-        .get(step_id)
+        .get(step_id.as_str())
         .and_then(|value| value.as_str())
         .map(ToOwned::to_owned)
         .or_else(|| default_template_slug.map(ToOwned::to_owned))
@@ -714,7 +713,7 @@ fn template_slug_for_step(
 }
 
 fn job_input_for_step(
-    step_id: &str,
+    step_id: StepId,
     revision: &ItemRevision,
     jobs: &[Job],
     convergences: &[Convergence],
@@ -824,10 +823,7 @@ fn ensure_no_active_execution(
 fn should_clear_item_escalation_on_success(item: &Item, job: &Job) -> bool {
     item.escalation.is_escalated()
         && job.retry_no > 0
-        && matches!(
-            step::find_step(&job.step_id).map(|contract| contract.closure_relevance),
-            Some(ClosureRelevance::ClosureRelevant)
-        )
+        && step::find_step(job.step_id).closure_relevance == ClosureRelevance::ClosureRelevant
 }
 
 fn current_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<CommitOid> {
@@ -873,7 +869,7 @@ fn successful_commit_oids(jobs: &[Job], revision: &ItemRevision) -> Vec<CommitOi
 fn next_semantic_attempt_no(
     jobs: &[Job],
     revision_id: ingot_domain::ids::ItemRevisionId,
-    step_id: &str,
+    step_id: StepId,
 ) -> u32 {
     jobs.iter()
         .filter(|job| job.item_revision_id == revision_id && job.step_id == step_id)
@@ -899,7 +895,7 @@ fn prepared_convergence_guard(
     job: &Job,
     convergences: &[Convergence],
 ) -> Result<Option<PreparedConvergenceGuard>, CompleteJobError> {
-    if job.step_id != "validate_integrated"
+    if job.step_id != StepId::ValidateIntegrated
         || job.state.outcome_class() != Some(OutcomeClass::Clean)
     {
         return Ok(None);
@@ -1113,9 +1109,15 @@ mod tests {
         )
         .expect("dispatch after repair");
 
-        assert_eq!(job.step_id, "review_incremental_repair");
-        assert_eq!(job.job_input.base_commit_oid().map(CommitOid::as_str), Some("commit-1"));
-        assert_eq!(job.job_input.head_commit_oid().map(CommitOid::as_str), Some("commit-2"));
+        assert_eq!(job.step_id, step::REVIEW_INCREMENTAL_REPAIR);
+        assert_eq!(
+            job.job_input.base_commit_oid().map(CommitOid::as_str),
+            Some("commit-1")
+        );
+        assert_eq!(
+            job.job_input.head_commit_oid().map(CommitOid::as_str),
+            Some("commit-2")
+        );
     }
 
     #[test]
@@ -1173,7 +1175,7 @@ mod tests {
             DispatchJobCommand { step_id: None },
         )
         .expect("dispatch candidate review");
-        assert_eq!(candidate_review_job.step_id, "review_candidate_repair");
+        assert_eq!(candidate_review_job.step_id, step::REVIEW_CANDIDATE_REPAIR);
 
         let mut review_candidate_repair =
             test_job("review_candidate_repair", OutputArtifactKind::ReviewReport);
@@ -1213,9 +1215,21 @@ mod tests {
             DispatchJobCommand { step_id: None },
         )
         .expect("dispatch validation");
-        assert_eq!(validation_job.step_id, "validate_candidate_repair");
-        assert_eq!(validation_job.job_input.base_commit_oid().map(CommitOid::as_str), Some("seed"));
-        assert_eq!(validation_job.job_input.head_commit_oid().map(CommitOid::as_str), Some("commit-2"));
+        assert_eq!(validation_job.step_id, step::VALIDATE_CANDIDATE_REPAIR);
+        assert_eq!(
+            validation_job
+                .job_input
+                .base_commit_oid()
+                .map(CommitOid::as_str),
+            Some("seed")
+        );
+        assert_eq!(
+            validation_job
+                .job_input
+                .head_commit_oid()
+                .map(CommitOid::as_str),
+            Some("commit-2")
+        );
     }
 
     #[tokio::test]
@@ -1754,7 +1768,10 @@ mod tests {
         .execution_permission(ExecutionPermission::MustNotMutate)
         .context_policy(ContextPolicy::ResumeContext)
         .phase_template_slug("validate-integrated")
-        .job_input(JobInput::integrated_subject("target".into(), "prepared-head".into()))
+        .job_input(JobInput::integrated_subject(
+            "target".into(),
+            "prepared-head".into(),
+        ))
         .output_artifact_kind(output_artifact_kind)
         .build()
     }

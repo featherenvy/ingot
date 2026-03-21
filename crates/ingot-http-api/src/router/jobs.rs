@@ -135,7 +135,7 @@ pub(super) async fn complete_job(
         )
         .await?;
     }
-    if job.step_id == "validate_integrated"
+    if job.step_id == ingot_domain::step_id::StepId::ValidateIntegrated
         && job.state.outcome_class() == Some(OutcomeClass::Clean)
         && item.approval_state == ApprovalState::Pending
     {

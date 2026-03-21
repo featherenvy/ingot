@@ -164,7 +164,7 @@ pub struct TriageFindingRequest {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct DispatchJobRequest {
-    pub step_id: Option<String>,
+    pub step_id: Option<ingot_domain::step_id::StepId>,
 }
 
 #[derive(Debug, Deserialize)]

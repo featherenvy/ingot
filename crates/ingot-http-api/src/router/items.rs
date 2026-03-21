@@ -43,10 +43,7 @@ pub(super) async fn create_item(
         resolved_target_head,
     )
     .await?;
-    let seed = AuthoringBaseSeed::from_parts(
-        seed_commit_oid,
-        seed_target_commit_oid,
-    );
+    let seed = AuthoringBaseSeed::from_parts(seed_commit_oid, seed_target_commit_oid);
 
     let (item, revision) = create_manual_item(
         &project,
@@ -1108,7 +1105,8 @@ pub(super) async fn prepare_convergence_workspace(
     let integration_workspace_path = paths
         .worktree_root
         .join(integration_workspace_id.to_string());
-    let integration_workspace_ref = GitRef::new(format!("refs/ingot/workspaces/{integration_workspace_id}"));
+    let integration_workspace_ref =
+        GitRef::new(format!("refs/ingot/workspaces/{integration_workspace_id}"));
     let now = Utc::now();
     let mut integration_workspace = Workspace {
         id: integration_workspace_id,
@@ -1234,7 +1232,8 @@ pub(super) async fn prepare_convergence_workspace(
     let mut prepared_commit_oids = Vec::with_capacity(source_commit_oids.len());
 
     for source_commit_oid in &source_commit_oids {
-        if let Err(error) = cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid).await
+        if let Err(error) =
+            cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid).await
         {
             let _ = abort_cherry_pick(&integration_workspace_dir).await;
             integration_workspace.mark_error(Utc::now());
@@ -1401,7 +1400,11 @@ pub(super) async fn prepare_convergence_workspace(
         if let Some(workspace_ref) = integration_workspace.workspace_ref.as_ref() {
             if let Err(error) = ingot_git::commands::git(
                 repo_path,
-                &["update-ref", workspace_ref.as_str(), next_prepared_tip.as_str()],
+                &[
+                    "update-ref",
+                    workspace_ref.as_str(),
+                    next_prepared_tip.as_str(),
+                ],
             )
             .await
             {
@@ -1513,7 +1516,7 @@ pub(super) async fn current_authoring_head_for_revision_with_workspace(
             revision,
             jobs,
             workspace.as_ref(),
-        )
+        ),
     )
 }
 
@@ -1526,9 +1529,7 @@ pub(super) async fn effective_authoring_base_commit_oid(
         .find_authoring_workspace_for_revision(revision.id)
         .await
         .map_err(repo_to_internal)?;
-    Ok(
-        ingot_usecases::dispatch::effective_authoring_base_commit_oid(revision, workspace.as_ref())
-    )
+    Ok(ingot_usecases::dispatch::effective_authoring_base_commit_oid(revision, workspace.as_ref()))
 }
 
 #[cfg(test)]

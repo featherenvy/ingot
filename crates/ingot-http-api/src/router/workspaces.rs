@@ -31,15 +31,11 @@ pub(super) async fn reset_workspace_route(
     }
     ensure_workspace_not_busy(&workspace)?;
 
-    let expected_head = workspace
-        .state
-        .head_commit_oid()
-        .cloned()
-        .ok_or_else(|| {
-            ApiError::from(UseCaseError::Internal(
-                "workspace missing head_commit_oid".into(),
-            ))
-        })?;
+    let expected_head = workspace.state.head_commit_oid().cloned().ok_or_else(|| {
+        ApiError::from(UseCaseError::Internal(
+            "workspace missing head_commit_oid".into(),
+        ))
+    })?;
     let now = Utc::now();
     let mut operation = GitOperation {
         id: ingot_domain::ids::GitOperationId::new(),

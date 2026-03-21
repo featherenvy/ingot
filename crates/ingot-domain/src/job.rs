@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit_oid::CommitOid;
 use crate::ids::{AgentId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
+use crate::step_id::StepId;
 use crate::workspace::WorkspaceKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -528,7 +529,7 @@ struct JobWire {
     pub project_id: ProjectId,
     pub item_id: ItemId,
     pub item_revision_id: ItemRevisionId,
-    pub step_id: String,
+    pub step_id: StepId,
     pub semantic_attempt_no: u32,
     pub retry_no: u32,
     pub supersedes_job_id: Option<JobId>,
@@ -712,7 +713,7 @@ pub struct Job {
     pub project_id: ProjectId,
     pub item_id: ItemId,
     pub item_revision_id: ItemRevisionId,
-    pub step_id: String,
+    pub step_id: StepId,
     pub semantic_attempt_no: u32,
     pub retry_no: u32,
     pub supersedes_job_id: Option<JobId>,

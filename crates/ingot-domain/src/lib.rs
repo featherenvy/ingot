@@ -15,6 +15,7 @@ pub mod ports;
 pub mod project;
 pub mod revision;
 pub mod revision_context;
+pub mod step_id;
 pub mod template;
 pub mod workspace;
 

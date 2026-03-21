@@ -211,7 +211,10 @@ mod tests {
         assert_eq!(revision.item_id, item.id);
         assert_eq!(revision.revision_no, 1);
         assert_eq!(revision.target_ref, "refs/heads/main");
-        assert_eq!(revision.seed.seed_commit_oid().map(CommitOid::as_str), Some("seed"));
+        assert_eq!(
+            revision.seed.seed_commit_oid().map(CommitOid::as_str),
+            Some("seed")
+        );
         assert_eq!(revision.seed.seed_target_commit_oid().as_str(), "target");
         assert_eq!(revision.policy_snapshot["candidate_rework_budget"], 3);
         assert_eq!(revision.policy_snapshot["integration_rework_budget"], 4);

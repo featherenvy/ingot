@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit_oid::CommitOid;
 use crate::ids::{FindingId, ItemId, ItemRevisionId, JobId, ProjectId};
+use crate::step_id::StepId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -277,7 +278,7 @@ struct FindingWire {
     pub source_item_id: ItemId,
     pub source_item_revision_id: ItemRevisionId,
     pub source_job_id: JobId,
-    pub source_step_id: String,
+    pub source_step_id: StepId,
     pub source_report_schema_version: String,
     pub source_finding_key: String,
     pub source_subject_kind: FindingSubjectKind,
@@ -371,7 +372,7 @@ pub struct Finding {
     pub source_item_id: ItemId,
     pub source_item_revision_id: ItemRevisionId,
     pub source_job_id: JobId,
-    pub source_step_id: String,
+    pub source_step_id: StepId,
     pub source_report_schema_version: String,
     pub source_finding_key: String,
     pub source_subject_kind: FindingSubjectKind,

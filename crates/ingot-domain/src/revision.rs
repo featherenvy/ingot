@@ -25,7 +25,10 @@ pub enum AuthoringBaseSeed {
 
 impl AuthoringBaseSeed {
     #[must_use]
-    pub fn from_parts(seed_commit_oid: Option<CommitOid>, seed_target_commit_oid: CommitOid) -> Self {
+    pub fn from_parts(
+        seed_commit_oid: Option<CommitOid>,
+        seed_target_commit_oid: CommitOid,
+    ) -> Self {
         match seed_commit_oid {
             Some(seed_commit_oid) => Self::Explicit {
                 seed_commit_oid,

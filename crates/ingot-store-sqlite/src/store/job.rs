@@ -25,27 +25,27 @@ pub struct ClaimQueuedAgentJobExecutionParams {
     pub lease_expires_at: DateTime<Utc>,
 }
 
-fn encode_job_input(job_input: &JobInput) -> (&'static str, Option<&str>, Option<&str>) {
+fn encode_job_input(job_input: &JobInput) -> (&'static str, Option<CommitOid>, Option<CommitOid>) {
     match job_input {
         JobInput::None => ("none", None, None),
         JobInput::AuthoringHead { head_commit_oid } => {
-            ("authoring_head", None, Some(head_commit_oid.as_str()))
+            ("authoring_head", None, Some(head_commit_oid.clone()))
         }
         JobInput::CandidateSubject {
             base_commit_oid,
             head_commit_oid,
         } => (
             "candidate_subject",
-            Some(base_commit_oid.as_str()),
-            Some(head_commit_oid.as_str()),
+            Some(base_commit_oid.clone()),
+            Some(head_commit_oid.clone()),
         ),
         JobInput::IntegratedSubject {
             base_commit_oid,
             head_commit_oid,
         } => (
             "integrated_subject",
-            Some(base_commit_oid.as_str()),
-            Some(head_commit_oid.as_str()),
+            Some(base_commit_oid.clone()),
+            Some(head_commit_oid.clone()),
         ),
     }
 }
@@ -61,17 +61,19 @@ fn decode_job_input(
             .map(JobInput::authoring_head)
             .ok_or_else(|| StoreDecodeError::Json("authoring_head job_input missing head".into())),
         "candidate_subject" => match (base_commit_oid, head_commit_oid) {
-            (Some(base_commit_oid), Some(head_commit_oid)) => {
-                Ok(JobInput::candidate_subject(base_commit_oid, head_commit_oid))
-            }
+            (Some(base_commit_oid), Some(head_commit_oid)) => Ok(JobInput::candidate_subject(
+                base_commit_oid,
+                head_commit_oid,
+            )),
             _ => Err(StoreDecodeError::Json(
                 "candidate_subject job_input missing base or head".into(),
             )),
         },
         "integrated_subject" => match (base_commit_oid, head_commit_oid) {
-            (Some(base_commit_oid), Some(head_commit_oid)) => {
-                Ok(JobInput::integrated_subject(base_commit_oid, head_commit_oid))
-            }
+            (Some(base_commit_oid), Some(head_commit_oid)) => Ok(JobInput::integrated_subject(
+                base_commit_oid,
+                head_commit_oid,
+            )),
             _ => Err(StoreDecodeError::Json(
                 "integrated_subject job_input missing base or head".into(),
             )),
@@ -347,7 +349,7 @@ impl Database {
         .bind(job.project_id.to_string())
         .bind(job.item_id.to_string())
         .bind(job.item_revision_id.to_string())
-        .bind(&job.step_id)
+        .bind(job.step_id.as_str())
         .bind(job.semantic_attempt_no as i64)
         .bind(job.retry_no as i64)
         .bind(job.supersedes_job_id.map(|id| id.to_string()))
@@ -402,7 +404,7 @@ impl Database {
                  created_at = ?, started_at = ?, ended_at = ?
              WHERE id = ?",
         )
-        .bind(&job.step_id)
+        .bind(job.step_id.as_str())
         .bind(job.semantic_attempt_no as i64)
         .bind(job.retry_no as i64)
         .bind(job.supersedes_job_id.map(|id| id.to_string()))
@@ -835,7 +837,7 @@ fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {
         project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
         item_id: parse_id(row.try_get("item_id").map_err(db_err)?)?,
         item_revision_id: parse_id(row.try_get("item_revision_id").map_err(db_err)?)?,
-        step_id: row.try_get("step_id").map_err(db_err)?,
+        step_id: parse_enum(row.try_get("step_id").map_err(db_err)?)?,
         semantic_attempt_no: row
             .try_get::<i64, _>("semantic_attempt_no")
             .map_err(db_err)? as u32,

@@ -16,16 +16,16 @@ use ingot_agent_adapters::codex::CodexCliAdapter;
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
-use ingot_domain::commit_oid::CommitOid;
-use ingot_domain::git_ref::GitRef;
 use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
 use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::{Convergence, ConvergenceStatus, PrepareFailureKind};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::FindingTriageState;
 use ingot_domain::git_operation::{
     ConvergenceReplayMetadata, GitOperation, GitOperationStatus, OperationKind, OperationPayload,
 };
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::harness::{HarnessCommand, HarnessProfile, HarnessProfileError};
 use ingot_domain::ids::{GitOperationId, WorkspaceId};
 use ingot_domain::item::{
@@ -39,6 +39,7 @@ use ingot_domain::ports::{JobCompletionMutation, ProjectMutationLockPort, Reposi
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::revision_context::RevisionContext;
+use ingot_domain::step_id::StepId;
 use ingot_domain::workspace::{
     RetentionPolicy, Workspace, WorkspaceCommitState, WorkspaceKind, WorkspaceState,
     WorkspaceStatus, WorkspaceStrategy,
@@ -334,7 +335,7 @@ struct PreparedHarnessValidation {
     revision_id: ingot_domain::ids::ItemRevisionId,
     workspace_id: WorkspaceId,
     workspace_path: PathBuf,
-    step_id: String,
+    step_id: ingot_domain::step_id::StepId,
 }
 
 enum PrepareHarnessValidationOutcome {
@@ -1389,9 +1390,7 @@ impl JobDispatcher {
                 }
                 OperationPayload::CreateInvestigationRef {
                     ref_name, new_oid, ..
-                } => {
-                    resolve_ref_oid(repo_path, ref_name).await?.as_ref() == Some(new_oid)
-                }
+                } => resolve_ref_oid(repo_path, ref_name).await?.as_ref() == Some(new_oid),
                 OperationPayload::RemoveWorkspaceRef { ref_name, .. } => {
                     resolve_ref_oid(repo_path, ref_name).await?.is_none()
                 }
@@ -1453,7 +1452,10 @@ impl JobDispatcher {
             context.mirror_target_ref,
         )
         .await?;
-        if !current_target_oid.as_ref().is_some_and(|oid| oid == context.prepared_commit_oid) {
+        if !current_target_oid
+            .as_ref()
+            .is_some_and(|oid| oid == context.prepared_commit_oid)
+        {
             operation.status = GitOperationStatus::Failed;
             operation.completed_at = Some(Utc::now());
             self.db.update_git_operation(operation).await?;
@@ -2299,7 +2301,7 @@ impl JobDispatcher {
             self.db.create_workspace(&workspace).await?;
         }
 
-        let template = built_in_template(&job.phase_template_slug, &job.step_id);
+        let template = built_in_template(&job.phase_template_slug, job.step_id);
         let phase_template_digest = template_digest(template);
         let prompt = match self
             .assemble_prompt(&job, &item, &revision, template, &harness_prompt)
@@ -2551,8 +2553,8 @@ impl JobDispatcher {
         ));
 
         if matches!(
-            job.step_id.as_str(),
-            "repair_candidate" | "repair_after_integration"
+            job.step_id,
+            StepId::RepairCandidate | StepId::RepairAfterIntegration
         ) {
             let jobs = self.db.list_jobs_by_item(item.id).await?;
             let findings = self.db.list_findings_by_item(item.id).await?;
@@ -2869,7 +2871,9 @@ impl JobDispatcher {
             serde_json::json!({ "item_id": prepared.item.id, "outcome": outcome_class_name(outcome_class) }),
         )
         .await?;
-        if prepared.job.step_id == "validate_integrated" && outcome_class == OutcomeClass::Clean {
+        if prepared.job.step_id == StepId::ValidateIntegrated
+            && outcome_class == OutcomeClass::Clean
+        {
             let updated_item = self.db.get_item(prepared.item.id).await?;
             if updated_item.approval_state == ApprovalState::Pending {
                 self.append_activity(
@@ -3166,9 +3170,8 @@ impl JobDispatcher {
         let integration_workspace_path = paths
             .worktree_root
             .join(integration_workspace_id.to_string());
-        let integration_workspace_ref = GitRef::new(format!(
-            "refs/ingot/workspaces/{integration_workspace_id}"
-        ));
+        let integration_workspace_ref =
+            GitRef::new(format!("refs/ingot/workspaces/{integration_workspace_id}"));
         let now = Utc::now();
         let mut integration_workspace = Workspace {
             id: integration_workspace_id,
@@ -3271,7 +3274,9 @@ impl JobDispatcher {
         let mut prepared_commit_oids = Vec::with_capacity(source_commit_oids.len());
 
         for source_commit_oid in &source_commit_oids {
-            if let Err(error) = cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid).await {
+            if let Err(error) =
+                cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid).await
+            {
                 let _ = abort_cherry_pick(&integration_workspace_dir).await;
                 self.fail_prepare_convergence_attempt(
                     project,
@@ -3370,7 +3375,11 @@ impl JobDispatcher {
             if let Some(workspace_ref) = integration_workspace.workspace_ref.as_ref() {
                 if let Err(error) = git(
                     repo_path,
-                    &["update-ref", workspace_ref.as_str(), next_prepared_tip.as_str()],
+                    &[
+                        "update-ref",
+                        workspace_ref.as_str(),
+                        next_prepared_tip.as_str(),
+                    ],
                 )
                 .await
                 {
@@ -3421,7 +3430,7 @@ impl JobDispatcher {
             findings,
             &all_convergences,
             DispatchJobCommand {
-                step_id: Some("validate_integrated".into()),
+                step_id: Some(StepId::ValidateIntegrated),
             },
         )
         .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
@@ -3607,7 +3616,7 @@ impl JobDispatcher {
             .unwrap_or("Authoring changes generated by Ingot");
         let commit_oid = create_daemon_job_commit(
             Path::new(&prepared.workspace.path),
-            &commit_subject(&prepared.revision.title, &prepared.job.step_id),
+            &commit_subject(&prepared.revision.title, prepared.job.step_id),
             summary,
             &JobCommitTrailers {
                 operation_id: operation.id,
@@ -3617,7 +3626,11 @@ impl JobDispatcher {
             },
         )
         .await?;
-        git(repo_path, &["update-ref", workspace_ref.as_str(), commit_oid.as_str()]).await?;
+        git(
+            repo_path,
+            &["update-ref", workspace_ref.as_str(), commit_oid.as_str()],
+        )
+        .await?;
 
         operation.payload.set_job_commit_result(commit_oid.clone());
         operation.status = GitOperationStatus::Applied;
@@ -3917,7 +3930,7 @@ impl JobDispatcher {
         )
         .await?;
 
-        if prepared.step_id == "validate_integrated" && outcome_class == OutcomeClass::Clean {
+        if prepared.step_id == StepId::ValidateIntegrated && outcome_class == OutcomeClass::Clean {
             let updated_item = self.db.get_item(prepared.item_id).await?;
             if updated_item.approval_state == ApprovalState::Pending {
                 self.append_activity(
@@ -4336,7 +4349,7 @@ impl JobDispatcher {
         convergences: &[Convergence],
     ) -> Result<Option<Job>, RuntimeError> {
         let evaluation = Evaluator::new().evaluate(item, revision, jobs, findings, convergences);
-        let Some(step_id) = evaluation.dispatchable_step_id.as_deref() else {
+        let Some(step_id) = evaluation.dispatchable_step_id else {
             return Ok(None);
         };
         if !step::is_closure_relevant_validate_step(step_id) {
@@ -4350,14 +4363,14 @@ impl JobDispatcher {
             findings,
             convergences,
             DispatchJobCommand {
-                step_id: Some(step_id.to_string()),
+                step_id: Some(step_id),
             },
         )
         .map_err(|error| {
             RuntimeError::InvalidState(format!("failed to auto-dispatch validation: {error}"))
         })?;
 
-        if ingot_usecases::dispatch::should_fill_candidate_subject_from_workspace(&job.step_id) {
+        if ingot_usecases::dispatch::should_fill_candidate_subject_from_workspace(job.step_id) {
             let authoring_workspace = self
                 .db
                 .find_authoring_workspace_for_revision(revision.id)
@@ -4708,7 +4721,11 @@ impl JobDispatcher {
                 let workspace_path = Path::new(&prepared.workspace.path);
                 git(
                     workspace_path,
-                    &["reset", "--hard", prepared.original_head_commit_oid.as_str()],
+                    &[
+                        "reset",
+                        "--hard",
+                        prepared.original_head_commit_oid.as_str(),
+                    ],
                 )
                 .await?;
                 git(workspace_path, &["clean", "-fd"]).await?;
@@ -4728,7 +4745,11 @@ impl JobDispatcher {
                 let workspace_path = Path::new(&prepared.workspace.path);
                 git(
                     workspace_path,
-                    &["reset", "--hard", prepared.original_head_commit_oid.as_str()],
+                    &[
+                        "reset",
+                        "--hard",
+                        prepared.original_head_commit_oid.as_str(),
+                    ],
                 )
                 .await?;
                 git(workspace_path, &["clean", "-fd"]).await?;
@@ -5205,7 +5226,7 @@ fn tail_lines(s: &str, n: usize) -> String {
     }
 }
 
-fn built_in_template(template_slug: &str, step_id: &str) -> &'static str {
+fn built_in_template(template_slug: &str, step_id: StepId) -> &'static str {
     match template_slug {
         "author-initial" => {
             "Implement the requested change directly in the repository. Keep the edit set focused on the acceptance criteria and preserve surrounding style."
@@ -5226,26 +5247,26 @@ fn built_in_template(template_slug: &str, step_id: &str) -> &'static str {
             "Investigate the current subject and produce a finding report only when there is a concrete issue worth tracking."
         }
         _ => match step_id {
-            "author_initial" => {
+            StepId::AuthorInitial => {
                 "Implement the requested change directly in the repository. Keep the edit set focused on the acceptance criteria and preserve surrounding style."
             }
-            "review_incremental_initial"
-            | "review_incremental_repair"
-            | "review_incremental_after_integration_repair" => {
+            StepId::ReviewIncrementalInitial
+            | StepId::ReviewIncrementalRepair
+            | StepId::ReviewIncrementalAfterIntegrationRepair => {
                 "Review only the requested incremental diff and report concrete findings against the exact review subject."
             }
-            "review_candidate_initial"
-            | "review_candidate_repair"
-            | "review_after_integration_repair" => {
+            StepId::ReviewCandidateInitial
+            | StepId::ReviewCandidateRepair
+            | StepId::ReviewAfterIntegrationRepair => {
                 "Review the full candidate diff from the seed commit to the current head and report concrete findings when necessary."
             }
-            "validate_candidate_initial"
-            | "validate_candidate_repair"
-            | "validate_after_integration_repair"
-            | "validate_integrated" => {
+            StepId::ValidateCandidateInitial
+            | StepId::ValidateCandidateRepair
+            | StepId::ValidateAfterIntegrationRepair
+            | StepId::ValidateIntegrated => {
                 "Run objective validation against the current workspace subject and report failed checks or findings only when they are real."
             }
-            "investigate_item" => {
+            StepId::InvestigateItem => {
                 "Investigate the current subject and produce a finding report only when there is a concrete issue worth tracking."
             }
             _ => {
@@ -5433,7 +5454,7 @@ fn format_revision_context(revision_context: Option<&RevisionContext>) -> String
         .unwrap_or_else(|| "none".into())
 }
 
-fn commit_subject(title: &str, step_id: &str) -> String {
+fn commit_subject(title: &str, step_id: StepId) -> String {
     let title = title.trim();
     if title.is_empty() {
         format!("Ingot {step_id}")
@@ -5740,7 +5761,10 @@ mod tests {
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head").into_inner();
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
         let item = ItemBuilder::new(harness.project.id, revision_id)
             .id(item_id)
             .build();
@@ -5839,7 +5863,10 @@ mod tests {
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head").into_inner();
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
         let item = ItemBuilder::new(harness.project.id, revision_id)
             .id(item_id)
             .build();
@@ -5925,7 +5952,10 @@ mod tests {
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head").into_inner();
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
         let item = ItemBuilder::new(harness.project.id, revision_id)
             .id(item_id)
             .build();
@@ -5995,7 +6025,10 @@ mod tests {
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head").into_inner();
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
         let item = ItemBuilder::new(harness.project.id, revision_id)
             .id(item_id)
             .build();
@@ -6014,7 +6047,9 @@ mod tests {
             .workspace_kind(WorkspaceKind::Authoring)
             .execution_permission(ExecutionPermission::MayMutate)
             .phase_template_slug("author-initial")
-            .job_input(JobInput::authoring_head(CommitOid::new(seed_commit.clone())))
+            .job_input(JobInput::authoring_head(CommitOid::new(
+                seed_commit.clone(),
+            )))
             .output_artifact_kind(OutputArtifactKind::Commit)
             .build();
         harness.db.create_job(&job).await.expect("create job");
@@ -6103,7 +6138,10 @@ mod tests {
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head").into_inner();
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
         let item = ItemBuilder::new(harness.project.id, revision_id)
             .id(item_id)
             .build();
@@ -6226,7 +6264,10 @@ timeout = "30s"
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let seed_commit = head_oid(&harness.repo_path).await.expect("seed head").into_inner();
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
         let item = ItemBuilder::new(harness.project.id, revision_id)
             .id(item_id)
             .build();

@@ -4,6 +4,7 @@ use crate::finding::FindingTriageState;
 use crate::ids::*;
 use crate::item::EscalationReason;
 use crate::job::OutcomeClass;
+use crate::step_id::StepId;
 
 /// Domain events emitted by command handlers.
 /// These are used for activity logging and WebSocket broadcasting.
@@ -47,7 +48,7 @@ pub enum DomainEvent {
     JobDispatched {
         job_id: JobId,
         item_id: ItemId,
-        step_id: String,
+        step_id: StepId,
     },
     JobCompleted {
         job_id: JobId,

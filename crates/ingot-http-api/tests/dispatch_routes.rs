@@ -400,10 +400,10 @@ async fn investigate_item_dispatch_creates_and_triage_removes_anchor_ref() {
             paths.mirror_git_dir.as_path(),
             &GitRef::new(&investigation_ref),
         )
-            .await
-            .expect("resolve investigation ref")
-            .as_ref()
-            .map(|o| o.as_str()),
+        .await
+        .expect("resolve investigation ref")
+        .as_ref()
+        .map(|o| o.as_str()),
         Some(target_head.as_str())
     );
 
@@ -447,8 +447,8 @@ async fn investigate_item_dispatch_creates_and_triage_removes_anchor_ref() {
             paths.mirror_git_dir.as_path(),
             &GitRef::new(&investigation_ref),
         )
-            .await
-            .expect("resolve deleted investigation ref"),
+        .await
+        .expect("resolve deleted investigation ref"),
         None
     );
 }

@@ -1,4 +1,5 @@
 use ingot_domain::job::OutcomeClass;
+use ingot_domain::step_id::StepId;
 
 use crate::step::*;
 
@@ -158,7 +159,11 @@ impl WorkflowGraph {
     }
 
     /// Find the next step given a completed step and its outcome.
-    pub fn next_step(&self, from_step: &str, outcome: &OutcomeClass) -> Option<&TransitionTarget> {
+    pub fn next_step(
+        &self,
+        from_step: StepId,
+        outcome: &OutcomeClass,
+    ) -> Option<&TransitionTarget> {
         let transition_outcome = match outcome {
             OutcomeClass::Clean => TransitionOutcome::Clean,
             OutcomeClass::Findings => TransitionOutcome::Findings,

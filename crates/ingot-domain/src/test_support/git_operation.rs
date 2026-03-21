@@ -1,9 +1,9 @@
 use crate::commit_oid::CommitOid;
-use crate::git_ref::GitRef;
 use crate::git_operation::{
     ConvergenceReplayMetadata, GitEntityType, GitOperation, GitOperationStatus, OperationKind,
     OperationPayload,
 };
+use crate::git_ref::GitRef;
 use crate::ids;
 use chrono::{DateTime, Utc};
 

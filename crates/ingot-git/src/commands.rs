@@ -40,7 +40,9 @@ pub async fn git(repo_path: &Path, args: &[&str]) -> Result<Output, GitCommandEr
 /// Get the current HEAD commit OID.
 pub async fn head_oid(repo_path: &Path) -> Result<CommitOid, GitCommandError> {
     let output = git(repo_path, &["rev-parse", "HEAD"]).await?;
-    Ok(CommitOid::new(String::from_utf8_lossy(&output.stdout).trim()))
+    Ok(CommitOid::new(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
 }
 
 /// Get the current branch name for HEAD.
@@ -63,7 +65,9 @@ pub async fn current_head_ref(repo_path: &Path) -> Result<Option<GitRef>, GitCom
 /// Get the OID a ref points to.
 pub async fn ref_oid(repo_path: &Path, ref_name: &GitRef) -> Result<CommitOid, GitCommandError> {
     let output = git(repo_path, &["rev-parse", ref_name.as_str()]).await?;
-    Ok(CommitOid::new(String::from_utf8_lossy(&output.stdout).trim()))
+    Ok(CommitOid::new(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
 }
 
 /// Resolve a ref if it exists, returning None for missing refs.
@@ -217,7 +221,11 @@ pub async fn update_ref(
     ref_name: &GitRef,
     new_oid: &CommitOid,
 ) -> Result<(), GitCommandError> {
-    git(repo_path, &["update-ref", ref_name.as_str(), new_oid.as_str()]).await?;
+    git(
+        repo_path,
+        &["update-ref", ref_name.as_str(), new_oid.as_str()],
+    )
+    .await?;
     Ok(())
 }
 

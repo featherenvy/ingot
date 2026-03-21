@@ -55,7 +55,7 @@ impl Database {
         .bind(finding.source_item_id.to_string())
         .bind(finding.source_item_revision_id.to_string())
         .bind(finding.source_job_id.to_string())
-        .bind(&finding.source_step_id)
+        .bind(finding.source_step_id.as_str())
         .bind(&finding.source_report_schema_version)
         .bind(&finding.source_finding_key)
         .bind(encode_enum(&finding.source_subject_kind)?)
@@ -267,7 +267,7 @@ impl Database {
                  triage_state = ?, linked_item_id = ?, triage_note = ?, triaged_at = ?
              WHERE id = ?",
         )
-        .bind(&finding.source_step_id)
+        .bind(finding.source_step_id.as_str())
         .bind(&finding.source_report_schema_version)
         .bind(encode_enum(&finding.source_subject_kind)?)
         .bind(finding.source_subject_base_commit_oid.clone())
@@ -366,7 +366,7 @@ pub(super) async fn upsert_finding(
     .bind(finding.source_item_id.to_string())
     .bind(finding.source_item_revision_id.to_string())
     .bind(finding.source_job_id.to_string())
-    .bind(&finding.source_step_id)
+    .bind(finding.source_step_id.as_str())
     .bind(&finding.source_report_schema_version)
     .bind(&finding.source_finding_key)
     .bind(encode_enum(&finding.source_subject_kind)?)
@@ -415,7 +415,7 @@ fn map_finding(row: &SqliteRow) -> Result<Finding, RepositoryError> {
         source_item_id: parse_id(row.try_get("source_item_id").map_err(db_err)?)?,
         source_item_revision_id: parse_id(row.try_get("source_item_revision_id").map_err(db_err)?)?,
         source_job_id: parse_id(row.try_get("source_job_id").map_err(db_err)?)?,
-        source_step_id: row.try_get("source_step_id").map_err(db_err)?,
+        source_step_id: parse_enum(row.try_get("source_step_id").map_err(db_err)?)?,
         source_report_schema_version: row
             .try_get("source_report_schema_version")
             .map_err(db_err)?,

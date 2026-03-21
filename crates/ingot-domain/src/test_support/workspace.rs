@@ -40,7 +40,10 @@ impl WorkspaceBuilder {
                 .to_string(),
             created_for_revision_id: None,
             target_ref: Some(GitRef::new("refs/heads/main")),
-            workspace_ref: Some(GitRef::new(format!("refs/ingot/workspaces/{}", Uuid::now_v7().simple()))),
+            workspace_ref: Some(GitRef::new(format!(
+                "refs/ingot/workspaces/{}",
+                Uuid::now_v7().simple()
+            ))),
             base_commit_oid: None,
             head_commit_oid: None,
             retention_policy: RetentionPolicy::Persistent,
@@ -117,9 +120,7 @@ impl WorkspaceBuilder {
             WorkspaceCommitState::from_option_parts(self.base_commit_oid, self.head_commit_oid);
         let required_commits = matches!(
             self.status,
-            WorkspaceStatus::Ready
-                | WorkspaceStatus::Busy
-                | WorkspaceStatus::RetainedForDebug
+            WorkspaceStatus::Ready | WorkspaceStatus::Busy | WorkspaceStatus::RetainedForDebug
         );
         let state = WorkspaceState::from_parts(
             self.status,

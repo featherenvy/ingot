@@ -214,9 +214,9 @@ impl AgentAdapter for CodexCliAdapter {
                 // Already gone — not an error.
                 return Ok(());
             }
-            return Err(AgentError::ProcessError(format!(
+            Err(AgentError::ProcessError(format!(
                 "killpg({pid}) failed: {error}"
-            )));
+            )))
         }
         #[cfg(not(unix))]
         {

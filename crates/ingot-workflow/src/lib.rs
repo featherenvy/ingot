@@ -7,4 +7,4 @@ pub use evaluator::{
     RecommendedAction,
 };
 pub use graph::WorkflowGraph;
-pub use step::{ClosureRelevance, DELIVERY_V1_STEPS, StepContract, StepId};
+pub use step::{ClosureRelevance, DELIVERY_V1_STEPS, StepContract};

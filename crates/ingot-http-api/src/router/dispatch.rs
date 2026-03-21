@@ -80,7 +80,9 @@ pub(super) async fn dispatch_item_job(
             &state,
             &project,
             precreated_authoring_workspace.as_ref(),
-            pending_investigation_ref.as_ref().map(|pending| &pending.ref_name),
+            pending_investigation_ref
+                .as_ref()
+                .map(|pending| &pending.ref_name),
         )
         .await;
         return Err(repo_to_internal(error));
@@ -114,7 +116,9 @@ pub(super) fn investigation_ref_name(job_id: JobId) -> GitRef {
     GitRef::new(format!("refs/ingot/investigations/{job_id}"))
 }
 
-pub(super) fn should_fill_candidate_subject_from_workspace(step_id: &str) -> bool {
+pub(super) fn should_fill_candidate_subject_from_workspace(
+    step_id: ingot_domain::step_id::StepId,
+) -> bool {
     ingot_usecases::dispatch::should_fill_candidate_subject_from_workspace(step_id)
 }
 
@@ -152,7 +156,7 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
     let mut base_commit_oid = job.job_input.base_commit_oid().cloned();
     let mut head_commit_oid = job.job_input.head_commit_oid().cloned();
 
-    if should_fill_candidate_subject_from_workspace(&job.step_id) {
+    if should_fill_candidate_subject_from_workspace(job.step_id) {
         if base_commit_oid.is_none() {
             base_commit_oid = effective_authoring_base_commit_oid(state, revision).await?;
         }
@@ -163,10 +167,8 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
         if let (Some(base_commit_oid), Some(head_commit_oid)) =
             (base_commit_oid.clone(), head_commit_oid.clone())
         {
-            job.job_input = ingot_domain::job::JobInput::candidate_subject(
-                base_commit_oid,
-                head_commit_oid,
-            );
+            job.job_input =
+                ingot_domain::job::JobInput::candidate_subject(base_commit_oid, head_commit_oid);
             return Ok(None);
         }
     }
@@ -197,7 +199,7 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
         }));
     }
 
-    if should_fill_candidate_subject_from_workspace(&job.step_id)
+    if should_fill_candidate_subject_from_workspace(job.step_id)
         && !(base_commit_oid.is_some() && head_commit_oid.is_some())
     {
         return Err(UseCaseError::IllegalStepDispatch(format!(
@@ -547,7 +549,9 @@ pub(super) async fn retry_item_job(
             &state,
             &project,
             precreated_authoring_workspace.as_ref(),
-            pending_investigation_ref.as_ref().map(|pending| &pending.ref_name),
+            pending_investigation_ref
+                .as_ref()
+                .map(|pending| &pending.ref_name),
         )
         .await;
         return Err(repo_to_internal(error));
@@ -621,7 +625,10 @@ mod tests {
         support_git_output(path, args)
     }
 
-    fn test_job(step_id: &str, output_artifact_kind: OutputArtifactKind) -> Job {
+    fn test_job(
+        step_id: ingot_domain::step_id::StepId,
+        output_artifact_kind: OutputArtifactKind,
+    ) -> Job {
         JobBuilder::new(
             ProjectId::from_uuid(Uuid::nil()),
             ItemId::from_uuid(Uuid::nil()),
@@ -1002,9 +1009,12 @@ mod tests {
             None
         );
         assert_eq!(
-            resolve_ref_oid(paths.mirror_git_dir.as_path(), &GitRef::new(&investigation_ref))
-                .await
-                .expect("resolve investigation ref"),
+            resolve_ref_oid(
+                paths.mirror_git_dir.as_path(),
+                &GitRef::new(&investigation_ref)
+            )
+            .await
+            .expect("resolve investigation ref"),
             None
         );
         let workspace_count: i64 =

@@ -9,6 +9,7 @@ use ingot_domain::job::{Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKi
 use ingot_domain::ports::{ActivityRepository, JobRepository, WorkspaceRepository};
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
+use ingot_domain::step_id::StepId;
 use ingot_domain::workspace::Workspace;
 use ingot_workflow::{ClosureRelevance, Evaluator, step};
 
@@ -16,7 +17,7 @@ use crate::UseCaseError;
 use crate::job::{DispatchJobCommand, dispatch_job};
 
 /// Returns true for steps that need candidate subjects filled from workspace history.
-pub fn should_fill_candidate_subject_from_workspace(step_id: &str) -> bool {
+pub fn should_fill_candidate_subject_from_workspace(step_id: StepId) -> bool {
     matches!(
         step_id,
         step::REVIEW_INCREMENTAL_INITIAL
@@ -82,10 +83,7 @@ pub fn effective_authoring_base_commit_oid(
 
 /// Returns true if the job's step is closure-relevant (i.e., failures on it should escalate).
 pub fn is_closure_relevant_job(job: &Job) -> bool {
-    matches!(
-        step::find_step(&job.step_id).map(|step| step.closure_relevance),
-        Some(ClosureRelevance::ClosureRelevant)
-    )
+    step::find_step(job.step_id).closure_relevance == ClosureRelevance::ClosureRelevant
 }
 
 /// Returns the escalation reason for a job failure, if applicable.
@@ -149,7 +147,7 @@ where
     A: ActivityRepository,
 {
     let evaluation = Evaluator::new().evaluate(item, revision, jobs, findings, convergences);
-    let Some(step_id) = evaluation.dispatchable_step_id.as_deref() else {
+    let Some(step_id) = evaluation.dispatchable_step_id else {
         return Ok(None);
     };
 
@@ -164,12 +162,12 @@ where
         findings,
         convergences,
         DispatchJobCommand {
-            step_id: Some(step_id.to_string()),
+            step_id: Some(step_id),
         },
     )?;
 
     // Fill candidate subject from workspace history if needed
-    if should_fill_candidate_subject_from_workspace(&job.step_id) {
+    if should_fill_candidate_subject_from_workspace(job.step_id) {
         let authoring_workspace = workspace_repo
             .find_authoring_for_revision(revision.id)
             .await?;
@@ -220,6 +218,7 @@ mod tests {
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
     use ingot_domain::job::OutputArtifactKind;
     use ingot_test_support::fixtures::{JobBuilder, RevisionBuilder};
+    use ingot_workflow::step;
     use uuid::Uuid;
 
     use super::*;
@@ -271,17 +270,17 @@ mod tests {
     #[test]
     fn should_fill_is_true_for_review_steps() {
         assert!(should_fill_candidate_subject_from_workspace(
-            "review_incremental_initial"
+            step::REVIEW_INCREMENTAL_INITIAL
         ));
         assert!(should_fill_candidate_subject_from_workspace(
-            "investigate_item"
+            step::INVESTIGATE_ITEM
         ));
     }
 
     #[test]
     fn should_fill_is_false_for_authoring_steps() {
         assert!(!should_fill_candidate_subject_from_workspace(
-            "author_initial"
+            step::AUTHOR_INITIAL
         ));
     }
 }

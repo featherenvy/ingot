@@ -248,7 +248,8 @@ async fn classify_job_completion_conflict(
         };
 
         let prepared_convergence_id: String = prepared_convergence.try_get("id").map_err(db_err)?;
-        let prepared_target_ref: GitRef = prepared_convergence.try_get("target_ref").map_err(db_err)?;
+        let prepared_target_ref: GitRef =
+            prepared_convergence.try_get("target_ref").map_err(db_err)?;
         let input_target_commit_oid: Option<CommitOid> = prepared_convergence
             .try_get("input_target_commit_oid")
             .map_err(db_err)?;

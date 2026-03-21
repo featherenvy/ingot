@@ -3,6 +3,7 @@ use crate::finding::{
     Finding, FindingSeverity, FindingSubjectKind, FindingTriage, FindingTriageState,
 };
 use crate::ids;
+use crate::step_id::StepId;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 
@@ -14,7 +15,7 @@ pub struct FindingBuilder {
     source_item_id: ids::ItemId,
     source_item_revision_id: ids::ItemRevisionId,
     source_job_id: ids::JobId,
-    source_step_id: String,
+    source_step_id: StepId,
     source_report_schema_version: String,
     source_finding_key: String,
     source_subject_kind: FindingSubjectKind,
@@ -45,7 +46,7 @@ impl FindingBuilder {
             source_item_id: item_id,
             source_item_revision_id: revision_id,
             source_job_id: job_id,
-            source_step_id: "review_candidate_initial".into(),
+            source_step_id: StepId::ReviewCandidateInitial,
             source_report_schema_version: "review_report:v1".into(),
             source_finding_key: "f-1".into(),
             source_subject_kind: FindingSubjectKind::Candidate,
@@ -69,8 +70,14 @@ impl FindingBuilder {
         self
     }
 
-    pub fn source_step_id(mut self, step_id: impl Into<String>) -> Self {
-        self.source_step_id = step_id.into();
+    pub fn source_step_id<T>(mut self, step_id: T) -> Self
+    where
+        T: TryInto<StepId>,
+        T::Error: std::fmt::Display,
+    {
+        self.source_step_id = step_id
+            .try_into()
+            .unwrap_or_else(|error| panic!("invalid test step id: {error}"));
         self
     }
 

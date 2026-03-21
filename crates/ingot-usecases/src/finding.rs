@@ -13,6 +13,7 @@ use ingot_domain::item::{
 };
 use ingot_domain::job::{Job, OutcomeClass};
 use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
+use ingot_domain::step_id::StepId;
 use serde::Deserialize;
 
 use crate::UseCaseError;
@@ -189,7 +190,7 @@ pub fn extract_findings(
                 source_item_id: item.id,
                 source_item_revision_id: job.item_revision_id,
                 source_job_id: job.id,
-                source_step_id: job.step_id.clone(),
+                source_step_id: job.step_id,
                 source_report_schema_version: schema_version.into(),
                 source_finding_key: finding.finding_key,
                 source_subject_kind,
@@ -287,7 +288,11 @@ pub fn backlog_finding(
         return Err(UseCaseError::FindingNotTriageable);
     }
 
-    if finding.source_subject_head_commit_oid.as_str().trim().is_empty()
+    if finding
+        .source_subject_head_commit_oid
+        .as_str()
+        .trim()
+        .is_empty()
         || (finding.source_subject_kind == FindingSubjectKind::Integrated
             && finding
                 .source_subject_base_commit_oid
@@ -526,7 +531,7 @@ fn validate_report_summary(summary: &str) -> Result<(), UseCaseError> {
 }
 
 fn classify_subject(job: &Job, convergences: &[Convergence]) -> FindingSubjectKind {
-    if job.step_id == "validate_integrated" {
+    if job.step_id == StepId::ValidateIntegrated {
         return FindingSubjectKind::Integrated;
     }
 
@@ -569,6 +574,7 @@ mod tests {
     use ingot_domain::job::{
         Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
     };
+    use ingot_domain::step_id::StepId;
     use ingot_test_support::fixtures::{
         ConvergenceBuilder, FindingBuilder, JobBuilder, nil_item, nil_revision,
     };
@@ -585,7 +591,7 @@ mod tests {
     fn extraction_marks_integrated_validation_findings_as_integrated() {
         let item = nil_item();
         let mut job = test_job();
-        job.step_id = "validate_integrated".into();
+        job.step_id = StepId::ValidateIntegrated;
         job.phase_kind = PhaseKind::Validate;
         job.job_input = JobInput::integrated_subject("base".into(), "head".into());
         job.state = ingot_domain::job::JobState::Completed {
@@ -712,7 +718,7 @@ mod tests {
     fn validation_reports_require_checks_and_failed_signal_for_findings() {
         let item = nil_item();
         let mut job = test_job();
-        job.step_id = "validate_candidate_initial".into();
+        job.step_id = StepId::ValidateCandidateInitial;
         job.phase_kind = PhaseKind::Validate;
         job.job_input = JobInput::candidate_subject("base".into(), "head".into());
         job.state = ingot_domain::job::JobState::Completed {
@@ -738,7 +744,7 @@ mod tests {
     fn review_reports_require_overall_risk() {
         let item = nil_item();
         let mut job = test_job();
-        job.step_id = "review_candidate_initial".into();
+        job.step_id = StepId::ReviewCandidateInitial;
         job.phase_kind = PhaseKind::Review;
         job.job_input = JobInput::candidate_subject("base".into(), "head".into());
         job.state = ingot_domain::job::JobState::Completed {
@@ -767,7 +773,7 @@ mod tests {
     fn validation_reports_reject_duplicate_finding_keys() {
         let item = nil_item();
         let mut job = test_job();
-        job.step_id = "validate_candidate_initial".into();
+        job.step_id = StepId::ValidateCandidateInitial;
         job.phase_kind = PhaseKind::Validate;
         job.job_input = JobInput::candidate_subject("base".into(), "head".into());
         job.state = ingot_domain::job::JobState::Completed {
@@ -814,7 +820,7 @@ mod tests {
     fn review_reports_reject_duplicate_finding_keys() {
         let item = nil_item();
         let mut job = test_job();
-        job.step_id = "review_candidate_initial".into();
+        job.step_id = StepId::ReviewCandidateInitial;
         job.phase_kind = PhaseKind::Review;
         job.job_input = JobInput::candidate_subject("base".into(), "head".into());
         job.state = ingot_domain::job::JobState::Completed {
@@ -861,7 +867,7 @@ mod tests {
     fn finding_reports_reject_duplicate_finding_keys() {
         let item = nil_item();
         let mut job = test_job();
-        job.step_id = "investigate_item".into();
+        job.step_id = StepId::InvestigateItem;
         job.phase_kind = PhaseKind::Investigate;
         job.job_input = JobInput::candidate_subject("base".into(), "head".into());
         job.state = ingot_domain::job::JobState::Completed {

@@ -4,6 +4,7 @@ use crate::job::{
     ContextPolicy, ExecutionPermission, Job, JobAssignment, JobInput, JobLease, JobState,
     JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind, TerminalStatus,
 };
+use crate::step_id::StepId;
 use crate::workspace::WorkspaceKind;
 use chrono::{DateTime, Utc};
 
@@ -14,7 +15,7 @@ pub struct JobBuilder {
     project_id: ids::ProjectId,
     item_id: ids::ItemId,
     item_revision_id: ids::ItemRevisionId,
-    step_id: String,
+    step_id: StepId,
     semantic_attempt_no: u32,
     retry_no: u32,
     supersedes_job_id: Option<ids::JobId>,
@@ -46,18 +47,24 @@ pub struct JobBuilder {
 }
 
 impl JobBuilder {
-    pub fn new(
+    pub fn new<T>(
         project_id: ids::ProjectId,
         item_id: ids::ItemId,
         item_revision_id: ids::ItemRevisionId,
-        step_id: impl Into<String>,
-    ) -> Self {
+        step_id: T,
+    ) -> Self
+    where
+        T: TryInto<StepId>,
+        T::Error: std::fmt::Display,
+    {
         Self {
             id: ids::JobId::new(),
             project_id,
             item_id,
             item_revision_id,
-            step_id: step_id.into(),
+            step_id: step_id
+                .try_into()
+                .unwrap_or_else(|error| panic!("invalid test step id: {error}")),
             semantic_attempt_no: 1,
             retry_no: 0,
             supersedes_job_id: None,
@@ -314,7 +321,13 @@ mod tests {
             .created_at(default_timestamp())
             .build();
 
-        assert_eq!(job.job_input.base_commit_oid(), Some(&CommitOid::from("base")));
-        assert_eq!(job.job_input.head_commit_oid(), Some(&CommitOid::from("head")));
+        assert_eq!(
+            job.job_input.base_commit_oid(),
+            Some(&CommitOid::from("base"))
+        );
+        assert_eq!(
+            job.job_input.head_commit_oid(),
+            Some(&CommitOid::from("head"))
+        );
     }
 }

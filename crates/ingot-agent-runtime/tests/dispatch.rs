@@ -29,7 +29,10 @@ async fn tick_executes_a_queued_authoring_job_and_creates_a_commit() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
+    let seed_commit = head_oid(&h.repo_path)
+        .await
+        .expect("seed head")
+        .into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -128,7 +131,13 @@ async fn tick_executes_a_review_job_and_persists_structured_report() {
         .await
         .expect("create item");
 
-    let job = test_review_job(project.id, item_id, revision_id, base_commit.as_str(), head_commit.as_str());
+    let job = test_review_job(
+        project.id,
+        item_id,
+        revision_id,
+        base_commit.as_str(),
+        head_commit.as_str(),
+    );
     db.create_job(&job).await.expect("create job");
 
     let dispatcher = JobDispatcher::with_runner(
@@ -201,7 +210,10 @@ async fn tick_times_out_long_running_job_and_marks_it_failed() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
+    let seed_commit = head_oid(&h.repo_path)
+        .await
+        .expect("seed head")
+        .into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
@@ -269,7 +281,10 @@ async fn tick_runs_healthy_queued_job_even_when_another_project_is_broken() {
     // Create healthy item on the harness project
     let healthy_item_id = ingot_domain::ids::ItemId::new();
     let healthy_revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let healthy_seed_commit = head_oid(&h.repo_path).await.expect("healthy seed head").into_inner();
+    let healthy_seed_commit = head_oid(&h.repo_path)
+        .await
+        .expect("healthy seed head")
+        .into_inner();
 
     let healthy_item = ItemBuilder::new(h.project.id, healthy_revision_id)
         .id(healthy_item_id)
@@ -323,7 +338,10 @@ async fn create_supervised_authoring_job(
 ) {
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
+    let seed_commit = head_oid(&h.repo_path)
+        .await
+        .expect("seed head")
+        .into_inner();
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)
         .created_at(created_at)
@@ -528,7 +546,12 @@ async fn run_forever_skips_unlaunchable_head_job_when_filling_capacity() {
         create_supervised_authoring_job(&h, parse_timestamp("2026-03-12T00:00:00Z")).await;
     let next_revision = RevisionBuilder::new(stale_item.id)
         .revision_no(2)
-        .explicit_seed(head_oid(&h.repo_path).await.expect("seed head").into_inner())
+        .explicit_seed(
+            head_oid(&h.repo_path)
+                .await
+                .expect("seed head")
+                .into_inner(),
+        )
         .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
         .created_at(parse_timestamp("2026-03-12T00:00:03Z"))
         .build();
@@ -583,7 +606,10 @@ async fn run_forever_skips_workspace_busy_head_job_when_filling_capacity() {
 
     let (_, busy_revision, busy_job) =
         create_supervised_authoring_job(&h, parse_timestamp("2026-03-12T00:00:00Z")).await;
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
+    let seed_commit = head_oid(&h.repo_path)
+        .await
+        .expect("seed head")
+        .into_inner();
     let busy_workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
         .created_for_revision_id(busy_revision.id)
         .current_job_id(busy_job.id)

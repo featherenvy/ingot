@@ -264,7 +264,7 @@ pub(super) async fn apply_finding_triage(
         }),
     )
     .await?;
-    if step::is_closure_relevant_review_step(&applied.finding.source_step_id) {
+    if step::is_closure_relevant_review_step(applied.finding.source_step_id) {
         if let Err(error) =
             auto_dispatch_projected_review_job_locked(state, &project, source_item.id).await
         {
@@ -338,7 +338,7 @@ pub(super) async fn maybe_enter_approval_after_finding_triage(
     source_revision: &ItemRevision,
     finding: &Finding,
 ) -> Result<(), ApiError> {
-    if finding.source_step_id != "validate_integrated"
+    if finding.source_step_id != ingot_domain::step_id::StepId::ValidateIntegrated
         || source_item.current_revision_id != source_revision.id
     {
         return Ok(());
@@ -356,11 +356,8 @@ pub(super) async fn maybe_enter_approval_after_finding_triage(
             job.state.is_terminal() && job.state.outcome_class() == Some(OutcomeClass::Findings)
         })
         .filter(|job| {
-            matches!(
-                ingot_workflow::step::find_step(&job.step_id)
-                    .map(|contract| contract.closure_relevance),
-                Some(ingot_workflow::ClosureRelevance::ClosureRelevant)
-            )
+            ingot_workflow::step::find_step(job.step_id).closure_relevance
+                == ingot_workflow::ClosureRelevance::ClosureRelevant
         })
         .max_by_key(|job| (job.state.ended_at(), job.created_at));
 

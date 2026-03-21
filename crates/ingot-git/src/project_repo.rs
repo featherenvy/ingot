@@ -252,9 +252,12 @@ mod tests {
         ensure_mirror(&paths).await.expect("refresh mirror");
 
         assert_eq!(
-            resolve_ref_oid(&paths.mirror_git_dir, &GitRef::new("refs/ingot/workspaces/wrk_test"))
-                .await
-                .expect("resolve daemon ref"),
+            resolve_ref_oid(
+                &paths.mirror_git_dir,
+                &GitRef::new("refs/ingot/workspaces/wrk_test")
+            )
+            .await
+            .expect("resolve daemon ref"),
             Some(CommitOid::from(initial_head))
         );
         assert_eq!(
@@ -264,15 +267,21 @@ mod tests {
             Some(CommitOid::from(updated_head.clone()))
         );
         assert_eq!(
-            resolve_ref_oid(&paths.mirror_git_dir, &GitRef::new("refs/heads/fresh-branch"))
-                .await
-                .expect("resolve fresh branch"),
+            resolve_ref_oid(
+                &paths.mirror_git_dir,
+                &GitRef::new("refs/heads/fresh-branch")
+            )
+            .await
+            .expect("resolve fresh branch"),
             Some(CommitOid::from(updated_head.clone()))
         );
         assert_eq!(
-            resolve_ref_oid(&paths.mirror_git_dir, &GitRef::new("refs/heads/stale-branch"))
-                .await
-                .expect("resolve stale branch"),
+            resolve_ref_oid(
+                &paths.mirror_git_dir,
+                &GitRef::new("refs/heads/stale-branch")
+            )
+            .await
+            .expect("resolve stale branch"),
             None
         );
         assert_eq!(
@@ -322,9 +331,12 @@ mod tests {
             "error should describe fetched oid mismatch"
         );
         assert_eq!(
-            resolve_ref_oid(&checkout_path, &GitRef::new("refs/ingot/sync-targets/heads_main"))
-                .await
-                .expect("resolve scratch ref"),
+            resolve_ref_oid(
+                &checkout_path,
+                &GitRef::new("refs/ingot/sync-targets/heads_main")
+            )
+            .await
+            .expect("resolve scratch ref"),
             None,
             "temporary sync ref should be deleted after a failed sync"
         );

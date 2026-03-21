@@ -510,7 +510,10 @@ mod tests {
         assert_eq!(payload.operation_kind(), OperationKind::CreateJobCommit);
         assert_eq!(payload.entity_type(), GitEntityType::Job);
         assert_eq!(payload.workspace_id(), Some(test_workspace_id()));
-        assert_eq!(payload.ref_name(), Some(&GitRef::new("refs/ingot/workspaces/auth")));
+        assert_eq!(
+            payload.ref_name(),
+            Some(&GitRef::new("refs/ingot/workspaces/auth"))
+        );
         assert_eq!(payload.expected_old_oid(), Some(&CommitOid::from("aaa")));
         assert_eq!(payload.new_oid(), None);
         assert_eq!(payload.commit_oid(), None);
@@ -526,7 +529,10 @@ mod tests {
             new_oid: Some("new".into()),
             commit_oid: Some("commit".into()),
         };
-        assert_eq!(payload.effective_commit_oid(), Some(&CommitOid::from("commit")));
+        assert_eq!(
+            payload.effective_commit_oid(),
+            Some(&CommitOid::from("commit"))
+        );
     }
 
     #[test]
@@ -538,7 +544,10 @@ mod tests {
             new_oid: "new".into(),
             commit_oid: None,
         };
-        assert_eq!(payload.effective_commit_oid(), Some(&CommitOid::from("new")));
+        assert_eq!(
+            payload.effective_commit_oid(),
+            Some(&CommitOid::from("new"))
+        );
     }
 
     #[test]
@@ -731,8 +740,14 @@ mod tests {
                 replay_metadata, ..
             } => {
                 let rm = replay_metadata.as_ref().unwrap();
-                assert_eq!(rm.source_commit_oids, vec![CommitOid::from("s1"), CommitOid::from("s2")]);
-                assert_eq!(rm.prepared_commit_oids, vec![CommitOid::from("p1"), CommitOid::from("p2")]);
+                assert_eq!(
+                    rm.source_commit_oids,
+                    vec![CommitOid::from("s1"), CommitOid::from("s2")]
+                );
+                assert_eq!(
+                    rm.prepared_commit_oids,
+                    vec![CommitOid::from("p1"), CommitOid::from("p2")]
+                );
             }
             _ => unreachable!(),
         }

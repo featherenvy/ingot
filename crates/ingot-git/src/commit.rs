@@ -98,7 +98,11 @@ pub async fn commit_message(
     repo_path: &Path,
     commit_oid: &CommitOid,
 ) -> Result<String, GitCommandError> {
-    let output = git(repo_path, &["show", "-s", "--format=%B", commit_oid.as_str()]).await?;
+    let output = git(
+        repo_path,
+        &["show", "-s", "--format=%B", commit_oid.as_str()],
+    )
+    .await?;
     Ok(String::from_utf8_lossy(&output.stdout)
         .trim_end()
         .to_string())
@@ -127,7 +131,11 @@ pub async fn cherry_pick_no_commit(
     repo_path: &Path,
     commit_oid: &CommitOid,
 ) -> Result<(), GitCommandError> {
-    git(repo_path, &["cherry-pick", "--no-commit", commit_oid.as_str()]).await?;
+    git(
+        repo_path,
+        &["cherry-pick", "--no-commit", commit_oid.as_str()],
+    )
+    .await?;
     Ok(())
 }
 

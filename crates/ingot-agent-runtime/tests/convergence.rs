@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ingot_agent_runtime::{DispatcherConfig, JobDispatcher};
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::item::{ApprovalState, Escalation, EscalationReason, ResolutionSource};
 use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
@@ -10,7 +11,6 @@ use ingot_domain::job::{
 };
 use ingot_domain::revision::ApprovalPolicy;
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
-use ingot_domain::git_ref::GitRef;
 use ingot_git::commands::{head_oid, resolve_ref_oid};
 use ingot_usecases::{DispatchNotify, ProjectLocks};
 
@@ -126,9 +126,9 @@ async fn blocked_auto_finalize_fixture() -> BlockedAutoFinalizeFixture {
         .context_policy(ContextPolicy::ResumeContext)
         .phase_template_slug("validate-integrated")
         .job_input(JobInput::integrated_subject(
-        CommitOid::new(base_commit.clone()),
-        CommitOid::new(prepared_commit.clone()),
-    ))
+            CommitOid::new(base_commit.clone()),
+            CommitOid::new(prepared_commit.clone()),
+        ))
         .output_artifact_kind(OutputArtifactKind::ValidationReport)
         .result_schema_version("validation_report:v1")
         .result_payload(serde_json::json!({
@@ -304,9 +304,9 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
         .context_policy(ContextPolicy::ResumeContext)
         .phase_template_slug("validate-integrated")
         .job_input(JobInput::integrated_subject(
-        CommitOid::new(base_commit.clone()),
-        CommitOid::new(prepared_commit.clone()),
-    ))
+            CommitOid::new(base_commit.clone()),
+            CommitOid::new(prepared_commit.clone()),
+        ))
         .output_artifact_kind(OutputArtifactKind::ValidationReport)
         .result_schema_version("validation_report:v1")
         .result_payload(serde_json::json!({
@@ -388,8 +388,8 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
             refreshed_paths.mirror_git_dir.as_path(),
             &GitRef::new("refs/heads/main"),
         )
-            .await
-            .expect("resolve mirror head"),
+        .await
+        .expect("resolve mirror head"),
         Some(CommitOid::new(refreshed_head))
     );
 }
@@ -508,9 +508,9 @@ async fn tick_auto_finalizes_not_required_prepared_convergence_even_when_commit_
         .context_policy(ContextPolicy::ResumeContext)
         .phase_template_slug("validate-integrated")
         .job_input(JobInput::integrated_subject(
-        CommitOid::new(base_commit.clone()),
-        CommitOid::new(prepared_commit.clone()),
-    ))
+            CommitOid::new(base_commit.clone()),
+            CommitOid::new(prepared_commit.clone()),
+        ))
         .output_artifact_kind(OutputArtifactKind::ValidationReport)
         .result_schema_version("validation_report:v1")
         .result_payload(serde_json::json!({
@@ -641,9 +641,9 @@ async fn tick_invalidates_stale_prepared_convergence() {
         .context_policy(ContextPolicy::ResumeContext)
         .phase_template_slug("validate-integrated")
         .job_input(JobInput::integrated_subject(
-        CommitOid::new(base_commit.clone()),
-        CommitOid::new(prepared_commit.clone()),
-    ))
+            CommitOid::new(base_commit.clone()),
+            CommitOid::new(prepared_commit.clone()),
+        ))
         .output_artifact_kind(OutputArtifactKind::ValidationReport)
         .result_schema_version("validation_report:v1")
         .result_payload(serde_json::json!({
@@ -721,9 +721,12 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
     db.create_project(&project).await.expect("create project");
     let paths = ensure_test_mirror(state_root.as_path(), &project).await;
     assert_eq!(
-        resolve_ref_oid(paths.mirror_git_dir.as_path(), &GitRef::new("refs/heads/main"))
-            .await
-            .expect("mirror head"),
+        resolve_ref_oid(
+            paths.mirror_git_dir.as_path(),
+            &GitRef::new("refs/heads/main")
+        )
+        .await
+        .expect("mirror head"),
         Some(CommitOid::new(prepared_commit.clone()))
     );
 
@@ -839,7 +842,10 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
 async fn fail_prepare_convergence_attempt_marks_non_conflict_failures_as_step_failed() {
     let h = TestHarness::new(Arc::new(FakeRunner)).await;
 
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
+    let seed_commit = head_oid(&h.repo_path)
+        .await
+        .expect("seed head")
+        .into_inner();
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
     let item = ItemBuilder::new(h.project.id, revision_id)
@@ -964,7 +970,10 @@ async fn candidate_repair_loop_advances_to_prepare_convergence() {
 
     let item_id = ingot_domain::ids::ItemId::new();
     let revision_id = ingot_domain::ids::ItemRevisionId::new();
-    let seed_commit = head_oid(&h.repo_path).await.expect("seed head").into_inner();
+    let seed_commit = head_oid(&h.repo_path)
+        .await
+        .expect("seed head")
+        .into_inner();
 
     let item = ItemBuilder::new(h.project.id, revision_id)
         .id(item_id)

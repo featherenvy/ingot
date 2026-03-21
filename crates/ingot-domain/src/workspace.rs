@@ -660,7 +660,8 @@ mod tests {
         let mut value = serde_json::to_value(ws).expect("serialize");
         value.as_object_mut().unwrap().remove("base_commit_oid");
 
-        let roundtripped = serde_json::from_value::<Workspace>(value).expect("stale without commits");
+        let roundtripped =
+            serde_json::from_value::<Workspace>(value).expect("stale without commits");
         assert!(roundtripped.state.commits().is_none());
     }
 
@@ -727,10 +728,7 @@ mod tests {
         };
         let released = state.into_released();
         assert_eq!(released.status(), WorkspaceStatus::Ready);
-        assert_eq!(
-            released.head_commit_oid(),
-            Some(&CommitOid::new("def456"))
-        );
+        assert_eq!(released.head_commit_oid(), Some(&CommitOid::new("def456")));
         assert!(released.current_job_id().is_none());
     }
 
@@ -742,14 +740,8 @@ mod tests {
         };
         let released = state.into_released_with_head(CommitOid::new("newhead"));
         assert_eq!(released.status(), WorkspaceStatus::Ready);
-        assert_eq!(
-            released.head_commit_oid(),
-            Some(&CommitOid::new("newhead"))
-        );
-        assert_eq!(
-            released.base_commit_oid(),
-            Some(&CommitOid::new("abc123"))
-        );
+        assert_eq!(released.head_commit_oid(), Some(&CommitOid::new("newhead")));
+        assert_eq!(released.base_commit_oid(), Some(&CommitOid::new("abc123")));
     }
 
     #[test]
@@ -761,10 +753,7 @@ mod tests {
         let job_id = state.current_job_id();
         let updated = state.with_head_commit_oid(CommitOid::new("newhead"));
         assert_eq!(updated.status(), WorkspaceStatus::Busy);
-        assert_eq!(
-            updated.head_commit_oid(),
-            Some(&CommitOid::new("newhead"))
-        );
+        assert_eq!(updated.head_commit_oid(), Some(&CommitOid::new("newhead")));
         assert_eq!(updated.current_job_id(), job_id);
     }
 }

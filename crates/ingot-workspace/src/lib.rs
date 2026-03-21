@@ -71,7 +71,11 @@ pub async fn provision_authoring_workspace(
     if current_ref.as_ref() != Some(expected_head_oid) {
         git(
             repo_path,
-            &["update-ref", workspace_ref.as_str(), expected_head_oid.as_str()],
+            &[
+                "update-ref",
+                workspace_ref.as_str(),
+                expected_head_oid.as_str(),
+            ],
         )
         .await?;
     }
@@ -174,10 +178,19 @@ async fn reset_existing_worktree(
 ) -> Result<(), WorkspaceError> {
     git(
         workspace_path,
-        &["checkout", "--detach", "--force", expected_head_oid.as_str()],
+        &[
+            "checkout",
+            "--detach",
+            "--force",
+            expected_head_oid.as_str(),
+        ],
     )
     .await?;
-    git(workspace_path, &["reset", "--hard", expected_head_oid.as_str()]).await?;
+    git(
+        workspace_path,
+        &["reset", "--hard", expected_head_oid.as_str()],
+    )
+    .await?;
     git(workspace_path, &["clean", "-fd"]).await?;
     Ok(())
 }
@@ -274,12 +287,7 @@ pub async fn ensure_authoring_workspace_state(
         workspace.workspace_ref = Some(provisioned.workspace_ref);
         workspace.mark_ready(
             WorkspaceCommitState::new(
-                resolve_base_commit_oid(
-                    Some(&workspace),
-                    revision,
-                    job,
-                    &expected_head_commit_oid,
-                ),
+                resolve_base_commit_oid(Some(&workspace), revision, job, &expected_head_commit_oid),
                 provisioned.head_commit_oid,
             ),
             now,
@@ -398,9 +406,14 @@ mod tests {
         let workspace_path = unique_temp_path("ingot-workspace");
         let workspace_ref = "refs/ingot/workspaces/wrk_test";
 
-        provision_authoring_workspace(&repo, &workspace_path, &GitRef::new(workspace_ref), &base_head)
-            .await
-            .expect("first provision");
+        provision_authoring_workspace(
+            &repo,
+            &workspace_path,
+            &GitRef::new(workspace_ref),
+            &base_head,
+        )
+        .await
+        .expect("first provision");
 
         std::fs::write(repo.join("tracked.txt"), "next").expect("write tracked");
         git_sync(&repo, &["add", "tracked.txt"]);
@@ -409,12 +422,20 @@ mod tests {
 
         git_sync(&workspace_path, &["checkout", &next_head]);
 
-        provision_authoring_workspace(&repo, &workspace_path, &GitRef::new(workspace_ref), &base_head)
-            .await
-            .expect("re-provision drifted workspace");
+        provision_authoring_workspace(
+            &repo,
+            &workspace_path,
+            &GitRef::new(workspace_ref),
+            &base_head,
+        )
+        .await
+        .expect("re-provision drifted workspace");
 
         assert_eq!(
-            head_oid(&workspace_path).await.expect("workspace head").into_inner(),
+            head_oid(&workspace_path)
+                .await
+                .expect("workspace head")
+                .into_inner(),
             base_head.as_str()
         );
     }
@@ -426,9 +447,14 @@ mod tests {
         let workspace_path = unique_temp_path("ingot-workspace");
         let workspace_ref = "refs/ingot/workspaces/wrk_test";
 
-        provision_authoring_workspace(&repo, &workspace_path, &GitRef::new(workspace_ref), &base_head)
-            .await
-            .expect("first provision");
+        provision_authoring_workspace(
+            &repo,
+            &workspace_path,
+            &GitRef::new(workspace_ref),
+            &base_head,
+        )
+        .await
+        .expect("first provision");
 
         std::fs::write(repo.join("tracked.txt"), "next").expect("write tracked");
         git_sync(&repo, &["add", "tracked.txt"]);
@@ -438,12 +464,20 @@ mod tests {
         git_sync(&repo, &["branch", "feature/drift", &next_head]);
         git_sync(&workspace_path, &["checkout", "feature/drift"]);
 
-        provision_authoring_workspace(&repo, &workspace_path, &GitRef::new(workspace_ref), &base_head)
-            .await
-            .expect("re-provision drifted workspace");
+        provision_authoring_workspace(
+            &repo,
+            &workspace_path,
+            &GitRef::new(workspace_ref),
+            &base_head,
+        )
+        .await
+        .expect("re-provision drifted workspace");
 
         assert_eq!(
-            head_oid(&workspace_path).await.expect("workspace head").into_inner(),
+            head_oid(&workspace_path)
+                .await
+                .expect("workspace head")
+                .into_inner(),
             base_head.as_str()
         );
         assert_eq!(
@@ -459,9 +493,14 @@ mod tests {
         let workspace_path = unique_temp_path("ingot-workspace");
         let workspace_ref = "refs/ingot/workspaces/wrk_integration";
 
-        provision_integration_workspace(&repo, &workspace_path, &GitRef::new(workspace_ref), &base_head)
-            .await
-            .expect("first provision");
+        provision_integration_workspace(
+            &repo,
+            &workspace_path,
+            &GitRef::new(workspace_ref),
+            &base_head,
+        )
+        .await
+        .expect("first provision");
 
         std::fs::write(repo.join("tracked.txt"), "next").expect("write tracked");
         git_sync(&repo, &["add", "tracked.txt"]);
@@ -470,12 +509,20 @@ mod tests {
 
         git_sync(&workspace_path, &["checkout", &next_head]);
 
-        provision_integration_workspace(&repo, &workspace_path, &GitRef::new(workspace_ref), &base_head)
-            .await
-            .expect("re-provision drifted workspace");
+        provision_integration_workspace(
+            &repo,
+            &workspace_path,
+            &GitRef::new(workspace_ref),
+            &base_head,
+        )
+        .await
+        .expect("re-provision drifted workspace");
 
         assert_eq!(
-            head_oid(&workspace_path).await.expect("workspace head").into_inner(),
+            head_oid(&workspace_path)
+                .await
+                .expect("workspace head")
+                .into_inner(),
             base_head.as_str()
         );
     }

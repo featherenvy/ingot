@@ -1,5 +1,5 @@
-use ingot_domain::convergence::Convergence;
 use ingot_domain::commit_oid::CommitOid;
+use ingot_domain::convergence::Convergence;
 use ingot_domain::finding::Finding;
 use ingot_domain::item::Item;
 use ingot_domain::job::Job;

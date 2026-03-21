@@ -212,7 +212,9 @@ pub fn test_authoring_job(
         .workspace_kind(WorkspaceKind::Authoring)
         .execution_permission(ExecutionPermission::MayMutate)
         .phase_template_slug("author-initial")
-        .job_input(JobInput::authoring_head(ingot_domain::commit_oid::CommitOid::new(seed_commit)))
+        .job_input(JobInput::authoring_head(
+            ingot_domain::commit_oid::CommitOid::new(seed_commit),
+        ))
         .output_artifact_kind(OutputArtifactKind::Commit)
         .build()
 }
@@ -579,7 +581,10 @@ pub async fn create_mirror_only_commit(
     git_sync(&worktree_path, &["add", "tracked.txt"]);
     git_sync(&worktree_path, &["commit", "-m", message]);
     let commit_oid = head_oid(&worktree_path).await.expect("mirror-only head");
-    git_sync(mirror_git_dir, &["update-ref", workspace_ref, commit_oid.as_str()]);
+    git_sync(
+        mirror_git_dir,
+        &["update-ref", workspace_ref, commit_oid.as_str()],
+    );
     (worktree_path, commit_oid.into_inner())
 }
 

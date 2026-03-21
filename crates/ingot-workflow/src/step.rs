@@ -1,24 +1,23 @@
 use ingot_domain::job::{ContextPolicy, ExecutionPermission, OutputArtifactKind, PhaseKind};
+use ingot_domain::step_id::StepId;
 use ingot_domain::workspace::WorkspaceKind;
 
-pub type StepId = &'static str;
-
-pub const AUTHOR_INITIAL: StepId = "author_initial";
-pub const REVIEW_INCREMENTAL_INITIAL: StepId = "review_incremental_initial";
-pub const REVIEW_CANDIDATE_INITIAL: StepId = "review_candidate_initial";
-pub const VALIDATE_CANDIDATE_INITIAL: StepId = "validate_candidate_initial";
-pub const REPAIR_CANDIDATE: StepId = "repair_candidate";
-pub const REVIEW_INCREMENTAL_REPAIR: StepId = "review_incremental_repair";
-pub const REVIEW_CANDIDATE_REPAIR: StepId = "review_candidate_repair";
-pub const VALIDATE_CANDIDATE_REPAIR: StepId = "validate_candidate_repair";
-pub const INVESTIGATE_ITEM: StepId = "investigate_item";
-pub const PREPARE_CONVERGENCE: StepId = "prepare_convergence";
-pub const VALIDATE_INTEGRATED: StepId = "validate_integrated";
-pub const REPAIR_AFTER_INTEGRATION: StepId = "repair_after_integration";
+pub const AUTHOR_INITIAL: StepId = StepId::AuthorInitial;
+pub const REVIEW_INCREMENTAL_INITIAL: StepId = StepId::ReviewIncrementalInitial;
+pub const REVIEW_CANDIDATE_INITIAL: StepId = StepId::ReviewCandidateInitial;
+pub const VALIDATE_CANDIDATE_INITIAL: StepId = StepId::ValidateCandidateInitial;
+pub const REPAIR_CANDIDATE: StepId = StepId::RepairCandidate;
+pub const REVIEW_INCREMENTAL_REPAIR: StepId = StepId::ReviewIncrementalRepair;
+pub const REVIEW_CANDIDATE_REPAIR: StepId = StepId::ReviewCandidateRepair;
+pub const VALIDATE_CANDIDATE_REPAIR: StepId = StepId::ValidateCandidateRepair;
+pub const INVESTIGATE_ITEM: StepId = StepId::InvestigateItem;
+pub const PREPARE_CONVERGENCE: StepId = StepId::PrepareConvergence;
+pub const VALIDATE_INTEGRATED: StepId = StepId::ValidateIntegrated;
+pub const REPAIR_AFTER_INTEGRATION: StepId = StepId::RepairAfterIntegration;
 pub const REVIEW_INCREMENTAL_AFTER_INTEGRATION_REPAIR: StepId =
-    "review_incremental_after_integration_repair";
-pub const REVIEW_AFTER_INTEGRATION_REPAIR: StepId = "review_after_integration_repair";
-pub const VALIDATE_AFTER_INTEGRATION_REPAIR: StepId = "validate_after_integration_repair";
+    StepId::ReviewIncrementalAfterIntegrationRepair;
+pub const REVIEW_AFTER_INTEGRATION_REPAIR: StepId = StepId::ReviewAfterIntegrationRepair;
+pub const VALIDATE_AFTER_INTEGRATION_REPAIR: StepId = StepId::ValidateAfterIntegrationRepair;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClosureRelevance {
@@ -152,20 +151,21 @@ pub static DELIVERY_V1_STEPS: &[StepContract] = &[
     validate_step(VALIDATE_AFTER_INTEGRATION_REPAIR, WorkspaceKind::Authoring),
 ];
 
-pub fn find_step(step_id: &str) -> Option<&'static StepContract> {
-    DELIVERY_V1_STEPS.iter().find(|s| s.step_id == step_id)
+pub fn find_step(step_id: StepId) -> &'static StepContract {
+    DELIVERY_V1_STEPS
+        .iter()
+        .find(|s| s.step_id == step_id)
+        .expect("all StepId variants must have a workflow contract")
 }
 
-pub fn is_closure_relevant_review_step(step_id: &str) -> bool {
-    find_step(step_id).is_some_and(|contract| {
-        contract.phase_kind == PhaseKind::Review
-            && contract.closure_relevance == ClosureRelevance::ClosureRelevant
-    })
+pub fn is_closure_relevant_review_step(step_id: StepId) -> bool {
+    let contract = find_step(step_id);
+    contract.phase_kind == PhaseKind::Review
+        && contract.closure_relevance == ClosureRelevance::ClosureRelevant
 }
 
-pub fn is_closure_relevant_validate_step(step_id: &str) -> bool {
-    find_step(step_id).is_some_and(|contract| {
-        contract.phase_kind == PhaseKind::Validate
-            && contract.closure_relevance == ClosureRelevance::ClosureRelevant
-    })
+pub fn is_closure_relevant_validate_step(step_id: StepId) -> bool {
+    let contract = find_step(step_id);
+    contract.phase_kind == PhaseKind::Validate
+        && contract.closure_relevance == ClosureRelevance::ClosureRelevant
 }
