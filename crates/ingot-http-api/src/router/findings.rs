@@ -26,7 +26,7 @@ pub(super) struct AppliedFindingTriage {
 pub(super) async fn triage_item_finding(
     State(state): State<AppState>,
     ApiPath(FindingPathParams { finding_id }): ApiPath<FindingPathParams>,
-    Json(request): Json<TriageFindingRequest>,
+    request: TriageFindingRequest,
 ) -> Result<Json<Finding>, ApiError> {
     let applied = apply_finding_triage(&state, finding_id, request).await?;
     Ok(Json(applied.finding))

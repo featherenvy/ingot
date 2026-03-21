@@ -1,3 +1,5 @@
+use axum::extract::{FromRequest, Json, Request};
+use axum::response::{IntoResponse, Response};
 use ingot_domain::agent::{AdapterKind, AgentCapability};
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::finding::{Finding, FindingTriageState};
@@ -10,6 +12,8 @@ use ingot_domain::revision_context::RevisionContextSummary;
 use ingot_domain::workspace::Workspace;
 use ingot_workflow::Evaluation;
 use serde::{Deserialize, Serialize};
+
+use crate::error::ApiError;
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -204,6 +208,55 @@ pub struct TriageFindingRequest {
     pub linked_item_id: Option<ItemId>,
     pub target_ref: Option<GitRef>,
     pub approval_policy: Option<ApprovalPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TriageFindingRequestPayload {
+    triage_state: FindingTriageState,
+    triage_note: Option<String>,
+    linked_item_id: Option<String>,
+    target_ref: Option<GitRef>,
+    approval_policy: Option<ApprovalPolicy>,
+}
+
+impl TryFrom<TriageFindingRequestPayload> for TriageFindingRequest {
+    type Error = ApiError;
+
+    fn try_from(payload: TriageFindingRequestPayload) -> Result<Self, Self::Error> {
+        Ok(Self {
+            triage_state: payload.triage_state,
+            triage_note: payload.triage_note,
+            linked_item_id: payload
+                .linked_item_id
+                .map(|value| {
+                    value
+                        .parse::<ItemId>()
+                        .map_err(|_| ApiError::invalid_id("linked_item", &value))
+                })
+                .transpose()?,
+            target_ref: payload.target_ref,
+            approval_policy: payload.approval_policy,
+        })
+    }
+}
+
+impl<S> FromRequest<S> for TriageFindingRequest
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    fn from_request(
+        req: Request,
+        state: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        async move {
+            let Json(payload) = Json::<TriageFindingRequestPayload>::from_request(req, state)
+                .await
+                .map_err(IntoResponse::into_response)?;
+            TriageFindingRequest::try_from(payload).map_err(IntoResponse::into_response)
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

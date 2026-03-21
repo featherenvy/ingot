@@ -1,4 +1,4 @@
-use axum::body::Body;
+use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use ingot_domain::finding::{FindingSubjectKind, FindingTriageState};
 use ingot_domain::item::{Classification, Origin};
@@ -240,6 +240,41 @@ async fn backlog_triage_rejects_self_linked_item() {
         .expect("triage request");
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn triage_rejects_invalid_linked_item_id_with_invalid_id_error() {
+    let db = migrated_test_db("ingot-http-api-triage-invalid-linked-item-id").await;
+    let finding_id = "fnd_99999999999999999999999999999999";
+
+    let response = test_router(db)
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/findings/{finding_id}/triage"))
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "triage_state": "duplicate",
+                        "linked_item_id": "not-an-item-id"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("triage request");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read response body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert_eq!(body["error"]["code"], "invalid_id");
+    assert_eq!(
+        body["error"]["message"],
+        "Invalid linked_item id: not-an-item-id"
+    );
 }
 
 #[tokio::test]
