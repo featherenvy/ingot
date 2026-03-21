@@ -131,6 +131,7 @@ mod tests {
             priority: Priority::Major,
             labels: vec![],
             operator_notes: None,
+            sort_key: "80".to_string(),
             created_at: now,
             updated_at: now,
         };

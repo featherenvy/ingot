@@ -808,6 +808,16 @@ impl ConvergenceSystemActionPort for HttpConvergencePort {
             "http convergence port does not auto-finalize convergence".into(),
         ))
     }
+
+    async fn auto_queue_convergence(
+        &self,
+        _project_id: ProjectId,
+        _item_id: ItemId,
+    ) -> Result<bool, UseCaseError> {
+        Err(UseCaseError::Internal(
+            "http convergence port does not auto-queue convergence".into(),
+        ))
+    }
 }
 
 pub(super) async fn prepare_item_convergence(

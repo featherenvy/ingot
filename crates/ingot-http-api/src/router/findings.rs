@@ -156,11 +156,13 @@ pub(super) async fn apply_finding_triage(
                     target_ref: request.target_ref,
                     approval_policy: request.approval_policy,
                 };
+                let sort_key = next_project_sort_key(state, source_item.project_id).await?;
                 let (linked_item, linked_revision, triaged) = backlog_finding(
                     &finding,
                     &source_item,
                     &source_revision,
                     overrides,
+                    sort_key,
                     request.triage_note,
                 )?;
                 state

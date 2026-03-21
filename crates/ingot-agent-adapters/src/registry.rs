@@ -38,7 +38,10 @@ pub fn bootstrap_codex_agent() -> Agent {
     bootstrap_codex_agent_with(DEFAULT_CODEX_CLI_PATH, DEFAULT_CODEX_MODEL)
 }
 
-pub fn bootstrap_codex_agent_with(cli_path: impl Into<PathBuf>, model: impl Into<AgentModel>) -> Agent {
+pub fn bootstrap_codex_agent_with(
+    cli_path: impl Into<PathBuf>,
+    model: impl Into<AgentModel>,
+) -> Agent {
     Agent {
         id: AgentId::new(),
         slug: DEFAULT_CODEX_SLUG.into(),
@@ -193,6 +196,7 @@ fn combined_output(stdout: &[u8], stderr: &[u8]) -> String {
 
 fn validate_codex_exec_probe(output: &str) -> Result<String, String> {
     let required_flags = [
+        "--config",
         "--sandbox",
         "--output-schema",
         "--output-last-message",
@@ -251,7 +255,7 @@ mod tests {
         let fake_codex = write_script(
             &root,
             "fake-codex.sh",
-            "#!/bin/sh\necho '--sandbox --output-schema --output-last-message --json'\n",
+            "#!/bin/sh\necho '--config --sandbox --output-schema --output-last-message --json'\n",
         );
         let mut agent = bootstrap_codex_agent_with(fake_codex, "gpt-5.4");
 
@@ -277,6 +281,52 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("--sandbox"))
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn probe_and_apply_marks_codex_unavailable_when_config_flag_is_missing() {
+        let root = temp_test_root("codex-probe-missing-config");
+        let fake_codex = write_script(
+            &root,
+            "fake-codex.sh",
+            "#!/bin/sh\necho '--sandbox --output-schema --output-last-message --json'\n",
+        );
+        let mut agent = bootstrap_codex_agent_with(fake_codex, "gpt-5.4");
+
+        probe_and_apply(&mut agent).await;
+
+        assert_eq!(agent.status, AgentStatus::Unavailable);
+        assert!(
+            agent
+                .health_check
+                .as_deref()
+                .is_some_and(|message| message.contains("--config"))
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn probe_and_apply_marks_codex_available_without_forced_service_tier_override() {
+        let root = temp_test_root("codex-probe-no-service-tier-override");
+        let fake_codex = write_script(
+            &root,
+            "fake-codex.sh",
+            r#"#!/bin/sh
+if [ "$1" = "exec" ] && [ "$2" = "--help" ] && [ "$#" -eq 2 ]; then
+  echo '--config --sandbox --output-schema --output-last-message --json'
+  exit 0
+fi
+echo 'unexpected probe invocation' >&2
+exit 1
+"#,
+        );
+        let mut agent = bootstrap_codex_agent_with(fake_codex, "gpt-5.4");
+
+        probe_and_apply(&mut agent).await;
+
+        assert_eq!(agent.status, AgentStatus::Available);
+        assert_eq!(agent.health_check.as_deref(), Some("codex exec help ok"));
         let _ = fs::remove_dir_all(root);
     }
 

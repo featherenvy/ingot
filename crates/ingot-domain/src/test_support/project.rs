@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::branch_name::BranchName;
 use crate::ids;
-use crate::project::Project;
+use crate::project::{ExecutionMode, Project};
 use chrono::{DateTime, Utc};
 
 use super::timestamps::default_timestamp;
@@ -13,6 +13,7 @@ pub struct ProjectBuilder {
     path: PathBuf,
     default_branch: BranchName,
     color: String,
+    execution_mode: ExecutionMode,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -26,6 +27,7 @@ impl ProjectBuilder {
             path: path.as_ref().to_path_buf(),
             default_branch: "main".into(),
             color: "#000".into(),
+            execution_mode: ExecutionMode::Manual,
             created_at: now,
             updated_at: now,
         }
@@ -38,6 +40,11 @@ impl ProjectBuilder {
 
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
+        self
+    }
+
+    pub fn execution_mode(mut self, mode: ExecutionMode) -> Self {
+        self.execution_mode = mode;
         self
     }
 
@@ -54,6 +61,7 @@ impl ProjectBuilder {
             path: self.path,
             default_branch: self.default_branch,
             color: self.color,
+            execution_mode: self.execution_mode,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }

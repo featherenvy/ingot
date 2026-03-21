@@ -84,6 +84,7 @@ async fn create_item_route_uses_project_config_defaults_when_policy_is_omitted()
         item_json["current_revision"]["approval_policy"].as_str(),
         Some("not_required")
     );
+    assert_eq!(item_json["execution_mode"].as_str(), Some("manual"));
     assert_eq!(
         item_json["item"]["approval_state"].as_str(),
         Some("not_required")

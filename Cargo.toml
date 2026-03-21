@@ -64,5 +64,6 @@ uuid = { version = "1", features = ["v7", "serde"] }
 thiserror = "2"
 anyhow = "1"
 toml = "0.8"
+fractional_index = "2"
 indexmap = { version = "2", features = ["serde"] }
 libc = "0.2"

@@ -17,7 +17,9 @@ use ingot_domain::project::Project;
 use ingot_domain::revision::AuthoringBaseSeed;
 use ingot_git::commands::resolve_ref_oid;
 use ingot_usecases::UseCaseError;
-use ingot_usecases::item::{CreateItemInput, create_manual_item, normalize_target_ref};
+use ingot_usecases::item::{
+    CreateItemInput, create_manual_item, next_sort_key_after, normalize_target_ref,
+};
 
 use crate::error::ApiError;
 use crate::router::{
@@ -186,6 +188,7 @@ pub async fn create_demo_project(
         path: path.clone(),
         default_branch,
         color: template.color.to_string(),
+        execution_mode: ingot_domain::project::ExecutionMode::default(),
         created_at: now,
         updated_at: now,
     };
@@ -213,7 +216,11 @@ pub async fn create_demo_project(
         .await;
 
     let mut items_created = 0;
-    for item_def in template.items.iter().rev() {
+    let mut previous_sort_key: Option<String> = None;
+    for item_def in template.items.iter() {
+        let sort_key = next_sort_key_after(previous_sort_key.as_deref());
+        previous_sort_key = Some(sort_key.clone());
+
         let (item, revision) = create_manual_item(
             &project,
             CreateItemInput {
@@ -232,6 +239,7 @@ pub async fn create_demo_project(
                     seed_target_commit_oid: resolved_target_head.clone(),
                 },
             },
+            sort_key,
             Utc::now(),
         );
 

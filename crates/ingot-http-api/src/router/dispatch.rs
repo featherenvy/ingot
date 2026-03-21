@@ -105,7 +105,7 @@ pub(super) async fn dispatch_item_job(
         project_id,
         ActivityEventType::JobDispatched,
         ActivitySubject::Job(job.id),
-        serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
+        serde_json::json!({ "item_id": item.id, "step_id": job.step_id, "dispatch_origin": "operator" }),
     )
     .await?;
 

@@ -15,11 +15,13 @@ impl Database {
         &self,
         project_id: ProjectId,
     ) -> Result<Vec<Item>, RepositoryError> {
-        let rows = sqlx::query("SELECT * FROM items WHERE project_id = ? ORDER BY created_at DESC")
-            .bind(project_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db_err)?;
+        let rows = sqlx::query(
+            "SELECT * FROM items WHERE project_id = ? ORDER BY sort_key ASC, created_at ASC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
 
         rows.iter().map(map_item).collect()
     }
@@ -154,8 +156,8 @@ fn insert_item_query<'a>(item: &'a Item) -> Result<SqliteQuery<'a>, RepositoryEr
             id, project_id, classification, workflow_version, lifecycle_state, parking_state,
             done_reason, resolution_source, approval_state, escalation_state, escalation_reason,
             current_revision_id, origin_kind, origin_finding_id, priority, labels, operator_notes,
-            created_at, updated_at, closed_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            sort_key, created_at, updated_at, closed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(item.id)
     .bind(item.project_id)
@@ -174,6 +176,7 @@ fn insert_item_query<'a>(item: &'a Item) -> Result<SqliteQuery<'a>, RepositoryEr
     .bind(item.priority)
     .bind(serde_json::to_string(&item.labels).map_err(json_err)?)
     .bind(item.operator_notes.as_deref())
+    .bind(&item.sort_key)
     .bind(item.created_at)
     .bind(item.updated_at)
     .bind(item.lifecycle.closed_at()))
@@ -194,6 +197,7 @@ fn map_item(row: &SqliteRow) -> Result<Item, RepositoryError> {
         priority: row.try_get("priority").map_err(db_err)?,
         labels: parse_json(row.try_get("labels").map_err(db_err)?)?,
         operator_notes: row.try_get("operator_notes").map_err(db_err)?,
+        sort_key: row.try_get("sort_key").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
         updated_at: row.try_get("updated_at").map_err(db_err)?,
     })

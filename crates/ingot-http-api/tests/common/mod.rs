@@ -63,6 +63,7 @@ pub fn fake_codex_probe_script() -> PathBuf {
 if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
   cat <<'EOF'
 Usage: codex exec [OPTIONS] [PROMPT] [COMMAND]
+      --config <key=value>
   -s, --sandbox <SANDBOX_MODE>
   -C, --cd <DIR>
       --output-schema <FILE>

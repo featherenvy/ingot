@@ -281,6 +281,7 @@ pub struct Item {
     pub priority: Priority,
     pub labels: Vec<String>,
     pub operator_notes: Option<String>,
+    pub sort_key: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

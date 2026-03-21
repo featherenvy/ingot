@@ -44,6 +44,8 @@ pub(super) async fn create_item(
     .await?;
     let seed = AuthoringBaseSeed::from_parts(seed_commit_oid, seed_target_commit_oid);
 
+    let sort_key = next_project_sort_key(&state, project_id).await?;
+
     let (item, revision) = create_manual_item(
         &project,
         CreateItemInput {
@@ -62,6 +64,7 @@ pub(super) async fn create_item(
             integration_rework_budget: config.defaults.integration_rework_budget,
             seed,
         },
+        sort_key,
         Utc::now(),
     );
 
@@ -611,6 +614,7 @@ pub(super) async fn load_item_detail(
 
     Ok(ItemDetailResponse {
         item,
+        execution_mode: project.execution_mode,
         current_revision,
         evaluation,
         queue,

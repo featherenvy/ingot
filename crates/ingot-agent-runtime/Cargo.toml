@@ -35,3 +35,4 @@ chrono = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 uuid = { workspace = true }
+sqlx = { workspace = true }

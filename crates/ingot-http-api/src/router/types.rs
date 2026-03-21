@@ -10,6 +10,7 @@ use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::{AgentId, ConvergenceId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::item::{Classification, Item, Priority};
 use ingot_domain::job::{Job, OutcomeClass};
+use ingot_domain::project::ExecutionMode;
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
 use ingot_domain::revision_context::RevisionContextSummary;
 use ingot_domain::workspace::Workspace;
@@ -53,6 +54,7 @@ pub struct QueueStatusResponse {
 #[derive(Debug, Serialize)]
 pub struct ItemDetailResponse {
     pub item: Item,
+    pub execution_mode: ExecutionMode,
     pub current_revision: ItemRevision,
     pub evaluation: Evaluation,
     pub queue: QueueStatusResponse,
@@ -144,6 +146,7 @@ pub struct CreateProjectRequest {
     pub path: String,
     pub default_branch: Option<String>,
     pub color: Option<String>,
+    pub execution_mode: Option<ingot_domain::project::ExecutionMode>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -152,6 +155,7 @@ pub struct UpdateProjectRequest {
     pub path: Option<String>,
     pub default_branch: Option<String>,
     pub color: Option<String>,
+    pub execution_mode: Option<ingot_domain::project::ExecutionMode>,
 }
 
 #[derive(Debug, Default, Deserialize)]

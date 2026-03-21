@@ -9,7 +9,7 @@ use ingot_domain::finding::{
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::{FindingId, ItemId, ItemRevisionId};
 use ingot_domain::item::{
-    ApprovalState, Classification, Escalation, Item, Lifecycle, Origin, ParkingState,
+    Classification, Escalation, Item, Lifecycle, Origin, ParkingState,
 };
 use ingot_domain::job::{Job, OutcomeClass};
 use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
@@ -17,6 +17,7 @@ use ingot_domain::step_id::StepId;
 use serde::Deserialize;
 
 use crate::UseCaseError;
+use crate::item::approval_state_for_policy;
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct BacklogFindingOverrides {
@@ -282,6 +283,7 @@ pub fn backlog_finding(
     source_item: &Item,
     source_revision: &ItemRevision,
     overrides: BacklogFindingOverrides,
+    sort_key: String,
     triage_note: Option<String>,
 ) -> Result<(Item, ItemRevision, Finding), UseCaseError> {
     if !finding.triage.is_unresolved() {
@@ -329,10 +331,7 @@ pub fn backlog_finding(
         workflow_version: source_item.workflow_version,
         lifecycle: Lifecycle::Open,
         parking_state: ParkingState::Active,
-        approval_state: match approval_policy {
-            ApprovalPolicy::Required => ApprovalState::NotRequested,
-            ApprovalPolicy::NotRequired => ApprovalState::NotRequired,
-        },
+        approval_state: approval_state_for_policy(approval_policy),
         escalation: Escalation::None,
         current_revision_id: revision_id,
         origin: Origin::PromotedFinding {
@@ -341,6 +340,7 @@ pub fn backlog_finding(
         priority: source_item.priority,
         labels: vec![],
         operator_notes: None,
+        sort_key,
         created_at,
         updated_at: created_at,
     };
@@ -637,6 +637,7 @@ mod tests {
             &item,
             &revision,
             BacklogFindingOverrides::default(),
+            "80".to_string(),
             None,
         )
         .unwrap();

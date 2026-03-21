@@ -12,7 +12,7 @@ use crate::db::Database;
 impl Database {
     pub async fn list_projects(&self) -> Result<Vec<Project>, RepositoryError> {
         let rows = sqlx::query(
-            "SELECT id, name, path, default_branch, color, created_at, updated_at
+            "SELECT id, name, path, default_branch, color, execution_mode, created_at, updated_at
              FROM projects
              ORDER BY name ASC",
         )
@@ -25,7 +25,7 @@ impl Database {
 
     pub async fn get_project(&self, project_id: ProjectId) -> Result<Project, RepositoryError> {
         let row = sqlx::query(
-            "SELECT id, name, path, default_branch, color, created_at, updated_at
+            "SELECT id, name, path, default_branch, color, execution_mode, created_at, updated_at
              FROM projects
              WHERE id = ?",
         )
@@ -42,14 +42,15 @@ impl Database {
 
     pub async fn create_project(&self, project: &Project) -> Result<(), RepositoryError> {
         sqlx::query(
-            "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, path, default_branch, color, execution_mode, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(project.id)
         .bind(&project.name)
         .bind(project.path.to_string_lossy().as_ref())
         .bind(&project.default_branch)
         .bind(&project.color)
+        .bind(project.execution_mode)
         .bind(project.created_at)
         .bind(project.updated_at)
         .execute(&self.pool)
@@ -62,13 +63,14 @@ impl Database {
     pub async fn update_project(&self, project: &Project) -> Result<(), RepositoryError> {
         let result = sqlx::query(
             "UPDATE projects
-             SET name = ?, path = ?, default_branch = ?, color = ?, updated_at = ?
+             SET name = ?, path = ?, default_branch = ?, color = ?, execution_mode = ?, updated_at = ?
              WHERE id = ?",
         )
         .bind(&project.name)
         .bind(project.path.to_string_lossy().as_ref())
         .bind(&project.default_branch)
         .bind(&project.color)
+        .bind(project.execution_mode)
         .bind(project.updated_at)
         .bind(project.id)
         .execute(&self.pool)
@@ -122,6 +124,7 @@ fn map_project(row: &SqliteRow) -> Result<Project, RepositoryError> {
         path: PathBuf::from(row.try_get::<String, _>("path").map_err(db_err)?),
         default_branch: row.try_get("default_branch").map_err(db_err)?,
         color: row.try_get("color").map_err(db_err)?,
+        execution_mode: row.try_get("execution_mode").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
         updated_at: row.try_get("updated_at").map_err(db_err)?,
     })

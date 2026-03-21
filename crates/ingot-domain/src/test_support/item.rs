@@ -20,6 +20,7 @@ pub struct ItemBuilder {
     escalation: Escalation,
     origin: Origin,
     priority: Priority,
+    sort_key: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -48,6 +49,7 @@ impl ItemBuilder {
             escalation: Escalation::None,
             origin: Origin::Manual,
             priority: Priority::Major,
+            sort_key: "80".to_string(),
             created_at: now,
             updated_at: now,
         }
@@ -98,6 +100,11 @@ impl ItemBuilder {
         self
     }
 
+    pub fn sort_key(mut self, sort_key: impl Into<String>) -> Self {
+        self.sort_key = sort_key.into();
+        self
+    }
+
     pub fn build(self) -> Item {
         Item {
             id: self.id,
@@ -113,6 +120,7 @@ impl ItemBuilder {
             priority: self.priority,
             labels: vec![],
             operator_notes: None,
+            sort_key: self.sort_key,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }

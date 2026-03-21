@@ -10,7 +10,28 @@ use serde_json::{Map, Value, json};
 
 use ingot_domain::git_ref::GitRef;
 
+use fractional_index::FractionalIndex;
+
 use crate::UseCaseError;
+
+pub fn next_sort_key_after(previous_sort_key: Option<&str>) -> String {
+    previous_sort_key
+        .map(|sort_key| {
+            FractionalIndex::new_after(&FractionalIndex::from_string(sort_key).unwrap_or_default())
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Returns a sort key that comes after all existing items (append to end).
+pub fn next_sort_key(items: &[Item]) -> String {
+    next_sort_key_after(
+        items
+            .iter()
+            .max_by_key(|item| &item.sort_key)
+            .map(|item| item.sort_key.as_str()),
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct CreateItemInput {
@@ -31,6 +52,7 @@ pub struct CreateItemInput {
 pub fn create_manual_item(
     project: &Project,
     input: CreateItemInput,
+    sort_key: String,
     created_at: DateTime<Utc>,
 ) -> (Item, ItemRevision) {
     let item_id = ingot_domain::ids::ItemId::new();
@@ -65,6 +87,7 @@ pub fn create_manual_item(
         priority,
         labels,
         operator_notes,
+        sort_key,
         created_at,
         updated_at: created_at,
     };
@@ -167,8 +190,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        CreateItemInput, create_manual_item, normalize_target_ref,
-        rework_budgets_from_policy_snapshot,
+        CreateItemInput, create_manual_item, next_sort_key, next_sort_key_after,
+        normalize_target_ref, rework_budgets_from_policy_snapshot,
     };
 
     #[test]
@@ -180,6 +203,7 @@ mod tests {
             path: "/tmp/test".into(),
             default_branch: "main".into(),
             color: "#000".into(),
+            execution_mode: ingot_domain::project::ExecutionMode::default(),
             created_at,
             updated_at: created_at,
         };
@@ -203,6 +227,7 @@ mod tests {
                     seed_target_commit_oid: "target".into(),
                 },
             },
+            "80".to_string(),
             created_at,
         );
 
@@ -237,6 +262,19 @@ mod tests {
             normalize_target_ref("refs/heads/release").expect("normalize heads ref"),
             "refs/heads/release"
         );
+    }
+
+    #[test]
+    fn next_sort_key_defaults_without_existing_items() {
+        assert_eq!(next_sort_key(&[]), next_sort_key_after(None));
+    }
+
+    #[test]
+    fn next_sort_key_after_reuses_fractional_index_progression() {
+        let first = next_sort_key_after(None);
+        let second = next_sort_key_after(Some(&first));
+
+        assert!(second > first);
     }
 
     #[test]

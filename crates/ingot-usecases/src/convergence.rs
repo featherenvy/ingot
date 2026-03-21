@@ -184,6 +184,12 @@ pub trait ConvergenceSystemActionPort: Send + Sync {
         project_id: ProjectId,
         item_id: ItemId,
     ) -> impl Future<Output = Result<bool, UseCaseError>> + Send;
+
+    fn auto_queue_convergence(
+        &self,
+        project_id: ProjectId,
+        item_id: ItemId,
+    ) -> impl Future<Output = Result<bool, UseCaseError>> + Send;
 }
 
 pub trait PreparedConvergenceFinalizePort: Send + Sync {
@@ -597,6 +603,15 @@ where
                     {
                         return Ok(true);
                     }
+                } else if project_state.project.execution_mode
+                    == ingot_domain::project::ExecutionMode::Autopilot
+                    && evaluation.next_recommended_action == RecommendedAction::PrepareConvergence
+                    && self
+                        .port
+                        .auto_queue_convergence(project_state.project.id, state.item_id)
+                        .await?
+                {
+                    return Ok(true);
                 }
             }
         }
@@ -1029,6 +1044,18 @@ mod tests {
                 .expect("calls lock")
                 .push(format!("finalize:{project_id}:{item_id}"));
             ready(Ok(self.auto_finalize_progress))
+        }
+
+        fn auto_queue_convergence(
+            &self,
+            project_id: ProjectId,
+            item_id: ItemId,
+        ) -> impl Future<Output = Result<bool, UseCaseError>> + Send {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(format!("auto_queue:{project_id}:{item_id}"));
+            ready(Ok(true))
         }
     }
 

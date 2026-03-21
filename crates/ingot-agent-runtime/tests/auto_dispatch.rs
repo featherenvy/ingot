@@ -5,10 +5,13 @@ use std::time::Duration;
 
 use ingot_agent_runtime::{DispatcherConfig, RuntimeError};
 use ingot_domain::git_ref::GitRef;
+use ingot_domain::item::ApprovalState;
 use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
     PhaseKind,
 };
+use ingot_domain::project::ExecutionMode;
+use ingot_domain::revision::ApprovalPolicy;
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
 use ingot_test_support::git::unique_temp_path;
@@ -302,6 +305,62 @@ async fn auto_dispatch_projected_review_rejects_missing_candidate_subject() {
         Err(RuntimeError::InvalidState(message))
             if message.contains("incomplete candidate subject")
     ));
+}
+
+#[tokio::test]
+async fn autopilot_author_initial_binds_current_target_ref_head_after_branch_advances() {
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+
+    let mut project = h.project.clone();
+    project.execution_mode = ExecutionMode::Autopilot;
+    h.db.update_project(&project).await.expect("update project");
+
+    let seeded_target_head = head_oid(&h.repo_path)
+        .await
+        .expect("seeded target head")
+        .into_inner();
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .approval_state(ApprovalState::NotRequired)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .approval_policy(ApprovalPolicy::NotRequired)
+        .seed_commit_oid(None::<String>)
+        .seed_target_commit_oid(Some(seeded_target_head.clone()))
+        .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    std::fs::write(h.repo_path.join("tracked.txt"), "advanced target head").expect("write tracked");
+    git_sync(&h.repo_path, &["add", "tracked.txt"]);
+    git_sync(&h.repo_path, &["commit", "-m", "advanced target head"]);
+    let current_target_head = head_oid(&h.repo_path)
+        .await
+        .expect("current target head")
+        .into_inner();
+
+    let dispatched = h
+        .dispatcher
+        .auto_dispatch_autopilot_locked(&project, item_id)
+        .await
+        .expect("auto-dispatch autopilot");
+    assert!(dispatched, "autopilot should queue author_initial");
+
+    let jobs = h.db.list_jobs_by_item(item.id).await.expect("list jobs");
+    assert_eq!(jobs.len(), 1, "autopilot should queue one authoring job");
+    let author_job = &jobs[0];
+    assert_eq!(author_job.step_id, step::AUTHOR_INITIAL);
+    assert_eq!(author_job.state.status(), JobStatus::Queued);
+    assert_eq!(
+        author_job.job_input,
+        JobInput::authoring_head(CommitOid::new(current_target_head))
+    );
 }
 
 #[tokio::test]

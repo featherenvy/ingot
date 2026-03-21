@@ -13,7 +13,7 @@ use ingot_domain::project::Project;
 use ingot_domain::workspace::{Workspace, WorkspaceStatus};
 use ingot_git::commands::{check_ref_format, current_branch_name, resolve_ref_oid};
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
-use ingot_usecases::item::normalize_target_ref;
+use ingot_usecases::item::{next_sort_key, normalize_target_ref};
 use ingot_usecases::{CompleteJobError, UseCaseError};
 use ingot_workspace::WorkspaceError;
 use serde::de::DeserializeOwned;
@@ -156,6 +156,18 @@ pub(super) async fn refresh_project_mirror(
         ensure_mirror(&paths).await.map_err(git_to_internal)?;
     }
     Ok(paths)
+}
+
+pub(super) async fn next_project_sort_key(
+    state: &AppState,
+    project_id: ProjectId,
+) -> Result<String, ApiError> {
+    let items = state
+        .db
+        .list_items_by_project(project_id)
+        .await
+        .map_err(repo_to_internal)?;
+    Ok(next_sort_key(&items))
 }
 
 pub(crate) async fn ensure_git_valid_target_ref(target_ref: &str) -> Result<(), ApiError> {

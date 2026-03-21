@@ -166,8 +166,8 @@ impl Database {
                 id, project_id, classification, workflow_version, lifecycle_state, parking_state,
                 done_reason, resolution_source, approval_state, escalation_state, escalation_reason,
                 current_revision_id, origin_kind, origin_finding_id, priority, labels, operator_notes,
-                created_at, updated_at, closed_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                sort_key, created_at, updated_at, closed_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(linked_item.id)
         .bind(linked_item.project_id)
@@ -186,6 +186,7 @@ impl Database {
         .bind(linked_item.priority)
         .bind(serde_json::to_string(&linked_item.labels).map_err(json_err)?)
         .bind(linked_item.operator_notes.as_deref())
+        .bind(&linked_item.sort_key)
         .bind(linked_item.created_at)
         .bind(linked_item.updated_at)
         .bind(linked_item.lifecycle.closed_at())

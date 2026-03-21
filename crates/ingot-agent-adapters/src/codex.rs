@@ -280,6 +280,7 @@ mod tests {
 
         assert!(args.iter().all(|arg| arg != "--ask-for-approval"));
         assert!(args.iter().all(|arg| arg != "-o"));
+        assert!(args.iter().all(|arg| arg != "--config"));
         assert!(args.iter().any(|arg| arg == "--output-last-message"));
         assert_eq!(
             args,
@@ -312,7 +313,8 @@ mod tests {
             )
             .expect("build args");
 
-        assert_eq!(args[2], "read-only");
+        let sandbox_idx = args.iter().position(|arg| arg == "--sandbox").unwrap();
+        assert_eq!(args[sandbox_idx + 1], "read-only");
     }
 
     #[test]

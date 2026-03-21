@@ -1,11 +1,16 @@
 use std::fs;
+use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
+use chrono::Utc;
+use ingot_domain::project::ExecutionMode;
+use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
 use tower::ServiceExt;
 
 mod common;
 use common::*;
+use ingot_usecases::{DispatchNotify, ProjectLocks};
 
 #[tokio::test]
 async fn create_project_route_registers_repo_and_exposes_project_config() {
@@ -246,4 +251,143 @@ async fn update_and_delete_project_routes_mutate_registered_project() {
         .await
         .expect("project count");
     assert_eq!(projects, 0);
+}
+
+#[tokio::test]
+async fn update_project_route_waits_for_project_mutation_lock() {
+    let repo = temp_git_repo("ingot-http-api");
+    let db = migrated_test_db("ingot-http-api-db").await;
+    let project_id = "prj_000000000000000000000000000000a1";
+    let project = test_project_builder(&repo, project_id)
+        .execution_mode(ExecutionMode::Autopilot)
+        .build()
+        .persist(&db)
+        .await
+        .expect("persist project");
+
+    let state_root =
+        std::env::temp_dir().join(format!("ingot-http-api-state-{}", uuid::Uuid::now_v7()));
+    let paths = project_repo_paths(state_root.as_path(), project.id, &repo);
+    ensure_mirror(&paths).await.expect("ensure mirror");
+
+    let locks = ProjectLocks::default();
+    let app = ingot_http_api::build_router_with_project_locks_and_state_root(
+        db.clone(),
+        locks.clone(),
+        state_root,
+        DispatchNotify::default(),
+    );
+
+    let guard = locks.acquire(project.id).await;
+    let response_task = tokio::spawn(
+        app.clone().oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{project_id}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "execution_mode": "manual"
+                    })
+                    .to_string(),
+                ))
+                .expect("build update request"),
+        ),
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !response_task.is_finished(),
+        "update route should wait for the project mutation lock"
+    );
+
+    drop(guard);
+
+    let response = response_task
+        .await
+        .expect("update task join")
+        .expect("update response");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn update_project_route_does_not_overwrite_fields_changed_while_waiting_for_lock() {
+    let repo = temp_git_repo("ingot-http-api");
+    let db = migrated_test_db("ingot-http-api-db").await;
+    let project_id = "prj_000000000000000000000000000000a2";
+    let project = test_project_builder(&repo, project_id)
+        .name("Original")
+        .execution_mode(ExecutionMode::Autopilot)
+        .build()
+        .persist(&db)
+        .await
+        .expect("persist project");
+
+    let state_root =
+        std::env::temp_dir().join(format!("ingot-http-api-state-{}", uuid::Uuid::now_v7()));
+    let paths = project_repo_paths(state_root.as_path(), project.id, &repo);
+    ensure_mirror(&paths).await.expect("ensure mirror");
+
+    let locks = ProjectLocks::default();
+    let app = ingot_http_api::build_router_with_project_locks_and_state_root(
+        db.clone(),
+        locks.clone(),
+        state_root,
+        DispatchNotify::default(),
+    );
+
+    let guard = locks.acquire(project.id).await;
+    let response_task = tokio::spawn(
+        app.clone().oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{project_id}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "execution_mode": "manual"
+                    })
+                    .to_string(),
+                ))
+                .expect("build update request"),
+        ),
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !response_task.is_finished(),
+        "update route should still be waiting for the project mutation lock"
+    );
+
+    let mut concurrently_updated = db
+        .get_project(project.id)
+        .await
+        .expect("load project for concurrent update");
+    concurrently_updated.name = "Renamed while blocked".into();
+    concurrently_updated.updated_at = Utc::now();
+    db.update_project(&concurrently_updated)
+        .await
+        .expect("persist concurrent update");
+
+    drop(guard);
+
+    let response = response_task
+        .await
+        .expect("update task join")
+        .expect("update response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read update body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("update json");
+    assert_eq!(json["execution_mode"].as_str(), Some("manual"));
+    assert_eq!(json["name"].as_str(), Some("Renamed while blocked"));
+
+    let stored = db
+        .get_project(project.id)
+        .await
+        .expect("reload stored project");
+    assert_eq!(stored.execution_mode, ExecutionMode::Manual);
+    assert_eq!(stored.name, "Renamed while blocked");
 }
