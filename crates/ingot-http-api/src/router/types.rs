@@ -2,9 +2,11 @@ use axum::extract::{FromRequest, Json, Request};
 use axum::response::{IntoResponse, Response};
 use ingot_domain::agent::{AdapterKind, AgentCapability};
 use ingot_domain::commit_oid::CommitOid;
+use ingot_domain::convergence::ConvergenceStatus;
+use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
 use ingot_domain::finding::{Finding, FindingTriageState};
 use ingot_domain::git_ref::GitRef;
-use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
+use ingot_domain::ids::{AgentId, ConvergenceId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::item::{Classification, Item, Priority};
 use ingot_domain::job::{Job, OutcomeClass};
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
@@ -29,8 +31,8 @@ pub struct ItemSummaryResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ConvergenceResponse {
-    pub id: String,
-    pub status: String,
+    pub id: ConvergenceId,
+    pub status: ConvergenceStatus,
     pub input_target_commit_oid: Option<CommitOid>,
     pub prepared_commit_oid: Option<CommitOid>,
     pub final_target_commit_oid: Option<CommitOid>,
@@ -39,9 +41,9 @@ pub struct ConvergenceResponse {
 
 #[derive(Debug, Serialize)]
 pub struct QueueStatusResponse {
-    pub state: Option<String>,
+    pub state: Option<ConvergenceQueueEntryStatus>,
     pub position: Option<u32>,
-    pub lane_owner_item_id: Option<String>,
+    pub lane_owner_item_id: Option<ItemId>,
     pub lane_target_ref: Option<GitRef>,
     pub checkout_sync_blocked: bool,
     pub checkout_sync_message: Option<String>,

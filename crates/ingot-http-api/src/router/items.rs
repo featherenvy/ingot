@@ -667,11 +667,8 @@ pub(super) async fn read_optional_json(
 
 pub(super) fn convergence_response(convergence: Convergence) -> ConvergenceResponse {
     ConvergenceResponse {
-        id: convergence.id.to_string(),
-        status: serde_json::to_value(convergence.state.status())
-            .ok()
-            .and_then(|value| value.as_str().map(ToOwned::to_owned))
-            .unwrap_or_else(|| "unknown".into()),
+        id: convergence.id,
+        status: convergence.state.status(),
         input_target_commit_oid: convergence.state.input_target_commit_oid().cloned(),
         prepared_commit_oid: convergence.state.prepared_commit_oid().cloned(),
         final_target_commit_oid: convergence.state.final_target_commit_oid().cloned(),
@@ -707,7 +704,7 @@ pub(super) fn overlay_evaluation_with_queue_state(
         set_awaiting_convergence_lane(&mut evaluation);
     }
 
-    if queue.state.as_deref() == Some("queued") {
+    if queue.state == Some(ConvergenceQueueEntryStatus::Queued) {
         set_awaiting_convergence_lane(&mut evaluation);
     }
 
@@ -757,19 +754,14 @@ pub(super) async fn load_queue_status(
     let lane_owner_item_id = lane_entries
         .iter()
         .find(|entry| entry.status == ConvergenceQueueEntryStatus::Head)
-        .map(|entry| entry.item_id.to_string());
+        .map(|entry| entry.item_id);
     let position = lane_entries
         .iter()
         .position(|entry| entry.id == active_entry.id)
         .map(|index| index as u32 + 1);
 
     let mut queue = QueueStatusResponse {
-        state: Some(
-            serde_json::to_value(active_entry.status)
-                .ok()
-                .and_then(|value| value.as_str().map(ToOwned::to_owned))
-                .unwrap_or_else(|| "unknown".into()),
-        ),
+        state: Some(active_entry.status),
         position,
         lane_owner_item_id,
         lane_target_ref: Some(active_entry.target_ref.clone()),
