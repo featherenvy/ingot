@@ -6,8 +6,10 @@ use crate::ids::{AgentId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId}
 use crate::step_id::StepId;
 use crate::workspace::WorkspaceKind;
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum JobStatus {
     Queued,
     Assigned,
@@ -34,8 +36,10 @@ impl JobStatus {
     }
 }
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum OutcomeClass {
     Clean,
     Findings,
@@ -45,8 +49,10 @@ pub enum OutcomeClass {
     Cancelled,
 }
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum PhaseKind {
     Author,
     Validate,
@@ -55,24 +61,30 @@ pub enum PhaseKind {
     System,
 }
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum ExecutionPermission {
     MayMutate,
     MustNotMutate,
     DaemonOnly,
 }
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum ContextPolicy {
     Fresh,
     ResumeContext,
     None,
 }
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum OutputArtifactKind {
     Commit,
     ReviewReport,

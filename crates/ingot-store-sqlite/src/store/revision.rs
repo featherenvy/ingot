@@ -6,9 +6,7 @@ use ingot_domain::revision_context::RevisionContext;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
-use super::helpers::{
-    db_err, db_write_err, encode_enum, json_err, parse_enum, parse_id, parse_json,
-};
+use super::helpers::{db_err, db_write_err, json_err, parse_json};
 use crate::db::Database;
 
 impl Database {
@@ -18,7 +16,7 @@ impl Database {
     ) -> Result<Vec<ItemRevision>, RepositoryError> {
         let rows =
             sqlx::query("SELECT * FROM item_revisions WHERE item_id = ? ORDER BY revision_no DESC")
-                .bind(item_id.to_string())
+                .bind(item_id)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(db_err)?;
@@ -31,7 +29,7 @@ impl Database {
         revision_id: ItemRevisionId,
     ) -> Result<ItemRevision, RepositoryError> {
         let row = sqlx::query("SELECT * FROM item_revisions WHERE id = ?")
-            .bind(revision_id.to_string())
+            .bind(revision_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(db_err)?;
@@ -50,19 +48,19 @@ impl Database {
                 seed_target_commit_oid, supersedes_revision_id, created_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(revision.id.to_string())
-        .bind(revision.item_id.to_string())
+        .bind(revision.id)
+        .bind(revision.item_id)
         .bind(revision.revision_no as i64)
         .bind(&revision.title)
         .bind(&revision.description)
         .bind(&revision.acceptance_criteria)
         .bind(&revision.target_ref)
-        .bind(encode_enum(&revision.approval_policy)?)
+        .bind(revision.approval_policy)
         .bind(serde_json::to_string(&revision.policy_snapshot).map_err(json_err)?)
         .bind(serde_json::to_string(&revision.template_map_snapshot).map_err(json_err)?)
         .bind(revision.seed.seed_commit_oid().cloned())
         .bind(revision.seed.seed_target_commit_oid().clone())
-        .bind(revision.supersedes_revision_id.map(|id| id.to_string()))
+        .bind(revision.supersedes_revision_id)
         .bind(revision.created_at)
         .execute(&self.pool)
         .await
@@ -76,7 +74,7 @@ impl Database {
         revision_id: ItemRevisionId,
     ) -> Result<Option<RevisionContext>, RepositoryError> {
         let row = sqlx::query("SELECT * FROM revision_contexts WHERE item_revision_id = ?")
-            .bind(revision_id.to_string())
+            .bind(revision_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(db_err)?;
@@ -98,10 +96,10 @@ impl Database {
                 updated_from_job_id = excluded.updated_from_job_id,
                 updated_at = excluded.updated_at",
         )
-        .bind(context.item_revision_id.to_string())
+        .bind(context.item_revision_id)
         .bind(&context.schema_version)
         .bind(serde_json::to_string(&context.payload).map_err(json_err)?)
-        .bind(context.updated_from_job_id.map(|id| id.to_string()))
+        .bind(context.updated_from_job_id)
         .bind(context.updated_at)
         .execute(&self.pool)
         .await
@@ -146,36 +144,32 @@ fn map_revision(row: &SqliteRow) -> Result<ItemRevision, RepositoryError> {
     let seed = AuthoringBaseSeed::from_parts(seed_commit_oid, seed_target_commit_oid);
 
     Ok(ItemRevision {
-        id: parse_id(row.try_get("id").map_err(db_err)?)?,
-        item_id: parse_id(row.try_get("item_id").map_err(db_err)?)?,
+        id: row.try_get("id").map_err(db_err)?,
+        item_id: row.try_get("item_id").map_err(db_err)?,
         revision_no: row.try_get::<i64, _>("revision_no").map_err(db_err)? as u32,
         title: row.try_get("title").map_err(db_err)?,
         description: row.try_get("description").map_err(db_err)?,
         acceptance_criteria: row.try_get("acceptance_criteria").map_err(db_err)?,
         target_ref: row.try_get("target_ref").map_err(db_err)?,
-        approval_policy: parse_enum(row.try_get("approval_policy").map_err(db_err)?)?,
+        approval_policy: row.try_get("approval_policy").map_err(db_err)?,
         policy_snapshot: parse_json(row.try_get("policy_snapshot").map_err(db_err)?)?,
         template_map_snapshot: parse_json(row.try_get("template_map_snapshot").map_err(db_err)?)?,
         seed,
         supersedes_revision_id: row
-            .try_get::<Option<String>, _>("supersedes_revision_id")
-            .map_err(db_err)?
-            .map(parse_id)
-            .transpose()?,
+            .try_get("supersedes_revision_id")
+            .map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
     })
 }
 
 fn map_revision_context(row: &SqliteRow) -> Result<RevisionContext, RepositoryError> {
     Ok(RevisionContext {
-        item_revision_id: parse_id(row.try_get("item_revision_id").map_err(db_err)?)?,
+        item_revision_id: row.try_get("item_revision_id").map_err(db_err)?,
         schema_version: row.try_get("schema_version").map_err(db_err)?,
         payload: parse_json(row.try_get("payload").map_err(db_err)?)?,
         updated_from_job_id: row
-            .try_get::<Option<String>, _>("updated_from_job_id")
-            .map_err(db_err)?
-            .map(parse_id)
-            .transpose()?,
+            .try_get("updated_from_job_id")
+            .map_err(db_err)?,
         updated_at: row.try_get("updated_at").map_err(db_err)?,
     })
 }

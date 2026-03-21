@@ -5,15 +5,19 @@ use crate::commit_oid::CommitOid;
 use crate::ids::{FindingId, ItemId, ItemRevisionId, JobId, ProjectId};
 use crate::step_id::StepId;
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum FindingSubjectKind {
     Candidate,
     Integrated,
 }
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum FindingSeverity {
     Low,
     Medium,
@@ -21,8 +25,10 @@ pub enum FindingSeverity {
     Critical,
 }
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum FindingTriageState {
     Untriaged,
     FixNow,

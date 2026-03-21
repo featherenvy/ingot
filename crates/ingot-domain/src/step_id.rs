@@ -4,8 +4,10 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 /// Closed set of workflow step identifiers used across the delivery workflow.
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum StepId {
     AuthorInitial,
     ReviewIncrementalInitial,

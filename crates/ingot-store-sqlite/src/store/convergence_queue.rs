@@ -5,7 +5,7 @@ use ingot_domain::ports::{ConvergenceQueueRepository, RepositoryError};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
-use super::helpers::{db_err, db_write_err, encode_enum, parse_enum, parse_id};
+use super::helpers::{db_err, db_write_err};
 use crate::db::Database;
 
 impl Database {
@@ -19,7 +19,7 @@ impl Database {
              WHERE item_id = ?
              ORDER BY created_at ASC, id ASC",
         )
-        .bind(item_id.to_string())
+        .bind(item_id)
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;
@@ -32,7 +32,7 @@ impl Database {
         queue_entry_id: ConvergenceQueueEntryId,
     ) -> Result<ConvergenceQueueEntry, RepositoryError> {
         let row = sqlx::query("SELECT * FROM convergence_queue_entries WHERE id = ?")
-            .bind(queue_entry_id.to_string())
+            .bind(queue_entry_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(db_err)?;
@@ -55,7 +55,7 @@ impl Database {
              ORDER BY created_at ASC, id ASC
              LIMIT 1",
         )
-        .bind(revision_id.to_string())
+        .bind(revision_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(db_err)?;
@@ -76,7 +76,7 @@ impl Database {
                AND status = 'head'
              LIMIT 1",
         )
-        .bind(project_id.to_string())
+        .bind(project_id)
         .bind(target_ref)
         .fetch_optional(&self.pool)
         .await
@@ -99,7 +99,7 @@ impl Database {
              ORDER BY created_at ASC, id ASC
              LIMIT 1",
         )
-        .bind(project_id.to_string())
+        .bind(project_id)
         .bind(target_ref)
         .fetch_optional(&self.pool)
         .await
@@ -121,7 +121,7 @@ impl Database {
                AND status IN ('queued', 'head')
              ORDER BY created_at ASC, id ASC",
         )
-        .bind(project_id.to_string())
+        .bind(project_id)
         .bind(target_ref)
         .fetch_all(&self.pool)
         .await
@@ -141,7 +141,7 @@ impl Database {
                AND status IN ('queued', 'head')
              ORDER BY target_ref ASC, created_at ASC, id ASC",
         )
-        .bind(project_id.to_string())
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;
@@ -159,12 +159,12 @@ impl Database {
                 created_at, updated_at, released_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(queue_entry.id.to_string())
-        .bind(queue_entry.project_id.to_string())
-        .bind(queue_entry.item_id.to_string())
-        .bind(queue_entry.item_revision_id.to_string())
+        .bind(queue_entry.id)
+        .bind(queue_entry.project_id)
+        .bind(queue_entry.item_id)
+        .bind(queue_entry.item_revision_id)
         .bind(&queue_entry.target_ref)
-        .bind(encode_enum(&queue_entry.status)?)
+        .bind(queue_entry.status)
         .bind(queue_entry.head_acquired_at)
         .bind(queue_entry.created_at)
         .bind(queue_entry.updated_at)
@@ -185,11 +185,11 @@ impl Database {
              SET status = ?, head_acquired_at = ?, updated_at = ?, released_at = ?
              WHERE id = ?",
         )
-        .bind(encode_enum(&queue_entry.status)?)
+        .bind(queue_entry.status)
         .bind(queue_entry.head_acquired_at)
         .bind(queue_entry.updated_at)
         .bind(queue_entry.released_at)
-        .bind(queue_entry.id.to_string())
+        .bind(queue_entry.id)
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -259,12 +259,12 @@ impl ConvergenceQueueRepository for Database {
 
 fn map_convergence_queue_entry(row: &SqliteRow) -> Result<ConvergenceQueueEntry, RepositoryError> {
     Ok(ConvergenceQueueEntry {
-        id: parse_id(row.try_get("id").map_err(db_err)?)?,
-        project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
-        item_id: parse_id(row.try_get("item_id").map_err(db_err)?)?,
-        item_revision_id: parse_id(row.try_get("item_revision_id").map_err(db_err)?)?,
+        id: row.try_get("id").map_err(db_err)?,
+        project_id: row.try_get("project_id").map_err(db_err)?,
+        item_id: row.try_get("item_id").map_err(db_err)?,
+        item_revision_id: row.try_get("item_revision_id").map_err(db_err)?,
         target_ref: row.try_get("target_ref").map_err(db_err)?,
-        status: parse_enum(row.try_get("status").map_err(db_err)?)?,
+        status: row.try_get("status").map_err(db_err)?,
         head_acquired_at: row.try_get("head_acquired_at").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
         updated_at: row.try_get("updated_at").map_err(db_err)?,

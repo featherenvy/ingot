@@ -5,7 +5,7 @@ use ingot_domain::ports::{ConvergenceRepository, RepositoryError};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
-use super::helpers::{db_err, db_write_err, encode_enum, parse_enum, parse_id};
+use super::helpers::{db_err, db_write_err};
 use crate::db::Database;
 
 impl Database {
@@ -15,7 +15,7 @@ impl Database {
     ) -> Result<Vec<Convergence>, RepositoryError> {
         let rows =
             sqlx::query("SELECT * FROM convergences WHERE item_id = ? ORDER BY created_at DESC")
-                .bind(item_id.to_string())
+                .bind(item_id)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(db_err)?;
@@ -28,7 +28,7 @@ impl Database {
         convergence_id: ConvergenceId,
     ) -> Result<Convergence, RepositoryError> {
         let row = sqlx::query("SELECT * FROM convergences WHERE id = ?")
-            .bind(convergence_id.to_string())
+            .bind(convergence_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(db_err)?;
@@ -66,16 +66,16 @@ impl Database {
                 prepared_commit_oid, final_target_commit_oid, conflict_summary, created_at, completed_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(convergence.id.to_string())
-        .bind(convergence.project_id.to_string())
-        .bind(convergence.item_id.to_string())
-        .bind(convergence.item_revision_id.to_string())
-        .bind(convergence.source_workspace_id.to_string())
-        .bind(state.integration_workspace_id().map(|id| id.to_string()))
+        .bind(convergence.id)
+        .bind(convergence.project_id)
+        .bind(convergence.item_id)
+        .bind(convergence.item_revision_id)
+        .bind(convergence.source_workspace_id)
+        .bind(state.integration_workspace_id())
         .bind(convergence.source_head_commit_oid.clone())
         .bind(&convergence.target_ref)
-        .bind(encode_enum(&convergence.strategy)?)
-        .bind(encode_enum(&state.status())?)
+        .bind(convergence.strategy)
+        .bind(state.status())
         .bind(state.input_target_commit_oid().cloned())
         .bind(state.prepared_commit_oid().cloned())
         .bind(state.final_target_commit_oid().cloned())
@@ -102,17 +102,17 @@ impl Database {
                  conflict_summary = ?, completed_at = ?
              WHERE id = ?",
         )
-        .bind(state.integration_workspace_id().map(|id| id.to_string()))
+        .bind(state.integration_workspace_id())
         .bind(convergence.source_head_commit_oid.clone())
         .bind(&convergence.target_ref)
-        .bind(encode_enum(&convergence.strategy)?)
-        .bind(encode_enum(&state.status())?)
+        .bind(convergence.strategy)
+        .bind(state.status())
         .bind(state.input_target_commit_oid().cloned())
         .bind(state.prepared_commit_oid().cloned())
         .bind(state.final_target_commit_oid().cloned())
         .bind(state.conflict_summary())
         .bind(state.completed_at())
-        .bind(convergence.id.to_string())
+        .bind(convergence.id)
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -131,7 +131,7 @@ impl Database {
         let rows = sqlx::query(
             "SELECT * FROM convergences WHERE item_revision_id = ? ORDER BY created_at DESC",
         )
-        .bind(revision_id.to_string())
+        .bind(revision_id)
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;
@@ -151,7 +151,7 @@ impl Database {
              ORDER BY created_at DESC
              LIMIT 1",
         )
-        .bind(revision_id.to_string())
+        .bind(revision_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(db_err)?;
@@ -171,7 +171,7 @@ impl Database {
              ORDER BY created_at DESC
              LIMIT 1",
         )
-        .bind(revision_id.to_string())
+        .bind(revision_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(db_err)?;
@@ -230,14 +230,12 @@ fn required_convergence_field<T>(
 }
 
 fn map_convergence(row: &SqliteRow) -> Result<Convergence, RepositoryError> {
-    let status: ConvergenceStatus = parse_enum(row.try_get("status").map_err(db_err)?)?;
+    let status: ConvergenceStatus = row.try_get("status").map_err(db_err)?;
     let status_str = row.try_get::<String, _>("status").map_err(db_err)?;
 
     let integration_workspace_id: Option<ingot_domain::ids::WorkspaceId> = row
-        .try_get::<Option<String>, _>("integration_workspace_id")
-        .map_err(db_err)?
-        .map(parse_id)
-        .transpose()?;
+        .try_get("integration_workspace_id")
+        .map_err(db_err)?;
     let input_target_commit_oid: Option<CommitOid> =
         row.try_get("input_target_commit_oid").map_err(db_err)?;
     let prepared_commit_oid: Option<CommitOid> =
@@ -331,14 +329,14 @@ fn map_convergence(row: &SqliteRow) -> Result<Convergence, RepositoryError> {
     };
 
     Ok(Convergence {
-        id: parse_id(row.try_get("id").map_err(db_err)?)?,
-        project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
-        item_id: parse_id(row.try_get("item_id").map_err(db_err)?)?,
-        item_revision_id: parse_id(row.try_get("item_revision_id").map_err(db_err)?)?,
-        source_workspace_id: parse_id(row.try_get("source_workspace_id").map_err(db_err)?)?,
+        id: row.try_get("id").map_err(db_err)?,
+        project_id: row.try_get("project_id").map_err(db_err)?,
+        item_id: row.try_get("item_id").map_err(db_err)?,
+        item_revision_id: row.try_get("item_revision_id").map_err(db_err)?,
+        source_workspace_id: row.try_get("source_workspace_id").map_err(db_err)?,
         source_head_commit_oid: row.try_get("source_head_commit_oid").map_err(db_err)?,
         target_ref: row.try_get("target_ref").map_err(db_err)?,
-        strategy: parse_enum(row.try_get("strategy").map_err(db_err)?)?,
+        strategy: row.try_get("strategy").map_err(db_err)?,
         target_head_valid: None,
         created_at: row.try_get("created_at").map_err(db_err)?,
         state,
@@ -422,11 +420,11 @@ mod tests {
                 prepared_commit_oid
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(ConvergenceId::new().to_string())
-        .bind(project_id.to_string())
-        .bind(item_id.to_string())
-        .bind(revision_id.to_string())
-        .bind(source_workspace_id.to_string())
+        .bind(ConvergenceId::new())
+        .bind(project_id)
+        .bind(item_id)
+        .bind(revision_id)
+        .bind(source_workspace_id)
         .bind(Option::<String>::None)
         .bind("head")
         .bind("refs/heads/main")
@@ -462,11 +460,11 @@ mod tests {
                 source_head_commit_oid, target_ref, strategy, status
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(convergence_id.to_string())
-        .bind(project_id.to_string())
-        .bind(item_id.to_string())
-        .bind(revision_id.to_string())
-        .bind(source_workspace_id.to_string())
+        .bind(convergence_id)
+        .bind(project_id)
+        .bind(item_id)
+        .bind(revision_id)
+        .bind(source_workspace_id)
         .bind(Option::<String>::None)
         .bind("head")
         .bind("refs/heads/main")

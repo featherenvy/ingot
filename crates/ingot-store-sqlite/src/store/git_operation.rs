@@ -4,9 +4,7 @@ use ingot_domain::ports::{GitOperationRepository, RepositoryError};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
-use super::helpers::{
-    db_err, db_write_err, encode_enum, json_err, parse_enum, parse_id, parse_json,
-};
+use super::helpers::{db_err, db_write_err, json_err, parse_json};
 use crate::db::Database;
 
 impl Database {
@@ -21,17 +19,17 @@ impl Database {
                 expected_old_oid, new_oid, commit_oid, status, metadata, created_at, completed_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(wire.id.to_string())
-        .bind(wire.project_id.to_string())
-        .bind(encode_enum(&wire.operation_kind)?)
-        .bind(encode_enum(&wire.entity_type)?)
+        .bind(wire.id)
+        .bind(wire.project_id)
+        .bind(wire.operation_kind)
+        .bind(wire.entity_type)
         .bind(&wire.entity_id)
-        .bind(wire.workspace_id.map(|id| id.to_string()))
+        .bind(wire.workspace_id)
         .bind(wire.ref_name.clone())
         .bind(wire.expected_old_oid.clone())
         .bind(wire.new_oid.clone())
         .bind(wire.commit_oid.clone())
-        .bind(encode_enum(&wire.status)?)
+        .bind(wire.status)
         .bind(
             wire.metadata
                 .as_ref()
@@ -59,12 +57,12 @@ impl Database {
                  status = ?, metadata = ?, completed_at = ?
              WHERE id = ?",
         )
-        .bind(wire.workspace_id.map(|id| id.to_string()))
+        .bind(wire.workspace_id)
         .bind(wire.ref_name.clone())
         .bind(wire.expected_old_oid.clone())
         .bind(wire.new_oid.clone())
         .bind(wire.commit_oid.clone())
-        .bind(encode_enum(&wire.status)?)
+        .bind(wire.status)
         .bind(
             wire.metadata
                 .as_ref()
@@ -73,7 +71,7 @@ impl Database {
                 .map_err(json_err)?,
         )
         .bind(wire.completed_at)
-        .bind(wire.id.to_string())
+        .bind(wire.id)
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -117,7 +115,7 @@ impl Database {
              ORDER BY created_at ASC
              LIMIT 1",
         )
-        .bind(convergence_id.to_string())
+        .bind(convergence_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(db_err)?;
@@ -146,21 +144,19 @@ impl GitOperationRepository for Database {
 
 fn map_git_operation(row: &SqliteRow) -> Result<GitOperation, RepositoryError> {
     let wire = GitOperationWire {
-        id: parse_id(row.try_get("id").map_err(db_err)?)?,
-        project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
-        operation_kind: parse_enum(row.try_get("operation_kind").map_err(db_err)?)?,
-        entity_type: parse_enum(row.try_get("entity_type").map_err(db_err)?)?,
+        id: row.try_get("id").map_err(db_err)?,
+        project_id: row.try_get("project_id").map_err(db_err)?,
+        operation_kind: row.try_get("operation_kind").map_err(db_err)?,
+        entity_type: row.try_get("entity_type").map_err(db_err)?,
         entity_id: row.try_get("entity_id").map_err(db_err)?,
         workspace_id: row
-            .try_get::<Option<String>, _>("workspace_id")
-            .map_err(db_err)?
-            .map(parse_id)
-            .transpose()?,
+            .try_get("workspace_id")
+            .map_err(db_err)?,
         ref_name: row.try_get("ref_name").map_err(db_err)?,
         expected_old_oid: row.try_get("expected_old_oid").map_err(db_err)?,
         new_oid: row.try_get("new_oid").map_err(db_err)?,
         commit_oid: row.try_get("commit_oid").map_err(db_err)?,
-        status: parse_enum(row.try_get("status").map_err(db_err)?)?,
+        status: row.try_get("status").map_err(db_err)?,
         metadata: row
             .try_get::<Option<String>, _>("metadata")
             .map_err(db_err)?

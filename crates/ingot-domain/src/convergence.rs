@@ -5,14 +5,18 @@ use crate::commit_oid::CommitOid;
 use crate::git_ref::GitRef;
 use crate::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId, WorkspaceId};
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum ConvergenceStrategy {
     RebaseThenFastForward,
 }
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum ConvergenceStatus {
     Queued,
     Running,

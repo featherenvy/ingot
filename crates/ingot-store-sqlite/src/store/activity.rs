@@ -4,9 +4,7 @@ use ingot_domain::ports::{ActivityRepository, RepositoryError};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
-use super::helpers::{
-    db_err, db_write_err, encode_enum, json_err, parse_enum, parse_id, parse_json,
-};
+use super::helpers::{db_err, db_write_err, json_err, parse_json};
 use crate::db::Database;
 
 impl Database {
@@ -16,10 +14,10 @@ impl Database {
                 id, project_id, event_type, entity_type, entity_id, payload, created_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(activity.id.to_string())
-        .bind(activity.project_id.to_string())
-        .bind(encode_enum(&activity.event_type)?)
-        .bind(encode_enum(&activity.entity_type)?)
+        .bind(activity.id)
+        .bind(activity.project_id)
+        .bind(activity.event_type)
+        .bind(activity.entity_type)
         .bind(&activity.entity_id)
         .bind(serde_json::to_string(&activity.payload).map_err(json_err)?)
         .bind(activity.created_at)
@@ -43,7 +41,7 @@ impl Database {
              ORDER BY created_at DESC
              LIMIT ? OFFSET ?",
         )
-        .bind(project_id.to_string())
+        .bind(project_id)
         .bind(limit as i64)
         .bind(offset as i64)
         .fetch_all(&self.pool)
@@ -71,10 +69,10 @@ impl ActivityRepository for Database {
 
 fn map_activity(row: &SqliteRow) -> Result<Activity, RepositoryError> {
     Ok(Activity {
-        id: parse_id(row.try_get("id").map_err(db_err)?)?,
-        project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
-        event_type: parse_enum(row.try_get("event_type").map_err(db_err)?)?,
-        entity_type: parse_enum(row.try_get("entity_type").map_err(db_err)?)?,
+        id: row.try_get("id").map_err(db_err)?,
+        project_id: row.try_get("project_id").map_err(db_err)?,
+        event_type: row.try_get("event_type").map_err(db_err)?,
+        entity_type: row.try_get("entity_type").map_err(db_err)?,
         entity_id: row.try_get("entity_id").map_err(db_err)?,
         payload: parse_json(row.try_get("payload").map_err(db_err)?)?,
         created_at: row.try_get("created_at").map_err(db_err)?,

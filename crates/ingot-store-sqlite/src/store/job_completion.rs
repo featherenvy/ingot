@@ -12,7 +12,7 @@ use sqlx::Row;
 use sqlx::{Sqlite, Transaction};
 
 use super::finding::upsert_finding;
-use super::helpers::{db_err, encode_enum, item_revision_is_stale, serialize_optional_json};
+use super::helpers::{db_err, item_revision_is_stale, serialize_optional_json};
 use crate::db::Database;
 
 impl Database {
@@ -46,7 +46,7 @@ impl Database {
 
         let finding_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM findings WHERE source_job_id = ?")
-                .bind(job_id.to_string())
+                .bind(job_id)
                 .fetch_one(&self.pool)
                 .await
                 .map_err(db_err)?;
@@ -95,16 +95,16 @@ impl Database {
                          AND input_target_commit_oid = ?
                    )",
             )
-            .bind(encode_enum(&mutation.outcome_class)?)
+            .bind(mutation.outcome_class)
             .bind(mutation.result_schema_version.as_deref())
             .bind(&serialized_result_payload)
             .bind(mutation.output_commit_oid.clone())
             .bind(Utc::now())
-            .bind(mutation.job_id.to_string())
-            .bind(mutation.item_id.to_string())
-            .bind(mutation.expected_item_revision_id.to_string())
-            .bind(prepared_convergence_guard.convergence_id.to_string())
-            .bind(prepared_convergence_guard.item_revision_id.to_string())
+            .bind(mutation.job_id)
+            .bind(mutation.item_id)
+            .bind(mutation.expected_item_revision_id)
+            .bind(prepared_convergence_guard.convergence_id)
+            .bind(prepared_convergence_guard.item_revision_id)
             .bind(&prepared_convergence_guard.target_ref)
             .bind(prepared_convergence_guard.expected_target_head_oid.clone())
             .execute(&mut *tx)
@@ -128,14 +128,14 @@ impl Database {
                          AND current_revision_id = ?
                    )",
             )
-            .bind(encode_enum(&mutation.outcome_class)?)
+            .bind(mutation.outcome_class)
             .bind(mutation.result_schema_version.as_deref())
             .bind(&serialized_result_payload)
             .bind(mutation.output_commit_oid.clone())
             .bind(Utc::now())
-            .bind(mutation.job_id.to_string())
-            .bind(mutation.item_id.to_string())
-            .bind(mutation.expected_item_revision_id.to_string())
+            .bind(mutation.job_id)
+            .bind(mutation.item_id)
+            .bind(mutation.expected_item_revision_id)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?
@@ -158,8 +158,8 @@ impl Database {
             )
             .bind(Escalation::None.as_db_str())
             .bind(Utc::now())
-            .bind(mutation.item_id.to_string())
-            .bind(mutation.expected_item_revision_id.to_string())
+            .bind(mutation.item_id)
+            .bind(mutation.expected_item_revision_id)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
@@ -177,10 +177,10 @@ impl Database {
                      WHERE id = ?
                        AND current_revision_id = ?",
                 )
-                .bind(encode_enum(approval_state)?)
+                .bind(*approval_state)
                 .bind(Utc::now())
-                .bind(mutation.item_id.to_string())
-                .bind(mutation.expected_item_revision_id.to_string())
+                .bind(mutation.item_id)
+                .bind(mutation.expected_item_revision_id)
                 .execute(&mut *tx)
                 .await
                 .map_err(db_err)?;
@@ -236,7 +236,7 @@ async fn classify_job_completion_conflict(
              ORDER BY created_at DESC
              LIMIT 1",
         )
-        .bind(prepared_convergence_guard.item_revision_id.to_string())
+        .bind(prepared_convergence_guard.item_revision_id)
         .fetch_optional(&mut **tx)
         .await
         .map_err(db_err)?;
@@ -247,13 +247,14 @@ async fn classify_job_completion_conflict(
             ));
         };
 
-        let prepared_convergence_id: String = prepared_convergence.try_get("id").map_err(db_err)?;
+        let prepared_convergence_id: ingot_domain::ids::ConvergenceId =
+            prepared_convergence.try_get("id").map_err(db_err)?;
         let prepared_target_ref: GitRef =
             prepared_convergence.try_get("target_ref").map_err(db_err)?;
         let input_target_commit_oid: Option<CommitOid> = prepared_convergence
             .try_get("input_target_commit_oid")
             .map_err(db_err)?;
-        if prepared_convergence_id != prepared_convergence_guard.convergence_id.to_string()
+        if prepared_convergence_id != prepared_convergence_guard.convergence_id
             || prepared_target_ref != prepared_convergence_guard.target_ref
             || input_target_commit_oid.as_ref()
                 != Some(&prepared_convergence_guard.expected_target_head_oid)

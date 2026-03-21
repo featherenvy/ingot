@@ -4,9 +4,7 @@ use ingot_domain::ports::{AgentRepository, RepositoryError};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
-use super::helpers::{
-    db_err, db_write_err, encode_enum, json_err, parse_enum, parse_id, parse_json,
-};
+use super::helpers::{db_err, db_write_err, json_err, parse_json};
 use crate::db::Database;
 
 impl Database {
@@ -31,7 +29,7 @@ impl Database {
              FROM agents
              WHERE id = ?",
         )
-        .bind(agent_id.to_string())
+        .bind(agent_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(db_err)?;
@@ -49,16 +47,16 @@ impl Database {
                 health_check, status
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(agent.id.to_string())
+        .bind(agent.id)
         .bind(&agent.slug)
         .bind(&agent.name)
-        .bind(encode_enum(&agent.adapter_kind)?)
+        .bind(agent.adapter_kind)
         .bind(&agent.provider)
         .bind(&agent.model)
         .bind(&agent.cli_path)
         .bind(serde_json::to_string(&agent.capabilities).map_err(json_err)?)
         .bind(agent.health_check.as_deref())
-        .bind(encode_enum(&agent.status)?)
+        .bind(agent.status)
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -75,14 +73,14 @@ impl Database {
         )
         .bind(&agent.slug)
         .bind(&agent.name)
-        .bind(encode_enum(&agent.adapter_kind)?)
+        .bind(agent.adapter_kind)
         .bind(&agent.provider)
         .bind(&agent.model)
         .bind(&agent.cli_path)
         .bind(serde_json::to_string(&agent.capabilities).map_err(json_err)?)
         .bind(agent.health_check.as_deref())
-        .bind(encode_enum(&agent.status)?)
-        .bind(agent.id.to_string())
+        .bind(agent.status)
+        .bind(agent.id)
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -96,7 +94,7 @@ impl Database {
 
     pub async fn delete_agent(&self, agent_id: AgentId) -> Result<(), RepositoryError> {
         let result = sqlx::query("DELETE FROM agents WHERE id = ?")
-            .bind(agent_id.to_string())
+            .bind(agent_id)
             .execute(&self.pool)
             .await
             .map_err(db_write_err)?;
@@ -129,15 +127,15 @@ impl AgentRepository for Database {
 
 fn map_agent(row: &SqliteRow) -> Result<Agent, RepositoryError> {
     Ok(Agent {
-        id: parse_id(row.try_get("id").map_err(db_err)?)?,
+        id: row.try_get("id").map_err(db_err)?,
         slug: row.try_get("slug").map_err(db_err)?,
         name: row.try_get("name").map_err(db_err)?,
-        adapter_kind: parse_enum(row.try_get("adapter_kind").map_err(db_err)?)?,
+        adapter_kind: row.try_get("adapter_kind").map_err(db_err)?,
         provider: row.try_get("provider").map_err(db_err)?,
         model: row.try_get("model").map_err(db_err)?,
         cli_path: row.try_get("cli_path").map_err(db_err)?,
         capabilities: parse_json(row.try_get("capabilities").map_err(db_err)?)?,
         health_check: row.try_get("health_check").map_err(db_err)?,
-        status: parse_enum(row.try_get("status").map_err(db_err)?)?,
+        status: row.try_get("status").map_err(db_err)?,
     })
 }

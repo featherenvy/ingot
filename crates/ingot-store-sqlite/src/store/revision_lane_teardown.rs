@@ -4,7 +4,7 @@ use ingot_domain::ports::{
     RepositoryError, RevisionLaneTeardownMutation, RevisionLaneTeardownRepository,
 };
 
-use super::helpers::{db_err, db_write_err, encode_enum, item_revision_is_stale, json_err};
+use super::helpers::{db_err, db_write_err, item_revision_is_stale, json_err};
 use crate::db::Database;
 
 impl Database {
@@ -36,14 +36,14 @@ impl Database {
                          AND current_revision_id = ?
                    )",
             )
-            .bind(encode_enum(&params.status)?)
-            .bind(params.outcome_class.as_ref().map(encode_enum).transpose()?)
+            .bind(params.status)
+            .bind(params.outcome_class)
             .bind(params.error_code.as_deref())
             .bind(params.error_message.as_deref())
             .bind(Utc::now())
-            .bind(params.job_id.to_string())
-            .bind(params.item_id.to_string())
-            .bind(params.expected_item_revision_id.to_string())
+            .bind(params.job_id)
+            .bind(params.item_id)
+            .bind(params.expected_item_revision_id)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
@@ -58,7 +58,7 @@ impl Database {
                 let job_is_active: Option<String> = sqlx::query_scalar(
                     "SELECT id FROM jobs WHERE id = ? AND status IN ('queued', 'assigned', 'running')",
                 )
-                .bind(params.job_id.to_string())
+                .bind(params.job_id)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(db_err)?;
@@ -84,11 +84,11 @@ impl Database {
                 .bind(workspace.workspace_ref.clone())
                 .bind(workspace.state.base_commit_oid().cloned())
                 .bind(workspace.state.head_commit_oid().cloned())
-                .bind(encode_enum(&workspace.retention_policy)?)
-                .bind(encode_enum(&workspace.state.status())?)
-                .bind(workspace.state.current_job_id().map(|id| id.to_string()))
+                .bind(workspace.retention_policy)
+                .bind(workspace.state.status())
+                .bind(workspace.state.current_job_id())
                 .bind(workspace.updated_at)
-                .bind(workspace.id.to_string())
+                .bind(workspace.id)
                 .execute(&mut *tx)
                 .await
                 .map_err(db_write_err)?;
@@ -101,10 +101,10 @@ impl Database {
                     id, project_id, event_type, entity_type, entity_id, payload, created_at
                  ) VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(activity.id.to_string())
-            .bind(activity.project_id.to_string())
-            .bind(encode_enum(&activity.event_type)?)
-            .bind(encode_enum(&activity.entity_type)?)
+            .bind(activity.id)
+            .bind(activity.project_id)
+            .bind(activity.event_type)
+            .bind(activity.entity_type)
             .bind(&activity.entity_id)
             .bind(serde_json::to_string(&activity.payload).map_err(json_err)?)
             .bind(activity.created_at)
@@ -124,17 +124,17 @@ impl Database {
                      conflict_summary = ?, completed_at = ?
                  WHERE id = ?",
             )
-            .bind(state.integration_workspace_id().map(|id| id.to_string()))
+            .bind(state.integration_workspace_id())
             .bind(convergence.source_head_commit_oid.clone())
             .bind(&convergence.target_ref)
-            .bind(encode_enum(&convergence.strategy)?)
-            .bind(encode_enum(&state.status())?)
+            .bind(convergence.strategy)
+            .bind(state.status())
             .bind(state.input_target_commit_oid().cloned())
             .bind(state.prepared_commit_oid().cloned())
             .bind(state.final_target_commit_oid().cloned())
             .bind(state.conflict_summary())
             .bind(state.completed_at())
-            .bind(convergence.id.to_string())
+            .bind(convergence.id)
             .execute(&mut *tx)
             .await
             .map_err(db_write_err)?;
@@ -158,11 +158,11 @@ impl Database {
             .bind(workspace.workspace_ref.clone())
             .bind(workspace.state.base_commit_oid().cloned())
             .bind(workspace.state.head_commit_oid().cloned())
-            .bind(encode_enum(&workspace.retention_policy)?)
-            .bind(encode_enum(&workspace.state.status())?)
-            .bind(workspace.state.current_job_id().map(|id| id.to_string()))
+            .bind(workspace.retention_policy)
+            .bind(workspace.state.status())
+            .bind(workspace.state.current_job_id())
             .bind(workspace.updated_at)
-            .bind(workspace.id.to_string())
+            .bind(workspace.id)
             .execute(&mut *tx)
             .await
             .map_err(db_write_err)?;
@@ -179,11 +179,11 @@ impl Database {
                  SET status = ?, head_acquired_at = ?, updated_at = ?, released_at = ?
                  WHERE id = ?",
             )
-            .bind(encode_enum(&queue_entry.status)?)
+            .bind(queue_entry.status)
             .bind(queue_entry.head_acquired_at)
             .bind(queue_entry.updated_at)
             .bind(queue_entry.released_at)
-            .bind(queue_entry.id.to_string())
+            .bind(queue_entry.id)
             .execute(&mut *tx)
             .await
             .map_err(db_write_err)?;
@@ -202,12 +202,12 @@ impl Database {
                      commit_oid = ?, status = ?, metadata = ?, completed_at = ?
                  WHERE id = ?",
             )
-            .bind(wire.workspace_id.map(|id| id.to_string()))
+            .bind(wire.workspace_id)
             .bind(wire.ref_name.clone())
             .bind(wire.expected_old_oid.clone())
             .bind(wire.new_oid.clone())
             .bind(wire.commit_oid.clone())
-            .bind(encode_enum(&wire.status)?)
+            .bind(wire.status)
             .bind(
                 wire.metadata
                     .as_ref()
@@ -216,7 +216,7 @@ impl Database {
                     .map_err(json_err)?,
             )
             .bind(wire.completed_at)
-            .bind(wire.id.to_string())
+            .bind(wire.id)
             .execute(&mut *tx)
             .await
             .map_err(db_write_err)?;
@@ -233,10 +233,10 @@ impl Database {
                     id, project_id, event_type, entity_type, entity_id, payload, created_at
                  ) VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(activity.id.to_string())
-            .bind(activity.project_id.to_string())
-            .bind(encode_enum(&activity.event_type)?)
-            .bind(encode_enum(&activity.entity_type)?)
+            .bind(activity.id)
+            .bind(activity.project_id)
+            .bind(activity.event_type)
+            .bind(activity.entity_type)
             .bind(&activity.entity_id)
             .bind(serde_json::to_string(&activity.payload).map_err(json_err)?)
             .bind(activity.created_at)

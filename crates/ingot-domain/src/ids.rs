@@ -63,6 +63,48 @@ macro_rules! define_id {
                 value.parse().map_err(D::Error::custom)
             }
         }
+
+        #[cfg(feature = "sqlx")]
+        impl sqlx::Type<sqlx::Sqlite> for $name {
+            fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+                <String as sqlx::Type<sqlx::Sqlite>>::type_info()
+            }
+
+            fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+                <String as sqlx::Type<sqlx::Sqlite>>::compatible(ty)
+            }
+        }
+
+        #[cfg(feature = "sqlx")]
+        impl<'q> sqlx::Encode<'q, sqlx::Sqlite> for $name {
+            fn encode(
+                self,
+                buf: &mut <sqlx::Sqlite as sqlx::Database>::ArgumentBuffer<'q>,
+            ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+                <String as sqlx::Encode<sqlx::Sqlite>>::encode(self.to_string(), buf)
+            }
+
+            fn encode_by_ref(
+                &self,
+                buf: &mut <sqlx::Sqlite as sqlx::Database>::ArgumentBuffer<'q>,
+            ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+                <String as sqlx::Encode<sqlx::Sqlite>>::encode(self.to_string(), buf)
+            }
+
+            fn size_hint(&self) -> usize {
+                self.to_string().len()
+            }
+        }
+
+        #[cfg(feature = "sqlx")]
+        impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for $name {
+            fn decode(
+                value: <sqlx::Sqlite as sqlx::Database>::ValueRef<'r>,
+            ) -> Result<Self, sqlx::error::BoxDynError> {
+                let value = <String as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
+                value.parse().map_err(Into::into)
+            }
+        }
     };
 }
 

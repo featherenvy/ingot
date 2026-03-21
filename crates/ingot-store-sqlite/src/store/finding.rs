@@ -8,9 +8,7 @@ use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Sqlite, Transaction};
 
-use super::helpers::{
-    db_err, db_write_err, encode_enum, json_err, parse_enum, parse_id, parse_json,
-};
+use super::helpers::{db_err, db_write_err, json_err, parse_json};
 use crate::db::Database;
 
 impl Database {
@@ -20,7 +18,7 @@ impl Database {
     ) -> Result<Vec<Finding>, RepositoryError> {
         let rows =
             sqlx::query("SELECT * FROM findings WHERE source_item_id = ? ORDER BY created_at DESC")
-                .bind(item_id.to_string())
+                .bind(item_id)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(db_err)?;
@@ -30,7 +28,7 @@ impl Database {
 
     pub async fn get_finding(&self, finding_id: FindingId) -> Result<Finding, RepositoryError> {
         let row = sqlx::query("SELECT * FROM findings WHERE id = ?")
-            .bind(finding_id.to_string())
+            .bind(finding_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(db_err)?;
@@ -50,24 +48,24 @@ impl Database {
                 paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(finding.id.to_string())
-        .bind(finding.project_id.to_string())
-        .bind(finding.source_item_id.to_string())
-        .bind(finding.source_item_revision_id.to_string())
-        .bind(finding.source_job_id.to_string())
-        .bind(finding.source_step_id.as_str())
+        .bind(finding.id)
+        .bind(finding.project_id)
+        .bind(finding.source_item_id)
+        .bind(finding.source_item_revision_id)
+        .bind(finding.source_job_id)
+        .bind(finding.source_step_id)
         .bind(&finding.source_report_schema_version)
         .bind(&finding.source_finding_key)
-        .bind(encode_enum(&finding.source_subject_kind)?)
+        .bind(finding.source_subject_kind)
         .bind(finding.source_subject_base_commit_oid.clone())
         .bind(finding.source_subject_head_commit_oid.clone())
         .bind(&finding.code)
-        .bind(encode_enum(&finding.severity)?)
+        .bind(finding.severity)
         .bind(&finding.summary)
         .bind(serde_json::to_string(&finding.paths).map_err(json_err)?)
         .bind(serde_json::to_string(&finding.evidence).map_err(json_err)?)
-        .bind(encode_enum(&finding.triage.state())?)
-        .bind(finding.triage.linked_item_id().map(|id| id.to_string()))
+        .bind(finding.triage.state())
+        .bind(finding.triage.linked_item_id())
         .bind(finding.triage.triage_note())
         .bind(finding.created_at)
         .bind(finding.triage.triaged_at())
@@ -86,7 +84,7 @@ impl Database {
         let row = sqlx::query(
             "SELECT * FROM findings WHERE source_job_id = ? AND source_finding_key = ?",
         )
-        .bind(job_id.to_string())
+        .bind(job_id)
         .bind(source_finding_key)
         .fetch_optional(&self.pool)
         .await
@@ -101,11 +99,11 @@ impl Database {
              SET triage_state = ?, triage_note = ?, triaged_at = ?, linked_item_id = ?
              WHERE id = ?",
         )
-        .bind(encode_enum(&finding.triage.state())?)
+        .bind(finding.triage.state())
         .bind(finding.triage.triage_note())
         .bind(finding.triage.triaged_at())
-        .bind(finding.triage.linked_item_id().map(|id| id.to_string()))
-        .bind(finding.id.to_string())
+        .bind(finding.triage.linked_item_id())
+        .bind(finding.id)
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -125,11 +123,11 @@ impl Database {
              SET triage_state = ?, triage_note = ?, triaged_at = ?, linked_item_id = ?
              WHERE id = ?",
         )
-        .bind(encode_enum(&finding.triage.state())?)
+        .bind(finding.triage.state())
         .bind(finding.triage.triage_note())
         .bind(finding.triage.triaged_at())
-        .bind(finding.triage.linked_item_id().map(|id| id.to_string()))
-        .bind(finding.id.to_string())
+        .bind(finding.triage.linked_item_id())
+        .bind(finding.id)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -143,8 +141,8 @@ impl Database {
                    AND origin_finding_id = ?",
             )
             .bind(Utc::now())
-            .bind(detached_item_id.to_string())
-            .bind(finding.id.to_string())
+            .bind(detached_item_id)
+            .bind(finding.id)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
@@ -171,21 +169,21 @@ impl Database {
                 created_at, updated_at, closed_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(linked_item.id.to_string())
-        .bind(linked_item.project_id.to_string())
-        .bind(encode_enum(&linked_item.classification)?)
+        .bind(linked_item.id)
+        .bind(linked_item.project_id)
+        .bind(linked_item.classification)
         .bind(&linked_item.workflow_version)
         .bind(linked_item.lifecycle.as_db_str())
-        .bind(encode_enum(&linked_item.parking_state)?)
-        .bind(linked_item.lifecycle.done_reason().as_ref().map(encode_enum).transpose()?)
-        .bind(linked_item.lifecycle.resolution_source().as_ref().map(encode_enum).transpose()?)
-        .bind(encode_enum(&linked_item.approval_state)?)
+        .bind(linked_item.parking_state)
+        .bind(linked_item.lifecycle.done_reason())
+        .bind(linked_item.lifecycle.resolution_source())
+        .bind(linked_item.approval_state)
         .bind(linked_item.escalation.as_db_str())
-        .bind(linked_item.escalation.reason().as_ref().map(encode_enum).transpose()?)
-        .bind(linked_item.current_revision_id.to_string())
+        .bind(linked_item.escalation.reason())
+        .bind(linked_item.current_revision_id)
         .bind(linked_item.origin.as_db_str())
-        .bind(linked_item.origin.finding_id().map(|id| id.to_string()))
-        .bind(encode_enum(&linked_item.priority)?)
+        .bind(linked_item.origin.finding_id())
+        .bind(linked_item.priority)
         .bind(serde_json::to_string(&linked_item.labels).map_err(json_err)?)
         .bind(linked_item.operator_notes.as_deref())
         .bind(linked_item.created_at)
@@ -202,22 +200,20 @@ impl Database {
                 seed_target_commit_oid, supersedes_revision_id, created_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(linked_revision.id.to_string())
-        .bind(linked_revision.item_id.to_string())
+        .bind(linked_revision.id)
+        .bind(linked_revision.item_id)
         .bind(linked_revision.revision_no as i64)
         .bind(&linked_revision.title)
         .bind(&linked_revision.description)
         .bind(&linked_revision.acceptance_criteria)
         .bind(&linked_revision.target_ref)
-        .bind(encode_enum(&linked_revision.approval_policy)?)
+        .bind(linked_revision.approval_policy)
         .bind(serde_json::to_string(&linked_revision.policy_snapshot).map_err(json_err)?)
         .bind(serde_json::to_string(&linked_revision.template_map_snapshot).map_err(json_err)?)
         .bind(linked_revision.seed.seed_commit_oid().cloned())
         .bind(linked_revision.seed.seed_target_commit_oid().clone())
         .bind(
-            linked_revision
-                .supersedes_revision_id
-                .map(|id| id.to_string()),
+            linked_revision.supersedes_revision_id,
         )
         .bind(linked_revision.created_at)
         .execute(&mut *tx)
@@ -229,11 +225,11 @@ impl Database {
              SET triage_state = ?, linked_item_id = ?, triage_note = ?, triaged_at = ?
              WHERE id = ?",
         )
-        .bind(encode_enum(&finding.triage.state())?)
-        .bind(linked_item.id.to_string())
+        .bind(finding.triage.state())
+        .bind(linked_item.id)
         .bind(finding.triage.triage_note())
         .bind(finding.triage.triaged_at())
-        .bind(finding.id.to_string())
+        .bind(finding.id)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -247,8 +243,8 @@ impl Database {
                    AND origin_finding_id = ?",
             )
             .bind(Utc::now())
-            .bind(detached_item_id.to_string())
-            .bind(finding.id.to_string())
+            .bind(detached_item_id)
+            .bind(finding.id)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
@@ -267,21 +263,21 @@ impl Database {
                  triage_state = ?, linked_item_id = ?, triage_note = ?, triaged_at = ?
              WHERE id = ?",
         )
-        .bind(finding.source_step_id.as_str())
+        .bind(finding.source_step_id)
         .bind(&finding.source_report_schema_version)
-        .bind(encode_enum(&finding.source_subject_kind)?)
+        .bind(finding.source_subject_kind)
         .bind(finding.source_subject_base_commit_oid.clone())
         .bind(finding.source_subject_head_commit_oid.clone())
         .bind(&finding.code)
-        .bind(encode_enum(&finding.severity)?)
+        .bind(finding.severity)
         .bind(&finding.summary)
         .bind(serde_json::to_string(&finding.paths).map_err(json_err)?)
         .bind(serde_json::to_string(&finding.evidence).map_err(json_err)?)
-        .bind(encode_enum(&finding.triage.state())?)
-        .bind(finding.triage.linked_item_id().map(|id| id.to_string()))
+        .bind(finding.triage.state())
+        .bind(finding.triage.linked_item_id())
         .bind(finding.triage.triage_note())
         .bind(finding.triage.triaged_at())
-        .bind(finding.id.to_string())
+        .bind(finding.id)
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -361,24 +357,24 @@ pub(super) async fn upsert_finding(
             paths = excluded.paths,
             evidence = excluded.evidence",
     )
-    .bind(finding.id.to_string())
-    .bind(finding.project_id.to_string())
-    .bind(finding.source_item_id.to_string())
-    .bind(finding.source_item_revision_id.to_string())
-    .bind(finding.source_job_id.to_string())
-    .bind(finding.source_step_id.as_str())
+    .bind(finding.id)
+    .bind(finding.project_id)
+    .bind(finding.source_item_id)
+    .bind(finding.source_item_revision_id)
+    .bind(finding.source_job_id)
+    .bind(finding.source_step_id)
     .bind(&finding.source_report_schema_version)
     .bind(&finding.source_finding_key)
-    .bind(encode_enum(&finding.source_subject_kind)?)
+    .bind(finding.source_subject_kind)
     .bind(finding.source_subject_base_commit_oid.clone())
     .bind(finding.source_subject_head_commit_oid.clone())
     .bind(&finding.code)
-    .bind(encode_enum(&finding.severity)?)
+    .bind(finding.severity)
     .bind(&finding.summary)
     .bind(serde_json::to_string(&finding.paths).map_err(json_err)?)
     .bind(serde_json::to_string(&finding.evidence).map_err(json_err)?)
-    .bind(encode_enum(&finding.triage.state())?)
-    .bind(finding.triage.linked_item_id().map(|id| id.to_string()))
+    .bind(finding.triage.state())
+    .bind(finding.triage.linked_item_id())
     .bind(finding.triage.triage_note())
     .bind(finding.created_at)
     .bind(finding.triage.triaged_at())
@@ -390,12 +386,10 @@ pub(super) async fn upsert_finding(
 }
 
 fn map_finding(row: &SqliteRow) -> Result<Finding, RepositoryError> {
-    let state: FindingTriageState = parse_enum(row.try_get("triage_state").map_err(db_err)?)?;
+    let state: FindingTriageState = row.try_get("triage_state").map_err(db_err)?;
     let linked_item_id: Option<ItemId> = row
-        .try_get::<Option<String>, _>("linked_item_id")
-        .map_err(db_err)?
-        .map(parse_id)
-        .transpose()?;
+        .try_get("linked_item_id")
+        .map_err(db_err)?;
     let triage_note: Option<String> = row.try_get("triage_note").map_err(db_err)?;
     let triaged_at: Option<chrono::DateTime<chrono::Utc>> =
         row.try_get("triaged_at").map_err(db_err)?;
@@ -410,17 +404,17 @@ fn map_finding(row: &SqliteRow) -> Result<Finding, RepositoryError> {
     )?;
 
     Ok(Finding {
-        id: parse_id(row.try_get("id").map_err(db_err)?)?,
-        project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
-        source_item_id: parse_id(row.try_get("source_item_id").map_err(db_err)?)?,
-        source_item_revision_id: parse_id(row.try_get("source_item_revision_id").map_err(db_err)?)?,
-        source_job_id: parse_id(row.try_get("source_job_id").map_err(db_err)?)?,
-        source_step_id: parse_enum(row.try_get("source_step_id").map_err(db_err)?)?,
+        id: row.try_get("id").map_err(db_err)?,
+        project_id: row.try_get("project_id").map_err(db_err)?,
+        source_item_id: row.try_get("source_item_id").map_err(db_err)?,
+        source_item_revision_id: row.try_get("source_item_revision_id").map_err(db_err)?,
+        source_job_id: row.try_get("source_job_id").map_err(db_err)?,
+        source_step_id: row.try_get("source_step_id").map_err(db_err)?,
         source_report_schema_version: row
             .try_get("source_report_schema_version")
             .map_err(db_err)?,
         source_finding_key: row.try_get("source_finding_key").map_err(db_err)?,
-        source_subject_kind: parse_enum(row.try_get("source_subject_kind").map_err(db_err)?)?,
+        source_subject_kind: row.try_get("source_subject_kind").map_err(db_err)?,
         source_subject_base_commit_oid: row
             .try_get("source_subject_base_commit_oid")
             .map_err(db_err)?,
@@ -428,7 +422,7 @@ fn map_finding(row: &SqliteRow) -> Result<Finding, RepositoryError> {
             .try_get("source_subject_head_commit_oid")
             .map_err(db_err)?,
         code: row.try_get("code").map_err(db_err)?,
-        severity: parse_enum(row.try_get("severity").map_err(db_err)?)?,
+        severity: row.try_get("severity").map_err(db_err)?,
         summary: row.try_get("summary").map_err(db_err)?,
         paths: parse_json(row.try_get("paths").map_err(db_err)?)?,
         evidence: parse_json(row.try_get("evidence").map_err(db_err)?)?,

@@ -5,8 +5,10 @@ use crate::commit_oid::CommitOid;
 use crate::git_ref::GitRef;
 use crate::ids::{ItemId, ItemRevisionId};
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum ApprovalPolicy {
     Required,
     NotRequired,

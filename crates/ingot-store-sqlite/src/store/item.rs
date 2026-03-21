@@ -5,9 +5,7 @@ use ingot_domain::revision::ItemRevision;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
-use super::helpers::{
-    db_err, db_write_err, encode_enum, json_err, parse_enum, parse_id, parse_json,
-};
+use super::helpers::{db_err, db_write_err, json_err, parse_json};
 use crate::db::Database;
 
 type SqliteQuery<'a> = sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>;
@@ -18,7 +16,7 @@ impl Database {
         project_id: ProjectId,
     ) -> Result<Vec<Item>, RepositoryError> {
         let rows = sqlx::query("SELECT * FROM items WHERE project_id = ? ORDER BY created_at DESC")
-            .bind(project_id.to_string())
+            .bind(project_id)
             .fetch_all(&self.pool)
             .await
             .map_err(db_err)?;
@@ -28,7 +26,7 @@ impl Database {
 
     pub async fn get_item(&self, item_id: ItemId) -> Result<Item, RepositoryError> {
         let row = sqlx::query("SELECT * FROM items WHERE id = ?")
-            .bind(item_id.to_string())
+            .bind(item_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(db_err)?;
@@ -48,24 +46,24 @@ impl Database {
                  priority = ?, labels = ?, operator_notes = ?, updated_at = ?, closed_at = ?
              WHERE id = ?",
         )
-        .bind(encode_enum(&item.classification)?)
+        .bind(item.classification)
         .bind(&item.workflow_version)
         .bind(item.lifecycle.as_db_str())
-        .bind(encode_enum(&item.parking_state)?)
-        .bind(item.lifecycle.done_reason().as_ref().map(encode_enum).transpose()?)
-        .bind(item.lifecycle.resolution_source().as_ref().map(encode_enum).transpose()?)
-        .bind(encode_enum(&item.approval_state)?)
+        .bind(item.parking_state)
+        .bind(item.lifecycle.done_reason())
+        .bind(item.lifecycle.resolution_source())
+        .bind(item.approval_state)
         .bind(item.escalation.as_db_str())
-        .bind(item.escalation.reason().as_ref().map(encode_enum).transpose()?)
-        .bind(item.current_revision_id.to_string())
+        .bind(item.escalation.reason())
+        .bind(item.current_revision_id)
         .bind(item.origin.as_db_str())
-        .bind(item.origin.finding_id().map(|id| id.to_string()))
-        .bind(encode_enum(&item.priority)?)
+        .bind(item.origin.finding_id())
+        .bind(item.priority)
         .bind(serde_json::to_string(&item.labels).map_err(json_err)?)
         .bind(item.operator_notes.as_deref())
         .bind(item.updated_at)
         .bind(item.lifecycle.closed_at())
-        .bind(item.id.to_string())
+        .bind(item.id)
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -96,19 +94,19 @@ impl Database {
                 seed_target_commit_oid, supersedes_revision_id, created_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(revision.id.to_string())
-        .bind(revision.item_id.to_string())
+        .bind(revision.id)
+        .bind(revision.item_id)
         .bind(revision.revision_no as i64)
         .bind(&revision.title)
         .bind(&revision.description)
         .bind(&revision.acceptance_criteria)
         .bind(&revision.target_ref)
-        .bind(encode_enum(&revision.approval_policy)?)
+        .bind(revision.approval_policy)
         .bind(serde_json::to_string(&revision.policy_snapshot).map_err(json_err)?)
         .bind(serde_json::to_string(&revision.template_map_snapshot).map_err(json_err)?)
         .bind(revision.seed.seed_commit_oid().cloned())
         .bind(revision.seed.seed_target_commit_oid().clone())
-        .bind(revision.supersedes_revision_id.map(|id| id.to_string()))
+        .bind(revision.supersedes_revision_id)
         .bind(revision.created_at)
         .execute(&mut *tx)
         .await
@@ -159,39 +157,21 @@ fn insert_item_query<'a>(item: &'a Item) -> Result<SqliteQuery<'a>, RepositoryEr
             created_at, updated_at, closed_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(item.id.to_string())
-    .bind(item.project_id.to_string())
-    .bind(encode_enum(&item.classification)?)
+    .bind(item.id)
+    .bind(item.project_id)
+    .bind(item.classification)
     .bind(&item.workflow_version)
     .bind(item.lifecycle.as_db_str())
-    .bind(encode_enum(&item.parking_state)?)
-    .bind(
-        item.lifecycle
-            .done_reason()
-            .as_ref()
-            .map(encode_enum)
-            .transpose()?,
-    )
-    .bind(
-        item.lifecycle
-            .resolution_source()
-            .as_ref()
-            .map(encode_enum)
-            .transpose()?,
-    )
-    .bind(encode_enum(&item.approval_state)?)
+    .bind(item.parking_state)
+    .bind(item.lifecycle.done_reason())
+    .bind(item.lifecycle.resolution_source())
+    .bind(item.approval_state)
     .bind(item.escalation.as_db_str())
-    .bind(
-        item.escalation
-            .reason()
-            .as_ref()
-            .map(encode_enum)
-            .transpose()?,
-    )
-    .bind(item.current_revision_id.to_string())
+    .bind(item.escalation.reason())
+    .bind(item.current_revision_id)
     .bind(item.origin.as_db_str())
-    .bind(item.origin.finding_id().map(|id| id.to_string()))
-    .bind(encode_enum(&item.priority)?)
+    .bind(item.origin.finding_id())
+    .bind(item.priority)
     .bind(serde_json::to_string(&item.labels).map_err(json_err)?)
     .bind(item.operator_notes.as_deref())
     .bind(item.created_at)
@@ -201,17 +181,17 @@ fn insert_item_query<'a>(item: &'a Item) -> Result<SqliteQuery<'a>, RepositoryEr
 
 fn map_item(row: &SqliteRow) -> Result<Item, RepositoryError> {
     Ok(Item {
-        id: parse_id(row.try_get("id").map_err(db_err)?)?,
-        project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
-        classification: parse_enum(row.try_get("classification").map_err(db_err)?)?,
+        id: row.try_get("id").map_err(db_err)?,
+        project_id: row.try_get("project_id").map_err(db_err)?,
+        classification: row.try_get("classification").map_err(db_err)?,
         workflow_version: row.try_get("workflow_version").map_err(db_err)?,
         lifecycle: parse_lifecycle(row)?,
-        parking_state: parse_enum(row.try_get("parking_state").map_err(db_err)?)?,
-        approval_state: parse_enum(row.try_get("approval_state").map_err(db_err)?)?,
+        parking_state: row.try_get("parking_state").map_err(db_err)?,
+        approval_state: row.try_get("approval_state").map_err(db_err)?,
         escalation: parse_escalation(row)?,
-        current_revision_id: parse_id(row.try_get("current_revision_id").map_err(db_err)?)?,
+        current_revision_id: row.try_get("current_revision_id").map_err(db_err)?,
         origin: parse_origin(row)?,
-        priority: parse_enum(row.try_get("priority").map_err(db_err)?)?,
+        priority: row.try_get("priority").map_err(db_err)?,
         labels: parse_json(row.try_get("labels").map_err(db_err)?)?,
         operator_notes: row.try_get("operator_notes").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
@@ -227,11 +207,8 @@ fn parse_lifecycle(row: &SqliteRow) -> Result<Lifecycle, RepositoryError> {
     {
         "open" => Ok(Lifecycle::Open),
         "done" => Ok(Lifecycle::Done {
-            reason: parse_enum(row.try_get::<String, _>("done_reason").map_err(db_err)?)?,
-            source: parse_enum(
-                row.try_get::<String, _>("resolution_source")
-                    .map_err(db_err)?,
-            )?,
+            reason: row.try_get("done_reason").map_err(db_err)?,
+            source: row.try_get("resolution_source").map_err(db_err)?,
             closed_at: row.try_get("closed_at").map_err(db_err)?,
         }),
         other => invalid_state("lifecycle_state", other),
@@ -246,10 +223,7 @@ fn parse_escalation(row: &SqliteRow) -> Result<Escalation, RepositoryError> {
     {
         "none" => Ok(Escalation::None),
         "operator_required" => Ok(Escalation::OperatorRequired {
-            reason: parse_enum(
-                row.try_get::<String, _>("escalation_reason")
-                    .map_err(db_err)?,
-            )?,
+            reason: row.try_get("escalation_reason").map_err(db_err)?,
         }),
         other => invalid_state("escalation_state", other),
     }
@@ -263,10 +237,7 @@ fn parse_origin(row: &SqliteRow) -> Result<Origin, RepositoryError> {
     {
         "manual" => Ok(Origin::Manual),
         "promoted_finding" => Ok(Origin::PromotedFinding {
-            finding_id: parse_id(
-                row.try_get::<String, _>("origin_finding_id")
-                    .map_err(db_err)?,
-            )?,
+            finding_id: row.try_get("origin_finding_id").map_err(db_err)?,
         }),
         other => invalid_state("origin_kind", other),
     }

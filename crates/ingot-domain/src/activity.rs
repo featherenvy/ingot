@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{ActivityId, ProjectId};
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum ActivityEventType {
     ItemCreated,
     ItemRevisionCreated,
@@ -39,8 +41,10 @@ pub enum ActivityEventType {
     GitOperationReconciled,
 }
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum ActivityEntityType {
     Job,
     Item,

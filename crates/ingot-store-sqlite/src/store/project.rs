@@ -4,7 +4,7 @@ use ingot_domain::project::Project;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
-use super::helpers::{db_err, db_write_err, parse_id};
+use super::helpers::{db_err, db_write_err};
 use crate::db::Database;
 
 impl Database {
@@ -27,7 +27,7 @@ impl Database {
              FROM projects
              WHERE id = ?",
         )
-        .bind(project_id.to_string())
+        .bind(project_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(db_err)?;
@@ -43,7 +43,7 @@ impl Database {
             "INSERT INTO projects (id, name, path, default_branch, color, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(project.id.to_string())
+        .bind(project.id)
         .bind(&project.name)
         .bind(&project.path)
         .bind(&project.default_branch)
@@ -68,7 +68,7 @@ impl Database {
         .bind(&project.default_branch)
         .bind(&project.color)
         .bind(project.updated_at)
-        .bind(project.id.to_string())
+        .bind(project.id)
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -82,7 +82,7 @@ impl Database {
 
     pub async fn delete_project(&self, project_id: ProjectId) -> Result<(), RepositoryError> {
         let result = sqlx::query("DELETE FROM projects WHERE id = ?")
-            .bind(project_id.to_string())
+            .bind(project_id)
             .execute(&self.pool)
             .await
             .map_err(db_write_err)?;
@@ -115,7 +115,7 @@ impl ProjectRepository for Database {
 
 fn map_project(row: &SqliteRow) -> Result<Project, RepositoryError> {
     Ok(Project {
-        id: parse_id(row.try_get("id").map_err(db_err)?)?,
+        id: row.try_get("id").map_err(db_err)?,
         name: row.try_get("name").map_err(db_err)?,
         path: row.try_get("path").map_err(db_err)?,
         default_branch: row.try_get("default_branch").map_err(db_err)?,

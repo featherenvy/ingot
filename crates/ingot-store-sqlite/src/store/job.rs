@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use ingot_domain::commit_oid::CommitOid;
-use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId};
+use ingot_domain::ids::{AgentId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::item::Escalation;
 use ingot_domain::job::{Job, JobAssignment, JobInput, JobLease, JobState, TerminalStatus};
 use ingot_domain::ports::{
@@ -10,8 +10,8 @@ use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
 use super::helpers::{
-    StoreDecodeError, db_err, db_write_err, encode_enum, item_revision_is_stale, parse_enum,
-    parse_id, parse_json, serialize_optional_json,
+    StoreDecodeError, db_err, db_write_err, item_revision_is_stale, parse_json,
+    serialize_optional_json,
 };
 use crate::db::Database;
 
@@ -87,7 +87,7 @@ fn decode_job_input(
 impl Database {
     pub async fn list_jobs_by_item(&self, item_id: ItemId) -> Result<Vec<Job>, RepositoryError> {
         let rows = sqlx::query("SELECT * FROM jobs WHERE item_id = ? ORDER BY created_at DESC")
-            .bind(item_id.to_string())
+            .bind(item_id)
             .fetch_all(&self.pool)
             .await
             .map_err(db_err)?;
@@ -121,7 +121,7 @@ impl Database {
              WHERE project_id = ?
              ORDER BY created_at DESC",
         )
-        .bind(project_id.to_string())
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;
@@ -177,17 +177,17 @@ impl Database {
                      AND current_revision_id = ?
                )",
         )
-        .bind(workspace_id.map(|id| id.to_string()))
-        .bind(agent_id.map(|id| id.to_string()))
+        .bind(workspace_id)
+        .bind(agent_id)
         .bind(process_pid.map(i64::from))
         .bind(lease_owner_id)
         .bind(Utc::now())
         .bind(lease_expires_at)
         .bind(Utc::now())
-        .bind(job_id.to_string())
-        .bind(workspace_id.map(|id| id.to_string()))
-        .bind(item_id.to_string())
-        .bind(expected_item_revision_id.to_string())
+        .bind(job_id)
+        .bind(workspace_id)
+        .bind(item_id)
+        .bind(expected_item_revision_id)
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -241,17 +241,17 @@ impl Database {
                      AND current_revision_id = ?
                )",
         )
-        .bind(assignment.workspace_id.to_string())
-        .bind(assignment.agent_id.map(|id| id.to_string()))
+        .bind(assignment.workspace_id)
+        .bind(assignment.agent_id)
         .bind(assignment.prompt_snapshot)
         .bind(assignment.phase_template_digest)
         .bind(lease_owner_id)
         .bind(now)
         .bind(lease_expires_at)
         .bind(now)
-        .bind(job_id.to_string())
-        .bind(item_id.to_string())
-        .bind(expected_item_revision_id.to_string())
+        .bind(job_id)
+        .bind(item_id)
+        .bind(expected_item_revision_id)
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -294,10 +294,10 @@ impl Database {
         )
         .bind(Utc::now())
         .bind(lease_expires_at)
-        .bind(job_id.to_string())
+        .bind(job_id)
         .bind(lease_owner_id)
-        .bind(item_id.to_string())
-        .bind(expected_item_revision_id.to_string())
+        .bind(item_id)
+        .bind(expected_item_revision_id)
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -319,7 +319,7 @@ impl Database {
 
     pub async fn get_job(&self, job_id: JobId) -> Result<Job, RepositoryError> {
         let row = sqlx::query("SELECT * FROM jobs WHERE id = ?")
-            .bind(job_id.to_string())
+            .bind(job_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(db_err)?;
@@ -345,32 +345,32 @@ impl Database {
                 error_message, created_at, started_at, ended_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(job.id.to_string())
-        .bind(job.project_id.to_string())
-        .bind(job.item_id.to_string())
-        .bind(job.item_revision_id.to_string())
-        .bind(job.step_id.as_str())
+        .bind(job.id)
+        .bind(job.project_id)
+        .bind(job.item_id)
+        .bind(job.item_revision_id)
+        .bind(job.step_id)
         .bind(job.semantic_attempt_no as i64)
         .bind(job.retry_no as i64)
-        .bind(job.supersedes_job_id.map(|id| id.to_string()))
-        .bind(encode_enum(&status)?)
-        .bind(job.state.outcome_class().as_ref().map(encode_enum).transpose()?)
-        .bind(encode_enum(&job.phase_kind)?)
-        .bind(job.state.workspace_id().map(|id| id.to_string()))
-        .bind(encode_enum(&job.workspace_kind)?)
-        .bind(encode_enum(&job.execution_permission)?)
-        .bind(encode_enum(&job.context_policy)?)
+        .bind(job.supersedes_job_id)
+        .bind(status)
+        .bind(job.state.outcome_class())
+        .bind(job.phase_kind)
+        .bind(job.state.workspace_id())
+        .bind(job.workspace_kind)
+        .bind(job.execution_permission)
+        .bind(job.context_policy)
         .bind(&job.phase_template_slug)
         .bind(job.state.phase_template_digest())
         .bind(job.state.prompt_snapshot())
         .bind(job_input_kind)
         .bind(input_base_commit_oid)
         .bind(input_head_commit_oid)
-        .bind(encode_enum(&job.output_artifact_kind)?)
+        .bind(job.output_artifact_kind)
         .bind(job.state.output_commit_oid().cloned())
         .bind(job.state.result_schema_version())
         .bind(serialize_optional_json(job.state.result_payload())?)
-        .bind(job.state.agent_id().map(|id| id.to_string()))
+        .bind(job.state.agent_id())
         .bind(job.state.process_pid().map(i64::from))
         .bind(job.state.lease_owner_id())
         .bind(job.state.heartbeat_at())
@@ -404,28 +404,28 @@ impl Database {
                  created_at = ?, started_at = ?, ended_at = ?
              WHERE id = ?",
         )
-        .bind(job.step_id.as_str())
+        .bind(job.step_id)
         .bind(job.semantic_attempt_no as i64)
         .bind(job.retry_no as i64)
-        .bind(job.supersedes_job_id.map(|id| id.to_string()))
-        .bind(encode_enum(&status)?)
-        .bind(job.state.outcome_class().as_ref().map(encode_enum).transpose()?)
-        .bind(encode_enum(&job.phase_kind)?)
-        .bind(job.state.workspace_id().map(|id| id.to_string()))
-        .bind(encode_enum(&job.workspace_kind)?)
-        .bind(encode_enum(&job.execution_permission)?)
-        .bind(encode_enum(&job.context_policy)?)
+        .bind(job.supersedes_job_id)
+        .bind(status)
+        .bind(job.state.outcome_class())
+        .bind(job.phase_kind)
+        .bind(job.state.workspace_id())
+        .bind(job.workspace_kind)
+        .bind(job.execution_permission)
+        .bind(job.context_policy)
         .bind(&job.phase_template_slug)
         .bind(job.state.phase_template_digest())
         .bind(job.state.prompt_snapshot())
         .bind(job_input_kind)
         .bind(input_base_commit_oid)
         .bind(input_head_commit_oid)
-        .bind(encode_enum(&job.output_artifact_kind)?)
+        .bind(job.output_artifact_kind)
         .bind(job.state.output_commit_oid().cloned())
         .bind(job.state.result_schema_version())
         .bind(serialize_optional_json(job.state.result_payload())?)
-        .bind(job.state.agent_id().map(|id| id.to_string()))
+        .bind(job.state.agent_id())
         .bind(job.state.process_pid().map(i64::from))
         .bind(job.state.lease_owner_id())
         .bind(job.state.heartbeat_at())
@@ -435,7 +435,7 @@ impl Database {
         .bind(job.created_at)
         .bind(job.state.started_at())
         .bind(job.state.ended_at())
-        .bind(job.id.to_string())
+        .bind(job.id)
         .execute(&self.pool)
         .await
         .map_err(db_write_err)?;
@@ -453,7 +453,7 @@ impl Database {
     ) -> Result<Vec<Job>, RepositoryError> {
         let rows =
             sqlx::query("SELECT * FROM jobs WHERE item_revision_id = ? ORDER BY created_at DESC")
-                .bind(revision_id.to_string())
+                .bind(revision_id)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(db_err)?;
@@ -473,7 +473,7 @@ impl Database {
              ORDER BY created_at DESC
              LIMIT 1",
         )
-        .bind(revision_id.to_string())
+        .bind(revision_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(db_err)?;
@@ -516,14 +516,14 @@ impl Database {
                      AND current_revision_id = ?
                )",
         )
-        .bind(encode_enum(&status)?)
-        .bind(outcome_class.as_ref().map(encode_enum).transpose()?)
+        .bind(status)
+        .bind(outcome_class)
         .bind(error_code)
         .bind(error_message)
         .bind(Utc::now())
-        .bind(job_id.to_string())
-        .bind(item_id.to_string())
-        .bind(expected_item_revision_id.to_string())
+        .bind(job_id)
+        .bind(item_id)
+        .bind(expected_item_revision_id)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -551,10 +551,10 @@ impl Database {
                 }
                 .as_db_str(),
             )
-            .bind(encode_enum(&escalation_reason)?)
+            .bind(escalation_reason)
             .bind(Utc::now())
-            .bind(item_id.to_string())
-            .bind(expected_item_revision_id.to_string())
+            .bind(item_id)
+            .bind(expected_item_revision_id)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
@@ -660,7 +660,7 @@ async fn classify_running_job_conflict(
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let mut query = sqlx::query_scalar::<_, String>(&query).bind(job_id.to_string());
+    let mut query = sqlx::query_scalar::<_, JobId>(&query).bind(job_id);
     for status in expected_statuses {
         query = query.bind(*status);
     }
@@ -671,12 +671,12 @@ async fn classify_running_job_conflict(
     }
 
     if require_workspace_binding {
-        let workspace_id: Option<String> = sqlx::query_scalar(
+        let workspace_id: Option<ingot_domain::ids::WorkspaceId> = sqlx::query_scalar(
             "SELECT workspace_id
              FROM jobs
              WHERE id = ?",
         )
-        .bind(job_id.to_string())
+        .bind(job_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(db_err)?
@@ -699,13 +699,13 @@ async fn classify_terminal_job_conflict(
         return Ok(RepositoryError::Conflict("job_revision_stale".into()));
     }
 
-    let job_is_active: Option<String> = sqlx::query_scalar(
+    let job_is_active: Option<JobId> = sqlx::query_scalar(
         "SELECT id
          FROM jobs
          WHERE id = ?
            AND status IN ('queued', 'assigned', 'running')",
     )
-    .bind(job_id.to_string())
+    .bind(job_id)
     .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?;
@@ -721,22 +721,10 @@ fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {
     use ingot_domain::job::{JobStatus, OutcomeClass};
 
     // Extract flat columns
-    let status: JobStatus = parse_enum(row.try_get("status").map_err(db_err)?)?;
-    let outcome_class: Option<OutcomeClass> = row
-        .try_get::<Option<String>, _>("outcome_class")
-        .map_err(db_err)?
-        .map(parse_enum)
-        .transpose()?;
-    let workspace_id = row
-        .try_get::<Option<String>, _>("workspace_id")
-        .map_err(db_err)?
-        .map(parse_id)
-        .transpose()?;
-    let agent_id = row
-        .try_get::<Option<String>, _>("agent_id")
-        .map_err(db_err)?
-        .map(parse_id)
-        .transpose()?;
+    let status: JobStatus = row.try_get("status").map_err(db_err)?;
+    let outcome_class: Option<OutcomeClass> = row.try_get("outcome_class").map_err(db_err)?;
+    let workspace_id: Option<WorkspaceId> = row.try_get("workspace_id").map_err(db_err)?;
+    let agent_id: Option<AgentId> = row.try_get("agent_id").map_err(db_err)?;
     let prompt_snapshot: Option<String> = row.try_get("prompt_snapshot").map_err(db_err)?;
     let phase_template_digest: Option<String> =
         row.try_get("phase_template_digest").map_err(db_err)?;
@@ -833,24 +821,20 @@ fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {
     };
 
     Ok(Job {
-        id: parse_id(row.try_get("id").map_err(db_err)?)?,
-        project_id: parse_id(row.try_get("project_id").map_err(db_err)?)?,
-        item_id: parse_id(row.try_get("item_id").map_err(db_err)?)?,
-        item_revision_id: parse_id(row.try_get("item_revision_id").map_err(db_err)?)?,
-        step_id: parse_enum(row.try_get("step_id").map_err(db_err)?)?,
+        id: row.try_get("id").map_err(db_err)?,
+        project_id: row.try_get("project_id").map_err(db_err)?,
+        item_id: row.try_get("item_id").map_err(db_err)?,
+        item_revision_id: row.try_get("item_revision_id").map_err(db_err)?,
+        step_id: row.try_get("step_id").map_err(db_err)?,
         semantic_attempt_no: row
             .try_get::<i64, _>("semantic_attempt_no")
             .map_err(db_err)? as u32,
         retry_no: row.try_get::<i64, _>("retry_no").map_err(db_err)? as u32,
-        supersedes_job_id: row
-            .try_get::<Option<String>, _>("supersedes_job_id")
-            .map_err(db_err)?
-            .map(parse_id)
-            .transpose()?,
-        phase_kind: parse_enum(row.try_get("phase_kind").map_err(db_err)?)?,
-        workspace_kind: parse_enum(row.try_get("workspace_kind").map_err(db_err)?)?,
-        execution_permission: parse_enum(row.try_get("execution_permission").map_err(db_err)?)?,
-        context_policy: parse_enum(row.try_get("context_policy").map_err(db_err)?)?,
+        supersedes_job_id: row.try_get("supersedes_job_id").map_err(db_err)?,
+        phase_kind: row.try_get("phase_kind").map_err(db_err)?,
+        workspace_kind: row.try_get("workspace_kind").map_err(db_err)?,
+        execution_permission: row.try_get("execution_permission").map_err(db_err)?,
+        context_policy: row.try_get("context_policy").map_err(db_err)?,
         phase_template_slug: row.try_get("phase_template_slug").map_err(db_err)?,
         job_input: decode_job_input(
             row.try_get("job_input_kind").map_err(db_err)?,
@@ -858,7 +842,7 @@ fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {
             row.try_get("input_head_commit_oid").map_err(db_err)?,
         )
         .map_err(|error| RepositoryError::Database(Box::new(error)))?,
-        output_artifact_kind: parse_enum(row.try_get("output_artifact_kind").map_err(db_err)?)?,
+        output_artifact_kind: row.try_get("output_artifact_kind").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
         state,
     })
@@ -1012,10 +996,10 @@ mod tests {
                 error_message, created_at, started_at, ended_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(job_id.to_string())
-        .bind(project.id.to_string())
-        .bind(item.id.to_string())
-        .bind(revision.id.to_string())
+        .bind(job_id)
+        .bind(project.id)
+        .bind(item.id)
+        .bind(revision.id)
         .bind("author_initial")
         .bind(1_i64)
         .bind(0_i64)
