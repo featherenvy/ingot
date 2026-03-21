@@ -51,7 +51,7 @@ impl Database {
                      current_job_id = ?, updated_at = ?
                  WHERE id = ?",
             )
-            .bind(workspace.path.to_str().unwrap_or_default())
+            .bind(workspace.path.to_string_lossy().as_ref())
             .bind(workspace.target_ref.clone())
             .bind(workspace.workspace_ref.clone())
             .bind(workspace.state.base_commit_oid().cloned())

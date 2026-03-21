@@ -47,7 +47,7 @@ impl Database {
         )
         .bind(project.id)
         .bind(&project.name)
-        .bind(project.path.to_str().unwrap_or_default())
+        .bind(project.path.to_string_lossy().as_ref())
         .bind(&project.default_branch)
         .bind(&project.color)
         .bind(project.created_at)
@@ -66,7 +66,7 @@ impl Database {
              WHERE id = ?",
         )
         .bind(&project.name)
-        .bind(project.path.to_str().unwrap_or_default())
+        .bind(project.path.to_string_lossy().as_ref())
         .bind(&project.default_branch)
         .bind(&project.color)
         .bind(project.updated_at)

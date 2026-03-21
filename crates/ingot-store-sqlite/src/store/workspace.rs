@@ -38,7 +38,7 @@ impl Database {
         .bind(workspace.project_id)
         .bind(workspace.kind)
         .bind(workspace.strategy)
-        .bind(workspace.path.to_str().unwrap_or_default())
+        .bind(workspace.path.to_string_lossy().as_ref())
         .bind(workspace.created_for_revision_id)
         .bind(workspace.parent_workspace_id)
         .bind(workspace.target_ref.clone())
@@ -64,7 +64,7 @@ impl Database {
                  retention_policy = ?, status = ?, current_job_id = ?, updated_at = ?
              WHERE id = ?",
         )
-        .bind(workspace.path.to_str().unwrap_or_default())
+        .bind(workspace.path.to_string_lossy().as_ref())
         .bind(workspace.target_ref.clone())
         .bind(workspace.workspace_ref.clone())
         .bind(workspace.state.base_commit_oid().cloned())
