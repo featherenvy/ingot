@@ -5,10 +5,9 @@ use super::*;
 
 pub(super) async fn list_project_activity(
     State(state): State<AppState>,
-    Path(project_id): Path<String>,
+    ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
     Query(query): Query<ActivityQuery>,
 ) -> Result<Json<Vec<Activity>>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     state
         .db
         .get_project(project_id)
@@ -28,9 +27,8 @@ pub(super) async fn list_project_activity(
 
 pub(super) async fn list_project_workspaces(
     State(state): State<AppState>,
-    Path(project_id): Path<String>,
+    ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
 ) -> Result<Json<Vec<Workspace>>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     state
         .db
         .get_project(project_id)
@@ -80,10 +78,9 @@ pub(super) async fn create_project(
 
 pub(super) async fn update_project(
     State(state): State<AppState>,
-    Path(project_id): Path<String>,
+    ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
     Json(request): Json<UpdateProjectRequest>,
 ) -> Result<Json<Project>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     let existing = state
         .db
         .get_project(project_id)
@@ -130,9 +127,8 @@ pub(super) async fn update_project(
 
 pub(super) async fn delete_project(
     State(state): State<AppState>,
-    Path(project_id): Path<String>,
+    ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
 ) -> Result<StatusCode, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     state
         .db
         .delete_project(project_id)
@@ -144,9 +140,8 @@ pub(super) async fn delete_project(
 
 pub(super) async fn get_project_config(
     State(state): State<AppState>,
-    Path(project_id): Path<String>,
+    ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
 ) -> Result<Json<IngotConfig>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     let project = state
         .db
         .get_project(project_id)
@@ -157,9 +152,8 @@ pub(super) async fn get_project_config(
 
 pub(super) async fn list_project_jobs(
     State(state): State<AppState>,
-    Path(project_id): Path<String>,
+    ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
 ) -> Result<Json<Vec<Job>>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     state
         .db
         .get_project(project_id)

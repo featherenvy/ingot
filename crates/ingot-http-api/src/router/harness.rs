@@ -1,20 +1,20 @@
 use std::path::Path;
 
 use axum::Json;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use ingot_domain::harness::HarnessProfile;
 
 use super::AppState;
-use super::support::{parse_id, repo_to_project};
+use super::support::{ApiPath, repo_to_project};
+use super::types::ProjectPathParams;
 use crate::error::ApiError;
 
 pub(super) async fn get_harness_profile(
     State(state): State<AppState>,
-    AxumPath(project_id): AxumPath<String>,
+    ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
 ) -> Result<Json<HarnessProfile>, ApiError> {
-    let project_id = parse_id(&project_id, "project")?;
     let project = state
         .db
         .get_project(project_id)
@@ -26,10 +26,9 @@ pub(super) async fn get_harness_profile(
 
 pub(super) async fn put_harness_profile(
     State(state): State<AppState>,
-    AxumPath(project_id): AxumPath<String>,
+    ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
     body: String,
 ) -> Result<impl IntoResponse, ApiError> {
-    let project_id = parse_id(&project_id, "project")?;
     let project = state
         .db
         .get_project(project_id)

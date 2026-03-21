@@ -6,9 +6,8 @@ use super::*;
 
 pub(super) async fn get_finding(
     State(state): State<AppState>,
-    Path(finding_id): Path<String>,
+    ApiPath(FindingPathParams { finding_id }): ApiPath<FindingPathParams>,
 ) -> Result<Json<Finding>, ApiError> {
-    let finding_id = parse_id::<FindingId>(&finding_id, "finding")?;
     let finding = state
         .db
         .get_finding(finding_id)
@@ -26,20 +25,19 @@ pub(super) struct AppliedFindingTriage {
 
 pub(super) async fn triage_item_finding(
     State(state): State<AppState>,
-    Path(finding_id): Path<String>,
-    Json(request): Json<TriageFindingRequest>,
+    ApiPath(FindingPathParams { finding_id }): ApiPath<FindingPathParams>,
+    Json(payload): Json<TriageFindingRequestPayload>,
 ) -> Result<Json<Finding>, ApiError> {
-    let finding_id = parse_id::<FindingId>(&finding_id, "finding")?;
+    let request = TriageFindingRequest::try_from(payload)?;
     let applied = apply_finding_triage(&state, finding_id, request).await?;
     Ok(Json(applied.finding))
 }
 
 pub(super) async fn dismiss_item_finding(
     State(state): State<AppState>,
-    Path(finding_id): Path<String>,
+    ApiPath(FindingPathParams { finding_id }): ApiPath<FindingPathParams>,
     Json(request): Json<DismissFindingRequest>,
 ) -> Result<Json<Finding>, ApiError> {
-    let finding_id = parse_id::<FindingId>(&finding_id, "finding")?;
     let applied = apply_finding_triage(
         &state,
         finding_id,
@@ -57,10 +55,9 @@ pub(super) async fn dismiss_item_finding(
 
 pub(super) async fn promote_item_from_finding(
     State(state): State<AppState>,
-    Path(finding_id): Path<String>,
+    ApiPath(FindingPathParams { finding_id }): ApiPath<FindingPathParams>,
     maybe_request: Option<Json<PromoteFindingRequest>>,
 ) -> Result<Json<PromoteFindingResponse>, ApiError> {
-    let finding_id = parse_id::<FindingId>(&finding_id, "finding")?;
     let request = maybe_request
         .map(|Json(request)| TriageFindingRequest {
             triage_state: FindingTriageState::Backlog,
@@ -123,18 +120,13 @@ pub(super) async fn apply_finding_triage(
         .acquire_project_mutation(project.id)
         .await;
 
-    let parsed_linked_item_id = request
-        .linked_item_id
-        .as_deref()
-        .map(|value| parse_id::<ItemId>(value, "linked_item"))
-        .transpose()?;
     let detached_origin_item_id =
-        find_detached_origin_item_id(state, &finding, parsed_linked_item_id).await?;
+        find_detached_origin_item_id(state, &finding, request.linked_item_id).await?;
 
     let applied = match request.triage_state {
         FindingTriageState::Backlog => {
             ensure_finding_subject_reachable(state, &project, &finding).await?;
-            if let Some(linked_item_id) = parsed_linked_item_id {
+            if let Some(linked_item_id) = request.linked_item_id {
                 let linked_item =
                     load_linked_item_for_finding(state, &source_item, linked_item_id).await?;
                 if linked_item.id == source_item.id {
@@ -190,7 +182,7 @@ pub(super) async fn apply_finding_triage(
             }
         }
         FindingTriageState::Duplicate => {
-            let linked_item_id = parsed_linked_item_id.ok_or_else(|| {
+            let linked_item_id = request.linked_item_id.ok_or_else(|| {
                 ApiError::UseCase(UseCaseError::InvalidFindingTriage(
                     "duplicate triage requires linked_item_id".into(),
                 ))
@@ -227,7 +219,7 @@ pub(super) async fn apply_finding_triage(
                 TriageFindingInput {
                     triage_state: request.triage_state,
                     triage_note: request.triage_note,
-                    linked_item_id: parsed_linked_item_id,
+                    linked_item_id: request.linked_item_id,
                 },
             )?;
             state

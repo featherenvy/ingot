@@ -2,6 +2,10 @@ use std::path::Path as FsPath;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use axum::extract::path::ErrorKind as PathErrorKind;
+use axum::extract::rejection::{FailedToDeserializePathParams, PathRejection};
+use axum::extract::{FromRequestParts, Path};
+use axum::http::request::Parts;
 use ingot_config::IngotConfig;
 use ingot_domain::branch_name::BranchName;
 use ingot_domain::git_operation::OperationKind;
@@ -14,14 +18,79 @@ use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
 use ingot_usecases::item::normalize_target_ref;
 use ingot_usecases::{CompleteJobError, UseCaseError};
 use ingot_workspace::WorkspaceError;
+use serde::de::DeserializeOwned;
 
 use crate::error::ApiError;
 
 use super::AppState;
 
 // ---------------------------------------------------------------------------
-// Path helpers
+// Path extractors and helpers
 // ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub(super) struct ApiPath<T>(pub(super) T);
+
+impl<T, S> FromRequestParts<S> for ApiPath<T>
+where
+    T: DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Path(params) = Path::<T>::from_request_parts(parts, state)
+            .await
+            .map_err(path_rejection_to_api_error)?;
+        Ok(Self(params))
+    }
+}
+
+fn path_rejection_to_api_error(rejection: PathRejection) -> ApiError {
+    match rejection {
+        PathRejection::FailedToDeserializePathParams(error) => {
+            failed_path_params_to_api_error(error)
+        }
+        PathRejection::MissingPathParams(_) => {
+            ApiError::internal("missing path parameters for matched route")
+        }
+        _ => ApiError::internal("unexpected path extraction failure"),
+    }
+}
+
+fn failed_path_params_to_api_error(error: FailedToDeserializePathParams) -> ApiError {
+    let body_text = error.body_text();
+
+    match error.into_kind() {
+        PathErrorKind::ParseErrorAtKey { key, value, .. }
+        | PathErrorKind::DeserializeError { key, value, .. } => {
+            ApiError::invalid_id(path_param_entity_name(&key), &value)
+        }
+        PathErrorKind::InvalidUtf8InPathParam { key } => ApiError::BadRequest {
+            code: "invalid_id",
+            message: format!(
+                "Invalid {} id: path parameter was not valid UTF-8",
+                path_param_entity_name(&key)
+            ),
+        },
+        PathErrorKind::ParseErrorAtIndex { value, .. }
+        | PathErrorKind::ParseError { value, .. } => ApiError::invalid_id("resource", &value),
+        PathErrorKind::WrongNumberOfParameters { .. }
+        | PathErrorKind::UnsupportedType { .. }
+        | PathErrorKind::Message(_) => ApiError::BadRequest {
+            code: "invalid_id",
+            message: body_text,
+        },
+        _ => ApiError::BadRequest {
+            code: "invalid_id",
+            message: body_text,
+        },
+    }
+}
+
+pub(super) fn path_param_entity_name(key: &str) -> &str {
+    key.strip_suffix("_id").unwrap_or(key)
+}
 
 pub(super) fn global_config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -383,6 +452,13 @@ pub(super) fn complete_job_error_to_api_error(error: CompleteJobError) -> ApiErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use ingot_domain::ids::ProjectId;
+    use serde::Deserialize;
+    use tower::ServiceExt;
 
     #[test]
     fn project_not_found_maps_to_project_error() {
@@ -403,5 +479,40 @@ mod tests {
             ApiError::UseCase(UseCaseError::ProtocolViolation(message))
                 if message == "job expiration does not match the current item revision"
         ));
+    }
+
+    #[tokio::test]
+    async fn api_path_maps_invalid_typed_ids_to_invalid_id_error() {
+        #[derive(Debug, Deserialize)]
+        struct ProjectPathParams {
+            project_id: ProjectId,
+        }
+
+        async fn handler(
+            ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
+        ) -> Result<Json<()>, ApiError> {
+            let _ = project_id;
+            Ok(Json(()))
+        }
+
+        let app = Router::new().route("/projects/{project_id}", get(handler));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/projects/not-a-project-id")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("route should respond");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(body["error"]["code"], "invalid_id");
+        assert!(body["error"]["message"].is_string());
     }
 }

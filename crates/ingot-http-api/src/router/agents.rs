@@ -42,10 +42,9 @@ pub(super) async fn create_agent(
 
 pub(super) async fn update_agent(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    ApiPath(AgentPathParams { agent_id }): ApiPath<AgentPathParams>,
     Json(request): Json<UpdateAgentRequest>,
 ) -> Result<Json<Agent>, ApiError> {
-    let agent_id = parse_id::<AgentId>(&agent_id, "agent")?;
     let existing = state.db.get_agent(agent_id).await.map_err(repo_to_agent)?;
     let existing_name = existing.name.clone();
     let existing_slug = existing.slug.clone();
@@ -96,9 +95,8 @@ pub(super) async fn update_agent(
 
 pub(super) async fn delete_agent(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    ApiPath(AgentPathParams { agent_id }): ApiPath<AgentPathParams>,
 ) -> Result<StatusCode, ApiError> {
-    let agent_id = parse_id::<AgentId>(&agent_id, "agent")?;
     state
         .db
         .delete_agent(agent_id)
@@ -110,9 +108,8 @@ pub(super) async fn delete_agent(
 
 pub(super) async fn reprobe_agent(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    ApiPath(AgentPathParams { agent_id }): ApiPath<AgentPathParams>,
 ) -> Result<Json<Agent>, ApiError> {
-    let agent_id = parse_id::<AgentId>(&agent_id, "agent")?;
     let mut agent = state.db.get_agent(agent_id).await.map_err(repo_to_agent)?;
     probe_and_apply(&mut agent).await;
 

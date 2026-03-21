@@ -2,6 +2,7 @@ use ingot_domain::agent::{AdapterKind, AgentCapability};
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::finding::{Finding, FindingTriageState};
 use ingot_domain::git_ref::GitRef;
+use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::item::{Classification, Item, Priority};
 use ingot_domain::job::{Job, OutcomeClass};
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
@@ -9,6 +10,9 @@ use ingot_domain::revision_context::RevisionContextSummary;
 use ingot_domain::workspace::Workspace;
 use ingot_workflow::Evaluation;
 use serde::{Deserialize, Serialize};
+
+use super::support::parse_id;
+use crate::error::ApiError;
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -75,6 +79,49 @@ pub struct JobLogsResponse {
     pub stdout: Option<String>,
     pub stderr: Option<String>,
     pub result: Option<serde_json::Value>,
+}
+
+// ---------------------------------------------------------------------------
+// Path parameter types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AgentPathParams {
+    pub(super) agent_id: AgentId,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct FindingPathParams {
+    pub(super) finding_id: FindingId,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct JobPathParams {
+    pub(super) job_id: JobId,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ProjectPathParams {
+    pub(super) project_id: ProjectId,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ProjectItemPathParams {
+    pub(super) project_id: ProjectId,
+    pub(super) item_id: ItemId,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ProjectItemJobPathParams {
+    pub(super) project_id: ProjectId,
+    pub(super) item_id: ItemId,
+    pub(super) job_id: JobId,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ProjectWorkspacePathParams {
+    pub(super) project_id: ProjectId,
+    pub(super) workspace_id: WorkspaceId,
 }
 
 // ---------------------------------------------------------------------------
@@ -153,13 +200,40 @@ pub struct DismissFindingRequest {
     pub dismissal_reason: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct TriageFindingRequest {
+    pub triage_state: FindingTriageState,
+    pub triage_note: Option<String>,
+    pub linked_item_id: Option<ItemId>,
+    pub target_ref: Option<GitRef>,
+    pub approval_policy: Option<ApprovalPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct TriageFindingRequestPayload {
     pub triage_state: FindingTriageState,
     pub triage_note: Option<String>,
     pub linked_item_id: Option<String>,
     pub target_ref: Option<GitRef>,
     pub approval_policy: Option<ApprovalPolicy>,
+}
+
+impl TryFrom<TriageFindingRequestPayload> for TriageFindingRequest {
+    type Error = ApiError;
+
+    fn try_from(payload: TriageFindingRequestPayload) -> Result<Self, Self::Error> {
+        Ok(Self {
+            triage_state: payload.triage_state,
+            triage_note: payload.triage_note,
+            linked_item_id: payload
+                .linked_item_id
+                .as_deref()
+                .map(|value| parse_id::<ItemId>(value, "linked_item"))
+                .transpose()?,
+            target_ref: payload.target_ref,
+            approval_policy: payload.approval_policy,
+        })
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

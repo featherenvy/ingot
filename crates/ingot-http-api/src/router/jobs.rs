@@ -11,11 +11,12 @@ use ingot_usecases::job_lifecycle;
 
 pub(super) async fn cancel_item_job(
     State(state): State<AppState>,
-    Path((project_id, item_id, job_id)): Path<(String, String, String)>,
+    ApiPath(ProjectItemJobPathParams {
+        project_id,
+        item_id,
+        job_id,
+    }): ApiPath<ProjectItemJobPathParams>,
 ) -> Result<Json<()>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
-    let job_id = parse_id::<JobId>(&job_id, "job")?;
     let _project = state
         .db
         .get_project(project_id)
@@ -61,9 +62,8 @@ pub(super) async fn cancel_item_job(
 
 pub(super) async fn get_job_logs(
     State(state): State<AppState>,
-    Path(job_id): Path<String>,
+    ApiPath(JobPathParams { job_id }): ApiPath<JobPathParams>,
 ) -> Result<Json<JobLogsResponse>, ApiError> {
-    let job_id = parse_id::<JobId>(&job_id, "job")?;
     state.db.get_job(job_id).await.map_err(repo_to_internal)?;
     let logs_dir = logs_root(state.state_root.as_path()).join(job_id.to_string());
 
@@ -82,10 +82,9 @@ pub(super) async fn get_job_logs(
 
 pub(super) async fn complete_job(
     State(state): State<AppState>,
-    Path(job_id): Path<String>,
+    ApiPath(JobPathParams { job_id }): ApiPath<JobPathParams>,
     Json(request): Json<CompleteJobRequest>,
 ) -> Result<Json<CompleteJobResponse>, ApiError> {
-    let job_id = parse_id::<JobId>(&job_id, "job")?;
     let prior_job = state.db.get_job(job_id).await.map_err(repo_to_internal)?;
     let prior_item = state
         .db
@@ -166,12 +165,11 @@ pub(super) async fn complete_job(
 
 pub(super) async fn fail_job(
     State(state): State<AppState>,
-    Path(job_id): Path<String>,
+    ApiPath(JobPathParams { job_id }): ApiPath<JobPathParams>,
     Json(request): Json<FailJobRequest>,
 ) -> Result<Json<()>, ApiError> {
     // Validate outcome_class is valid for failure endpoint before proceeding
     let _status = map_failure_status(request.outcome_class)?;
-    let job_id = parse_id::<JobId>(&job_id, "job")?;
     let job = state.db.get_job(job_id).await.map_err(repo_to_internal)?;
     let item = state.db.get_item(job.item_id).await.map_err(repo_to_item)?;
     if job.item_revision_id != item.current_revision_id {
@@ -200,9 +198,8 @@ pub(super) async fn fail_job(
 
 pub(super) async fn expire_job(
     State(state): State<AppState>,
-    Path(job_id): Path<String>,
+    ApiPath(JobPathParams { job_id }): ApiPath<JobPathParams>,
 ) -> Result<Json<()>, ApiError> {
-    let job_id = parse_id::<JobId>(&job_id, "job")?;
     let job = state.db.get_job(job_id).await.map_err(repo_to_internal)?;
     let item = state.db.get_item(job.item_id).await.map_err(repo_to_item)?;
     if job.item_revision_id != item.current_revision_id {

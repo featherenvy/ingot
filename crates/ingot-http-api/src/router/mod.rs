@@ -24,7 +24,7 @@ use std::path::Path as FsPath;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{Query, Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware;
 use axum::response::Response;

@@ -811,10 +811,11 @@ impl ConvergenceSystemActionPort for HttpConvergencePort {
 
 pub(super) async fn prepare_item_convergence(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let _guard = state
         .project_locks
         .acquire_project_mutation(project_id)
@@ -831,10 +832,11 @@ pub(super) async fn prepare_item_convergence(
 
 pub(super) async fn approve_item(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let _guard = state
         .project_locks
         .acquire_project_mutation(project_id)
@@ -851,11 +853,12 @@ pub(super) async fn approve_item(
 
 pub(super) async fn reject_item_approval(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
     maybe_request: Option<Json<RejectApprovalRequest>>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let project = state
         .db
         .get_project(project_id)

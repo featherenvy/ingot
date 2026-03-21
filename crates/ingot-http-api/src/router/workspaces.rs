@@ -1,13 +1,15 @@
 use super::items::append_activity;
 use super::support::*;
+use super::types::*;
 use super::*;
 
 pub(super) async fn reset_workspace_route(
     State(state): State<AppState>,
-    Path((project_id, workspace_id)): Path<(String, String)>,
+    ApiPath(ProjectWorkspacePathParams {
+        project_id,
+        workspace_id,
+    }): ApiPath<ProjectWorkspacePathParams>,
 ) -> Result<Json<Workspace>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let workspace_id = parse_id::<WorkspaceId>(&workspace_id, "workspace")?;
     let project = state
         .db
         .get_project(project_id)
@@ -116,10 +118,11 @@ pub(super) async fn reset_workspace_route(
 
 pub(super) async fn abandon_workspace_route(
     State(state): State<AppState>,
-    Path((project_id, workspace_id)): Path<(String, String)>,
+    ApiPath(ProjectWorkspacePathParams {
+        project_id,
+        workspace_id,
+    }): ApiPath<ProjectWorkspacePathParams>,
 ) -> Result<Json<Workspace>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let workspace_id = parse_id::<WorkspaceId>(&workspace_id, "workspace")?;
     state
         .db
         .get_project(project_id)
@@ -147,10 +150,11 @@ pub(super) async fn abandon_workspace_route(
 
 pub(super) async fn remove_workspace_route(
     State(state): State<AppState>,
-    Path((project_id, workspace_id)): Path<(String, String)>,
+    ApiPath(ProjectWorkspacePathParams {
+        project_id,
+        workspace_id,
+    }): ApiPath<ProjectWorkspacePathParams>,
 ) -> Result<Json<Workspace>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let workspace_id = parse_id::<WorkspaceId>(&workspace_id, "workspace")?;
     let project = state
         .db
         .get_project(project_id)

@@ -10,11 +10,12 @@ use ingot_usecases::job::{DispatchJobCommand, dispatch_job, retry_job};
 
 pub(super) async fn dispatch_item_job(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
     maybe_request: Option<Json<DispatchJobRequest>>,
 ) -> Result<(StatusCode, Json<Job>), ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let project = state
         .db
         .get_project(project_id)
@@ -473,11 +474,12 @@ pub(super) async fn auto_dispatch_projected_review_job_locked(
 
 pub(super) async fn retry_item_job(
     State(state): State<AppState>,
-    Path((project_id, item_id, job_id)): Path<(String, String, String)>,
+    ApiPath(ProjectItemJobPathParams {
+        project_id,
+        item_id,
+        job_id,
+    }): ApiPath<ProjectItemJobPathParams>,
 ) -> Result<(StatusCode, Json<Job>), ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
-    let job_id = parse_id::<JobId>(&job_id, "job")?;
     let project = state
         .db
         .get_project(project_id)

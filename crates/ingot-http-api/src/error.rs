@@ -15,7 +15,8 @@ pub enum ApiError {
 }
 
 impl ApiError {
-    pub fn invalid_id(entity: &'static str, value: &str) -> Self {
+    pub fn invalid_id(entity: impl AsRef<str>, value: &str) -> Self {
+        let entity = entity.as_ref();
         Self::BadRequest {
             code: "invalid_id",
             message: format!("Invalid {entity} id: {value}"),

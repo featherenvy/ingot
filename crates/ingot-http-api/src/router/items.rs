@@ -5,10 +5,9 @@ use super::*;
 
 pub(super) async fn create_item(
     State(state): State<AppState>,
-    Path(project_id): Path<String>,
+    ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
     Json(request): Json<CreateItemRequest>,
 ) -> Result<(StatusCode, Json<ItemDetailResponse>), ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     let project = state
         .db
         .get_project(project_id)
@@ -87,9 +86,8 @@ pub(super) async fn create_item(
 
 pub(super) async fn list_items(
     State(state): State<AppState>,
-    Path(project_id): Path<String>,
+    ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
 ) -> Result<Json<Vec<ItemSummaryResponse>>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
     let project = state
         .db
         .get_project(project_id)
@@ -151,11 +149,12 @@ pub(super) async fn list_items(
 
 pub(super) async fn update_item(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
     Json(request): Json<UpdateItemRequest>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let _project = state
         .db
         .get_project(project_id)
@@ -202,10 +201,11 @@ pub(super) async fn update_item(
 
 pub(super) async fn get_item(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
     state
         .db
         .get_project(project_id)
@@ -217,14 +217,15 @@ pub(super) async fn get_item(
 
 pub(super) async fn revise_item(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
     maybe_request: Option<Json<ReviseItemRequest>>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
     let request: ReviseItemRequest = maybe_request
         .map(|Json(request)| request)
         .unwrap_or_default();
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let project = state
         .db
         .get_project(project_id)
@@ -294,10 +295,11 @@ pub(super) async fn revise_item(
 
 pub(super) async fn defer_item(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let project = state
         .db
         .get_project(project_id)
@@ -348,10 +350,11 @@ pub(super) async fn defer_item(
 
 pub(super) async fn resume_item(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let project = state
         .db
         .get_project(project_id)
@@ -401,12 +404,15 @@ pub(super) async fn resume_item(
 
 pub(super) async fn dismiss_item(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
     finish_item_manually(
         state,
-        parse_id::<ProjectId>(&project_id, "project")?,
-        parse_id::<ItemId>(&item_id, "item")?,
+        project_id,
+        item_id,
         DoneReason::Dismissed,
         ActivityEventType::ItemDismissed,
     )
@@ -415,12 +421,15 @@ pub(super) async fn dismiss_item(
 
 pub(super) async fn invalidate_item(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
     finish_item_manually(
         state,
-        parse_id::<ProjectId>(&project_id, "project")?,
-        parse_id::<ItemId>(&item_id, "item")?,
+        project_id,
+        item_id,
         DoneReason::Invalidated,
         ActivityEventType::ItemInvalidated,
     )
@@ -429,14 +438,15 @@ pub(super) async fn invalidate_item(
 
 pub(super) async fn reopen_item(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
     maybe_request: Option<Json<ReviseItemRequest>>,
 ) -> Result<Json<ItemDetailResponse>, ApiError> {
     let request: ReviseItemRequest = maybe_request
         .map(|Json(request)| request)
         .unwrap_or_default();
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
     let project = state
         .db
         .get_project(project_id)
@@ -522,10 +532,11 @@ pub(super) async fn reopen_item(
 
 pub(super) async fn list_item_findings(
     State(state): State<AppState>,
-    Path((project_id, item_id)): Path<(String, String)>,
+    ApiPath(ProjectItemPathParams {
+        project_id,
+        item_id,
+    }): ApiPath<ProjectItemPathParams>,
 ) -> Result<Json<Vec<Finding>>, ApiError> {
-    let project_id = parse_id::<ProjectId>(&project_id, "project")?;
-    let item_id = parse_id::<ItemId>(&item_id, "item")?;
     state
         .db
         .get_project(project_id)
