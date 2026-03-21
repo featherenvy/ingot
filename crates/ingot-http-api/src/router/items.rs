@@ -19,7 +19,7 @@ pub(super) async fn create_item(
         .await;
     let paths = refresh_project_mirror(&state, &project).await?;
     let config = load_effective_config(Some(&project))?;
-    let configured_approval_policy = parse_config_approval_policy(&config)?;
+    let configured_approval_policy = config.defaults.approval_policy;
 
     let target_ref = normalize_target_ref(
         request

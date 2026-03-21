@@ -1,3 +1,4 @@
+use ingot_domain::revision::ApprovalPolicy;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -10,7 +11,7 @@ pub struct IngotConfig {
 pub struct DefaultsConfig {
     pub candidate_rework_budget: u32,
     pub integration_rework_budget: u32,
-    pub approval_policy: String,
+    pub approval_policy: ApprovalPolicy,
     pub overflow_strategy: String,
 }
 
@@ -19,7 +20,7 @@ impl Default for DefaultsConfig {
         Self {
             candidate_rework_budget: 2,
             integration_rework_budget: 2,
-            approval_policy: "required".into(),
+            approval_policy: ApprovalPolicy::Required,
             overflow_strategy: "truncate".into(),
         }
     }

@@ -22,8 +22,7 @@ use ingot_usecases::item::{CreateItemInput, create_manual_item, normalize_target
 use crate::error::ApiError;
 use crate::router::{
     AppState, append_activity, ensure_git_valid_target_ref, git_to_internal, load_effective_config,
-    parse_config_approval_policy, repo_to_internal, repo_to_project_mutation,
-    resolve_default_branch,
+    repo_to_internal, repo_to_project_mutation, resolve_default_branch,
 };
 
 use catalog::{DEMO_CATALOG, find_template};
@@ -199,7 +198,7 @@ pub async fn create_demo_project(
 
     // Create items from template
     let config = load_effective_config(Some(&project))?;
-    let configured_approval_policy = parse_config_approval_policy(&config)?;
+    let configured_approval_policy = config.defaults.approval_policy;
     let target_ref = normalize_target_ref(project.default_branch.as_str())?;
     ensure_git_valid_target_ref(target_ref.as_str()).await?;
     let repo_path = &project.path;

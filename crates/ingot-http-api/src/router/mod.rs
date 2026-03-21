@@ -16,8 +16,8 @@ use items::RevisionLaneTeardown;
 pub(crate) use items::{append_activity, load_effective_config};
 use support::*;
 pub(crate) use support::{
-    ensure_git_valid_target_ref, git_to_internal, parse_config_approval_policy, repo_to_internal,
-    repo_to_project_mutation, resolve_default_branch,
+    ensure_git_valid_target_ref, git_to_internal, repo_to_internal, repo_to_project_mutation,
+    resolve_default_branch,
 };
 
 use std::path::Path as FsPath;

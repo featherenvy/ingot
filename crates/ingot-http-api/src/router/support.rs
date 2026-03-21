@@ -5,13 +5,11 @@ use axum::extract::path::ErrorKind as PathErrorKind;
 use axum::extract::rejection::{FailedToDeserializePathParams, PathRejection};
 use axum::extract::{FromRequestParts, Path, RawPathParams};
 use axum::http::request::Parts;
-use ingot_config::IngotConfig;
 use ingot_domain::branch_name::BranchName;
 use ingot_domain::git_operation::OperationKind;
 use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::ports::RepositoryError;
 use ingot_domain::project::Project;
-use ingot_domain::revision::ApprovalPolicy;
 use ingot_domain::workspace::{Workspace, WorkspaceStatus};
 use ingot_git::commands::{check_ref_format, current_branch_name, resolve_ref_oid};
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
@@ -202,19 +200,6 @@ pub(crate) async fn resolve_default_branch(
     }
 
     Ok(branch)
-}
-
-pub(crate) fn parse_config_approval_policy(
-    config: &IngotConfig,
-) -> Result<ApprovalPolicy, ApiError> {
-    match config.defaults.approval_policy.as_str() {
-        "required" => Ok(ApprovalPolicy::Required),
-        "not_required" => Ok(ApprovalPolicy::NotRequired),
-        other => Err(ApiError::BadRequest {
-            code: "config_invalid",
-            message: format!("Unsupported approval policy in config: {other}"),
-        }),
-    }
 }
 
 // ---------------------------------------------------------------------------
