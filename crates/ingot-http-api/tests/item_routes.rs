@@ -4,8 +4,10 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use chrono::Utc;
 use ingot_domain::convergence::ConvergenceStatus;
-use ingot_domain::git_operation::{GitOperation, GitOperationStatus, OperationPayload};
-use ingot_domain::ids::{GitOperationId, ProjectId, WorkspaceId};
+use ingot_domain::git_operation::{
+    GitOperation, GitOperationEntityRef, GitOperationStatus, OperationPayload,
+};
+use ingot_domain::ids::{ConvergenceId, GitOperationId, ProjectId, WorkspaceId};
 use ingot_domain::item::{ApprovalState, Escalation, EscalationReason, ParkingState};
 use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
@@ -975,7 +977,7 @@ async fn revise_route_cancels_current_lane_state() {
     db.create_git_operation(&GitOperation {
         id: GitOperationId::new(),
         project_id: parse_id::<ProjectId>(&project_id),
-        entity_id: convergence_id.clone(),
+        entity: GitOperationEntityRef::Convergence(convergence_id.parse::<ConvergenceId>().unwrap()),
         payload: OperationPayload::PrepareConvergenceCommit {
             workspace_id: "wrk_00000000000000000000000000000057"
                 .parse::<WorkspaceId>()
@@ -995,7 +997,7 @@ async fn revise_route_cancels_current_lane_state() {
     db.create_git_operation(&GitOperation {
         id: GitOperationId::new(),
         project_id: parse_id::<ProjectId>(&project_id),
-        entity_id: convergence_id.clone(),
+        entity: GitOperationEntityRef::Convergence(convergence_id.parse::<ConvergenceId>().unwrap()),
         payload: OperationPayload::FinalizeTargetRef {
             workspace_id: None,
             ref_name: "refs/heads/main".into(),

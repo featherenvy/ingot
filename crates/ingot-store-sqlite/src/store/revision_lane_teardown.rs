@@ -104,8 +104,8 @@ impl Database {
             .bind(activity.id)
             .bind(activity.project_id)
             .bind(activity.event_type)
-            .bind(activity.entity_type)
-            .bind(&activity.entity_id)
+            .bind(activity.subject.entity_type())
+            .bind(activity.subject.entity_id_string())
             .bind(serde_json::to_string(&activity.payload).map_err(json_err)?)
             .bind(activity.created_at)
             .execute(&mut *tx)
@@ -236,8 +236,8 @@ impl Database {
             .bind(activity.id)
             .bind(activity.project_id)
             .bind(activity.event_type)
-            .bind(activity.entity_type)
-            .bind(&activity.entity_id)
+            .bind(activity.subject.entity_type())
+            .bind(activity.subject.entity_id_string())
             .bind(serde_json::to_string(&activity.payload).map_err(json_err)?)
             .bind(activity.created_at)
             .execute(&mut *tx)
@@ -331,8 +331,7 @@ mod tests {
             id: ActivityId::new(),
             project_id: project.id,
             event_type: ingot_domain::activity::ActivityEventType::JobCancelled,
-            entity_type: ingot_domain::activity::ActivityEntityType::Job,
-            entity_id: job.id.to_string(),
+            subject: ingot_domain::activity::ActivitySubject::Job(job.id),
             payload: serde_json::json!({ "item_id": item.id }),
             created_at: chrono::Utc::now(),
         };
@@ -446,8 +445,7 @@ mod tests {
                     id: ActivityId::new(),
                     project_id: project.id,
                     event_type: ingot_domain::activity::ActivityEventType::JobCancelled,
-                    entity_type: ingot_domain::activity::ActivityEntityType::Job,
-                    entity_id: job.id.to_string(),
+                    subject: ingot_domain::activity::ActivitySubject::Job(job.id),
                     payload: serde_json::json!({}),
                     created_at: chrono::Utc::now(),
                 },

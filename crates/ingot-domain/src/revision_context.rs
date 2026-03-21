@@ -3,22 +3,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit_oid::CommitOid;
 use crate::ids::{ItemRevisionId, JobId};
+use crate::job::OutcomeClass;
 use crate::step_id::StepId;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevisionContextResultSummary {
-    pub job_id: String,
+    pub job_id: JobId,
     pub schema_version: String,
-    pub outcome: String,
+    pub outcome: OutcomeClass,
     pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevisionContextAcceptedResultRef {
-    pub job_id: String,
+    pub job_id: JobId,
     pub step_id: StepId,
     pub schema_version: String,
-    pub outcome: String,
+    pub outcome: OutcomeClass,
     pub summary: String,
 }
 

@@ -149,6 +149,6 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
             .expect("activity");
     assert!(activity.iter().any(|entry| {
         entry.event_type == ActivityEventType::ItemEscalationCleared
-            && entry.entity_id == item_id.to_string()
+            && entry.subject == ingot_domain::activity::ActivitySubject::Item(item_id)
     }));
 }

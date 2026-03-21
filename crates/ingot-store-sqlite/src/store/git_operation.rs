@@ -169,7 +169,7 @@ fn map_git_operation(row: &SqliteRow) -> Result<GitOperation, RepositoryError> {
 
 #[cfg(test)]
 mod tests {
-    use ingot_domain::git_operation::{GitEntityType, GitOperationStatus, OperationKind};
+    use ingot_domain::git_operation::{GitOperationEntityRef, GitOperationStatus, OperationKind};
     use ingot_domain::ids::ConvergenceId;
     use ingot_domain::ports::RepositoryError;
     use ingot_test_support::fixtures::{GitOperationBuilder, ProjectBuilder};
@@ -191,8 +191,7 @@ mod tests {
         let operation = GitOperationBuilder::new(
             project.id,
             OperationKind::FinalizeTargetRef,
-            GitEntityType::Convergence,
-            convergence_id.to_string(),
+            GitOperationEntityRef::Convergence(convergence_id),
         )
         .ref_name("refs/heads/main")
         .expected_old_oid("base")
@@ -225,8 +224,7 @@ mod tests {
         let first = GitOperationBuilder::new(
             project.id,
             OperationKind::FinalizeTargetRef,
-            GitEntityType::Convergence,
-            convergence_id.to_string(),
+            GitOperationEntityRef::Convergence(convergence_id),
         )
         .ref_name("refs/heads/main")
         .expected_old_oid("base")
@@ -241,8 +239,7 @@ mod tests {
         let second = GitOperationBuilder::new(
             project.id,
             OperationKind::FinalizeTargetRef,
-            GitEntityType::Convergence,
-            convergence_id.to_string(),
+            GitOperationEntityRef::Convergence(convergence_id),
         )
         .ref_name("refs/heads/main")
         .expected_old_oid("base")

@@ -19,7 +19,7 @@ use common::*;
 use ingot_domain::activity::ActivityEventType;
 use ingot_domain::convergence::ConvergenceStatus;
 use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
-use ingot_domain::git_operation::{GitEntityType, GitOperationStatus, OperationKind};
+use ingot_domain::git_operation::{GitOperationEntityRef, GitOperationStatus, OperationKind};
 use ingot_test_support::fixtures::{
     GitOperationBuilder, JobBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
 };
@@ -788,8 +788,7 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
         &GitOperationBuilder::new(
             project.id,
             OperationKind::FinalizeTargetRef,
-            GitEntityType::Convergence,
-            convergence.id.to_string(),
+            GitOperationEntityRef::Convergence(convergence.id),
         )
         .ref_name("refs/heads/main")
         .expected_old_oid(base_commit.clone())
@@ -904,8 +903,7 @@ async fn fail_prepare_convergence_attempt_marks_non_conflict_failures_as_step_fa
     let mut operation = GitOperationBuilder::new(
         h.project.id,
         OperationKind::PrepareConvergenceCommit,
-        GitEntityType::Convergence,
-        convergence.id.to_string(),
+        GitOperationEntityRef::Convergence(convergence.id),
     )
     .workspace_id(integration_workspace.id)
     .ref_name(

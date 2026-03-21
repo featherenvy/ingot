@@ -34,7 +34,7 @@ use chrono::Utc;
 use ingot_agent_adapters::registry::{default_agent_capabilities, probe_and_apply};
 use ingot_config::IngotConfig;
 use ingot_config::loader::load_config;
-use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
+use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::agent::{Agent, AgentStatus};
 
 use ingot_domain::commit_oid::CommitOid;
@@ -42,7 +42,8 @@ use ingot_domain::convergence::Convergence;
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::{Finding, FindingTriageState};
 use ingot_domain::git_operation::{
-    ConvergenceReplayMetadata, GitOperation, GitOperationStatus, OperationPayload,
+    ConvergenceReplayMetadata, GitOperation, GitOperationEntityRef, GitOperationStatus,
+    OperationPayload,
 };
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};

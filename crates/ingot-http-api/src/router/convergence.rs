@@ -90,8 +90,7 @@ async fn reconcile_checkout_sync_state_http(
                     state,
                     project.id,
                     ActivityEventType::CheckoutSyncCleared,
-                    ActivityEntityType::Item,
-                    item.id,
+                    ActivitySubject::Item(item.id),
                     serde_json::json!({}),
                 )
                 .await
@@ -100,8 +99,7 @@ async fn reconcile_checkout_sync_state_http(
                     state,
                     project.id,
                     ActivityEventType::ItemEscalationCleared,
-                    ActivityEntityType::Item,
-                    item.id,
+                    ActivitySubject::Item(item.id),
                     serde_json::json!({ "reason": "checkout_sync_ready" }),
                 )
                 .await
@@ -123,8 +121,7 @@ async fn reconcile_checkout_sync_state_http(
                     state,
                     project.id,
                     ActivityEventType::CheckoutSyncBlocked,
-                    ActivityEntityType::Item,
-                    item.id,
+                    ActivitySubject::Item(item.id),
                     serde_json::json!({ "message": message }),
                 )
                 .await
@@ -494,10 +491,13 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
             if let Some(existing) = state
                 .db
                 .find_unresolved_finalize_for_convergence(
-                    operation
-                        .entity_id
-                        .parse::<ingot_domain::ids::ConvergenceId>()
-                        .map_err(|error| UseCaseError::Internal(error.to_string()))?,
+                    match &operation.entity {
+                        GitOperationEntityRef::Convergence(id) => *id,
+                        other => return Err(UseCaseError::Internal(format!(
+                            "expected convergence entity, got {:?}",
+                            other.entity_type()
+                        ))),
+                    },
                 )
                 .await
                 .map_err(UseCaseError::Repository)?
@@ -511,11 +511,10 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                         &state,
                         operation.project_id,
                         ActivityEventType::GitOperationPlanned,
-                        ActivityEntityType::GitOperation,
-                        operation.id,
+                        ActivitySubject::GitOperation(operation.id),
                         serde_json::json!({
                             "operation_kind": operation.operation_kind(),
-                            "entity_id": operation.entity_id,
+                            "entity_id": operation.entity.entity_id_string(),
                         }),
                     )
                     .await
@@ -525,10 +524,13 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                 Err(RepositoryError::Conflict(_)) => state
                     .db
                     .find_unresolved_finalize_for_convergence(
-                        operation
-                            .entity_id
-                            .parse::<ingot_domain::ids::ConvergenceId>()
-                            .map_err(|error| UseCaseError::Internal(error.to_string()))?,
+                        match &operation.entity {
+                            GitOperationEntityRef::Convergence(id) => *id,
+                            other => return Err(UseCaseError::Internal(format!(
+                                "expected convergence entity, got {:?}",
+                                other.entity_type()
+                            ))),
+                        },
                     )
                     .await
                     .map_err(UseCaseError::Repository)?
@@ -750,8 +752,7 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                 &state,
                 project.id,
                 ActivityEventType::ConvergenceFinalized,
-                ActivityEntityType::Convergence,
-                convergence.id,
+                ActivitySubject::Convergence(convergence.id),
                 serde_json::json!({ "item_id": item.id }),
             )
             .await
@@ -901,8 +902,7 @@ pub(super) async fn reject_item_approval(
         &state,
         project_id,
         ActivityEventType::ApprovalRejected,
-        ActivityEntityType::Item,
-        item.id,
+        ActivitySubject::Item(item.id),
         serde_json::json!({
             "new_revision_id": next_revision.id,
             "cancelled_convergence_id": teardown.first_cancelled_convergence_id,
@@ -915,8 +915,7 @@ pub(super) async fn reject_item_approval(
             &state,
             project_id,
             ActivityEventType::ItemEscalationCleared,
-            ActivityEntityType::Item,
-            item.id,
+            ActivitySubject::Item(item.id),
             serde_json::json!({ "reason": "approval_reject" }),
         )
         .await?;

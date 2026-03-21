@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit_oid::CommitOid;
 use crate::git_ref::GitRef;
-use crate::ids::{GitOperationId, ProjectId, WorkspaceId};
+use crate::ids::{
+    ConvergenceId, GitOperationId, ItemRevisionId, JobId, ProjectId, WorkspaceId,
+};
 
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +47,57 @@ pub enum GitOperationStatus {
 pub struct ConvergenceReplayMetadata {
     pub source_commit_oids: Vec<CommitOid>,
     pub prepared_commit_oids: Vec<CommitOid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitOperationEntityRef {
+    Job(JobId),
+    Convergence(ConvergenceId),
+    Workspace(WorkspaceId),
+    ItemRevision(ItemRevisionId),
+}
+
+impl GitOperationEntityRef {
+    #[must_use]
+    pub fn entity_type(&self) -> GitEntityType {
+        match self {
+            Self::Job(_) => GitEntityType::Job,
+            Self::Convergence(_) => GitEntityType::Convergence,
+            Self::Workspace(_) => GitEntityType::Workspace,
+            Self::ItemRevision(_) => GitEntityType::ItemRevision,
+        }
+    }
+
+    #[must_use]
+    pub fn entity_id_string(&self) -> String {
+        match self {
+            Self::Job(id) => id.to_string(),
+            Self::Convergence(id) => id.to_string(),
+            Self::Workspace(id) => id.to_string(),
+            Self::ItemRevision(id) => id.to_string(),
+        }
+    }
+
+    pub fn from_parts(entity_type: GitEntityType, entity_id: &str) -> Result<Self, String> {
+        match entity_type {
+            GitEntityType::Job => entity_id
+                .parse::<JobId>()
+                .map(Self::Job)
+                .map_err(|e| e.to_string()),
+            GitEntityType::Convergence => entity_id
+                .parse::<ConvergenceId>()
+                .map(Self::Convergence)
+                .map_err(|e| e.to_string()),
+            GitEntityType::Workspace => entity_id
+                .parse::<WorkspaceId>()
+                .map(Self::Workspace)
+                .map_err(|e| e.to_string()),
+            GitEntityType::ItemRevision => entity_id
+                .parse::<ItemRevisionId>()
+                .map(Self::ItemRevision)
+                .map_err(|e| e.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -259,7 +312,7 @@ impl OperationPayload {
 pub struct GitOperation {
     pub id: GitOperationId,
     pub project_id: ProjectId,
-    pub entity_id: String,
+    pub entity: GitOperationEntityRef,
     pub payload: OperationPayload,
     pub status: GitOperationStatus,
     pub created_at: DateTime<Utc>,
@@ -270,11 +323,6 @@ impl GitOperation {
     #[must_use]
     pub fn operation_kind(&self) -> OperationKind {
         self.payload.operation_kind()
-    }
-
-    #[must_use]
-    pub fn entity_type(&self) -> GitEntityType {
-        self.payload.entity_type()
     }
 
     #[must_use]
@@ -435,10 +483,13 @@ impl TryFrom<GitOperationWire> for GitOperation {
             }
         };
 
+        let entity = GitOperationEntityRef::from_parts(w.entity_type, &w.entity_id)
+            .map_err(|e| format!("invalid entity: {e}"))?;
+
         Ok(GitOperation {
             id: w.id,
             project_id: w.project_id,
-            entity_id: w.entity_id,
+            entity,
             payload,
             status: w.status,
             created_at: w.created_at,
@@ -453,8 +504,8 @@ impl From<&GitOperation> for GitOperationWire {
             id: op.id,
             project_id: op.project_id,
             operation_kind: op.operation_kind(),
-            entity_type: op.entity_type(),
-            entity_id: op.entity_id.clone(),
+            entity_type: op.entity.entity_type(),
+            entity_id: op.entity.entity_id_string(),
             workspace_id: op.workspace_id(),
             ref_name: op.ref_name().cloned(),
             expected_old_oid: op.expected_old_oid().cloned(),
@@ -691,11 +742,11 @@ mod tests {
 
     #[test]
     fn wire_round_trip_create_job_commit() {
+        let job_id: crate::ids::JobId = "01234567-89ab-cdef-0123-456789abcdef".parse().unwrap();
         let op = GitOperationBuilder::new(
             test_project_id(),
             OperationKind::CreateJobCommit,
-            GitEntityType::Job,
-            "job-1",
+            GitOperationEntityRef::Job(job_id),
         )
         .workspace_id(test_workspace_id())
         .ref_name("refs/ingot/workspaces/auth")
@@ -717,11 +768,12 @@ mod tests {
 
     #[test]
     fn wire_round_trip_prepare_convergence_with_metadata() {
+        let convergence_id: crate::ids::ConvergenceId =
+            "01234567-89ab-cdef-0123-456789abcdef".parse().unwrap();
         let op = GitOperationBuilder::new(
             test_project_id(),
             OperationKind::PrepareConvergenceCommit,
-            GitEntityType::Convergence,
-            "conv-1",
+            GitOperationEntityRef::Convergence(convergence_id),
         )
         .workspace_id(test_workspace_id())
         .ref_name("refs/ingot/workspaces/int")

@@ -104,8 +104,7 @@ pub(super) async fn dispatch_item_job(
         &state,
         project_id,
         ActivityEventType::JobDispatched,
-        ActivityEntityType::Job,
-        job.id,
+        ActivitySubject::Job(job.id),
         serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
     )
     .await?;
@@ -226,7 +225,7 @@ pub(super) async fn apply_pending_investigation_ref_or_cleanup(
     if let Err(error) = plan_and_apply_investigation_ref(
         state,
         project.id,
-        job_id.to_string(),
+        GitOperationEntityRef::Job(job_id),
         &pending_investigation_ref.ref_name,
         &pending_investigation_ref.commit_oid,
     )
@@ -287,14 +286,14 @@ pub(super) async fn cleanup_failed_dispatch_side_effects(
 pub(super) async fn plan_and_apply_investigation_ref(
     state: &AppState,
     project_id: ProjectId,
-    entity_id: String,
+    entity: GitOperationEntityRef,
     ref_name: &GitRef,
     commit_oid: &CommitOid,
 ) -> Result<(), ApiError> {
     let mut operation = GitOperation {
         id: ingot_domain::ids::GitOperationId::new(),
         project_id,
-        entity_id,
+        entity,
         payload: OperationPayload::CreateInvestigationRef {
             ref_name: ref_name.clone(),
             new_oid: commit_oid.clone(),
@@ -313,9 +312,8 @@ pub(super) async fn plan_and_apply_investigation_ref(
         state,
         project_id,
         ActivityEventType::GitOperationPlanned,
-        ActivityEntityType::GitOperation,
-        operation.id,
-        serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
+        ActivitySubject::GitOperation(operation.id),
+        serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity.entity_id_string() }),
     )
     .await?;
     let project = state
@@ -378,7 +376,7 @@ pub(super) async fn maybe_cleanup_investigation_ref(
     let mut operation = GitOperation {
         id: ingot_domain::ids::GitOperationId::new(),
         project_id,
-        entity_id: finding.source_job_id.to_string(),
+        entity: GitOperationEntityRef::Job(finding.source_job_id),
         payload: OperationPayload::RemoveInvestigationRef {
             ref_name: ref_name.clone(),
             expected_old_oid: existing_oid.clone(),
@@ -396,9 +394,8 @@ pub(super) async fn maybe_cleanup_investigation_ref(
         state,
         project_id,
         ActivityEventType::GitOperationPlanned,
-        ActivityEntityType::GitOperation,
-        operation.id,
-        serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
+        ActivitySubject::GitOperation(operation.id),
+        serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity.entity_id_string() }),
     )
     .await?;
     delete_ref(paths.mirror_git_dir.as_path(), &ref_name)
@@ -571,8 +568,7 @@ pub(super) async fn retry_item_job(
         &state,
         project_id,
         ActivityEventType::JobDispatched,
-        ActivityEntityType::Job,
-        job.id,
+        ActivitySubject::Job(job.id),
         serde_json::json!({
             "item_id": item.id,
             "step_id": job.step_id,
@@ -980,7 +976,7 @@ mod tests {
             .create_git_operation(&GitOperation {
                 id: GitOperationId::new(),
                 project_id: project.id,
-                entity_id: JobId::from_uuid(Uuid::now_v7()).to_string(),
+                entity: GitOperationEntityRef::Job(JobId::from_uuid(Uuid::now_v7())),
                 payload: OperationPayload::CreateInvestigationRef {
                     ref_name: GitRef::new(&investigation_ref),
                     new_oid: CommitOid::new(&head),
@@ -1080,7 +1076,7 @@ mod tests {
             .create_git_operation(&GitOperation {
                 id: GitOperationId::new(),
                 project_id: project.id,
-                entity_id: JobId::from_uuid(Uuid::now_v7()).to_string(),
+                entity: GitOperationEntityRef::Job(JobId::from_uuid(Uuid::now_v7())),
                 payload: OperationPayload::CreateInvestigationRef {
                     ref_name: GitRef::new(&investigation_ref),
                     new_oid: CommitOid::new("deadbeef".repeat(5)),

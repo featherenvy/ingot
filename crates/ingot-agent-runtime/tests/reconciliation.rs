@@ -6,7 +6,7 @@ use ingot_agent_runtime::{DispatcherConfig, JobDispatcher};
 use ingot_domain::activity::ActivityEventType;
 use ingot_domain::convergence::ConvergenceStatus;
 use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
-use ingot_domain::git_operation::{GitEntityType, GitOperationStatus, OperationKind};
+use ingot_domain::git_operation::{GitOperationEntityRef, GitOperationStatus, OperationKind};
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::item::{
     ApprovalState, DoneReason, Escalation, EscalationReason, ResolutionSource,
@@ -567,8 +567,7 @@ async fn reconcile_startup_marks_finalized_target_ref_git_operation_reconciled()
     let operation = GitOperationBuilder::new(
         project.id,
         OperationKind::FinalizeTargetRef,
-        GitEntityType::Convergence,
-        convergence.id.to_string(),
+        GitOperationEntityRef::Convergence(convergence.id),
     )
     .ref_name("refs/heads/main")
     .expected_old_oid(base_commit.clone())
@@ -738,8 +737,7 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
     let operation = GitOperationBuilder::new(
         project.id,
         OperationKind::FinalizeTargetRef,
-        GitEntityType::Convergence,
-        convergence.id.to_string(),
+        GitOperationEntityRef::Convergence(convergence.id),
     )
     .ref_name("refs/heads/main")
     .expected_old_oid(base_commit.clone())
@@ -895,8 +893,7 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
     let operation = GitOperationBuilder::new(
         project.id,
         OperationKind::FinalizeTargetRef,
-        GitEntityType::Convergence,
-        convergence.id.to_string(),
+        GitOperationEntityRef::Convergence(convergence.id),
     )
     .ref_name("refs/heads/main")
     .expected_old_oid(base_commit)
@@ -1028,8 +1025,7 @@ async fn reconcile_startup_adopts_prepared_convergence_from_git_operation() {
     let operation = GitOperationBuilder::new(
         project.id,
         OperationKind::PrepareConvergenceCommit,
-        GitEntityType::Convergence,
-        convergence.id.to_string(),
+        GitOperationEntityRef::Convergence(convergence.id),
     )
     .workspace_id(workspace.id)
     .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
@@ -1156,8 +1152,7 @@ async fn reconcile_startup_does_not_resurrect_cancelled_convergence_from_prepare
     let operation = GitOperationBuilder::new(
         project.id,
         OperationKind::PrepareConvergenceCommit,
-        GitEntityType::Convergence,
-        convergence.id.to_string(),
+        GitOperationEntityRef::Convergence(convergence.id),
     )
     .workspace_id(workspace.id)
     .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
@@ -1279,8 +1274,7 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
     let operation = GitOperationBuilder::new(
         project.id,
         OperationKind::CreateJobCommit,
-        GitEntityType::Job,
-        job.id.to_string(),
+        GitOperationEntityRef::Job(job.id),
     )
     .workspace_id(workspace.id)
     .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
@@ -1499,8 +1493,7 @@ async fn reconcile_startup_adopts_reset_workspace_operation() {
     let operation = GitOperationBuilder::new(
         h.project.id,
         OperationKind::ResetWorkspace,
-        GitEntityType::Workspace,
-        workspace.id.to_string(),
+        GitOperationEntityRef::Workspace(workspace.id),
     )
     .workspace_id(workspace.id)
     .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))
@@ -1585,8 +1578,7 @@ async fn reconcile_startup_adopts_remove_workspace_ref_operation() {
     let operation = GitOperationBuilder::new(
         project.id,
         OperationKind::RemoveWorkspaceRef,
-        GitEntityType::Workspace,
-        workspace.id.to_string(),
+        GitOperationEntityRef::Workspace(workspace.id),
     )
     .workspace_id(workspace.id)
     .ref_name(workspace.workspace_ref.clone().expect("workspace ref"))

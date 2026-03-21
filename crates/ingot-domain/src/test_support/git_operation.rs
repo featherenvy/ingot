@@ -1,7 +1,7 @@
 use crate::commit_oid::CommitOid;
 use crate::git_operation::{
-    ConvergenceReplayMetadata, GitEntityType, GitOperation, GitOperationStatus, OperationKind,
-    OperationPayload,
+    ConvergenceReplayMetadata, GitOperation, GitOperationEntityRef, GitOperationStatus,
+    OperationKind, OperationPayload,
 };
 use crate::git_ref::GitRef;
 use crate::ids;
@@ -13,8 +13,7 @@ pub struct GitOperationBuilder {
     id: ids::GitOperationId,
     project_id: ids::ProjectId,
     operation_kind: OperationKind,
-    _entity_type: GitEntityType,
-    entity_id: String,
+    entity: GitOperationEntityRef,
     workspace_id: Option<ids::WorkspaceId>,
     ref_name: Option<GitRef>,
     expected_old_oid: Option<CommitOid>,
@@ -30,15 +29,13 @@ impl GitOperationBuilder {
     pub fn new(
         project_id: ids::ProjectId,
         operation_kind: OperationKind,
-        entity_type: GitEntityType,
-        entity_id: impl Into<String>,
+        entity: GitOperationEntityRef,
     ) -> Self {
         Self {
             id: ids::GitOperationId::new(),
             project_id,
             operation_kind,
-            _entity_type: entity_type,
-            entity_id: entity_id.into(),
+            entity,
             workspace_id: None,
             ref_name: None,
             expected_old_oid: None,
@@ -178,7 +175,7 @@ impl GitOperationBuilder {
         GitOperation {
             id: self.id,
             project_id: self.project_id,
-            entity_id: self.entity_id,
+            entity: self.entity,
             payload,
             status: self.status,
             created_at: self.created_at,

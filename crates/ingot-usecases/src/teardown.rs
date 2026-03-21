@@ -1,8 +1,8 @@
 use chrono::Utc;
-use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
+use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::convergence::ConvergenceStatus;
 use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
-use ingot_domain::git_operation::{GitEntityType, GitOperationStatus, OperationKind};
+use ingot_domain::git_operation::{GitOperationStatus, OperationKind};
 use ingot_domain::ids::{
     ActivityId, ConvergenceId, ConvergenceQueueEntryId, GitOperationId, ItemId, JobId, ProjectId,
     WorkspaceId,
@@ -134,8 +134,7 @@ where
             id: ActivityId::new(),
             project_id,
             event_type: ActivityEventType::JobCancelled,
-            entity_type: ActivityEntityType::Job,
-            entity_id: job.id.to_string(),
+            subject: ActivitySubject::Job(job.id),
             payload: serde_json::json!({ "item_id": item_id, "reason": "item_mutation_cancelled" }),
             created_at: Utc::now(),
         };
@@ -178,20 +177,17 @@ where
 
     // 4. Build git operation reconciliations
     if result.has_cancelled_convergence() {
-        let cancelled_ids: Vec<String> = result
-            .cancelled_convergence_ids
-            .iter()
-            .map(|id| id.to_string())
-            .collect();
-
         for mut operation in git_op_repo
             .find_unresolved()
             .await?
             .into_iter()
             .filter(|operation| {
                 operation.project_id == project_id
-                    && operation.entity_type() == GitEntityType::Convergence
-                    && cancelled_ids.iter().any(|id| id == &operation.entity_id)
+                    && matches!(
+                        &operation.entity,
+                        ingot_domain::git_operation::GitOperationEntityRef::Convergence(id)
+                            if result.cancelled_convergence_ids.contains(id)
+                    )
                     && matches!(
                         operation.operation_kind(),
                         OperationKind::PrepareConvergenceCommit | OperationKind::FinalizeTargetRef
@@ -206,8 +202,7 @@ where
                         id: ActivityId::new(),
                         project_id,
                         event_type: ActivityEventType::GitOperationReconciled,
-                        entity_type: ActivityEntityType::GitOperation,
-                        entity_id: operation.id.to_string(),
+                        subject: ActivitySubject::GitOperation(operation.id),
                         payload: serde_json::json!({ "operation_kind": operation.operation_kind() }),
                         created_at: Utc::now(),
                     });

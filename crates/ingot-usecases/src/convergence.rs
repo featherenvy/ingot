@@ -1,12 +1,14 @@
 use std::future::Future;
 
 use chrono::Utc;
-use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
+use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::Finding;
-use ingot_domain::git_operation::{GitOperation, GitOperationStatus, OperationPayload};
+use ingot_domain::git_operation::{
+    GitOperation, GitOperationEntityRef, GitOperationStatus, OperationPayload,
+};
 use ingot_domain::ids::{ActivityId, ItemId, ProjectId};
 use ingot_domain::item::ApprovalState;
 use ingot_domain::job::Job;
@@ -264,7 +266,7 @@ where
     let planned_operation = GitOperation {
         id: ingot_domain::ids::GitOperationId::new(),
         project_id: project.id,
-        entity_id: convergence.id.to_string(),
+        entity: GitOperationEntityRef::Convergence(convergence.id),
         payload: OperationPayload::FinalizeTargetRef {
             workspace_id: convergence.state.integration_workspace_id(),
             ref_name: convergence.target_ref.clone(),
@@ -383,8 +385,7 @@ where
                     id: ActivityId::new(),
                     project_id: context.project.id,
                     event_type: ActivityEventType::ConvergenceQueued,
-                    entity_type: ActivityEntityType::QueueEntry,
-                    entity_id: queue_entry.id.to_string(),
+                    subject: ActivitySubject::QueueEntry(queue_entry.id),
                     payload: serde_json::json!({
                         "item_id": context.item.id,
                         "target_ref": context.revision.target_ref,
@@ -406,8 +407,7 @@ where
                     id: ActivityId::new(),
                     project_id: context.project.id,
                     event_type: ActivityEventType::ConvergenceLaneAcquired,
-                    entity_type: ActivityEntityType::QueueEntry,
-                    entity_id: queue_entry.id.to_string(),
+                    subject: ActivitySubject::QueueEntry(queue_entry.id),
                     payload: serde_json::json!({
                         "item_id": context.item.id,
                         "target_ref": context.revision.target_ref,
@@ -478,8 +478,7 @@ where
                 id: ActivityId::new(),
                 project_id,
                 event_type: ActivityEventType::ApprovalApproved,
-                entity_type: ActivityEntityType::Item,
-                entity_id: item.id.to_string(),
+                subject: ActivitySubject::Item(item.id),
                 payload: serde_json::json!({
                     "convergence_id": convergence.id,
                     "queue_entry_id": queue_entry.id,
@@ -642,8 +641,7 @@ where
                 id: ActivityId::new(),
                 project_id,
                 event_type: ActivityEventType::ConvergenceLaneAcquired,
-                entity_type: ActivityEntityType::QueueEntry,
-                entity_id: entry.id.to_string(),
+                subject: ActivitySubject::QueueEntry(entry.id),
                 payload: serde_json::json!({ "item_id": entry.item_id, "target_ref": entry.target_ref }),
                 created_at: Utc::now(),
             })
@@ -704,8 +702,7 @@ where
         id: ActivityId::new(),
         project_id: convergence.project_id,
         event_type: ActivityEventType::ConvergenceFailed,
-        entity_type: ActivityEntityType::Convergence,
-        entity_id: convergence.id.to_string(),
+        subject: ActivitySubject::Convergence(convergence.id),
         payload: serde_json::json!({ "item_id": item.id, "reason": "target_ref_moved" }),
         created_at: Utc::now(),
     };
@@ -1043,7 +1040,7 @@ mod tests {
             self.calls
                 .lock()
                 .expect("calls lock")
-                .push(format!("find_or_create_op:{}", operation.entity_id));
+                .push(format!("find_or_create_op:{}", operation.entity.entity_id_string()));
             ready(Ok(operation.clone()))
         }
 

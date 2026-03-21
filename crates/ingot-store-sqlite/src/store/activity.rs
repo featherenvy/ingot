@@ -1,4 +1,4 @@
-use ingot_domain::activity::Activity;
+use ingot_domain::activity::{Activity, ActivitySubject};
 use ingot_domain::ids::ProjectId;
 use ingot_domain::ports::{ActivityRepository, RepositoryError};
 use sqlx::Row;
@@ -17,8 +17,8 @@ impl Database {
         .bind(activity.id)
         .bind(activity.project_id)
         .bind(activity.event_type)
-        .bind(activity.entity_type)
-        .bind(&activity.entity_id)
+        .bind(activity.subject.entity_type())
+        .bind(activity.subject.entity_id_string())
         .bind(serde_json::to_string(&activity.payload).map_err(json_err)?)
         .bind(activity.created_at)
         .execute(&self.pool)
@@ -68,12 +68,15 @@ impl ActivityRepository for Database {
 }
 
 fn map_activity(row: &SqliteRow) -> Result<Activity, RepositoryError> {
+    let entity_type = row.try_get("entity_type").map_err(db_err)?;
+    let entity_id: String = row.try_get("entity_id").map_err(db_err)?;
+    let subject = ActivitySubject::from_parts(entity_type, &entity_id)
+        .map_err(|e| RepositoryError::Conflict(format!("invalid activity subject: {e}")))?;
     Ok(Activity {
         id: row.try_get("id").map_err(db_err)?,
         project_id: row.try_get("project_id").map_err(db_err)?,
         event_type: row.try_get("event_type").map_err(db_err)?,
-        entity_type: row.try_get("entity_type").map_err(db_err)?,
-        entity_id: row.try_get("entity_id").map_err(db_err)?,
+        subject,
         payload: parse_json(row.try_get("payload").map_err(db_err)?)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
     })

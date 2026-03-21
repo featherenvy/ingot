@@ -115,8 +115,7 @@ pub(super) async fn complete_job(
         &state,
         job.project_id,
         ActivityEventType::JobCompleted,
-        ActivityEntityType::Job,
-        job.id,
+        ActivitySubject::Job(job.id),
         serde_json::json!({ "item_id": job.item_id, "outcome": job.state.outcome_class() }),
     )
     .await?;
@@ -128,8 +127,7 @@ pub(super) async fn complete_job(
             &state,
             job.project_id,
             ActivityEventType::ItemEscalationCleared,
-            ActivityEntityType::Item,
-            item.id,
+            ActivitySubject::Item(item.id),
             serde_json::json!({ "reason": "successful_retry", "job_id": job.id }),
         )
         .await?;
@@ -142,8 +140,7 @@ pub(super) async fn complete_job(
             &state,
             job.project_id,
             ActivityEventType::ApprovalRequested,
-            ActivityEntityType::Item,
-            item.id,
+            ActivitySubject::Item(item.id),
             serde_json::json!({ "job_id": job.id }),
         )
         .await?;

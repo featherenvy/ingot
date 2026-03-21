@@ -16,14 +16,15 @@ use ingot_agent_adapters::codex::CodexCliAdapter;
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
-use ingot_domain::activity::{Activity, ActivityEntityType, ActivityEventType};
+use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::{Convergence, ConvergenceStatus, PrepareFailureKind};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::FindingTriageState;
 use ingot_domain::git_operation::{
-    ConvergenceReplayMetadata, GitOperation, GitOperationStatus, OperationKind, OperationPayload,
+    ConvergenceReplayMetadata, GitOperation, GitOperationEntityRef, GitOperationStatus,
+    OperationKind, OperationPayload,
 };
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::harness::{HarnessCommand, HarnessProfile, HarnessProfileError};
@@ -597,10 +598,12 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
         let dispatcher = self.dispatcher.clone();
         let operation = operation.clone();
         async move {
-            let convergence_id = operation
-                .entity_id
-                .parse::<ingot_domain::ids::ConvergenceId>()
-                .map_err(|error| ingot_usecases::UseCaseError::Internal(error.to_string()))?;
+            let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
+                return Err(ingot_usecases::UseCaseError::Internal(format!(
+                    "expected convergence entity, got {:?}", operation.entity.entity_type()
+                )));
+            };
+            let convergence_id = *convergence_id;
             if let Some(existing) = dispatcher
                 .db
                 .find_unresolved_finalize_for_convergence(convergence_id)
@@ -616,11 +619,10 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                         .append_activity(
                             operation.project_id,
                             ActivityEventType::GitOperationPlanned,
-                            ActivityEntityType::GitOperation,
-                            operation.id.to_string(),
+                            ActivitySubject::GitOperation(operation.id),
                             serde_json::json!({
                                 "operation_kind": operation.operation_kind(),
-                                "entity_id": operation.entity_id,
+                                "entity_id": operation.entity.entity_id_string(),
                             }),
                         )
                         .await
@@ -793,8 +795,7 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                 .append_activity(
                     project.id,
                     ActivityEventType::ConvergenceFinalized,
-                    ActivityEntityType::Convergence,
-                    convergence.id.to_string(),
+                    ActivitySubject::Convergence(convergence.id),
                     serde_json::json!({ "item_id": item.id }),
                 )
                 .await
@@ -1224,8 +1225,7 @@ impl JobDispatcher {
                         self.append_activity(
                             prepared.project_id,
                             ActivityEventType::JobFailed,
-                            ActivityEntityType::Job,
-                            prepared.job_id.to_string(),
+                            ActivitySubject::Job(prepared.job_id),
                             serde_json::json!({ "item_id": prepared.item_id, "error_code": "supervised_task_failed" }),
                         )
                         .await?;
@@ -1430,8 +1430,7 @@ impl JobDispatcher {
         self.append_activity(
             operation.project_id,
             ActivityEventType::GitOperationReconciled,
-            ActivityEntityType::GitOperation,
-            operation.id.to_string(),
+            ActivitySubject::GitOperation(operation.id),
             serde_json::json!({ "operation_kind": operation.operation_kind() }),
         )
         .await?;
@@ -1530,10 +1529,12 @@ impl JobDispatcher {
     }
 
     async fn adopt_create_job_commit(&self, operation: &GitOperation) -> Result<(), RuntimeError> {
-        let job_id = operation
-            .entity_id
-            .parse::<ingot_domain::ids::JobId>()
-            .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
+        let GitOperationEntityRef::Job(job_id) = &operation.entity else {
+            return Err(RuntimeError::InvalidState(format!(
+                "expected job entity, got {:?}", operation.entity.entity_type()
+            )));
+        };
+        let job_id = *job_id;
         let mut job = self.db.get_job(job_id).await?;
         let commit_oid = operation
             .effective_commit_oid()
@@ -1569,8 +1570,7 @@ impl JobDispatcher {
         self.append_activity(
             job.project_id,
             ActivityEventType::JobCompleted,
-            ActivityEntityType::Job,
-            job.id.to_string(),
+            ActivitySubject::Job(job.id),
             serde_json::json!({ "item_id": job.item_id, "outcome": "clean", "reconciled": true }),
         )
         .await?;
@@ -1591,10 +1591,12 @@ impl JobDispatcher {
         &self,
         operation: &GitOperation,
     ) -> Result<(), RuntimeError> {
-        let convergence_id = operation
-            .entity_id
-            .parse::<ingot_domain::ids::ConvergenceId>()
-            .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
+        let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
+            return Err(RuntimeError::InvalidState(format!(
+                "expected convergence entity, got {:?}", operation.entity.entity_type()
+            )));
+        };
+        let convergence_id = *convergence_id;
         let mut convergence = self.db.get_convergence(convergence_id).await?;
         if convergence.state.status() != ConvergenceStatus::Finalized {
             let final_oid = operation
@@ -1661,10 +1663,12 @@ impl JobDispatcher {
         &self,
         operation: &GitOperation,
     ) -> Result<(), RuntimeError> {
-        let convergence_id = operation
-            .entity_id
-            .parse::<ingot_domain::ids::ConvergenceId>()
-            .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
+        let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
+            return Err(RuntimeError::InvalidState(format!(
+                "expected convergence entity, got {:?}", operation.entity.entity_type()
+            )));
+        };
+        let convergence_id = *convergence_id;
         let mut convergence = self.db.get_convergence(convergence_id).await?;
         if matches!(
             convergence.state.status(),
@@ -1709,10 +1713,12 @@ impl JobDispatcher {
         operation: &mut GitOperation,
         paths: &ingot_git::project_repo::ProjectRepoPaths,
     ) -> Result<bool, RuntimeError> {
-        let convergence_id = operation
-            .entity_id
-            .parse::<ingot_domain::ids::ConvergenceId>()
-            .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
+        let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
+            return Err(RuntimeError::InvalidState(format!(
+                "expected convergence entity, got {:?}", operation.entity.entity_type()
+            )));
+        };
+        let convergence_id = *convergence_id;
         let convergence = self.db.get_convergence(convergence_id).await?;
         let item = self.db.get_item(convergence.item_id).await?;
         let revision = self.db.get_revision(convergence.item_revision_id).await?;
@@ -1881,8 +1887,7 @@ impl JobDispatcher {
         self.append_activity(
             job.project_id,
             ActivityEventType::JobFailed,
-            ActivityEntityType::Job,
-            job.id.to_string(),
+            ActivitySubject::Job(job.id),
             serde_json::json!({ "item_id": job.item_id, "error_code": "heartbeat_expired" }),
         )
         .await?;
@@ -1917,8 +1922,7 @@ impl JobDispatcher {
             self.append_activity(
                 convergence.project_id,
                 ActivityEventType::ConvergenceFailed,
-                ActivityEntityType::Convergence,
-                convergence.id.to_string(),
+                ActivitySubject::Convergence(convergence.id),
                 serde_json::json!({ "item_id": convergence.item_id, "reason": "startup_recovery_required" }),
             )
             .await?;
@@ -2009,7 +2013,7 @@ impl JobDispatcher {
             let mut operation = GitOperation {
                 id: GitOperationId::new(),
                 project_id: project.id,
-                entity_id: workspace.id.to_string(),
+                entity: GitOperationEntityRef::Workspace(workspace.id),
                 payload: OperationPayload::RemoveWorkspaceRef {
                     workspace_id: workspace.id,
                     ref_name: workspace_ref.clone(),
@@ -2023,9 +2027,8 @@ impl JobDispatcher {
             self.append_activity(
                 project.id,
                 ActivityEventType::GitOperationPlanned,
-                ActivityEntityType::GitOperation,
-                operation.id.to_string(),
-                serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
+                ActivitySubject::GitOperation(operation.id),
+                serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity.entity_id_string() }),
             )
             .await?;
             delete_ref(repo_path.as_path(), workspace_ref).await?;
@@ -2862,8 +2865,7 @@ impl JobDispatcher {
         self.append_activity(
             prepared.project.id,
             ActivityEventType::JobCompleted,
-            ActivityEntityType::Job,
-            prepared.job.id.to_string(),
+            ActivitySubject::Job(prepared.job.id),
             serde_json::json!({ "item_id": prepared.item.id, "outcome": outcome_class_name(outcome_class) }),
         )
         .await?;
@@ -2875,8 +2877,7 @@ impl JobDispatcher {
                 self.append_activity(
                     prepared.project.id,
                     ActivityEventType::ApprovalRequested,
-                    ActivityEntityType::Item,
-                    prepared.item.id.to_string(),
+                    ActivitySubject::Item(prepared.item.id),
                     serde_json::json!({ "job_id": prepared.job.id }),
                 )
                 .await?;
@@ -3090,16 +3091,14 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             event_type,
-            ActivityEntityType::Convergence,
-            convergence.id.to_string(),
+            ActivitySubject::Convergence(convergence.id),
             serde_json::json!({ "item_id": item.id, "summary": summary }),
         )
         .await?;
         self.append_activity(
             project.id,
             ActivityEventType::ItemEscalated,
-            ActivityEntityType::Item,
-            item.id.to_string(),
+            ActivitySubject::Item(item.id),
             serde_json::json!({ "reason": escalation_reason }),
         )
         .await?;
@@ -3223,8 +3222,7 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             ActivityEventType::ConvergenceStarted,
-            ActivityEntityType::Convergence,
-            convergence.id.to_string(),
+            ActivitySubject::Convergence(convergence.id),
             serde_json::json!({ "item_id": item.id, "queue_entry_id": queue_entry.id }),
         )
         .await?;
@@ -3239,7 +3237,7 @@ impl JobDispatcher {
         let mut operation = GitOperation {
             id: GitOperationId::new(),
             project_id: project.id,
-            entity_id: convergence.id.to_string(),
+            entity: GitOperationEntityRef::Convergence(convergence.id),
             payload: OperationPayload::PrepareConvergenceCommit {
                 workspace_id: integration_workspace.id,
                 ref_name: integration_workspace.workspace_ref.clone(),
@@ -3259,9 +3257,8 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             ActivityEventType::GitOperationPlanned,
-            ActivityEntityType::GitOperation,
-            operation.id.to_string(),
-            serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
+            ActivitySubject::GitOperation(operation.id),
+            serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity.entity_id_string() }),
         )
         .await?;
 
@@ -3434,16 +3431,14 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             ActivityEventType::ConvergencePrepared,
-            ActivityEntityType::Convergence,
-            convergence.id.to_string(),
+            ActivitySubject::Convergence(convergence.id),
             serde_json::json!({ "item_id": item.id, "validation_job_id": validation_job.id }),
         )
         .await?;
         self.append_activity(
             project.id,
             ActivityEventType::JobDispatched,
-            ActivityEntityType::Job,
-            validation_job.id.to_string(),
+            ActivitySubject::Job(validation_job.id),
             serde_json::json!({ "item_id": item.id, "step_id": validation_job.step_id }),
         )
         .await?;
@@ -3474,16 +3469,14 @@ impl JobDispatcher {
                     self.append_activity(
                         project.id,
                         ActivityEventType::CheckoutSyncCleared,
-                        ActivityEntityType::Item,
-                        item.id.to_string(),
+                        ActivitySubject::Item(item.id),
                         serde_json::json!({}),
                     )
                     .await?;
                     self.append_activity(
                         project.id,
                         ActivityEventType::ItemEscalationCleared,
-                        ActivityEntityType::Item,
-                        item.id.to_string(),
+                        ActivitySubject::Item(item.id),
                         serde_json::json!({ "reason": "checkout_sync_ready" }),
                     )
                     .await?;
@@ -3499,16 +3492,14 @@ impl JobDispatcher {
                     self.append_activity(
                         project.id,
                         ActivityEventType::CheckoutSyncBlocked,
-                        ActivityEntityType::Item,
-                        item.id.to_string(),
+                        ActivitySubject::Item(item.id),
                         serde_json::json!({ "message": message }),
                     )
                     .await?;
                     self.append_activity(
                         project.id,
                         ActivityEventType::ItemEscalated,
-                        ActivityEntityType::Item,
-                        item.id.to_string(),
+                        ActivitySubject::Item(item.id),
                         serde_json::json!({ "reason": EscalationReason::CheckoutSyncBlocked }),
                     )
                     .await?;
@@ -3582,7 +3573,7 @@ impl JobDispatcher {
         let mut operation = GitOperation {
             id: GitOperationId::new(),
             project_id: prepared.project.id,
-            entity_id: prepared.job.id.to_string(),
+            entity: GitOperationEntityRef::Job(prepared.job.id),
             payload: OperationPayload::CreateJobCommit {
                 workspace_id: prepared.workspace.id,
                 ref_name: workspace_ref.clone(),
@@ -3598,9 +3589,8 @@ impl JobDispatcher {
         self.append_activity(
             prepared.project.id,
             ActivityEventType::GitOperationPlanned,
-            ActivityEntityType::GitOperation,
-            operation.id.to_string(),
-            serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
+            ActivitySubject::GitOperation(operation.id),
+            serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity.entity_id_string() }),
         )
         .await?;
 
@@ -3664,8 +3654,7 @@ impl JobDispatcher {
         self.append_activity(
             prepared.project.id,
             ActivityEventType::JobCompleted,
-            ActivityEntityType::Job,
-            prepared.job.id.to_string(),
+            ActivitySubject::Job(prepared.job.id),
             serde_json::json!({ "item_id": prepared.item.id, "outcome": "clean" }),
         )
         .await?;
@@ -3920,8 +3909,7 @@ impl JobDispatcher {
         self.append_activity(
             prepared.project_id,
             ActivityEventType::JobCompleted,
-            ActivityEntityType::Job,
-            prepared.job_id.to_string(),
+            ActivitySubject::Job(prepared.job_id),
             serde_json::json!({ "item_id": prepared.item_id, "outcome": outcome }),
         )
         .await?;
@@ -3932,8 +3920,7 @@ impl JobDispatcher {
                 self.append_activity(
                     prepared.project_id,
                     ActivityEventType::ApprovalRequested,
-                    ActivityEntityType::Item,
-                    prepared.item_id.to_string(),
+                    ActivitySubject::Item(prepared.item_id),
                     serde_json::json!({ "job_id": prepared.job_id }),
                 )
                 .await?;
@@ -4409,8 +4396,7 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             ActivityEventType::JobDispatched,
-            ActivityEntityType::Job,
-            job.id.to_string(),
+            ActivitySubject::Job(job.id),
             serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
         )
         .await?;
@@ -4457,8 +4443,7 @@ impl JobDispatcher {
         self.append_activity(
             prepared.project.id,
             event_type,
-            ActivityEntityType::Job,
-            prepared.job.id.to_string(),
+            ActivitySubject::Job(prepared.job.id),
             serde_json::json!({ "item_id": prepared.item.id, "error_code": error_code }),
         )
         .await?;
@@ -4466,8 +4451,7 @@ impl JobDispatcher {
             self.append_activity(
                 prepared.project.id,
                 ActivityEventType::ItemEscalated,
-                ActivityEntityType::Item,
-                prepared.item.id.to_string(),
+                ActivitySubject::Item(prepared.item.id),
                 serde_json::json!({ "reason": escalation_reason }),
             )
             .await?;
@@ -4566,8 +4550,7 @@ impl JobDispatcher {
         self.append_activity(
             project.id,
             ActivityEventType::JobFailed,
-            ActivityEntityType::Job,
-            job.id.to_string(),
+            ActivitySubject::Job(job.id),
             serde_json::json!({ "item_id": item.id, "error_code": error_code }),
         )
         .await?;
@@ -4575,8 +4558,7 @@ impl JobDispatcher {
             self.append_activity(
                 project.id,
                 ActivityEventType::ItemEscalated,
-                ActivityEntityType::Item,
-                item.id.to_string(),
+                ActivitySubject::Item(item.id),
                 serde_json::json!({ "reason": escalation_reason }),
             )
             .await?;
@@ -4615,8 +4597,7 @@ impl JobDispatcher {
         self.append_activity(
             prepared.project.id,
             ActivityEventType::ItemEscalationCleared,
-            ActivityEntityType::Item,
-            prepared.item.id.to_string(),
+            ActivitySubject::Item(prepared.item.id),
             serde_json::json!({ "reason": "successful_retry", "job_id": prepared.job.id }),
         )
         .await?;
@@ -4871,8 +4852,7 @@ impl JobDispatcher {
         &self,
         project_id: ingot_domain::ids::ProjectId,
         event_type: ActivityEventType,
-        entity_type: ActivityEntityType,
-        entity_id: String,
+        subject: ActivitySubject,
         payload: serde_json::Value,
     ) -> Result<(), RuntimeError> {
         self.db
@@ -4880,8 +4860,7 @@ impl JobDispatcher {
                 id: ingot_domain::ids::ActivityId::new(),
                 project_id,
                 event_type,
-                entity_type,
-                entity_id,
+                subject,
                 payload,
                 created_at: Utc::now(),
             })

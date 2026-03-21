@@ -42,7 +42,7 @@ pub(super) async fn reset_workspace_route(
     let mut operation = GitOperation {
         id: ingot_domain::ids::GitOperationId::new(),
         project_id,
-        entity_id: workspace.id.to_string(),
+        entity: GitOperationEntityRef::Workspace(workspace.id),
         payload: OperationPayload::ResetWorkspace {
             workspace_id: workspace.id,
             ref_name: workspace.workspace_ref.clone(),
@@ -62,9 +62,8 @@ pub(super) async fn reset_workspace_route(
         &state,
         project_id,
         ActivityEventType::GitOperationPlanned,
-        ActivityEntityType::GitOperation,
-        operation.id,
-        serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
+        ActivitySubject::GitOperation(operation.id),
+        serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity.entity_id_string() }),
     )
     .await?;
 
@@ -197,7 +196,7 @@ pub(super) async fn remove_workspace_route(
             let mut operation = GitOperation {
                 id: ingot_domain::ids::GitOperationId::new(),
                 project_id,
-                entity_id: workspace.id.to_string(),
+                entity: GitOperationEntityRef::Workspace(workspace.id),
                 payload: OperationPayload::RemoveWorkspaceRef {
                     workspace_id: workspace.id,
                     ref_name: workspace_ref.clone(),
@@ -216,9 +215,8 @@ pub(super) async fn remove_workspace_route(
                 &state,
                 project_id,
                 ActivityEventType::GitOperationPlanned,
-                ActivityEntityType::GitOperation,
-                operation.id,
-                serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity_id }),
+                ActivitySubject::GitOperation(operation.id),
+                serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity.entity_id_string() }),
             )
             .await?;
             delete_ref(paths.mirror_git_dir.as_path(), workspace_ref)

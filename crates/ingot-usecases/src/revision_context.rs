@@ -60,10 +60,10 @@ fn accepted_result_refs(jobs: &[Job]) -> Vec<RevisionContextAcceptedResultRef> {
             let schema_version = job.state.result_schema_version()?;
 
             Some(RevisionContextAcceptedResultRef {
-                job_id: job.id.to_string(),
+                job_id: job.id,
                 step_id: job.step_id,
                 schema_version: schema_version.to_owned(),
-                outcome: outcome_name(outcome).into(),
+                outcome,
                 summary: summary.into(),
             })
         })
@@ -72,9 +72,9 @@ fn accepted_result_refs(jobs: &[Job]) -> Vec<RevisionContextAcceptedResultRef> {
 
 fn summary_from_job(job: &Job) -> Option<RevisionContextResultSummary> {
     Some(RevisionContextResultSummary {
-        job_id: job.id.to_string(),
+        job_id: job.id,
         schema_version: job.state.result_schema_version()?.to_owned(),
-        outcome: outcome_name(job.state.outcome_class()?).into(),
+        outcome: job.state.outcome_class()?,
         summary: job.state.result_payload()?.get("summary")?.as_str()?.into(),
     })
 }
@@ -91,17 +91,6 @@ fn structured_result_jobs(jobs: &[Job]) -> impl Iterator<Item = &Job> {
             && job.state.result_schema_version().is_some()
             && job.state.result_payload().is_some()
     })
-}
-
-fn outcome_name(outcome: ingot_domain::job::OutcomeClass) -> &'static str {
-    match outcome {
-        ingot_domain::job::OutcomeClass::Clean => "clean",
-        ingot_domain::job::OutcomeClass::Findings => "findings",
-        ingot_domain::job::OutcomeClass::TransientFailure => "transient_failure",
-        ingot_domain::job::OutcomeClass::TerminalFailure => "terminal_failure",
-        ingot_domain::job::OutcomeClass::ProtocolViolation => "protocol_violation",
-        ingot_domain::job::OutcomeClass::Cancelled => "cancelled",
-    }
 }
 
 fn excerpt_operator_notes(notes: &str) -> String {
