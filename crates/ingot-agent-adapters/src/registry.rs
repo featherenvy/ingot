@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use ingot_domain::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
 use ingot_domain::ids::AgentId;
 use tokio::process::Command;
@@ -28,7 +30,7 @@ pub fn bootstrap_codex_agent() -> Agent {
     bootstrap_codex_agent_with(DEFAULT_CODEX_CLI_PATH, DEFAULT_CODEX_MODEL)
 }
 
-pub fn bootstrap_codex_agent_with(cli_path: impl Into<String>, model: impl Into<String>) -> Agent {
+pub fn bootstrap_codex_agent_with(cli_path: impl Into<PathBuf>, model: impl Into<String>) -> Agent {
     Agent {
         id: AgentId::new(),
         slug: DEFAULT_CODEX_SLUG.into(),
@@ -74,7 +76,7 @@ async fn probe_agent_cli(agent: &Agent, timeout_duration: Duration) -> Result<St
     }
 }
 
-async fn probe_codex_cli(cli_path: &str, timeout_duration: Duration) -> Result<String, String> {
+async fn probe_codex_cli(cli_path: &Path, timeout_duration: Duration) -> Result<String, String> {
     let output = run_probe_command(
         cli_path,
         ["exec", "--help"],
@@ -87,14 +89,18 @@ async fn probe_codex_cli(cli_path: &str, timeout_duration: Duration) -> Result<S
     if output.status.success() {
         validate_codex_exec_probe(&combined)
     } else if combined.is_empty() {
-        Err(format!("{cli_path} exited with status {}", output.status))
+        Err(format!(
+            "{} exited with status {}",
+            cli_path.display(),
+            output.status
+        ))
     } else {
         Err(combined)
     }
 }
 
 async fn probe_claude_code_cli(
-    cli_path: &str,
+    cli_path: &Path,
     timeout_duration: Duration,
 ) -> Result<String, String> {
     let output = run_probe_command(
@@ -109,14 +115,18 @@ async fn probe_claude_code_cli(
     if output.status.success() {
         Ok(combined)
     } else if combined.is_empty() {
-        Err(format!("{cli_path} exited with status {}", output.status))
+        Err(format!(
+            "{} exited with status {}",
+            cli_path.display(),
+            output.status
+        ))
     } else {
         Err(combined)
     }
 }
 
 async fn run_probe_command<const N: usize>(
-    cli_path: &str,
+    cli_path: &Path,
     args: [&str; N],
     timeout_duration: Duration,
     probe_label: &str,
@@ -185,7 +195,7 @@ mod tests {
         assert_eq!(agent.name, "Codex");
         assert_eq!(agent.provider, "openai");
         assert_eq!(agent.model, DEFAULT_CODEX_MODEL);
-        assert_eq!(agent.cli_path, DEFAULT_CODEX_CLI_PATH);
+        assert_eq!(agent.cli_path, PathBuf::from(DEFAULT_CODEX_CLI_PATH));
         assert_eq!(
             agent.capabilities,
             default_agent_capabilities(AdapterKind::Codex)
@@ -200,7 +210,7 @@ mod tests {
             "fake-codex.sh",
             "#!/bin/sh\necho '--sandbox --output-schema --output-last-message --json'\n",
         );
-        let mut agent = bootstrap_codex_agent_with(fake_codex.to_string_lossy(), "gpt-5.4");
+        let mut agent = bootstrap_codex_agent_with(fake_codex, "gpt-5.4");
 
         probe_and_apply(&mut agent).await;
 
@@ -213,7 +223,7 @@ mod tests {
     async fn probe_and_apply_marks_codex_unavailable_when_required_flags_are_missing() {
         let root = temp_test_root("codex-probe-bad");
         let fake_codex = write_script(&root, "fake-codex.sh", "#!/bin/sh\necho '--json'\n");
-        let mut agent = bootstrap_codex_agent_with(fake_codex.to_string_lossy(), "gpt-5.4");
+        let mut agent = bootstrap_codex_agent_with(fake_codex, "gpt-5.4");
 
         probe_and_apply(&mut agent).await;
 
@@ -231,7 +241,7 @@ mod tests {
     async fn probe_and_apply_marks_codex_unavailable_when_probe_times_out() {
         let root = temp_test_root("codex-probe-timeout");
         let fake_codex = write_script(&root, "fake-codex.sh", "#!/bin/sh\nsleep 1\n");
-        let mut agent = bootstrap_codex_agent_with(fake_codex.to_string_lossy(), "gpt-5.4");
+        let mut agent = bootstrap_codex_agent_with(fake_codex, "gpt-5.4");
 
         probe_and_apply_with_timeout(&mut agent, Duration::from_millis(50)).await;
 

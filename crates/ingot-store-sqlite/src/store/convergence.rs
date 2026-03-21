@@ -233,9 +233,8 @@ fn map_convergence(row: &SqliteRow) -> Result<Convergence, RepositoryError> {
     let status: ConvergenceStatus = row.try_get("status").map_err(db_err)?;
     let status_str = row.try_get::<String, _>("status").map_err(db_err)?;
 
-    let integration_workspace_id: Option<ingot_domain::ids::WorkspaceId> = row
-        .try_get("integration_workspace_id")
-        .map_err(db_err)?;
+    let integration_workspace_id: Option<ingot_domain::ids::WorkspaceId> =
+        row.try_get("integration_workspace_id").map_err(db_err)?;
     let input_target_commit_oid: Option<CommitOid> =
         row.try_get("input_target_commit_oid").map_err(db_err)?;
     let prepared_commit_oid: Option<CommitOid> =

@@ -1,5 +1,6 @@
 pub mod activity;
 pub mod agent;
+pub mod branch_name;
 pub mod commit_oid;
 pub mod convergence;
 pub mod convergence_queue;

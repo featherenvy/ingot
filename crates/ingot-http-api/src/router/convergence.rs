@@ -66,7 +66,7 @@ async fn reconcile_checkout_sync_state_http(
         .get_item(item_id)
         .await
         .map_err(UseCaseError::Repository)?;
-    let status = checkout_sync_status(std::path::Path::new(&project.path), &revision.target_ref)
+    let status = checkout_sync_status(&project.path, &revision.target_ref)
         .await
         .map_err(git_to_internal)
         .map_err(api_to_usecase_error)?;
@@ -598,7 +598,7 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         let prepared_commit_oid = prepared_commit_oid.clone();
         async move {
             let readiness = match checkout_finalization_status(
-                std::path::Path::new(&project.path),
+                &project.path,
                 &revision.target_ref,
                 &prepared_commit_oid,
             )
@@ -632,7 +632,7 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                 .await
                 .map_err(api_to_usecase_error)?;
             sync_checkout_to_commit(
-                std::path::Path::new(&project.path),
+                &project.path,
                 paths.mirror_git_dir.as_path(),
                 &revision.target_ref,
                 &prepared_commit_oid,
@@ -733,13 +733,10 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                     .map_err(UseCaseError::Repository)?;
                 if workspace.state.status() != WorkspaceStatus::Abandoned {
                     let mirror_git_dir = project_paths(&state, &project).mirror_git_dir;
-                    remove_workspace(
-                        mirror_git_dir.as_path(),
-                        std::path::Path::new(&workspace.path),
-                    )
-                    .await
-                    .map_err(workspace_to_api_error)
-                    .map_err(api_to_usecase_error)?;
+                    remove_workspace(mirror_git_dir.as_path(), &workspace.path)
+                        .await
+                        .map_err(workspace_to_api_error)
+                        .map_err(api_to_usecase_error)?;
                     workspace.mark_abandoned(now);
                     state
                         .db

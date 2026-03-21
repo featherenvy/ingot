@@ -61,7 +61,7 @@ fn accepted_result_refs(jobs: &[Job]) -> Vec<RevisionContextAcceptedResultRef> {
 
             Some(RevisionContextAcceptedResultRef {
                 job_id: job.id.to_string(),
-                step_id: job.step_id.clone(),
+                step_id: job.step_id,
                 schema_version: schema_version.to_owned(),
                 outcome: outcome_name(outcome).into(),
                 summary: summary.into(),

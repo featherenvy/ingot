@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use ingot_config::IngotConfig;
+use ingot_domain::branch_name::BranchName;
 use ingot_domain::git_operation::OperationKind;
 use ingot_domain::ports::RepositoryError;
 use ingot_domain::project::Project;
@@ -32,18 +33,14 @@ pub(super) fn logs_root(state_root: &FsPath) -> PathBuf {
 }
 
 pub(super) fn project_config_path(project: &Project) -> PathBuf {
-    FsPath::new(&project.path).join(".ingot").join("config.yml")
+    project.path.join(".ingot").join("config.yml")
 }
 
 pub(super) fn project_paths(
     state: &AppState,
     project: &Project,
 ) -> ingot_git::project_repo::ProjectRepoPaths {
-    project_repo_paths(
-        state.state_root.as_path(),
-        project.id,
-        FsPath::new(&project.path),
-    )
+    project_repo_paths(state.state_root.as_path(), project.id, &project.path)
 }
 
 pub(super) async fn refresh_project_mirror(
@@ -80,19 +77,19 @@ pub(crate) async fn ensure_git_valid_target_ref(target_ref: &str) -> Result<(), 
 pub(crate) async fn resolve_default_branch(
     repo_path: &FsPath,
     requested_branch: Option<&str>,
-) -> Result<String, ApiError> {
+) -> Result<BranchName, ApiError> {
     let branch = if let Some(branch) = requested_branch {
         normalize_branch_name(branch)?
     } else {
-        current_branch_name(repo_path)
-            .await
-            .map_err(|error| ApiError::BadRequest {
+        BranchName::new(current_branch_name(repo_path).await.map_err(|error| {
+            ApiError::BadRequest {
                 code: "invalid_project_repo",
                 message: error.to_string(),
-            })?
+            }
+        })?)
     };
 
-    let target_ref = normalize_target_ref(&branch)?;
+    let target_ref = normalize_target_ref(branch.as_str())?;
     ensure_git_valid_target_ref(target_ref.as_str()).await?;
     let resolved = resolve_ref_oid(repo_path, &target_ref)
         .await
@@ -169,12 +166,13 @@ pub(super) fn normalize_project_color(color: Option<&str>) -> Result<String, Api
     }
 }
 
-pub(super) fn normalize_branch_name(branch: &str) -> Result<String, ApiError> {
+pub(super) fn normalize_branch_name(branch: &str) -> Result<BranchName, ApiError> {
     let branch = normalize_non_empty("default branch", branch)?;
-    Ok(branch
-        .strip_prefix("refs/heads/")
-        .unwrap_or(branch.as_str())
-        .to_string())
+    Ok(BranchName::new(
+        branch
+            .strip_prefix("refs/heads/")
+            .unwrap_or(branch.as_str()),
+    ))
 }
 
 pub(super) fn normalize_agent_slug(

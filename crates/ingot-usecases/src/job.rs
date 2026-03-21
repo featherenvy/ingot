@@ -91,7 +91,7 @@ impl<R, G, L> CompleteJobService<R, G, L> {
             repository,
             git,
             project_locks,
-            Arc::new(|project: &Project| PathBuf::from(&project.path)),
+            Arc::new(|project: &Project| project.path.clone()),
         )
     }
 
@@ -680,8 +680,7 @@ fn select_dispatch_step(
         if evaluation.dispatchable_step_id == Some(requested_step_id)
             || evaluation
                 .auxiliary_dispatchable_step_ids
-                .iter()
-                .any(|step_id| *step_id == requested_step_id)
+                .contains(&requested_step_id)
         {
             return Ok(requested_step_id);
         }

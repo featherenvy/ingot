@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::agent::{AdapterKind, Agent, AgentCapability, AgentStatus};
 use crate::ids;
 
@@ -8,7 +10,7 @@ pub struct AgentBuilder {
     adapter_kind: AdapterKind,
     provider: String,
     model: String,
-    cli_path: String,
+    cli_path: PathBuf,
     capabilities: Vec<AgentCapability>,
     health_check: Option<String>,
     status: AgentStatus,
@@ -23,7 +25,7 @@ impl AgentBuilder {
             adapter_kind: AdapterKind::Codex,
             provider: "openai".into(),
             model: "gpt-5-codex".into(),
-            cli_path: "codex".into(),
+            cli_path: PathBuf::from("codex"),
             capabilities,
             health_check: Some("ok".into()),
             status: AgentStatus::Available,

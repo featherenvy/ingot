@@ -52,7 +52,7 @@ mod tests {
 
         ensure_default_agent_with(
             &db,
-            bootstrap_codex_agent_with(fake_codex.to_string_lossy(), "gpt-5.4"),
+            bootstrap_codex_agent_with(fake_codex.clone(), "gpt-5.4"),
         )
         .await
         .expect("bootstrap default agent");
@@ -70,12 +70,14 @@ mod tests {
         let root = unique_temp_path("runtime-bootstrap-idempotent");
         let db = migrated_test_db("runtime-bootstrap-idempotent").await;
         let fake_codex = write_fake_codex_cli(&root);
-        let fake_codex_path = fake_codex.to_string_lossy().to_string();
 
-        ensure_default_agent_with(&db, bootstrap_codex_agent_with(&fake_codex_path, "gpt-5.4"))
-            .await
-            .expect("first bootstrap");
-        ensure_default_agent_with(&db, bootstrap_codex_agent_with(&fake_codex_path, "gpt-6"))
+        ensure_default_agent_with(
+            &db,
+            bootstrap_codex_agent_with(fake_codex.clone(), "gpt-5.4"),
+        )
+        .await
+        .expect("first bootstrap");
+        ensure_default_agent_with(&db, bootstrap_codex_agent_with(fake_codex, "gpt-6"))
             .await
             .expect("second bootstrap");
 
@@ -94,7 +96,7 @@ mod tests {
 
         ensure_default_agent_with(
             &db,
-            bootstrap_codex_agent_with(fake_codex.to_string_lossy(), "gpt-5.4"),
+            bootstrap_codex_agent_with(fake_codex.clone(), "gpt-5.4"),
         )
         .await
         .expect("bootstrap unavailable default agent");

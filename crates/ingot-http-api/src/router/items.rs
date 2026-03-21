@@ -779,7 +779,7 @@ pub(super) async fn load_queue_status(
     let should_check_checkout = active_entry.status == ConvergenceQueueEntryStatus::Head
         && evaluation.next_recommended_action == RecommendedAction::FinalizePreparedConvergence;
     if should_check_checkout {
-        match checkout_sync_status(FsPath::new(&project.path), &revision.target_ref)
+        match checkout_sync_status(&project.path, &revision.target_ref)
             .await
             .map_err(git_to_internal)?
         {
@@ -1113,7 +1113,7 @@ pub(super) async fn prepare_convergence_workspace(
         project_id: project.id,
         kind: WorkspaceKind::Integration,
         strategy: ingot_domain::workspace::WorkspaceStrategy::Worktree,
-        path: integration_workspace_path.display().to_string(),
+        path: integration_workspace_path.clone(),
         created_for_revision_id: Some(revision.id),
         parent_workspace_id: Some(source_workspace.id),
         target_ref: Some(revision.target_ref.clone()),
@@ -1142,7 +1142,7 @@ pub(super) async fn prepare_convergence_workspace(
     )
     .await
     .map_err(workspace_to_api_error)?;
-    integration_workspace.path = provisioned.workspace_path.display().to_string();
+    integration_workspace.path = provisioned.workspace_path.clone();
     integration_workspace.workspace_ref = Some(provisioned.workspace_ref);
     integration_workspace.mark_ready_with_head(provisioned.head_commit_oid, Utc::now());
     state

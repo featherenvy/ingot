@@ -710,7 +710,7 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                     Ok(CheckoutFinalizationReadiness::Blocked { message })
                 }
                 CheckoutSyncStatus::Ready => match checkout_finalization_status(
-                    Path::new(&project.path),
+                    &project.path,
                     &revision.target_ref,
                     &prepared_commit_oid,
                 )
@@ -745,7 +745,7 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                 .await
                 .map_err(usecase_from_runtime_error)?;
             sync_checkout_to_commit(
-                Path::new(&project.path),
+                &project.path,
                 paths.mirror_git_dir.as_path(),
                 &revision.target_ref,
                 &prepared_commit_oid,
@@ -907,11 +907,7 @@ impl JobDispatcher {
     }
 
     fn project_paths(&self, project: &Project) -> ingot_git::project_repo::ProjectRepoPaths {
-        project_repo_paths(
-            self.config.state_root.as_path(),
-            project.id,
-            Path::new(&project.path),
-        )
+        project_repo_paths(self.config.state_root.as_path(), project.id, &project.path)
     }
 
     pub async fn refresh_project_mirror(
@@ -1403,7 +1399,7 @@ impl JobDispatcher {
                     ..
                 } => {
                     let workspace = self.db.get_workspace(*workspace_id).await?;
-                    match head_oid(Path::new(&workspace.path)).await {
+                    match head_oid(&workspace.path).await {
                         Ok(actual_head) => actual_head == *new_oid,
                         Err(_) => false,
                     }
@@ -2002,7 +1998,7 @@ impl JobDispatcher {
         workspace: &Workspace,
     ) -> Result<(), RuntimeError> {
         let repo_path = self.project_paths(project).mirror_git_dir;
-        let path = Path::new(&workspace.path);
+        let path = &workspace.path;
         if path.exists() {
             remove_workspace(repo_path.as_path(), path).await?;
         }
@@ -2253,7 +2249,7 @@ impl JobDispatcher {
 
         let revision = self.db.get_revision(job.item_revision_id).await?;
         let project = self.db.get_project(job.project_id).await?;
-        let harness_prompt = match resolve_harness_prompt_context(Path::new(&project.path)) {
+        let harness_prompt = match resolve_harness_prompt_context(&project.path) {
             Ok(context) => context,
             Err(error) => {
                 self.fail_job_preparation(
@@ -2424,7 +2420,7 @@ impl JobDispatcher {
                 )
                 .await?;
                 let mut workspace = existing_workspace;
-                workspace.path = provisioned.workspace_path.display().to_string();
+                workspace.path = provisioned.workspace_path.clone();
                 workspace.workspace_ref = Some(provisioned.workspace_ref);
                 workspace.mark_ready_with_head(provisioned.head_commit_oid, now);
                 Ok((
@@ -2451,7 +2447,7 @@ impl JobDispatcher {
                     project_id: project.id,
                     kind: WorkspaceKind::Review,
                     strategy: WorkspaceStrategy::Worktree,
-                    path: provisioned.workspace_path.display().to_string(),
+                    path: provisioned.workspace_path.clone(),
                     created_for_revision_id: Some(revision.id),
                     parent_workspace_id: None,
                     target_ref: None,
@@ -3178,7 +3174,7 @@ impl JobDispatcher {
             project_id: project.id,
             kind: WorkspaceKind::Integration,
             strategy: WorkspaceStrategy::Worktree,
-            path: integration_workspace_path.display().to_string(),
+            path: integration_workspace_path.clone(),
             created_for_revision_id: Some(revision.id),
             parent_workspace_id: Some(source_workspace.id),
             target_ref: Some(revision.target_ref.clone()),
@@ -3202,7 +3198,7 @@ impl JobDispatcher {
             &input_target_commit_oid,
         )
         .await?;
-        integration_workspace.path = provisioned.workspace_path.display().to_string();
+        integration_workspace.path = provisioned.workspace_path.clone();
         integration_workspace.workspace_ref = Some(provisioned.workspace_ref);
         integration_workspace.set_head_commit_oid(provisioned.head_commit_oid, Utc::now());
         self.db.update_workspace(&integration_workspace).await?;
@@ -3462,7 +3458,7 @@ impl JobDispatcher {
         revision: &ItemRevision,
     ) -> Result<CheckoutSyncStatus, RuntimeError> {
         let mut item = self.db.get_item(item_id).await?;
-        let status = checkout_sync_status(Path::new(&project.path), &revision.target_ref).await?;
+        let status = checkout_sync_status(&project.path, &revision.target_ref).await?;
         let checkout_sync_blocked = matches!(
             item.escalation,
             Escalation::OperatorRequired {
@@ -3706,7 +3702,7 @@ impl JobDispatcher {
 
         let revision = self.db.get_revision(job.item_revision_id).await?;
         let project = self.db.get_project(job.project_id).await?;
-        let harness = match load_harness_profile(Path::new(&project.path)) {
+        let harness = match load_harness_profile(&project.path) {
             Ok(harness) => harness,
             Err(error) => {
                 self.fail_job_preparation(
@@ -3774,8 +3770,8 @@ impl JobDispatcher {
                 project_id: project.id,
                 revision_id: job.item_revision_id,
                 workspace_id: workspace.id,
-                workspace_path: PathBuf::from(&workspace.path),
-                step_id: job.step_id.clone(),
+                workspace_path: workspace.path.clone(),
+                step_id: job.step_id,
             },
         )))
     }
@@ -4674,7 +4670,7 @@ impl JobDispatcher {
         workspace: &Workspace,
     ) -> Result<(), RuntimeError> {
         let repo_path = self.project_paths(project).mirror_git_dir;
-        remove_workspace(repo_path.as_path(), Path::new(&workspace.path)).await?;
+        remove_workspace(repo_path.as_path(), &workspace.path).await?;
         let mut workspace = workspace.clone();
         workspace.mark_abandoned(Utc::now());
         self.db.update_workspace(&workspace).await?;

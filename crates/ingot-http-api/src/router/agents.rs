@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use super::support::*;
 use super::types::*;
 use super::*;
@@ -20,7 +22,7 @@ pub(super) async fn create_agent(
         adapter_kind: request.adapter_kind,
         provider: normalize_non_empty("provider", &request.provider)?,
         model: normalize_non_empty("model", &request.model)?,
-        cli_path: normalize_non_empty("cli path", &request.cli_path)?,
+        cli_path: PathBuf::from(normalize_non_empty("cli path", &request.cli_path)?),
         capabilities: request
             .capabilities
             .unwrap_or_else(|| default_agent_capabilities(request.adapter_kind)),
@@ -74,7 +76,7 @@ pub(super) async fn update_agent(
             None => existing_model,
         },
         cli_path: match request.cli_path.as_deref() {
-            Some(cli_path) => normalize_non_empty("cli path", cli_path)?,
+            Some(cli_path) => PathBuf::from(normalize_non_empty("cli path", cli_path)?),
             None => existing_cli_path,
         },
         capabilities: request.capabilities.unwrap_or(existing_capabilities),

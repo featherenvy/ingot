@@ -69,12 +69,12 @@ pub(super) async fn reset_workspace_route(
     match workspace.kind {
         WorkspaceKind::Authoring | WorkspaceKind::Integration => {
             git(
-                FsPath::new(&workspace.path),
+                &workspace.path,
                 &["reset", "--hard", expected_head.as_str()],
             )
             .await
             .map_err(git_to_internal)?;
-            git(FsPath::new(&workspace.path), &["clean", "-fd"])
+            git(&workspace.path, &["clean", "-fd"])
                 .await
                 .map_err(git_to_internal)?;
             if let Some(workspace_ref) = workspace.workspace_ref.as_ref() {
@@ -89,7 +89,7 @@ pub(super) async fn reset_workspace_route(
         WorkspaceKind::Review => {
             provision_review_workspace(
                 paths.mirror_git_dir.as_path(),
-                FsPath::new(&workspace.path),
+                &workspace.path,
                 &expected_head,
             )
             .await
@@ -179,8 +179,8 @@ pub(super) async fn remove_workspace_route(
         ingot_usecases::workspace::plan_workspace_removal(&state.db, &workspace).await?;
 
     // Phase 2: filesystem cleanup (infrastructure)
-    if PathBuf::from(&workspace.path).exists() {
-        remove_workspace(paths.mirror_git_dir.as_path(), FsPath::new(&workspace.path))
+    if workspace.path.exists() {
+        remove_workspace(paths.mirror_git_dir.as_path(), &workspace.path)
             .await
             .map_err(workspace_to_api_error)?;
     }

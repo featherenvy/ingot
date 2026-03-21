@@ -149,9 +149,7 @@ fn map_git_operation(row: &SqliteRow) -> Result<GitOperation, RepositoryError> {
         operation_kind: row.try_get("operation_kind").map_err(db_err)?,
         entity_type: row.try_get("entity_type").map_err(db_err)?,
         entity_id: row.try_get("entity_id").map_err(db_err)?,
-        workspace_id: row
-            .try_get("workspace_id")
-            .map_err(db_err)?,
+        workspace_id: row.try_get("workspace_id").map_err(db_err)?,
         ref_name: row.try_get("ref_name").map_err(db_err)?,
         expected_old_oid: row.try_get("expected_old_oid").map_err(db_err)?,
         new_oid: row.try_get("new_oid").map_err(db_err)?,

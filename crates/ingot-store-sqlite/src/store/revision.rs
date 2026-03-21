@@ -155,9 +155,7 @@ fn map_revision(row: &SqliteRow) -> Result<ItemRevision, RepositoryError> {
         policy_snapshot: parse_json(row.try_get("policy_snapshot").map_err(db_err)?)?,
         template_map_snapshot: parse_json(row.try_get("template_map_snapshot").map_err(db_err)?)?,
         seed,
-        supersedes_revision_id: row
-            .try_get("supersedes_revision_id")
-            .map_err(db_err)?,
+        supersedes_revision_id: row.try_get("supersedes_revision_id").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
     })
 }
@@ -167,9 +165,7 @@ fn map_revision_context(row: &SqliteRow) -> Result<RevisionContext, RepositoryEr
         item_revision_id: row.try_get("item_revision_id").map_err(db_err)?,
         schema_version: row.try_get("schema_version").map_err(db_err)?,
         payload: parse_json(row.try_get("payload").map_err(db_err)?)?,
-        updated_from_job_id: row
-            .try_get("updated_from_job_id")
-            .map_err(db_err)?,
+        updated_from_job_id: row.try_get("updated_from_job_id").map_err(db_err)?,
         updated_at: row.try_get("updated_at").map_err(db_err)?,
     })
 }

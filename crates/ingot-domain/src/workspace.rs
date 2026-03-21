@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -481,7 +483,7 @@ struct WorkspaceWire {
     pub project_id: ProjectId,
     pub kind: WorkspaceKind,
     pub strategy: WorkspaceStrategy,
-    pub path: String,
+    pub path: PathBuf,
     pub created_for_revision_id: Option<ItemRevisionId>,
     pub parent_workspace_id: Option<WorkspaceId>,
     pub target_ref: Option<GitRef>,
@@ -573,7 +575,7 @@ pub struct Workspace {
     pub created_at: DateTime<Utc>,
 
     // Mutable, not status-dependent
-    pub path: String,
+    pub path: PathBuf,
     pub target_ref: Option<GitRef>,
     pub workspace_ref: Option<GitRef>,
     pub updated_at: DateTime<Utc>,

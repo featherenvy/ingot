@@ -263,7 +263,7 @@ pub async fn ensure_authoring_workspace_state(
         .unwrap_or_default();
     let workspace_path = existing
         .as_ref()
-        .map(|workspace| PathBuf::from(&workspace.path))
+        .map(|workspace| workspace.path.clone())
         .unwrap_or_else(|| workspace_root.join(workspace_id.to_string()));
     let workspace_ref = existing
         .as_ref()
@@ -282,7 +282,7 @@ pub async fn ensure_authoring_workspace_state(
             &expected_head_commit_oid,
         )
         .await?;
-        workspace.path = provisioned.workspace_path.display().to_string();
+        workspace.path = provisioned.workspace_path.clone();
         workspace.target_ref = Some(revision.target_ref.clone());
         workspace.workspace_ref = Some(provisioned.workspace_ref);
         workspace.mark_ready(
@@ -307,7 +307,7 @@ pub async fn ensure_authoring_workspace_state(
             project_id,
             kind: WorkspaceKind::Authoring,
             strategy: WorkspaceStrategy::Worktree,
-            path: provisioned.workspace_path.display().to_string(),
+            path: provisioned.workspace_path.clone(),
             created_for_revision_id: Some(revision.id),
             parent_workspace_id: None,
             target_ref: Some(revision.target_ref.clone()),

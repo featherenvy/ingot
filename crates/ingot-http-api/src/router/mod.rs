@@ -130,12 +130,8 @@ pub fn build_router_with_project_locks_and_state_root(
             GitJobCompletionPort,
             project_locks.clone(),
             Arc::new(move |project: &Project| {
-                project_repo_paths(
-                    repo_path_resolver_root.as_path(),
-                    project.id,
-                    FsPath::new(&project.path),
-                )
-                .mirror_git_dir
+                project_repo_paths(repo_path_resolver_root.as_path(), project.id, &project.path)
+                    .mirror_git_dir
             }),
         ),
         project_locks,
@@ -358,9 +354,8 @@ pub(super) async fn teardown_revision_lane_state(
             .get_workspace(*workspace_id)
             .await
             .map_err(repo_to_internal)?;
-        if PathBuf::from(&workspace.path).exists() {
-            let _ = ingot_workspace::remove_workspace(mirror_git_dir, FsPath::new(&workspace.path))
-                .await;
+        if workspace.path.exists() {
+            let _ = ingot_workspace::remove_workspace(mirror_git_dir, &workspace.path).await;
         }
     }
 

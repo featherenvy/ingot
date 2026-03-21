@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::ids::AgentId;
@@ -40,7 +42,7 @@ pub struct Agent {
     pub adapter_kind: AdapterKind,
     pub provider: String,
     pub model: String,
-    pub cli_path: String,
+    pub cli_path: PathBuf,
     pub capabilities: Vec<AgentCapability>,
     pub health_check: Option<String>,
     pub status: AgentStatus,

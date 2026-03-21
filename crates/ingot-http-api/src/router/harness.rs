@@ -21,7 +21,7 @@ pub(super) async fn get_harness_profile(
         .await
         .map_err(repo_to_project)?;
 
-    Ok(Json(read_harness_profile(Path::new(&project.path))?))
+    Ok(Json(read_harness_profile(&project.path)?))
 }
 
 pub(super) async fn put_harness_profile(
@@ -38,7 +38,7 @@ pub(super) async fn put_harness_profile(
 
     let profile = parse_harness_profile(&body)?;
 
-    let toml_path = harness_toml_path(Path::new(&project.path));
+    let toml_path = harness_toml_path(&project.path);
     let ingot_dir = toml_path
         .parent()
         .expect("harness.toml should have a parent directory");

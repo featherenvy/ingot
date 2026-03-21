@@ -10,12 +10,12 @@ use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct CodexCliAdapter {
-    cli_path: String,
+    cli_path: PathBuf,
     model: String,
 }
 
 impl CodexCliAdapter {
-    pub fn new(cli_path: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(cli_path: impl Into<PathBuf>, model: impl Into<String>) -> Self {
         Self {
             cli_path: cli_path.into(),
             model: model.into(),
@@ -50,7 +50,7 @@ impl CodexCliAdapter {
             "--sandbox".into(),
             sandbox.into(),
             "-C".into(),
-            request.working_dir.clone(),
+            request.working_dir.to_string_lossy().into_owned(),
             "-m".into(),
             self.model.clone(),
             "--json".into(),
@@ -117,9 +117,9 @@ impl AgentAdapter for CodexCliAdapter {
 
         let args = self.build_exec_args(request, &schema_path, &response_path)?;
         info!(
-            cli_path = %self.cli_path,
+            cli_path = %self.cli_path.display(),
             model = %self.model,
-            working_dir = %request.working_dir,
+            working_dir = %request.working_dir.display(),
             may_mutate = request.may_mutate,
             args = ?args,
             "launching codex exec"
@@ -362,9 +362,9 @@ printf '{"summary":"ok","validation":null}\n' > "$output_path"
         permissions.set_mode(0o755);
         std::fs::set_permissions(&cli_path, permissions).expect("chmod fake cli");
 
-        let adapter = CodexCliAdapter::new(cli_path.to_string_lossy().to_string(), "gpt-5");
+        let adapter = CodexCliAdapter::new(cli_path.clone(), "gpt-5");
         let request = AgentRequest {
-            working_dir: root.to_string_lossy().to_string(),
+            working_dir: root.clone(),
             ..request(true)
         };
 

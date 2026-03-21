@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use ingot_domain::agent::Agent;
 use ingot_domain::ids::AgentId;
 use ingot_domain::ports::{AgentRepository, RepositoryError};
@@ -53,7 +55,7 @@ impl Database {
         .bind(agent.adapter_kind)
         .bind(&agent.provider)
         .bind(&agent.model)
-        .bind(&agent.cli_path)
+        .bind(agent.cli_path.to_str().unwrap_or_default())
         .bind(serde_json::to_string(&agent.capabilities).map_err(json_err)?)
         .bind(agent.health_check.as_deref())
         .bind(agent.status)
@@ -76,7 +78,7 @@ impl Database {
         .bind(agent.adapter_kind)
         .bind(&agent.provider)
         .bind(&agent.model)
-        .bind(&agent.cli_path)
+        .bind(agent.cli_path.to_str().unwrap_or_default())
         .bind(serde_json::to_string(&agent.capabilities).map_err(json_err)?)
         .bind(agent.health_check.as_deref())
         .bind(agent.status)
@@ -133,7 +135,7 @@ fn map_agent(row: &SqliteRow) -> Result<Agent, RepositoryError> {
         adapter_kind: row.try_get("adapter_kind").map_err(db_err)?,
         provider: row.try_get("provider").map_err(db_err)?,
         model: row.try_get("model").map_err(db_err)?,
-        cli_path: row.try_get("cli_path").map_err(db_err)?,
+        cli_path: PathBuf::from(row.try_get::<String, _>("cli_path").map_err(db_err)?),
         capabilities: parse_json(row.try_get("capabilities").map_err(db_err)?)?,
         health_check: row.try_get("health_check").map_err(db_err)?,
         status: row.try_get("status").map_err(db_err)?,

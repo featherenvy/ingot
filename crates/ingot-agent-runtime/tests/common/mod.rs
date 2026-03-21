@@ -550,7 +550,7 @@ impl AgentRunner for BlockingRunner {
 // ---------------------------------------------------------------------------
 
 pub async fn ensure_test_mirror(state_root: &Path, project: &Project) -> ProjectRepoPaths {
-    let paths = project_repo_paths(state_root, project.id, Path::new(&project.path));
+    let paths = project_repo_paths(state_root, project.id, &project.path);
     ensure_mirror(&paths).await.expect("ensure mirror");
     paths
 }

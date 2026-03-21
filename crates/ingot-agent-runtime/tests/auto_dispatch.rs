@@ -1127,7 +1127,7 @@ timeout = "30s"
         Duration::from_secs(2),
     )
     .await;
-    let marker_path = Path::new(&workspace.path).join("cancellation-marker.log");
+    let marker_path = workspace.path.join("cancellation-marker.log");
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if marker_path.exists() {
@@ -1829,9 +1829,7 @@ timeout = "1s"
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     assert!(
-        !Path::new(&workspace.path)
-            .join("timeout-orphan.txt")
-            .exists(),
+        !&workspace.path.join("timeout-orphan.txt").exists(),
         "timed out harness command should not leave a background writer alive"
     );
 }
@@ -1868,7 +1866,7 @@ async fn daemon_validation_resyncs_authoring_workspace_before_running_harness() 
 
     let workspace =
         create_authoring_validation_workspace(&h, revision_id, &seed_commit, &candidate_head).await;
-    git_sync(Path::new(&workspace.path), &["checkout", &seed_commit]);
+    git_sync(&workspace.path, &["checkout", &seed_commit]);
     write_harness_toml(
         &h.repo_path,
         &format!(
@@ -1910,7 +1908,7 @@ timeout = "30s"
     assert_eq!(job.state.status(), JobStatus::Completed);
     assert_eq!(job.state.outcome_class(), Some(OutcomeClass::Clean));
     assert_eq!(
-        head_oid(Path::new(&workspace.path))
+        head_oid(&workspace.path)
             .await
             .expect("workspace head")
             .into_inner(),
@@ -1986,7 +1984,7 @@ async fn daemon_validation_resyncs_integration_workspace_before_running_harness(
     h.db.create_convergence(&convergence)
         .await
         .expect("create convergence");
-    git_sync(Path::new(&workspace.path), &["checkout", &seed_commit]);
+    git_sync(&workspace.path, &["checkout", &seed_commit]);
     write_harness_toml(
         &h.repo_path,
         &format!(
@@ -2028,7 +2026,7 @@ timeout = "30s"
     assert_eq!(job.state.status(), JobStatus::Completed);
     assert_eq!(job.state.outcome_class(), Some(OutcomeClass::Clean));
     assert_eq!(
-        head_oid(Path::new(&workspace.path))
+        head_oid(&workspace.path)
             .await
             .expect("workspace head")
             .into_inner(),

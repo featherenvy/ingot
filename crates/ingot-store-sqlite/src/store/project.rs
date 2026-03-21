@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use ingot_domain::ids::ProjectId;
 use ingot_domain::ports::{ProjectRepository, RepositoryError};
 use ingot_domain::project::Project;
@@ -45,7 +47,7 @@ impl Database {
         )
         .bind(project.id)
         .bind(&project.name)
-        .bind(&project.path)
+        .bind(project.path.to_str().unwrap_or_default())
         .bind(&project.default_branch)
         .bind(&project.color)
         .bind(project.created_at)
@@ -64,7 +66,7 @@ impl Database {
              WHERE id = ?",
         )
         .bind(&project.name)
-        .bind(&project.path)
+        .bind(project.path.to_str().unwrap_or_default())
         .bind(&project.default_branch)
         .bind(&project.color)
         .bind(project.updated_at)
@@ -117,7 +119,7 @@ fn map_project(row: &SqliteRow) -> Result<Project, RepositoryError> {
     Ok(Project {
         id: row.try_get("id").map_err(db_err)?,
         name: row.try_get("name").map_err(db_err)?,
-        path: row.try_get("path").map_err(db_err)?,
+        path: PathBuf::from(row.try_get::<String, _>("path").map_err(db_err)?),
         default_branch: row.try_get("default_branch").map_err(db_err)?,
         color: row.try_get("color").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,

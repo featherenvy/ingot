@@ -184,7 +184,7 @@ pub async fn create_demo_project(
     let project = Project {
         id: ProjectId::new(),
         name: format!("Demo: {}", template.name),
-        path: path.display().to_string(),
+        path: path.clone(),
         default_branch,
         color: template.color.to_string(),
         created_at: now,
@@ -200,9 +200,9 @@ pub async fn create_demo_project(
     // Create items from template
     let config = load_effective_config(Some(&project))?;
     let configured_approval_policy = parse_config_approval_policy(&config)?;
-    let target_ref = normalize_target_ref(&project.default_branch)?;
+    let target_ref = normalize_target_ref(project.default_branch.as_str())?;
     ensure_git_valid_target_ref(target_ref.as_str()).await?;
-    let repo_path = std::path::Path::new(&project.path);
+    let repo_path = &project.path;
     let resolved_target_head = resolve_ref_oid(repo_path, &target_ref)
         .await
         .map_err(git_to_internal)?

@@ -1278,7 +1278,7 @@ mod tests {
             ItemRevisionId::from_uuid(Uuid::nil()),
             job.id,
         )
-        .source_step_id(job.step_id.clone())
+        .source_step_id(job.step_id)
         .source_finding_key("finding-1")
         .triage_state(triage_state);
         if triage_state == FindingTriageState::WontFix {

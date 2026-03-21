@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::commit_oid::CommitOid;
 use crate::git_ref::GitRef;
 use crate::ids;
@@ -14,7 +16,7 @@ pub struct WorkspaceBuilder {
     id: ids::WorkspaceId,
     project_id: ids::ProjectId,
     kind: WorkspaceKind,
-    path: String,
+    path: PathBuf,
     created_for_revision_id: Option<ids::ItemRevisionId>,
     target_ref: Option<GitRef>,
     workspace_ref: Option<GitRef>,
@@ -34,10 +36,7 @@ impl WorkspaceBuilder {
             id: ids::WorkspaceId::new(),
             project_id,
             kind,
-            path: std::env::temp_dir()
-                .join(format!("ingot-test-workspace-{}", Uuid::now_v7()))
-                .display()
-                .to_string(),
+            path: std::env::temp_dir().join(format!("ingot-test-workspace-{}", Uuid::now_v7())),
             created_for_revision_id: None,
             target_ref: Some(GitRef::new("refs/heads/main")),
             workspace_ref: Some(GitRef::new(format!(
@@ -74,7 +73,7 @@ impl WorkspaceBuilder {
         self
     }
 
-    pub fn path(mut self, path: impl Into<String>) -> Self {
+    pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
         self.path = path.into();
         self
     }

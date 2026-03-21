@@ -257,11 +257,9 @@ pub(super) async fn cleanup_failed_dispatch_side_effects(
 
     if let Some(workspace) = precreated_authoring_workspace {
         if let Some(paths) = mirror_paths.as_ref() {
-            let _ = ingot_workspace::remove_workspace(
-                paths.mirror_git_dir.as_path(),
-                FsPath::new(&workspace.path),
-            )
-            .await;
+            let _ =
+                ingot_workspace::remove_workspace(paths.mirror_git_dir.as_path(), &workspace.path)
+                    .await;
             if let Some(workspace_ref) = workspace.workspace_ref.as_ref() {
                 let _ = delete_ref(paths.mirror_git_dir.as_path(), workspace_ref).await;
             }

@@ -133,7 +133,14 @@ export interface Project {
   color: string
 }
 
-export type ActivityEntityType = 'job' | 'item' | 'queue_entry' | 'convergence' | 'git_operation' | 'finding' | 'workspace'
+export type ActivityEntityType =
+  | 'job'
+  | 'item'
+  | 'queue_entry'
+  | 'convergence'
+  | 'git_operation'
+  | 'finding'
+  | 'workspace'
 
 export interface Activity {
   id: string

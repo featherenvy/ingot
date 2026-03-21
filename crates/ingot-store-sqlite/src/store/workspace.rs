@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId, WorkspaceId};
 use ingot_domain::ports::{RepositoryError, WorkspaceRepository};
 use ingot_domain::workspace::{Workspace, WorkspaceCommitState, WorkspaceState, WorkspaceStatus};
@@ -36,7 +38,7 @@ impl Database {
         .bind(workspace.project_id)
         .bind(workspace.kind)
         .bind(workspace.strategy)
-        .bind(&workspace.path)
+        .bind(workspace.path.to_str().unwrap_or_default())
         .bind(workspace.created_for_revision_id)
         .bind(workspace.parent_workspace_id)
         .bind(workspace.target_ref.clone())
@@ -62,7 +64,7 @@ impl Database {
                  retention_policy = ?, status = ?, current_job_id = ?, updated_at = ?
              WHERE id = ?",
         )
-        .bind(&workspace.path)
+        .bind(workspace.path.to_str().unwrap_or_default())
         .bind(workspace.target_ref.clone())
         .bind(workspace.workspace_ref.clone())
         .bind(workspace.state.base_commit_oid().cloned())
@@ -171,9 +173,7 @@ impl WorkspaceRepository for Database {
 
 fn map_workspace(row: &SqliteRow) -> Result<Workspace, RepositoryError> {
     let status: WorkspaceStatus = row.try_get("status").map_err(db_err)?;
-    let current_job_id = row
-        .try_get("current_job_id")
-        .map_err(db_err)?;
+    let current_job_id = row.try_get("current_job_id").map_err(db_err)?;
     let state = WorkspaceState::from_parts(
         status,
         WorkspaceCommitState::from_option_parts(
@@ -189,13 +189,9 @@ fn map_workspace(row: &SqliteRow) -> Result<Workspace, RepositoryError> {
         project_id: row.try_get("project_id").map_err(db_err)?,
         kind: row.try_get("kind").map_err(db_err)?,
         strategy: row.try_get("strategy").map_err(db_err)?,
-        path: row.try_get("path").map_err(db_err)?,
-        created_for_revision_id: row
-            .try_get("created_for_revision_id")
-            .map_err(db_err)?,
-        parent_workspace_id: row
-            .try_get("parent_workspace_id")
-            .map_err(db_err)?,
+        path: PathBuf::from(row.try_get::<String, _>("path").map_err(db_err)?),
+        created_for_revision_id: row.try_get("created_for_revision_id").map_err(db_err)?,
+        parent_workspace_id: row.try_get("parent_workspace_id").map_err(db_err)?,
         target_ref: row.try_get("target_ref").map_err(db_err)?,
         workspace_ref: row.try_get("workspace_ref").map_err(db_err)?,
         retention_policy: row.try_get("retention_policy").map_err(db_err)?,

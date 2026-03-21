@@ -1,4 +1,3 @@
-use std::path::Path as FsPath;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -25,12 +24,8 @@ pub(super) async fn test_app_state() -> AppState {
             GitJobCompletionPort,
             ProjectLocks::default(),
             Arc::new(move |project: &Project| {
-                project_repo_paths(
-                    resolver_state_root.as_path(),
-                    project.id,
-                    FsPath::new(&project.path),
-                )
-                .mirror_git_dir
+                project_repo_paths(resolver_state_root.as_path(), project.id, &project.path)
+                    .mirror_git_dir
             }),
         ),
         project_locks: ProjectLocks::default(),

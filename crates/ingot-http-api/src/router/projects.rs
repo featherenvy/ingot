@@ -61,7 +61,7 @@ pub(super) async fn create_project(
     let project = Project {
         id: ProjectId::new(),
         name: normalize_project_name(request.name.as_deref(), &path)?,
-        path: path.display().to_string(),
+        path,
         default_branch,
         color: normalize_project_color(request.color.as_deref())?,
         created_at: now,
@@ -94,7 +94,12 @@ pub(super) async fn update_project(
     let existing_color = existing.color.clone();
     let path = match request.path.as_deref() {
         Some(path) => canonicalize_repo_path(path)?,
-        None => PathBuf::from(&existing.path),
+        None => existing.path.clone(),
+    };
+    let default_branch = if request.default_branch.is_some() || request.path.is_some() {
+        resolve_default_branch(&path, request.default_branch.as_deref()).await?
+    } else {
+        existing_default_branch
     };
 
     let project = Project {
@@ -103,12 +108,8 @@ pub(super) async fn update_project(
             Some(name) => normalize_non_empty("project name", name)?,
             None => existing_name,
         },
-        path: path.display().to_string(),
-        default_branch: if request.default_branch.is_some() || request.path.is_some() {
-            resolve_default_branch(&path, request.default_branch.as_deref()).await?
-        } else {
-            existing_default_branch
-        },
+        path,
+        default_branch,
         color: match request.color.as_deref() {
             Some(color) => normalize_project_color(Some(color))?,
             None => existing_color,

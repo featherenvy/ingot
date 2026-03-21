@@ -212,9 +212,7 @@ impl Database {
         .bind(serde_json::to_string(&linked_revision.template_map_snapshot).map_err(json_err)?)
         .bind(linked_revision.seed.seed_commit_oid().cloned())
         .bind(linked_revision.seed.seed_target_commit_oid().clone())
-        .bind(
-            linked_revision.supersedes_revision_id,
-        )
+        .bind(linked_revision.supersedes_revision_id)
         .bind(linked_revision.created_at)
         .execute(&mut *tx)
         .await
@@ -387,9 +385,7 @@ pub(super) async fn upsert_finding(
 
 fn map_finding(row: &SqliteRow) -> Result<Finding, RepositoryError> {
     let state: FindingTriageState = row.try_get("triage_state").map_err(db_err)?;
-    let linked_item_id: Option<ItemId> = row
-        .try_get("linked_item_id")
-        .map_err(db_err)?;
+    let linked_item_id: Option<ItemId> = row.try_get("linked_item_id").map_err(db_err)?;
     let triage_note: Option<String> = row.try_get("triage_note").map_err(db_err)?;
     let triaged_at: Option<chrono::DateTime<chrono::Utc>> =
         row.try_get("triaged_at").map_err(db_err)?;

@@ -1,5 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::branch_name::BranchName;
 use crate::ids;
 use crate::project::Project;
 use chrono::{DateTime, Utc};
@@ -9,8 +10,8 @@ use super::timestamps::default_timestamp;
 pub struct ProjectBuilder {
     id: ids::ProjectId,
     name: String,
-    path: String,
-    default_branch: String,
+    path: PathBuf,
+    default_branch: BranchName,
     color: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -22,7 +23,7 @@ impl ProjectBuilder {
         Self {
             id: ids::ProjectId::new(),
             name: "repo".into(),
-            path: path.as_ref().display().to_string(),
+            path: path.as_ref().to_path_buf(),
             default_branch: "main".into(),
             color: "#000".into(),
             created_at: now,
