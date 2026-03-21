@@ -172,7 +172,20 @@ pub struct JobDispatcher {
     dispatch_notify: DispatchNotify,
     #[cfg(test)]
     pre_spawn_pause_hook: Option<PreSpawnPauseHook>,
+    #[cfg(test)]
+    auto_queue_pause_hook: Option<AutoQueuePauseHook>,
+    #[cfg(test)]
+    projected_recovery_pause_hook: Option<ProjectedRecoveryPauseHook>,
 }
+
+#[cfg(test)]
+type PreSpawnPauseHook = PauseHook<PreSpawnPausePoint>;
+
+#[cfg(test)]
+type AutoQueuePauseHook = PauseHook<AutoQueuePausePoint>;
+
+#[cfg(test)]
+type ProjectedRecoveryPauseHook = PauseHook<ProjectedRecoveryPausePoint>;
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,13 +196,13 @@ enum PreSpawnPausePoint {
 
 #[cfg(test)]
 #[derive(Clone)]
-struct PreSpawnPauseHook {
-    point: PreSpawnPausePoint,
-    state: Arc<PreSpawnPauseState>,
+struct PauseHook<P> {
+    point: P,
+    state: Arc<PauseHookState>,
 }
 
 #[cfg(test)]
-struct PreSpawnPauseState {
+struct PauseHookState {
     entered: std::sync::Mutex<usize>,
     released: std::sync::Mutex<bool>,
     entered_notify: tokio::sync::Notify,
@@ -197,11 +210,14 @@ struct PreSpawnPauseState {
 }
 
 #[cfg(test)]
-impl PreSpawnPauseHook {
-    fn new(point: PreSpawnPausePoint) -> Self {
+impl<P> PauseHook<P>
+where
+    P: Copy + Eq,
+{
+    fn new(point: P) -> Self {
         Self {
             point,
-            state: Arc::new(PreSpawnPauseState {
+            state: Arc::new(PauseHookState {
                 entered: std::sync::Mutex::new(0),
                 released: std::sync::Mutex::new(false),
                 entered_notify: tokio::sync::Notify::new(),
@@ -210,7 +226,7 @@ impl PreSpawnPauseHook {
         }
     }
 
-    async fn pause_if_matching(&self, point: PreSpawnPausePoint) {
+    async fn pause_if_matching(&self, point: P) {
         if self.point != point {
             return;
         }
@@ -255,6 +271,19 @@ impl PreSpawnPauseHook {
             .expect("pause hook released lock") = true;
         self.state.release_notify.notify_waiters();
     }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoQueuePausePoint {
+    BeforeGuard,
+    BeforeInsert,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectedRecoveryPausePoint {
+    BeforeGuard,
 }
 
 #[derive(Clone)]
@@ -593,6 +622,149 @@ impl ConvergenceSystemActionPort for RuntimeConvergencePort {
                 .map_err(usecase_from_runtime_error)
         }
     }
+
+    fn auto_queue_convergence(
+        &self,
+        project_id: ingot_domain::ids::ProjectId,
+        item_id: ingot_domain::ids::ItemId,
+    ) -> impl Future<Output = Result<bool, ingot_usecases::UseCaseError>> + Send {
+        let dispatcher = self.dispatcher.clone();
+        async move {
+            #[cfg(test)]
+            dispatcher.pause_before_auto_queue_guard().await;
+            let _guard = dispatcher
+                .project_locks
+                .acquire_project_mutation(project_id)
+                .await;
+            let project = dispatcher
+                .db
+                .get_project(project_id)
+                .await
+                .map_err(ingot_usecases::UseCaseError::Repository)?;
+            if project.execution_mode != ingot_domain::project::ExecutionMode::Autopilot {
+                return Ok(false);
+            }
+            let mut retry_after_conflict = true;
+            loop {
+                let item = dispatcher
+                    .db
+                    .get_item(item_id)
+                    .await
+                    .map_err(ingot_usecases::UseCaseError::Repository)?;
+                let revision = dispatcher
+                    .db
+                    .get_revision(item.current_revision_id)
+                    .await
+                    .map_err(ingot_usecases::UseCaseError::Repository)?;
+                let existing = dispatcher
+                    .db
+                    .find_active_queue_entry_for_revision(revision.id)
+                    .await
+                    .map_err(ingot_usecases::UseCaseError::Repository)?;
+                if existing.is_some() {
+                    return Ok(false);
+                }
+                let jobs = dispatcher
+                    .db
+                    .list_jobs_by_item(item.id)
+                    .await
+                    .map_err(ingot_usecases::UseCaseError::Repository)?;
+                let findings = dispatcher
+                    .db
+                    .list_findings_by_item(item.id)
+                    .await
+                    .map_err(ingot_usecases::UseCaseError::Repository)?;
+                let convergences = dispatcher
+                    .hydrate_convergences(
+                        &project,
+                        dispatcher
+                            .db
+                            .list_convergences_by_item(item.id)
+                            .await
+                            .map_err(ingot_usecases::UseCaseError::Repository)?,
+                    )
+                    .await
+                    .map_err(usecase_from_runtime_error)?;
+                let evaluation =
+                    Evaluator::new().evaluate(&item, &revision, &jobs, &findings, &convergences);
+                if evaluation.next_recommended_action != RecommendedAction::PrepareConvergence {
+                    return Ok(false);
+                }
+                let lane_head = dispatcher
+                    .db
+                    .find_queue_head(project_id, &revision.target_ref)
+                    .await
+                    .map_err(ingot_usecases::UseCaseError::Repository)?;
+                let now = Utc::now();
+                let queue_entry = ingot_domain::convergence_queue::ConvergenceQueueEntry {
+                    id: ingot_domain::ids::ConvergenceQueueEntryId::new(),
+                    project_id,
+                    item_id,
+                    item_revision_id: revision.id,
+                    target_ref: revision.target_ref.clone(),
+                    status: if lane_head.is_some() {
+                        ingot_domain::convergence_queue::ConvergenceQueueEntryStatus::Queued
+                    } else {
+                        ingot_domain::convergence_queue::ConvergenceQueueEntryStatus::Head
+                    },
+                    head_acquired_at: lane_head.is_none().then_some(now),
+                    created_at: now,
+                    updated_at: now,
+                    released_at: None,
+                };
+                #[cfg(test)]
+                dispatcher.pause_before_auto_queue_insert().await;
+                match dispatcher.db.create_queue_entry(&queue_entry).await {
+                    Ok(()) => {
+                        dispatcher
+                            .db
+                            .append_activity(&ingot_domain::activity::Activity {
+                                id: ingot_domain::ids::ActivityId::new(),
+                                project_id,
+                                event_type:
+                                    ingot_domain::activity::ActivityEventType::ConvergenceQueued,
+                                subject: ingot_domain::activity::ActivitySubject::QueueEntry(
+                                    queue_entry.id,
+                                ),
+                                payload: serde_json::json!({
+                                    "item_id": item_id,
+                                    "target_ref": revision.target_ref,
+                                    "dispatch_origin": "autopilot",
+                                }),
+                                created_at: now,
+                            })
+                            .await
+                            .map_err(ingot_usecases::UseCaseError::Repository)?;
+                        info!(
+                            project_id = %project_id,
+                            item_id = %item_id,
+                            "autopilot queued convergence"
+                        );
+                        return Ok(true);
+                    }
+                    Err(RepositoryError::Conflict(_)) if retry_after_conflict => {
+                        retry_after_conflict = false;
+                    }
+                    Err(RepositoryError::Conflict(message)) => {
+                        let existing = dispatcher
+                            .db
+                            .find_active_queue_entry_for_revision(revision.id)
+                            .await
+                            .map_err(ingot_usecases::UseCaseError::Repository)?;
+                        if existing.is_some() {
+                            return Ok(false);
+                        }
+                        return Err(ingot_usecases::UseCaseError::Repository(
+                            RepositoryError::Conflict(message),
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(ingot_usecases::UseCaseError::Repository(error));
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
@@ -893,6 +1065,10 @@ impl JobDispatcher {
             dispatch_notify,
             #[cfg(test)]
             pre_spawn_pause_hook: None,
+            #[cfg(test)]
+            auto_queue_pause_hook: None,
+            #[cfg(test)]
+            projected_recovery_pause_hook: None,
         }
     }
 
@@ -910,6 +1086,30 @@ impl JobDispatcher {
     async fn pause_before_pre_spawn_guard(&self, point: PreSpawnPausePoint) {
         if let Some(hook) = &self.pre_spawn_pause_hook {
             hook.pause_if_matching(point).await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn pause_before_auto_queue_guard(&self) {
+        if let Some(hook) = &self.auto_queue_pause_hook {
+            hook.pause_if_matching(AutoQueuePausePoint::BeforeGuard)
+                .await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn pause_before_auto_queue_insert(&self) {
+        if let Some(hook) = &self.auto_queue_pause_hook {
+            hook.pause_if_matching(AutoQueuePausePoint::BeforeInsert)
+                .await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn pause_before_projected_recovery_guard(&self) {
+        if let Some(hook) = &self.projected_recovery_pause_hook {
+            hook.pause_if_matching(ProjectedRecoveryPausePoint::BeforeGuard)
+                .await;
         }
     }
 
@@ -1010,7 +1210,7 @@ impl JobDispatcher {
     }
 
     pub async fn reconcile_startup(&self) -> Result<(), RuntimeError> {
-        bootstrap::ensure_default_agent(&self.db).await?;
+        bootstrap::ensure_default_agents(&self.db).await?;
         let _ = self.reconcile_startup_assigned_jobs().await?;
         ReconciliationService::new(RuntimeReconciliationPort {
             dispatcher: self.clone(),
@@ -1019,7 +1219,7 @@ impl JobDispatcher {
         .await
         .map_err(usecase_to_runtime_error)?;
         drain_until_idle(|| self.tick_system_action()).await?;
-        let _ = self.recover_projected_review_jobs().await?;
+        let _ = self.recover_projected_jobs().await?;
         Ok(())
     }
 
@@ -1100,7 +1300,7 @@ impl JobDispatcher {
         .await
         .map_err(usecase_to_runtime_error)?;
         made_progress |= system_actions_progressed;
-        made_progress |= self.recover_projected_review_jobs().await?;
+        made_progress |= self.recover_projected_jobs().await?;
         Ok(NonJobWorkProgress {
             made_progress,
             system_actions_progressed,
@@ -2687,7 +2887,7 @@ impl JobDispatcher {
                     job_id = %prepared.job.id,
                     "job cancelled during runtime execution"
                 );
-                let _ = self.recover_projected_review_jobs().await?;
+                let _ = self.recover_projected_jobs().await?;
             }
             AgentRunOutcome::OwnershipLostBeforeSpawn => {
                 self.cleanup_unclaimed_prepared_agent_run(&prepared).await?;
@@ -4217,21 +4417,39 @@ impl JobDispatcher {
         }
     }
 
-    async fn recover_projected_review_jobs(&self) -> Result<bool, RuntimeError> {
+    async fn recover_projected_jobs(&self) -> Result<bool, RuntimeError> {
         let mut dispatched_any = false;
 
         for project in self.db.list_projects().await? {
+            #[cfg(test)]
+            self.pause_before_projected_recovery_guard().await;
             let _guard = self
                 .project_locks
                 .acquire_project_mutation(project.id)
                 .await;
+            let project = match self.db.get_project(project.id).await {
+                Ok(project) => project,
+                Err(error) => {
+                    warn!(
+                        ?error,
+                        project_id = %project.id,
+                        "projected job recovery skipped project"
+                    );
+                    continue;
+                }
+            };
+            if project.execution_mode == ingot_domain::project::ExecutionMode::Autopilot
+                && self.project_has_active_autopilot_work(project.id).await?
+            {
+                continue;
+            }
             let items = match self.db.list_items_by_project(project.id).await {
                 Ok(items) => items,
                 Err(error) => {
                     warn!(
                         ?error,
                         project_id = %project.id,
-                        "projected review recovery skipped project"
+                        "projected job recovery skipped project"
                     );
                     continue;
                 }
@@ -4240,19 +4458,31 @@ impl JobDispatcher {
                 if !item.lifecycle.is_open() {
                     continue;
                 }
-                match self
-                    .auto_dispatch_projected_review_locked(&project, item.id)
-                    .await
-                {
+                let result = match project.execution_mode {
+                    ingot_domain::project::ExecutionMode::Autopilot => {
+                        self.auto_dispatch_autopilot_locked(&project, item.id).await
+                    }
+                    ingot_domain::project::ExecutionMode::Manual => {
+                        self.auto_dispatch_projected_review_locked(&project, item.id)
+                            .await
+                    }
+                };
+                match result {
                     Ok(dispatched) => {
                         dispatched_any |= dispatched;
+                        if dispatched
+                            && project.execution_mode
+                                == ingot_domain::project::ExecutionMode::Autopilot
+                        {
+                            break;
+                        }
                     }
                     Err(error) => {
                         warn!(
                             ?error,
                             project_id = %project.id,
                             item_id = %item.id,
-                            "projected review recovery skipped item"
+                            "projected job recovery skipped item"
                         );
                     }
                 }
@@ -4260,10 +4490,41 @@ impl JobDispatcher {
         }
 
         if dispatched_any {
-            info!("projected review recovery queued review work");
+            info!("projected job recovery queued work");
         }
 
         Ok(dispatched_any)
+    }
+
+    async fn project_has_active_autopilot_work(
+        &self,
+        project_id: ingot_domain::ids::ProjectId,
+    ) -> Result<bool, RuntimeError> {
+        if self
+            .db
+            .list_jobs_by_project(project_id)
+            .await?
+            .into_iter()
+            .any(|job| job.state.is_active())
+        {
+            return Ok(true);
+        }
+
+        if self
+            .db
+            .list_active_convergences()
+            .await?
+            .into_iter()
+            .any(|convergence| convergence.project_id == project_id)
+        {
+            return Ok(true);
+        }
+
+        Ok(!self
+            .db
+            .list_active_queue_entries_by_project(project_id)
+            .await?
+            .is_empty())
     }
 
     async fn auto_dispatch_projected_review(
@@ -4277,8 +4538,18 @@ impl JobDispatcher {
             .await;
 
         let project = self.db.get_project(project_id).await?;
-        self.auto_dispatch_projected_review_locked(&project, item_id)
-            .await
+        match project.execution_mode {
+            ingot_domain::project::ExecutionMode::Autopilot => {
+                if self.project_has_active_autopilot_work(project.id).await? {
+                    return Ok(false);
+                }
+                self.auto_dispatch_autopilot_locked(&project, item_id).await
+            }
+            ingot_domain::project::ExecutionMode::Manual => {
+                self.auto_dispatch_projected_review_locked(&project, item_id)
+                    .await
+            }
+        }
     }
 
     pub async fn auto_dispatch_projected_review_locked(
@@ -4325,6 +4596,59 @@ impl JobDispatcher {
             .await?
         {
             info!(job_id = %job.id, step_id = %job.step_id, item_id = %item.id, "auto-dispatched validation");
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub async fn auto_dispatch_autopilot_locked(
+        &self,
+        project: &Project,
+        item_id: ingot_domain::ids::ItemId,
+    ) -> Result<bool, RuntimeError> {
+        let item = self.db.get_item(item_id).await?;
+        let revision = self.db.get_revision(item.current_revision_id).await?;
+        let jobs = self.db.list_jobs_by_item(item.id).await?;
+        let findings = self.db.list_findings_by_item(item.id).await?;
+        let convergences = self
+            .hydrate_convergences(project, self.db.list_convergences_by_item(item.id).await?)
+            .await?;
+        let author_initial_head_commit_oid = if Evaluator::new()
+            .evaluate(&item, &revision, &jobs, &findings, &convergences)
+            .dispatchable_step_id
+            == Some(step::AUTHOR_INITIAL)
+            && revision.seed.seed_commit_oid().is_none()
+        {
+            let paths = self.refresh_project_mirror(project).await?;
+            Some(
+                resolve_ref_oid(paths.mirror_git_dir.as_path(), &revision.target_ref)
+                    .await?
+                    .ok_or_else(|| RuntimeError::InvalidState("target ref unresolved".into()))?,
+            )
+        } else {
+            None
+        };
+
+        let result = ingot_usecases::dispatch::auto_dispatch_autopilot(
+            &self.db,
+            &self.db,
+            &self.db,
+            project,
+            &item,
+            &revision,
+            &jobs,
+            &findings,
+            &convergences,
+            author_initial_head_commit_oid,
+        )
+        .await
+        .map_err(|error| {
+            RuntimeError::InvalidState(format!("autopilot dispatch failed: {error}"))
+        })?;
+
+        if let Some(job) = result {
+            info!(job_id = %job.id, step_id = %job.step_id, item_id = %item.id, "autopilot dispatched step");
             Ok(true)
         } else {
             Ok(false)
@@ -5497,15 +5821,19 @@ mod tests {
     use ingot_domain::job::{
         ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutputArtifactKind, PhaseKind,
     };
+    use ingot_domain::project::ExecutionMode;
     use ingot_domain::workspace::WorkspaceStatus;
     use ingot_git::commands::head_oid;
     use ingot_test_support::fixtures::{
-        AgentBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder, default_timestamp,
+        AgentBuilder, ConvergenceQueueEntryBuilder, ItemBuilder, JobBuilder, ProjectBuilder,
+        RevisionBuilder, default_timestamp,
     };
     use ingot_test_support::git::{temp_git_repo, unique_temp_path};
     use ingot_test_support::sqlite::migrated_test_db;
     use ingot_usecases::job_lifecycle;
     use ingot_workflow::step;
+    use sqlx::query;
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
     use tokio::sync::Notify;
 
     #[test]
@@ -6323,6 +6651,624 @@ timeout = "30s"
             .await
             .expect("reload workspace");
         assert_eq!(workspace.state.status(), WorkspaceStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn auto_queue_convergence_treats_conflicting_insert_as_noop() {
+        let repo_path = temp_git_repo("ingot-runtime-lib-autopilot");
+        let db_path = unique_temp_path("ingot-runtime-lib-autopilot-db").with_extension("db");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(options)
+            .await
+            .expect("connect db");
+        let db = Database { pool };
+        db.migrate().await.expect("migrate db");
+
+        let dispatcher = JobDispatcher::with_runner(
+            db.clone(),
+            ProjectLocks::default(),
+            DispatcherConfig::new(unique_temp_path("ingot-runtime-lib-autopilot-state")),
+            Arc::new(BlockingRunner::new()),
+            DispatchNotify::default(),
+        );
+
+        let created_at = default_timestamp();
+        let project = ProjectBuilder::new(&repo_path)
+            .execution_mode(ExecutionMode::Autopilot)
+            .created_at(created_at)
+            .build();
+        db.create_project(&project).await.expect("create project");
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let seed_commit = head_oid(&repo_path).await.expect("seed head").into_inner();
+        let item = ItemBuilder::new(project.id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .explicit_seed(seed_commit.as_str())
+            .build();
+        db.create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+        let validate_job = JobBuilder::new(
+            project.id,
+            item_id,
+            revision_id,
+            step::VALIDATE_CANDIDATE_INITIAL,
+        )
+        .status(JobStatus::Completed)
+        .outcome_class(OutcomeClass::Clean)
+        .phase_kind(PhaseKind::Validate)
+        .workspace_kind(WorkspaceKind::Integration)
+        .execution_permission(ExecutionPermission::MustNotMutate)
+        .context_policy(ContextPolicy::ResumeContext)
+        .phase_template_slug("validate-candidate")
+        .job_input(JobInput::None)
+        .output_artifact_kind(OutputArtifactKind::ValidationReport)
+        .created_at(created_at)
+        .started_at(created_at)
+        .ended_at(created_at)
+        .build();
+        db.create_job(&validate_job).await.expect("create job");
+
+        let mut writer = db.pool.acquire().await.expect("acquire writer");
+        query("BEGIN IMMEDIATE")
+            .execute(&mut *writer)
+            .await
+            .expect("begin write transaction");
+
+        let mut dispatcher = dispatcher.clone();
+        let pause_hook = AutoQueuePauseHook::new(AutoQueuePausePoint::BeforeInsert);
+        dispatcher.auto_queue_pause_hook = Some(pause_hook.clone());
+
+        let queue_task = tokio::spawn({
+            let port = RuntimeConvergencePort { dispatcher };
+            async move { port.auto_queue_convergence(project.id, item.id).await }
+        });
+
+        pause_hook
+            .wait_until_entered(1, Duration::from_secs(2))
+            .await;
+
+        let queue_entry = ConvergenceQueueEntryBuilder::new(project.id, item.id, revision.id)
+            .created_at(created_at)
+            .build();
+        query(
+            "INSERT INTO convergence_queue_entries (
+                id, project_id, item_id, item_revision_id, target_ref, status, head_acquired_at,
+                created_at, updated_at, released_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(queue_entry.id)
+        .bind(queue_entry.project_id)
+        .bind(queue_entry.item_id)
+        .bind(queue_entry.item_revision_id)
+        .bind(&queue_entry.target_ref)
+        .bind(queue_entry.status)
+        .bind(queue_entry.head_acquired_at)
+        .bind(queue_entry.created_at)
+        .bind(queue_entry.updated_at)
+        .bind(queue_entry.released_at)
+        .execute(&mut *writer)
+        .await
+        .expect("insert conflicting queue entry");
+        query("COMMIT")
+            .execute(&mut *writer)
+            .await
+            .expect("commit conflicting queue entry");
+        pause_hook.release();
+
+        let queued = queue_task
+            .await
+            .expect("join queue task")
+            .expect("concurrent autopilot queueing should complete without surfacing the race");
+        assert!(
+            !queued,
+            "concurrent autopilot queueing should degrade to a no-op"
+        );
+
+        let active_entries = db
+            .list_active_queue_entries_for_lane(project.id, &revision.target_ref)
+            .await
+            .expect("list queue entries");
+        assert_eq!(active_entries.len(), 1);
+        assert_eq!(active_entries[0].item_revision_id, revision.id);
+    }
+
+    #[tokio::test]
+    async fn tick_system_action_does_not_queue_stale_autopilot_prepare_decision() {
+        let harness = TestRuntimeHarness::new(Arc::new(BlockingRunner::new())).await;
+
+        let mut project = harness
+            .db
+            .get_project(harness.project.id)
+            .await
+            .expect("project");
+        project.execution_mode = ExecutionMode::Autopilot;
+        harness
+            .db
+            .update_project(&project)
+            .await
+            .expect("update project");
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
+        let item = ItemBuilder::new(project.id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .explicit_seed(seed_commit.as_str())
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let validate_job = JobBuilder::new(
+            project.id,
+            item_id,
+            revision_id,
+            step::VALIDATE_CANDIDATE_INITIAL,
+        )
+        .status(JobStatus::Completed)
+        .outcome_class(OutcomeClass::Clean)
+        .phase_kind(PhaseKind::Validate)
+        .workspace_kind(WorkspaceKind::Integration)
+        .execution_permission(ExecutionPermission::MustNotMutate)
+        .context_policy(ContextPolicy::ResumeContext)
+        .phase_template_slug("validate-candidate")
+        .job_input(JobInput::None)
+        .output_artifact_kind(OutputArtifactKind::ValidationReport)
+        .created_at(default_timestamp())
+        .started_at(default_timestamp())
+        .ended_at(default_timestamp())
+        .build();
+        harness
+            .db
+            .create_job(&validate_job)
+            .await
+            .expect("create job");
+
+        let mut dispatcher = harness.dispatcher.clone();
+        let pause_hook = AutoQueuePauseHook::new(AutoQueuePausePoint::BeforeGuard);
+        dispatcher.auto_queue_pause_hook = Some(pause_hook.clone());
+
+        let tick_task = tokio::spawn({
+            let dispatcher = dispatcher.clone();
+            async move { dispatcher.tick_system_action().await }
+        });
+
+        pause_hook
+            .wait_until_entered(1, Duration::from_secs(2))
+            .await;
+
+        {
+            let _guard = dispatcher
+                .project_locks
+                .acquire_project_mutation(project.id)
+                .await;
+            let active_job =
+                JobBuilder::new(project.id, item_id, revision_id, step::AUTHOR_INITIAL)
+                    .status(JobStatus::Queued)
+                    .phase_kind(PhaseKind::Author)
+                    .workspace_kind(WorkspaceKind::Authoring)
+                    .execution_permission(ExecutionPermission::MayMutate)
+                    .phase_template_slug("author-initial")
+                    .job_input(JobInput::authoring_head(CommitOid::new(
+                        seed_commit.clone(),
+                    )))
+                    .output_artifact_kind(OutputArtifactKind::Commit)
+                    .created_at(default_timestamp())
+                    .build();
+            harness
+                .db
+                .create_job(&active_job)
+                .await
+                .expect("create active job");
+        }
+
+        pause_hook.release();
+
+        let made_progress = tick_task
+            .await
+            .expect("join tick task")
+            .expect("tick system action");
+        assert!(
+            !made_progress,
+            "stale prepare decision should not count as progress"
+        );
+
+        let queue_entry = harness
+            .db
+            .find_active_queue_entry_for_revision(revision.id)
+            .await
+            .expect("find queue entry");
+        assert!(
+            queue_entry.is_none(),
+            "runtime should not queue convergence after the item becomes non-preparable"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_system_action_does_not_queue_after_execution_mode_switches_to_manual() {
+        let harness = TestRuntimeHarness::new(Arc::new(BlockingRunner::new())).await;
+
+        let mut project = harness
+            .db
+            .get_project(harness.project.id)
+            .await
+            .expect("project");
+        project.execution_mode = ExecutionMode::Autopilot;
+        harness
+            .db
+            .update_project(&project)
+            .await
+            .expect("update project");
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
+        let item = ItemBuilder::new(project.id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .explicit_seed(seed_commit.as_str())
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let validate_job = JobBuilder::new(
+            project.id,
+            item_id,
+            revision_id,
+            step::VALIDATE_CANDIDATE_INITIAL,
+        )
+        .status(JobStatus::Completed)
+        .outcome_class(OutcomeClass::Clean)
+        .phase_kind(PhaseKind::Validate)
+        .workspace_kind(WorkspaceKind::Integration)
+        .execution_permission(ExecutionPermission::MustNotMutate)
+        .context_policy(ContextPolicy::ResumeContext)
+        .phase_template_slug("validate-candidate")
+        .job_input(JobInput::None)
+        .output_artifact_kind(OutputArtifactKind::ValidationReport)
+        .created_at(default_timestamp())
+        .started_at(default_timestamp())
+        .ended_at(default_timestamp())
+        .build();
+        harness
+            .db
+            .create_job(&validate_job)
+            .await
+            .expect("create job");
+
+        let mut dispatcher = harness.dispatcher.clone();
+        let pause_hook = AutoQueuePauseHook::new(AutoQueuePausePoint::BeforeGuard);
+        dispatcher.auto_queue_pause_hook = Some(pause_hook.clone());
+
+        let tick_task = tokio::spawn({
+            let dispatcher = dispatcher.clone();
+            async move { dispatcher.tick_system_action().await }
+        });
+
+        pause_hook
+            .wait_until_entered(1, Duration::from_secs(2))
+            .await;
+
+        project.execution_mode = ExecutionMode::Manual;
+        harness
+            .db
+            .update_project(&project)
+            .await
+            .expect("switch execution mode");
+
+        pause_hook.release();
+
+        let made_progress = tick_task
+            .await
+            .expect("join tick task")
+            .expect("tick system action");
+        assert!(
+            !made_progress,
+            "stale autopilot mode should not queue convergence after switching to manual"
+        );
+
+        let queue_entry = harness
+            .db
+            .find_active_queue_entry_for_revision(revision.id)
+            .await
+            .expect("find queue entry");
+        assert!(
+            queue_entry.is_none(),
+            "runtime should not queue convergence after autopilot is disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_projected_jobs_reloads_execution_mode_after_lock() {
+        let harness = TestRuntimeHarness::new(Arc::new(BlockingRunner::new())).await;
+
+        let mut project = harness
+            .db
+            .get_project(harness.project.id)
+            .await
+            .expect("project");
+        project.execution_mode = ExecutionMode::Autopilot;
+        harness
+            .db
+            .update_project(&project)
+            .await
+            .expect("update project");
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
+        let item = ItemBuilder::new(project.id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .explicit_seed(seed_commit.as_str())
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let mut dispatcher = harness.dispatcher.clone();
+        let pause_hook = ProjectedRecoveryPauseHook::new(ProjectedRecoveryPausePoint::BeforeGuard);
+        dispatcher.projected_recovery_pause_hook = Some(pause_hook.clone());
+
+        let recovery_task = tokio::spawn({
+            let dispatcher = dispatcher.clone();
+            async move { dispatcher.recover_projected_jobs().await }
+        });
+
+        pause_hook
+            .wait_until_entered(1, Duration::from_secs(2))
+            .await;
+
+        project.execution_mode = ExecutionMode::Manual;
+        harness
+            .db
+            .update_project(&project)
+            .await
+            .expect("switch execution mode");
+
+        pause_hook.release();
+
+        let recovered = recovery_task
+            .await
+            .expect("join recovery task")
+            .expect("recover projected jobs");
+        assert!(
+            !recovered,
+            "stale autopilot mode should not dispatch projected recovery work after switching to manual"
+        );
+
+        let jobs = harness
+            .db
+            .list_jobs_by_item(item.id)
+            .await
+            .expect("list jobs");
+        assert!(
+            jobs.is_empty(),
+            "runtime should not auto-dispatch new work after autopilot is disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_projected_jobs_only_queues_one_autopilot_item_while_another_is_active() {
+        let harness = TestRuntimeHarness::new(Arc::new(BlockingRunner::new())).await;
+
+        let mut project = harness
+            .db
+            .get_project(harness.project.id)
+            .await
+            .expect("project");
+        project.execution_mode = ExecutionMode::Autopilot;
+        harness
+            .db
+            .update_project(&project)
+            .await
+            .expect("update project");
+
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
+
+        let first_item_id = ingot_domain::ids::ItemId::new();
+        let first_revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let first_item = ItemBuilder::new(project.id, first_revision_id)
+            .id(first_item_id)
+            .sort_key("10")
+            .build();
+        let first_revision = RevisionBuilder::new(first_item_id)
+            .id(first_revision_id)
+            .explicit_seed(seed_commit.as_str())
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&first_item, &first_revision)
+            .await
+            .expect("create first item");
+
+        let second_item_id = ingot_domain::ids::ItemId::new();
+        let second_revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let second_item = ItemBuilder::new(project.id, second_revision_id)
+            .id(second_item_id)
+            .sort_key("20")
+            .build();
+        let second_revision = RevisionBuilder::new(second_item_id)
+            .id(second_revision_id)
+            .explicit_seed(seed_commit.as_str())
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&second_item, &second_revision)
+            .await
+            .expect("create second item");
+
+        let recovered = harness
+            .dispatcher
+            .recover_projected_jobs()
+            .await
+            .expect("recover projected jobs");
+        assert!(
+            recovered,
+            "autopilot recovery should queue work for the first eligible item"
+        );
+
+        let first_jobs = harness
+            .db
+            .list_jobs_by_item(first_item.id)
+            .await
+            .expect("list first item jobs");
+        assert_eq!(first_jobs.len(), 1, "first item should have one queued job");
+        assert_eq!(first_jobs[0].step_id, step::AUTHOR_INITIAL);
+        assert_eq!(first_jobs[0].state.status(), JobStatus::Queued);
+
+        let second_jobs = harness
+            .db
+            .list_jobs_by_item(second_item.id)
+            .await
+            .expect("list second item jobs");
+        assert!(
+            second_jobs.is_empty(),
+            "second item should remain undispatched while the first autopilot item is active"
+        );
+
+        let recovered_again = harness
+            .dispatcher
+            .recover_projected_jobs()
+            .await
+            .expect("recover projected jobs again");
+        assert!(
+            !recovered_again,
+            "autopilot recovery should not queue the second item while the first job is still active"
+        );
+
+        let second_jobs = harness
+            .db
+            .list_jobs_by_item(second_item.id)
+            .await
+            .expect("list second item jobs after second recovery");
+        assert!(
+            second_jobs.is_empty(),
+            "second item should still be waiting while the first item remains active"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_dispatch_projected_review_does_not_queue_autopilot_item_while_project_has_active_work()
+     {
+        let harness = TestRuntimeHarness::new(Arc::new(BlockingRunner::new())).await;
+
+        let mut project = harness
+            .db
+            .get_project(harness.project.id)
+            .await
+            .expect("project");
+        project.execution_mode = ExecutionMode::Autopilot;
+        harness
+            .db
+            .update_project(&project)
+            .await
+            .expect("update project");
+
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
+
+        let first_item_id = ingot_domain::ids::ItemId::new();
+        let first_revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let first_item = ItemBuilder::new(project.id, first_revision_id)
+            .id(first_item_id)
+            .sort_key("10")
+            .build();
+        let first_revision = RevisionBuilder::new(first_item_id)
+            .id(first_revision_id)
+            .explicit_seed(seed_commit.as_str())
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&first_item, &first_revision)
+            .await
+            .expect("create first item");
+
+        let second_item_id = ingot_domain::ids::ItemId::new();
+        let second_revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let second_item = ItemBuilder::new(project.id, second_revision_id)
+            .id(second_item_id)
+            .sort_key("20")
+            .build();
+        let second_revision = RevisionBuilder::new(second_item_id)
+            .id(second_revision_id)
+            .explicit_seed(seed_commit.as_str())
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&second_item, &second_revision)
+            .await
+            .expect("create second item");
+
+        let recovered = harness
+            .dispatcher
+            .recover_projected_jobs()
+            .await
+            .expect("recover projected jobs");
+        assert!(
+            recovered,
+            "autopilot recovery should queue work for the first eligible item"
+        );
+
+        let dispatched = harness
+            .dispatcher
+            .auto_dispatch_projected_review(project.id, second_item.id)
+            .await
+            .expect("auto-dispatch projected review");
+        assert!(
+            !dispatched,
+            "shared projected-review entry should not queue a second autopilot item while the project already has active work"
+        );
+
+        let second_jobs = harness
+            .db
+            .list_jobs_by_item(second_item.id)
+            .await
+            .expect("list second item jobs");
+        assert!(
+            second_jobs.is_empty(),
+            "second item should remain undispatched while another autopilot item is active"
+        );
     }
 
     fn assert_schema_requires_all_properties(schema: &serde_json::Value) {

@@ -5,12 +5,14 @@ use ingot_domain::convergence::Convergence;
 use ingot_domain::finding::Finding;
 use ingot_domain::ids::ActivityId;
 use ingot_domain::item::{EscalationReason, Item};
-use ingot_domain::job::{Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind};
+use ingot_domain::job::{
+    ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
+};
 use ingot_domain::ports::{ActivityRepository, JobRepository, WorkspaceRepository};
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::step_id::StepId;
-use ingot_domain::workspace::Workspace;
+use ingot_domain::workspace::{Workspace, WorkspaceKind};
 use ingot_workflow::{ClosureRelevance, Evaluator, step};
 
 use crate::UseCaseError;
@@ -79,6 +81,93 @@ pub fn effective_authoring_base_commit_oid(
     }
 
     workspace.and_then(|ws| ws.state.base_commit_oid().map(ToOwned::to_owned))
+}
+
+fn needs_mutable_authoring_head(job: &Job) -> bool {
+    job.workspace_kind == WorkspaceKind::Authoring
+        && job.execution_permission == ExecutionPermission::MayMutate
+        && job.job_input.head_commit_oid().is_none()
+}
+
+fn bind_autopilot_authoring_head_if_needed(
+    revision: &ItemRevision,
+    jobs: &[Job],
+    workspace: Option<&Workspace>,
+    author_initial_head_commit_oid: Option<&CommitOid>,
+    job: &mut Job,
+) -> Result<(), UseCaseError> {
+    if !needs_mutable_authoring_head(job) {
+        return Ok(());
+    }
+
+    let head_commit_oid = match job.step_id {
+        step::AUTHOR_INITIAL => author_initial_head_commit_oid
+            .cloned()
+            .or_else(|| Some(revision.seed.seed_target_commit_oid().to_owned())),
+        _ => current_authoring_head_for_revision_with_workspace(revision, jobs, workspace),
+    };
+
+    let Some(head_commit_oid) = head_commit_oid else {
+        return Err(UseCaseError::Internal(format!(
+            "missing authoring head for autopilot-dispatched step {}",
+            job.step_id
+        )));
+    };
+
+    job.job_input = JobInput::authoring_head(head_commit_oid);
+    Ok(())
+}
+
+fn build_candidate_subject_input(
+    step_id: StepId,
+    input: &JobInput,
+    revision: &ItemRevision,
+    jobs: &[Job],
+    workspace: Option<&Workspace>,
+    context: &str,
+) -> Result<JobInput, UseCaseError> {
+    let base = input
+        .base_commit_oid()
+        .map(ToOwned::to_owned)
+        .or_else(|| effective_authoring_base_commit_oid(revision, workspace));
+    let head = input
+        .head_commit_oid()
+        .map(ToOwned::to_owned)
+        .or_else(|| current_authoring_head_for_revision_with_workspace(revision, jobs, workspace));
+
+    match (base, head) {
+        (Some(base), Some(head)) => Ok(JobInput::candidate_subject(base, head)),
+        _ => Err(UseCaseError::Internal(format!(
+            "incomplete candidate subject for {context} {step_id}"
+        ))),
+    }
+}
+
+async fn append_job_dispatched_activity<A>(
+    activity_repo: &A,
+    project_id: ingot_domain::ids::ProjectId,
+    item_id: ingot_domain::ids::ItemId,
+    job: &Job,
+    dispatch_origin: &'static str,
+) -> Result<(), UseCaseError>
+where
+    A: ActivityRepository,
+{
+    activity_repo
+        .append(&Activity {
+            id: ActivityId::new(),
+            project_id,
+            event_type: ActivityEventType::JobDispatched,
+            subject: ActivitySubject::Job(job.id),
+            payload: serde_json::json!({
+                "item_id": item_id,
+                "step_id": job.step_id,
+                "dispatch_origin": dispatch_origin,
+            }),
+            created_at: Utc::now(),
+        })
+        .await
+        .map_err(UseCaseError::Repository)
 }
 
 /// Returns true if the job's step is closure-relevant (i.e., failures on it should escalate).
@@ -171,42 +260,93 @@ where
         let authoring_workspace = workspace_repo
             .find_authoring_for_revision(revision.id)
             .await?;
-        let mut base = job.job_input.base_commit_oid().map(ToOwned::to_owned);
-        let mut head = job.job_input.head_commit_oid().map(ToOwned::to_owned);
-        if base.is_none() {
-            base = effective_authoring_base_commit_oid(revision, authoring_workspace.as_ref());
-        }
-        if head.is_none() {
-            head = current_authoring_head_for_revision_with_workspace(
-                revision,
-                jobs,
-                authoring_workspace.as_ref(),
-            );
-        }
-        match (base, head) {
-            (Some(base), Some(head)) => {
-                job.job_input = JobInput::candidate_subject(base, head);
-            }
-            _ => {
-                return Err(UseCaseError::Internal(format!(
-                    "incomplete candidate subject for auto-dispatched review {}",
-                    job.step_id
-                )));
-            }
-        }
+        job.job_input = build_candidate_subject_input(
+            job.step_id,
+            &job.job_input,
+            revision,
+            jobs,
+            authoring_workspace.as_ref(),
+            "auto-dispatched review",
+        )?;
     }
 
     job_repo.create(&job).await?;
-    activity_repo
-        .append(&Activity {
-            id: ActivityId::new(),
-            project_id: project.id,
-            event_type: ActivityEventType::JobDispatched,
-            subject: ActivitySubject::Job(job.id),
-            payload: serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
-            created_at: Utc::now(),
-        })
-        .await?;
+    append_job_dispatched_activity(activity_repo, project.id, item.id, &job, "system").await?;
+
+    Ok(Some(job))
+}
+
+/// Auto-dispatch any evaluator-recommended step without the closure-relevance filter.
+/// Used when `project.execution_mode == Autopilot`.
+///
+/// Returns `Some(job)` if dispatched, `None` if no dispatchable step.
+/// Human gates (approval, escalation, findings triage) are respected: the evaluator
+/// will not set `dispatchable_step_id` when those gates are active.
+#[allow(clippy::too_many_arguments)]
+pub async fn auto_dispatch_autopilot<J, W, A>(
+    job_repo: &J,
+    workspace_repo: &W,
+    activity_repo: &A,
+    project: &Project,
+    item: &Item,
+    revision: &ItemRevision,
+    jobs: &[Job],
+    findings: &[Finding],
+    convergences: &[Convergence],
+    author_initial_head_commit_oid: Option<CommitOid>,
+) -> Result<Option<Job>, UseCaseError>
+where
+    J: JobRepository,
+    W: WorkspaceRepository,
+    A: ActivityRepository,
+{
+    let evaluation = Evaluator::new().evaluate(item, revision, jobs, findings, convergences);
+    let Some(step_id) = evaluation.dispatchable_step_id else {
+        return Ok(None);
+    };
+
+    let mut job = dispatch_job(
+        item,
+        revision,
+        jobs,
+        findings,
+        convergences,
+        DispatchJobCommand {
+            step_id: Some(step_id),
+        },
+    )?;
+
+    let needs_authoring_workspace = should_fill_candidate_subject_from_workspace(job.step_id)
+        || needs_mutable_authoring_head(&job);
+    let authoring_workspace = if needs_authoring_workspace {
+        workspace_repo
+            .find_authoring_for_revision(revision.id)
+            .await?
+    } else {
+        None
+    };
+
+    bind_autopilot_authoring_head_if_needed(
+        revision,
+        jobs,
+        authoring_workspace.as_ref(),
+        author_initial_head_commit_oid.as_ref(),
+        &mut job,
+    )?;
+
+    if should_fill_candidate_subject_from_workspace(job.step_id) {
+        job.job_input = build_candidate_subject_input(
+            job.step_id,
+            &job.job_input,
+            revision,
+            jobs,
+            authoring_workspace.as_ref(),
+            "autopilot-dispatched step",
+        )?;
+    }
+
+    job_repo.create(&job).await?;
+    append_job_dispatched_activity(activity_repo, project.id, item.id, &job, "autopilot").await?;
 
     Ok(Some(job))
 }
@@ -215,8 +355,13 @@ where
 mod tests {
     use chrono::Utc;
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
+    use ingot_domain::item::ApprovalState;
+    use ingot_domain::job::JobInput;
     use ingot_domain::job::OutputArtifactKind;
-    use ingot_test_support::fixtures::{JobBuilder, RevisionBuilder};
+    use ingot_domain::project::ExecutionMode;
+    use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed};
+    use ingot_test_support::fixtures::{ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder};
+    use ingot_test_support::sqlite::migrated_test_db;
     use ingot_workflow::step;
     use uuid::Uuid;
 
@@ -281,5 +426,59 @@ mod tests {
         assert!(!should_fill_candidate_subject_from_workspace(
             step::AUTHOR_INITIAL
         ));
+    }
+
+    #[tokio::test]
+    async fn autopilot_dispatch_binds_author_initial_from_implicit_target_head() {
+        let db = migrated_test_db("ingot-usecases-dispatch").await;
+        let project_id = ProjectId::new();
+        let item_id = ItemId::new();
+        let revision_id = ItemRevisionId::new();
+
+        let project = ProjectBuilder::new(
+            std::env::temp_dir().join(format!("ingot-usecases-dispatch-{}", Uuid::now_v7())),
+        )
+        .id(project_id)
+        .execution_mode(ExecutionMode::Autopilot)
+        .build();
+        let item = ItemBuilder::new(project_id, revision_id)
+            .id(item_id)
+            .approval_state(ApprovalState::NotRequired)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .approval_policy(ApprovalPolicy::NotRequired)
+            .seed(AuthoringBaseSeed::Implicit {
+                seed_target_commit_oid: "target-head".into(),
+            })
+            .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
+            .build();
+
+        db.create_project(&project).await.expect("persist project");
+        db.create_item_with_revision(&item, &revision)
+            .await
+            .expect("persist item");
+
+        let job = auto_dispatch_autopilot(
+            &db,
+            &db,
+            &db,
+            &project,
+            &item,
+            &revision,
+            &[],
+            &[],
+            &[],
+            None,
+        )
+        .await
+        .expect("autopilot dispatch")
+        .expect("author_initial job");
+
+        assert_eq!(job.step_id, step::AUTHOR_INITIAL);
+        assert_eq!(
+            job.job_input,
+            JobInput::authoring_head("target-head".into())
+        );
     }
 }

@@ -62,6 +62,7 @@ pub(super) async fn create_project(
         path,
         default_branch,
         color: normalize_project_color(request.color.as_deref())?,
+        execution_mode: request.execution_mode.unwrap_or_default(),
         created_at: now,
         updated_at: now,
     };
@@ -81,39 +82,40 @@ pub(super) async fn update_project(
     ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
     Json(request): Json<UpdateProjectRequest>,
 ) -> Result<Json<Project>, ApiError> {
+    let _guard = state
+        .project_locks
+        .acquire_project_mutation(project_id)
+        .await;
     let existing = state
         .db
         .get_project(project_id)
         .await
         .map_err(repo_to_project)?;
-    let existing_name = existing.name.clone();
-    let existing_default_branch = existing.default_branch.clone();
-    let existing_color = existing.color.clone();
-    let path = match request.path.as_deref() {
-        Some(path) => canonicalize_repo_path(path)?,
-        None => existing.path.clone(),
-    };
+    let mut project = existing;
+    let path = request
+        .path
+        .as_deref()
+        .map(canonicalize_repo_path)
+        .transpose()?
+        .unwrap_or_else(|| project.path.clone());
     let default_branch = if request.default_branch.is_some() || request.path.is_some() {
         resolve_default_branch(&path, request.default_branch.as_deref()).await?
     } else {
-        existing_default_branch
+        project.default_branch.clone()
     };
 
-    let project = Project {
-        id: existing.id,
-        name: match request.name.as_deref() {
-            Some(name) => normalize_non_empty("project name", name)?,
-            None => existing_name,
-        },
-        path,
-        default_branch,
-        color: match request.color.as_deref() {
-            Some(color) => normalize_project_color(Some(color))?,
-            None => existing_color,
-        },
-        created_at: existing.created_at,
-        updated_at: Utc::now(),
+    project.name = match request.name.as_deref() {
+        Some(name) => normalize_non_empty("project name", name)?,
+        None => project.name,
     };
+    project.path = path;
+    project.default_branch = default_branch;
+    project.color = match request.color.as_deref() {
+        Some(color) => normalize_project_color(Some(color))?,
+        None => project.color,
+    };
+    project.execution_mode = request.execution_mode.unwrap_or(project.execution_mode);
+    project.updated_at = Utc::now();
 
     state
         .db
