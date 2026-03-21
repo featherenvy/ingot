@@ -278,7 +278,9 @@ mod tests {
                 id: ActivityId::new(),
                 project_id: project.id,
                 event_type: ingot_domain::activity::ActivityEventType::ConvergenceFailed,
-                subject: ingot_domain::activity::ActivitySubject::Convergence(ingot_domain::ids::ConvergenceId::from_uuid(uuid::Uuid::nil())),
+                subject: ingot_domain::activity::ActivitySubject::Convergence(
+                    ingot_domain::ids::ConvergenceId::from_uuid(uuid::Uuid::nil()),
+                ),
                 payload: serde_json::json!({}),
                 created_at: chrono::Utc::now(),
             },

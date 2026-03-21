@@ -1037,10 +1037,10 @@ mod tests {
             &self,
             operation: &GitOperation,
         ) -> impl Future<Output = Result<GitOperation, UseCaseError>> + Send {
-            self.calls
-                .lock()
-                .expect("calls lock")
-                .push(format!("find_or_create_op:{}", operation.entity.entity_id_string()));
+            self.calls.lock().expect("calls lock").push(format!(
+                "find_or_create_op:{}",
+                operation.entity.entity_id_string()
+            ));
             ready(Ok(operation.clone()))
         }
 

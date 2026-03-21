@@ -1,26 +1,429 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use tracing::{debug, info, warn};
 
-#[derive(Debug, Clone, Default)]
-pub struct ClaudeCodeCliAdapter;
+#[derive(Debug, Clone)]
+pub struct ClaudeCodeCliAdapter {
+    cli_path: PathBuf,
+    model: String,
+}
+
+impl ClaudeCodeCliAdapter {
+    pub fn new(cli_path: impl Into<PathBuf>, model: impl Into<String>) -> Self {
+        Self {
+            cli_path: cli_path.into(),
+            model: model.into(),
+        }
+    }
+
+    fn build_print_args(&self, request: &AgentRequest) -> Vec<String> {
+        let schema = request
+            .output_schema
+            .clone()
+            .unwrap_or_else(structured_output_schema);
+        let schema_json = serde_json::to_string(&schema).expect("schema serialization");
+
+        let mut args = vec![
+            "--print".into(),
+            "--output-format".into(),
+            "json".into(),
+            "--model".into(),
+            self.model.clone(),
+            "--no-session-persistence".into(),
+            "--bare".into(),
+            "--dangerously-skip-permissions".into(),
+            "--json-schema".into(),
+            schema_json,
+        ];
+
+        if !request.may_mutate {
+            args.push("--disallowedTools".into());
+            args.push("Edit,Write,NotebookEdit".into());
+        }
+
+        args
+    }
+
+    async fn collect_stream(
+        reader: impl tokio::io::AsyncRead + Unpin,
+        stream_name: &'static str,
+    ) -> Result<String, AgentError> {
+        let mut reader = BufReader::new(reader).lines();
+        let mut lines = Vec::new();
+
+        while let Some(line) = reader
+            .next_line()
+            .await
+            .map_err(|err| AgentError::ProcessError(err.to_string()))?
+        {
+            match stream_name {
+                "stdout" => debug!(stream = stream_name, line, "claude event"),
+                "stderr" => warn!(stream = stream_name, line, "claude stderr"),
+                _ => debug!(stream = stream_name, line, "claude stream"),
+            }
+            lines.push(line);
+        }
+
+        Ok(lines.join("\n"))
+    }
+}
 
 impl AgentAdapter for ClaudeCodeCliAdapter {
     async fn launch(
         &self,
-        _request: &AgentRequest,
-        _working_dir: &Path,
+        request: &AgentRequest,
+        working_dir: &Path,
     ) -> Result<AgentResponse, AgentError> {
-        Err(AgentError::LaunchFailed(
-            "claude_code runtime execution is not implemented in the MVP yet".into(),
-        ))
+        let args = self.build_print_args(request);
+        info!(
+            cli_path = %self.cli_path.display(),
+            model = %self.model,
+            working_dir = %working_dir.display(),
+            may_mutate = request.may_mutate,
+            args = ?args,
+            "launching claude --print"
+        );
+
+        let mut command = Command::new(&self.cli_path);
+        command
+            .args(&args)
+            .current_dir(working_dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command
+            .spawn()
+            .map_err(|err| AgentError::LaunchFailed(err.to_string()))?;
+        debug!("spawned claude subprocess");
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(request.prompt.as_bytes())
+                .await
+                .map_err(|err| AgentError::ProcessError(err.to_string()))?;
+            stdin
+                .shutdown()
+                .await
+                .map_err(|err| AgentError::ProcessError(err.to_string()))?;
+        }
+        debug!("wrote prompt to claude stdin and closed input");
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AgentError::ProcessError("missing claude stdout pipe".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| AgentError::ProcessError("missing claude stderr pipe".into()))?;
+        let stdout_task = tokio::spawn(Self::collect_stream(stdout, "stdout"));
+        let stderr_task = tokio::spawn(Self::collect_stream(stderr, "stderr"));
+
+        let status = child
+            .wait()
+            .await
+            .map_err(|err| AgentError::ProcessError(err.to_string()))?;
+        info!(
+            exit_code = status.code().unwrap_or(-1),
+            "claude --print finished"
+        );
+
+        let stdout = stdout_task
+            .await
+            .map_err(|err| AgentError::ProcessError(err.to_string()))??;
+        let stderr = stderr_task
+            .await
+            .map_err(|err| AgentError::ProcessError(err.to_string()))??;
+
+        let result = parse_print_output(&stdout);
+
+        Ok(AgentResponse {
+            exit_code: status.code().unwrap_or(-1),
+            stdout,
+            stderr,
+            result,
+        })
     }
 
-    async fn cancel(&self, _pid: u32) -> Result<(), AgentError> {
-        Err(AgentError::ProcessError(
-            "claude_code subprocess cancellation is not implemented yet".into(),
-        ))
+    async fn cancel(&self, pid: u32) -> Result<(), AgentError> {
+        #[cfg(unix)]
+        {
+            let result = unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+            if result == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            Err(AgentError::ProcessError(format!(
+                "killpg({pid}) failed: {error}"
+            )))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            Err(AgentError::ProcessError(
+                "claude subprocess cancellation is only supported on unix".into(),
+            ))
+        }
+    }
+}
+
+fn structured_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": "Short summary of the completed work."
+            },
+            "validation": {
+                "type": ["string", "null"],
+                "description": "Short note describing validation that was run, if any."
+            }
+        },
+        "required": ["summary", "validation"],
+        "additionalProperties": false
+    })
+}
+
+/// Parse Claude's `--print --output-format json` envelope.
+///
+/// Envelope shape:
+/// ```json
+/// { "type": "result", "subtype": "success", "is_error": false, "result": "...", ... }
+/// ```
+///
+/// If `is_error` is true, returns `None`. If `result` is a JSON string that
+/// parses as an object/array, returns the parsed value. If it's a plain string,
+/// wraps it as `{"summary": "<text>"}`.
+fn parse_print_output(stdout: &str) -> Option<serde_json::Value> {
+    let envelope: serde_json::Value = serde_json::from_str(stdout).ok()?;
+
+    if envelope.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
+        return None;
+    }
+
+    let result = envelope.get("result")?;
+
+    match result {
+        serde_json::Value::String(s) => {
+            // Try to parse as JSON first (the --json-schema case)
+            match serde_json::from_str::<serde_json::Value>(s) {
+                Ok(parsed) if parsed.is_object() || parsed.is_array() => Some(parsed),
+                _ => Some(serde_json::json!({ "summary": s.trim() })),
+            }
+        }
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => Some(result.clone()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn request(may_mutate: bool) -> AgentRequest {
+        AgentRequest {
+            prompt: "Implement the change".into(),
+            working_dir: "/tmp/repo".into(),
+            may_mutate,
+            timeout_seconds: Some(60),
+            output_schema: None,
+        }
+    }
+
+    #[test]
+    fn build_print_args_for_mutating_job() {
+        let adapter = ClaudeCodeCliAdapter::new("claude", "claude-sonnet-4-6");
+        let args = adapter.build_print_args(&request(true));
+
+        assert!(args.contains(&"--print".into()));
+        assert!(args.contains(&"--dangerously-skip-permissions".into()));
+        assert!(args.contains(&"--bare".into()));
+        assert!(args.contains(&"--no-session-persistence".into()));
+        assert!(!args.contains(&"--disallowedTools".into()));
+
+        // Verify model position
+        let model_idx = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[model_idx + 1], "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn build_print_args_for_read_only_job() {
+        let adapter = ClaudeCodeCliAdapter::new("claude", "claude-sonnet-4-6");
+        let args = adapter.build_print_args(&request(false));
+
+        assert!(args.contains(&"--disallowedTools".into()));
+        let idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert_eq!(args[idx + 1], "Edit,Write,NotebookEdit");
+        assert!(args.contains(&"--dangerously-skip-permissions".into()));
+    }
+
+    #[test]
+    fn build_print_args_include_json_schema_inline() {
+        let custom_schema =
+            serde_json::json!({"type": "object", "properties": {"outcome": {"type": "string"}}});
+        let req = AgentRequest {
+            output_schema: Some(custom_schema.clone()),
+            ..request(true)
+        };
+        let adapter = ClaudeCodeCliAdapter::new("claude", "claude-sonnet-4-6");
+        let args = adapter.build_print_args(&req);
+
+        let schema_idx = args.iter().position(|a| a == "--json-schema").unwrap();
+        let schema_str = &args[schema_idx + 1];
+        let parsed: serde_json::Value = serde_json::from_str(schema_str).expect("valid JSON");
+        assert_eq!(parsed, custom_schema);
+    }
+
+    #[test]
+    fn build_print_args_include_default_schema_when_none() {
+        let adapter = ClaudeCodeCliAdapter::new("claude", "claude-sonnet-4-6");
+        let args = adapter.build_print_args(&request(true));
+
+        let schema_idx = args.iter().position(|a| a == "--json-schema").unwrap();
+        let schema_str = &args[schema_idx + 1];
+        let parsed: serde_json::Value = serde_json::from_str(schema_str).expect("valid JSON");
+        assert_eq!(parsed, structured_output_schema());
+    }
+
+    #[test]
+    fn fallback_structured_output_schema_requires_nullable_validation() {
+        let schema = structured_output_schema();
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["summary", "validation"])
+        );
+        assert_eq!(
+            schema["properties"]["validation"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+    }
+
+    #[test]
+    fn parse_print_output_extracts_structured_json_result() {
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": r#"{"summary":"done","validation":null}"#,
+            "duration_ms": 1000
+        });
+        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        assert_eq!(
+            result,
+            Some(serde_json::json!({"summary": "done", "validation": null}))
+        );
+    }
+
+    #[test]
+    fn parse_print_output_extracts_object_result() {
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": {"summary": "done", "validation": null}
+        });
+        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        assert_eq!(
+            result,
+            Some(serde_json::json!({"summary": "done", "validation": null}))
+        );
+    }
+
+    #[test]
+    fn parse_print_output_returns_none_when_is_error() {
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "error",
+            "is_error": true,
+            "result": "something went wrong"
+        });
+        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_print_output_handles_non_json_gracefully() {
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "I completed the task successfully."
+        });
+        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        assert_eq!(
+            result,
+            Some(serde_json::json!({"summary": "I completed the task successfully."}))
+        );
+    }
+
+    #[test]
+    fn parse_print_output_returns_none_for_non_json_stdout() {
+        let result = parse_print_output("not json at all");
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn launch_closes_stdin_after_writing_prompt() {
+        let root =
+            std::env::temp_dir().join(format!("ingot-claude-adapter-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).expect("create temp dir");
+
+        let cli_path = root.join("fake-claude.sh");
+        std::fs::write(
+            &cli_path,
+            r#"#!/bin/sh
+# Capture stdin to a file
+cat > "$PWD/stdin.txt"
+# Emit a Claude --print JSON envelope on stdout
+cat <<'EOF'
+{"type":"result","subtype":"success","is_error":false,"result":{"summary":"ok","validation":null},"duration_ms":100}
+EOF
+"#,
+        )
+        .expect("write fake cli");
+        let mut permissions = std::fs::metadata(&cli_path)
+            .expect("fake cli metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&cli_path, permissions).expect("chmod fake cli");
+
+        let adapter = ClaudeCodeCliAdapter::new(cli_path.clone(), "claude-sonnet-4-6");
+        let request = AgentRequest {
+            working_dir: root.clone(),
+            ..request(true)
+        };
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            adapter.launch(&request, &root),
+        )
+        .await
+        .expect("launch timed out")
+        .expect("launch response");
+
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(
+            std::fs::read_to_string(root.join("stdin.txt")).expect("stdin capture"),
+            request.prompt
+        );
+        assert_eq!(
+            response.result,
+            Some(serde_json::json!({"summary": "ok", "validation": null}))
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -3,9 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit_oid::CommitOid;
 use crate::git_ref::GitRef;
-use crate::ids::{
-    ConvergenceId, GitOperationId, ItemRevisionId, JobId, ProjectId, WorkspaceId,
-};
+use crate::ids::{ConvergenceId, GitOperationId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
 
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

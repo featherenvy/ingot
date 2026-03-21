@@ -781,9 +781,10 @@ async fn complete_route_clears_item_escalation_after_successful_retry() {
         .expect("list activity");
     assert!(activity.iter().any(|entry| {
         entry.event_type == ActivityEventType::ItemEscalationCleared
-            && entry.subject == ingot_domain::activity::ActivitySubject::Item(
-                item_id.parse::<ingot_domain::ids::ItemId>().unwrap()
-            )
+            && entry.subject
+                == ingot_domain::activity::ActivitySubject::Item(
+                    item_id.parse::<ingot_domain::ids::ItemId>().unwrap(),
+                )
     }));
 }
 

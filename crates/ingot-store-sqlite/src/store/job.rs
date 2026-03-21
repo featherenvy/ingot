@@ -860,12 +860,12 @@ mod tests {
     use chrono::Utc;
     use ingot_domain::agent::AgentCapability;
     use ingot_domain::ids::{ItemId, ItemRevisionId, JobId};
-    use ingot_domain::lease_owner_id::LeaseOwnerId;
     use ingot_domain::item::EscalationReason;
     use ingot_domain::job::{
         ContextPolicy, ExecutionPermission, JobAssignment, JobStatus, OutcomeClass,
         OutputArtifactKind, PhaseKind,
     };
+    use ingot_domain::lease_owner_id::LeaseOwnerId;
     use ingot_domain::ports::RepositoryError;
     use ingot_domain::workspace::WorkspaceKind;
     use ingot_test_support::fixtures::{

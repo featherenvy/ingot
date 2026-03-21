@@ -12,7 +12,6 @@ use ingot_domain::git_ref::GitRef;
 
 use crate::UseCaseError;
 
-
 #[derive(Debug, Clone)]
 pub struct CreateItemInput {
     pub classification: Classification,

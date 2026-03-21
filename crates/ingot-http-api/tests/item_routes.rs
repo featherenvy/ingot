@@ -977,7 +977,9 @@ async fn revise_route_cancels_current_lane_state() {
     db.create_git_operation(&GitOperation {
         id: GitOperationId::new(),
         project_id: parse_id::<ProjectId>(&project_id),
-        entity: GitOperationEntityRef::Convergence(convergence_id.parse::<ConvergenceId>().unwrap()),
+        entity: GitOperationEntityRef::Convergence(
+            convergence_id.parse::<ConvergenceId>().unwrap(),
+        ),
         payload: OperationPayload::PrepareConvergenceCommit {
             workspace_id: "wrk_00000000000000000000000000000057"
                 .parse::<WorkspaceId>()
@@ -997,7 +999,9 @@ async fn revise_route_cancels_current_lane_state() {
     db.create_git_operation(&GitOperation {
         id: GitOperationId::new(),
         project_id: parse_id::<ProjectId>(&project_id),
-        entity: GitOperationEntityRef::Convergence(convergence_id.parse::<ConvergenceId>().unwrap()),
+        entity: GitOperationEntityRef::Convergence(
+            convergence_id.parse::<ConvergenceId>().unwrap(),
+        ),
         payload: OperationPayload::FinalizeTargetRef {
             workspace_id: None,
             ref_name: "refs/heads/main".into(),

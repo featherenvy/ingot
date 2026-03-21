@@ -148,8 +148,7 @@ impl<'de> Deserialize<'de> for ActivitySubject {
             entity_id: String,
         }
         let helper = Helper::deserialize(deserializer)?;
-        Self::from_parts(helper.entity_type, &helper.entity_id)
-            .map_err(serde::de::Error::custom)
+        Self::from_parts(helper.entity_type, &helper.entity_id).map_err(serde::de::Error::custom)
     }
 }
 

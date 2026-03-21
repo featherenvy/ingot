@@ -10,6 +10,12 @@ pub const DEFAULT_CODEX_NAME: &str = "Codex";
 pub const DEFAULT_CODEX_PROVIDER: &str = "openai";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.4";
 pub const DEFAULT_CODEX_CLI_PATH: &str = "codex";
+
+pub const DEFAULT_CLAUDE_CODE_SLUG: &str = "claude-code";
+pub const DEFAULT_CLAUDE_CODE_NAME: &str = "Claude Code";
+pub const DEFAULT_CLAUDE_CODE_PROVIDER: &str = "anthropic";
+pub const DEFAULT_CLAUDE_CODE_MODEL: &str = "claude-sonnet-4-6";
+pub const DEFAULT_CLAUDE_CODE_CLI_PATH: &str = "claude";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn default_agent_capabilities(adapter_kind: AdapterKind) -> Vec<AgentCapability> {
@@ -21,6 +27,7 @@ pub fn default_agent_capabilities(adapter_kind: AdapterKind) -> Vec<AgentCapabil
         ],
         AdapterKind::ClaudeCode => vec![
             AgentCapability::ReadOnlyJobs,
+            AgentCapability::MutatingJobs,
             AgentCapability::StructuredOutput,
         ],
     }
@@ -40,6 +47,28 @@ pub fn bootstrap_codex_agent_with(cli_path: impl Into<PathBuf>, model: impl Into
         model: model.into(),
         cli_path: cli_path.into(),
         capabilities: default_agent_capabilities(AdapterKind::Codex),
+        health_check: None,
+        status: AgentStatus::Probing,
+    }
+}
+
+pub fn bootstrap_claude_code_agent() -> Agent {
+    bootstrap_claude_code_agent_with(DEFAULT_CLAUDE_CODE_CLI_PATH, DEFAULT_CLAUDE_CODE_MODEL)
+}
+
+pub fn bootstrap_claude_code_agent_with(
+    cli_path: impl Into<PathBuf>,
+    model: impl Into<String>,
+) -> Agent {
+    Agent {
+        id: AgentId::new(),
+        slug: DEFAULT_CLAUDE_CODE_SLUG.into(),
+        name: DEFAULT_CLAUDE_CODE_NAME.into(),
+        adapter_kind: AdapterKind::ClaudeCode,
+        provider: DEFAULT_CLAUDE_CODE_PROVIDER.into(),
+        model: model.into(),
+        cli_path: cli_path.into(),
+        capabilities: default_agent_capabilities(AdapterKind::ClaudeCode),
         health_check: None,
         status: AgentStatus::Probing,
     }
@@ -103,17 +132,11 @@ async fn probe_claude_code_cli(
     cli_path: &Path,
     timeout_duration: Duration,
 ) -> Result<String, String> {
-    let output = run_probe_command(
-        cli_path,
-        ["--version"],
-        timeout_duration,
-        "claude-code --version",
-    )
-    .await?;
+    let output = run_probe_command(cli_path, ["--help"], timeout_duration, "claude --help").await?;
 
     let combined = combined_output(&output.stdout, &output.stderr);
     if output.status.success() {
-        Ok(combined)
+        validate_claude_code_help_probe(&combined)
     } else if combined.is_empty() {
         Err(format!(
             "{} exited with status {}",
@@ -123,6 +146,23 @@ async fn probe_claude_code_cli(
     } else {
         Err(combined)
     }
+}
+
+fn validate_claude_code_help_probe(output: &str) -> Result<String, String> {
+    let required_flags = ["--print", "--output-format", "--json-schema", "--model"];
+    let missing_flags = required_flags
+        .iter()
+        .filter(|flag| !output.contains(**flag))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing_flags.is_empty() {
+        return Err(format!(
+            "claude is missing required flags: {}",
+            missing_flags.join(", ")
+        ));
+    }
+
+    Ok("claude help ok".into())
 }
 
 async fn run_probe_command<const N: usize>(
@@ -175,9 +215,10 @@ fn validate_codex_exec_probe(output: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_CODEX_CLI_PATH, DEFAULT_CODEX_MODEL, bootstrap_codex_agent,
-        bootstrap_codex_agent_with, default_agent_capabilities, probe_and_apply,
-        probe_and_apply_with_timeout,
+        DEFAULT_CLAUDE_CODE_CLI_PATH, DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CODEX_CLI_PATH,
+        DEFAULT_CODEX_MODEL, bootstrap_claude_code_agent, bootstrap_claude_code_agent_with,
+        bootstrap_codex_agent, bootstrap_codex_agent_with, default_agent_capabilities,
+        probe_and_apply, probe_and_apply_with_timeout,
     };
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -185,7 +226,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::time::Duration;
 
-    use ingot_domain::agent::{AdapterKind, AgentStatus};
+    use ingot_domain::agent::{AdapterKind, AgentCapability, AgentStatus};
 
     #[test]
     fn bootstrap_codex_agent_uses_product_defaults() {
@@ -251,6 +292,57 @@ mod tests {
                 .health_check
                 .as_deref()
                 .is_some_and(|message| message.contains("timed out"))
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bootstrap_claude_code_agent_uses_product_defaults() {
+        let agent = bootstrap_claude_code_agent();
+
+        assert_eq!(agent.slug, "claude-code");
+        assert_eq!(agent.name, "Claude Code");
+        assert_eq!(agent.provider, "anthropic");
+        assert_eq!(agent.model, DEFAULT_CLAUDE_CODE_MODEL);
+        assert_eq!(agent.cli_path, PathBuf::from(DEFAULT_CLAUDE_CODE_CLI_PATH));
+        assert_eq!(
+            agent.capabilities,
+            default_agent_capabilities(AdapterKind::ClaudeCode)
+        );
+        assert!(agent.capabilities.contains(&AgentCapability::MutatingJobs));
+    }
+
+    #[tokio::test]
+    async fn probe_and_apply_marks_claude_code_available_when_probe_succeeds() {
+        let root = temp_test_root("claude-probe-ok");
+        let fake_claude = write_script(
+            &root,
+            "fake-claude.sh",
+            "#!/bin/sh\necho '--print --output-format --json-schema --model'\n",
+        );
+        let mut agent = bootstrap_claude_code_agent_with(fake_claude, "claude-sonnet-4-6");
+
+        probe_and_apply(&mut agent).await;
+
+        assert_eq!(agent.status, AgentStatus::Available);
+        assert_eq!(agent.health_check.as_deref(), Some("claude help ok"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn probe_and_apply_marks_claude_code_unavailable_when_required_flags_are_missing() {
+        let root = temp_test_root("claude-probe-bad");
+        let fake_claude = write_script(&root, "fake-claude.sh", "#!/bin/sh\necho '--model'\n");
+        let mut agent = bootstrap_claude_code_agent_with(fake_claude, "claude-sonnet-4-6");
+
+        probe_and_apply(&mut agent).await;
+
+        assert_eq!(agent.status, AgentStatus::Unavailable);
+        assert!(
+            agent
+                .health_check
+                .as_deref()
+                .is_some_and(|message| message.contains("--print"))
         );
         let _ = fs::remove_dir_all(root);
     }

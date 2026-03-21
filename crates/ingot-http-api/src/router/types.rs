@@ -248,10 +248,7 @@ where
 {
     type Rejection = Response;
 
-    async fn from_request(
-        req: Request,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let Json(payload) = Json::<TriageFindingRequestPayload>::from_request(req, state)
             .await
             .map_err(IntoResponse::into_response)?;

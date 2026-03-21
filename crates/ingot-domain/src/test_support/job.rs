@@ -237,7 +237,9 @@ impl JobBuilder {
                 None => JobState::Queued,
             },
             JobStatus::Running => {
-                let lease_owner_id = self.lease_owner_id.unwrap_or_else(|| LeaseOwnerId::new("test"));
+                let lease_owner_id = self
+                    .lease_owner_id
+                    .unwrap_or_else(|| LeaseOwnerId::new("test"));
                 let assignment = assignment.unwrap_or_else(|| JobAssignment {
                     workspace_id: ids::WorkspaceId::new(),
                     agent_id: self.agent_id,

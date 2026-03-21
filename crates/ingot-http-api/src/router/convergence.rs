@@ -490,15 +490,15 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         async move {
             if let Some(existing) = state
                 .db
-                .find_unresolved_finalize_for_convergence(
-                    match &operation.entity {
-                        GitOperationEntityRef::Convergence(id) => *id,
-                        other => return Err(UseCaseError::Internal(format!(
+                .find_unresolved_finalize_for_convergence(match &operation.entity {
+                    GitOperationEntityRef::Convergence(id) => *id,
+                    other => {
+                        return Err(UseCaseError::Internal(format!(
                             "expected convergence entity, got {:?}",
                             other.entity_type()
-                        ))),
-                    },
-                )
+                        )));
+                    }
+                })
                 .await
                 .map_err(UseCaseError::Repository)?
             {
@@ -523,15 +523,15 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                 }
                 Err(RepositoryError::Conflict(_)) => state
                     .db
-                    .find_unresolved_finalize_for_convergence(
-                        match &operation.entity {
-                            GitOperationEntityRef::Convergence(id) => *id,
-                            other => return Err(UseCaseError::Internal(format!(
+                    .find_unresolved_finalize_for_convergence(match &operation.entity {
+                        GitOperationEntityRef::Convergence(id) => *id,
+                        other => {
+                            return Err(UseCaseError::Internal(format!(
                                 "expected convergence entity, got {:?}",
                                 other.entity_type()
-                            ))),
-                        },
-                    )
+                            )));
+                        }
+                    })
                     .await
                     .map_err(UseCaseError::Repository)?
                     .ok_or_else(|| {

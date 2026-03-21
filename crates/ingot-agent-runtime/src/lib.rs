@@ -29,7 +29,6 @@ use ingot_domain::git_operation::{
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::harness::{HarnessCommand, HarnessProfile, HarnessProfileError};
 use ingot_domain::ids::{GitOperationId, WorkspaceId};
-use ingot_domain::lease_owner_id::LeaseOwnerId;
 use ingot_domain::item::{
     ApprovalState, DoneReason, Escalation, EscalationReason, Lifecycle, ResolutionSource,
 };
@@ -37,6 +36,7 @@ use ingot_domain::job::{
     ExecutionPermission, Job, JobAssignment, JobState, JobStatus, OutcomeClass, OutputArtifactKind,
     PhaseKind,
 };
+use ingot_domain::lease_owner_id::LeaseOwnerId;
 use ingot_domain::ports::{JobCompletionMutation, ProjectMutationLockPort, RepositoryError};
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
@@ -152,7 +152,11 @@ impl AgentRunner for CliAgentRunner {
                         .launch(request, working_dir)
                         .await
                 }
-                AdapterKind::ClaudeCode => ClaudeCodeCliAdapter.launch(request, working_dir).await,
+                AdapterKind::ClaudeCode => {
+                    ClaudeCodeCliAdapter::new(agent.cli_path.clone(), agent.model.clone())
+                        .launch(request, working_dir)
+                        .await
+                }
             }
         })
     }
@@ -601,7 +605,8 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
         async move {
             let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
                 return Err(ingot_usecases::UseCaseError::Internal(format!(
-                    "expected convergence entity, got {:?}", operation.entity.entity_type()
+                    "expected convergence entity, got {:?}",
+                    operation.entity.entity_type()
                 )));
             };
             let convergence_id = *convergence_id;
@@ -1532,7 +1537,8 @@ impl JobDispatcher {
     async fn adopt_create_job_commit(&self, operation: &GitOperation) -> Result<(), RuntimeError> {
         let GitOperationEntityRef::Job(job_id) = &operation.entity else {
             return Err(RuntimeError::InvalidState(format!(
-                "expected job entity, got {:?}", operation.entity.entity_type()
+                "expected job entity, got {:?}",
+                operation.entity.entity_type()
             )));
         };
         let job_id = *job_id;
@@ -1594,7 +1600,8 @@ impl JobDispatcher {
     ) -> Result<(), RuntimeError> {
         let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
             return Err(RuntimeError::InvalidState(format!(
-                "expected convergence entity, got {:?}", operation.entity.entity_type()
+                "expected convergence entity, got {:?}",
+                operation.entity.entity_type()
             )));
         };
         let convergence_id = *convergence_id;
@@ -1666,7 +1673,8 @@ impl JobDispatcher {
     ) -> Result<(), RuntimeError> {
         let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
             return Err(RuntimeError::InvalidState(format!(
-                "expected convergence entity, got {:?}", operation.entity.entity_type()
+                "expected convergence entity, got {:?}",
+                operation.entity.entity_type()
             )));
         };
         let convergence_id = *convergence_id;
@@ -1716,7 +1724,8 @@ impl JobDispatcher {
     ) -> Result<bool, RuntimeError> {
         let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
             return Err(RuntimeError::InvalidState(format!(
-                "expected convergence entity, got {:?}", operation.entity.entity_type()
+                "expected convergence entity, got {:?}",
+                operation.entity.entity_type()
             )));
         };
         let convergence_id = *convergence_id;
@@ -2358,7 +2367,6 @@ impl JobDispatcher {
             .await?
             .into_iter()
             .filter(|agent| agent.status == AgentStatus::Available)
-            .filter(|agent| agent.adapter_kind == AdapterKind::Codex)
             .filter(|agent| supports_job(agent, job))
             .collect::<Vec<_>>();
         agents.sort_by(|left, right| left.slug.cmp(&right.slug));
