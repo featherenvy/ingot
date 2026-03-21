@@ -246,16 +246,14 @@ where
 {
     type Rejection = Response;
 
-    fn from_request(
+    async fn from_request(
         req: Request,
         state: &S,
-    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        async move {
-            let Json(payload) = Json::<TriageFindingRequestPayload>::from_request(req, state)
-                .await
-                .map_err(IntoResponse::into_response)?;
-            TriageFindingRequest::try_from(payload).map_err(IntoResponse::into_response)
-        }
+    ) -> Result<Self, Self::Rejection> {
+        let Json(payload) = Json::<TriageFindingRequestPayload>::from_request(req, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        TriageFindingRequest::try_from(payload).map_err(IntoResponse::into_response)
     }
 }
 
