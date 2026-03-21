@@ -4,6 +4,7 @@ import type { Evaluation, Item, ItemSummary } from '../types/domain'
 function makeItem(overrides: Partial<Item> = {}): Item {
   return {
     id: 'itm_1',
+    sort_key: '2026-03-11T00:00:00Z#itm_1',
     project_id: 'prj_1',
     classification: 'change',
     workflow_version: 'delivery:v1',

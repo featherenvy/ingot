@@ -6,6 +6,7 @@ describe('domain contract typing', () => {
       title: 'Fix critical bug',
       item: {
         id: 'itm_1',
+        sort_key: '2026-03-11T00:00:00Z#itm_1',
         project_id: 'prj_1',
         classification: 'bug',
         workflow_version: 'delivery:v1',
@@ -54,6 +55,7 @@ describe('domain contract typing', () => {
     const detail: ItemDetail = {
       item: {
         id: 'itm_1',
+        sort_key: '2026-03-11T00:00:00Z#itm_1',
         project_id: 'prj_1',
         classification: 'change',
         workflow_version: 'delivery:v1',
@@ -69,6 +71,7 @@ describe('domain contract typing', () => {
         created_at: '2026-03-11T00:00:00Z',
         updated_at: '2026-03-11T00:10:00Z',
       },
+      execution_mode: 'manual',
       current_revision: {
         id: 'rev_2',
         item_id: 'itm_1',

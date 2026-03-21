@@ -1,6 +1,7 @@
 import type {
   Activity,
   Agent,
+  ExecutionMode,
   ItemDetail,
   ItemSummary,
   Job,
@@ -48,9 +49,30 @@ export const listProjectActivity = (projectId: string, params?: { limit?: number
   const query = search.toString()
   return request<Activity[]>(`/projects/${projectId}/activity${query ? `?${query}` : ''}`)
 }
-export const createProject = (payload: { name?: string; path: string; default_branch?: string; color?: string }) =>
+export const createProject = (payload: {
+  name?: string
+  path: string
+  default_branch?: string
+  color?: string
+  execution_mode?: ExecutionMode
+}) =>
   request<Project>('/projects', {
     method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const updateProject = (
+  projectId: string,
+  payload: {
+    name?: string
+    path?: string
+    default_branch?: string
+    color?: string
+    execution_mode?: ExecutionMode
+  },
+) =>
+  request<Project>(`/projects/${projectId}`, {
+    method: 'PUT',
     body: JSON.stringify(payload),
   })
 

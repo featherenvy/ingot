@@ -105,6 +105,9 @@ function handleEvent(event: WsEvent, lastSeq: number, qc: QueryClient) {
       break
     case 'project':
       qc.invalidateQueries({ queryKey: queryKeys.projects() })
+      if (projectId && event.entity_id === projectId) {
+        qc.invalidateQueries({ queryKey: queryKeys.items(projectId) })
+      }
       break
   }
 }

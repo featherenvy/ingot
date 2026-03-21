@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
+import { queryKeys } from '../api/queries'
 import { Toaster } from '../components/ui/sonner'
 import { TooltipProvider } from '../components/ui/tooltip'
 import ConfigPage from '../pages/ConfigPage'
@@ -23,18 +24,21 @@ function renderPage() {
     },
   })
 
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <MemoryRouter initialEntries={['/projects/prj_1/config']}>
-          <Routes>
-            <Route path="/projects/:projectId/config" element={<ConfigPage />} />
-          </Routes>
-        </MemoryRouter>
-        <Toaster />
-      </TooltipProvider>
-    </QueryClientProvider>,
-  )
+  return {
+    queryClient,
+    ...render(
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={['/projects/prj_1/config']}>
+            <Routes>
+              <Route path="/projects/:projectId/config" element={<ConfigPage />} />
+            </Routes>
+          </MemoryRouter>
+          <Toaster />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    ),
+  }
 }
 
 describe('ConfigPage', () => {
@@ -265,5 +269,52 @@ describe('ConfigPage', () => {
     expect(await screen.findByText('Config failed to load')).toBeInTheDocument()
     expect(screen.getByText('Error: network down')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
+
+  it('invalidates cached item details after changing the execution mode', async () => {
+    let projects = [
+      {
+        id: 'prj_1',
+        name: 'Ingot',
+        path: '/tmp/ingot',
+        default_branch: 'main',
+        color: '#1f2937',
+        execution_mode: 'manual',
+      },
+    ]
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+
+      if (method === 'GET' && url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (method === 'GET' && url.endsWith('/api/projects/prj_1/config')) {
+        return Promise.resolve(jsonResponse({ branch: 'main', sandbox: 'enabled' }))
+      }
+      if (method === 'GET' && url.endsWith('/api/projects')) {
+        return Promise.resolve(jsonResponse(projects))
+      }
+      if (method === 'PUT' && url.endsWith('/api/projects/prj_1')) {
+        projects = [{ ...projects[0], execution_mode: 'autopilot' }]
+        return Promise.resolve(jsonResponse(projects[0]))
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`)
+    })
+
+    const { queryClient } = renderPage()
+    queryClient.setQueryData(queryKeys.item('prj_1', 'itm_1'), {
+      item: { id: 'itm_1' },
+      execution_mode: 'manual',
+    })
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Autopilot' }))
+
+    expect(await screen.findByText('Execution mode updated.')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(queryClient.getQueryState(queryKeys.item('prj_1', 'itm_1'))?.isInvalidated).toBe(true)
+    })
   })
 })

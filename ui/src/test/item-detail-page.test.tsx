@@ -9,6 +9,7 @@ function makeItemDetail(): ItemDetail {
   return {
     item: {
       id: 'itm_1',
+      sort_key: '2026-03-11T00:00:00Z#itm_1',
       project_id: 'prj_1',
       classification: 'change',
       workflow_version: 'delivery:v1',
@@ -24,6 +25,7 @@ function makeItemDetail(): ItemDetail {
       created_at: '2026-03-11T00:00:00Z',
       updated_at: '2026-03-11T00:00:00Z',
     },
+    execution_mode: 'manual',
     current_revision: {
       id: 'rev_1',
       item_id: 'itm_1',
@@ -125,6 +127,28 @@ describe('ItemDetailPage', () => {
     expect(screen.getByRole('link', { name: 'Board' })).toHaveAttribute('href', '/projects/prj_1/board')
     expect(within(breadcrumb).getByText('Ship the feature')).toHaveAttribute('aria-current', 'page')
     expect(screen.getByRole('button', { name: 'Dispatch author_initial' })).toBeInTheDocument()
+  })
+
+  it('shows the autopilot badge without loading the projects list', async () => {
+    const detail = makeItemDetail()
+    detail.execution_mode = 'autopilot'
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/projects/prj_1/items/itm_1')) {
+        return Promise.resolve(jsonResponse(detail))
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Autopilot')).toBeInTheDocument()
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(fetchSpy.mock.calls.map(([input]) => String(input))).not.toContain('/api/projects')
   })
 
   it('renders query failures in a destructive alert', async () => {

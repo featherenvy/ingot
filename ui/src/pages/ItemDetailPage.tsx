@@ -269,6 +269,7 @@ export default function ItemDetailPage(): React.JSX.Element {
         queueBlocker={operatorBlocker}
         queue={detail.queue}
         agentsLoading={isAgentAvailabilityLoading}
+        executionMode={detail.execution_mode}
       />
 
       {/* ─── State details (collapsed by default) ─── */}

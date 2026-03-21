@@ -1,0 +1,90 @@
+import { QueryClient } from '@tanstack/react-query'
+import { waitFor } from '@testing-library/react'
+import { queryKeys } from '../api/queries'
+import { useConnectionStore } from '../stores/connection'
+import { useProjectsStore } from '../stores/projects'
+
+class MockWebSocket {
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSING = 2
+  static CLOSED = 3
+  static instances: MockWebSocket[] = []
+
+  readyState = MockWebSocket.CONNECTING
+  onopen: (() => void) | null = null
+  onmessage: ((event: MessageEvent) => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: (() => void) | null = null
+
+  constructor(_url: string) {
+    MockWebSocket.instances.push(this)
+  }
+
+  close() {
+    this.readyState = MockWebSocket.CLOSED
+    this.onclose?.()
+  }
+}
+
+describe('connection store', () => {
+  beforeEach(() => {
+    MockWebSocket.instances = []
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    useConnectionStore.setState({
+      status: 'disconnected',
+      lastSeq: 0,
+      ws: null,
+    })
+    useProjectsStore.setState({
+      activeProjectId: 'prj_1',
+    })
+  })
+
+  afterEach(() => {
+    useConnectionStore.setState({
+      status: 'disconnected',
+      lastSeq: 0,
+      ws: null,
+    })
+    useProjectsStore.setState({
+      activeProjectId: null,
+    })
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('invalidates cached item details when the active project changes', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+        },
+      },
+    })
+    queryClient.setQueryData(queryKeys.item('prj_1', 'itm_1'), {
+      item: { id: 'itm_1' },
+      execution_mode: 'manual',
+    })
+
+    useConnectionStore.getState().connect(queryClient)
+    const ws = MockWebSocket.instances[0]
+
+    ws.onmessage?.(
+      new MessageEvent('message', {
+        data: JSON.stringify({
+          seq: 1,
+          event: 'project_updated',
+          project_id: 'prj_1',
+          entity_type: 'project',
+          entity_id: 'prj_1',
+          payload: {},
+        }),
+      }),
+    )
+
+    await waitFor(() => {
+      expect(queryClient.getQueryState(queryKeys.item('prj_1', 'itm_1'))?.isInvalidated).toBe(true)
+    })
+  })
+})

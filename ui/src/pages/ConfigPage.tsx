@@ -2,8 +2,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
-import { createAgent, reprobeAgent } from '../api/client'
-import { agentsQuery, projectConfigQuery, queryKeys } from '../api/queries'
+import { createAgent, reprobeAgent, updateProject } from '../api/client'
+import { agentsQuery, projectConfigQuery, projectsQuery, queryKeys } from '../api/queries'
 import { CodeBlock } from '../components/CodeBlock'
 import type { ComboboxOption } from '../components/Combobox'
 import { Combobox } from '../components/Combobox'
@@ -28,11 +28,11 @@ import { Skeleton } from '../components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { useRequiredProjectId } from '../hooks/useRequiredRouteParam'
 import { showErrorToast } from '../lib/toast'
-import type { Agent } from '../types/domain'
+import type { Agent, AgentProvider } from '../types/domain'
 
 type AgentForm = {
   name: string
-  provider: string
+  provider: AgentProvider
   model: string
   cliPath: string
 }
@@ -44,10 +44,14 @@ const initialAgentForm: AgentForm = {
   cliPath: 'codex',
 }
 
-const providerDefaults = ['openai', 'anthropic']
-const providerModelDefaults: Record<string, string[]> = {
+const providerDefaults: AgentProvider[] = ['openai', 'anthropic']
+const providerModelDefaults: Record<AgentProvider, string[]> = {
   openai: ['gpt-5-codex', 'gpt-5'],
   anthropic: [],
+}
+
+function isAgentProvider(value: string): value is AgentProvider {
+  return value === 'openai' || value === 'anthropic'
 }
 
 function toComboboxOptions(values: Iterable<string>): ComboboxOption[] {
@@ -68,7 +72,7 @@ function buildProviderOptions(agents: Agent[] | undefined): ComboboxOption[] {
 }
 
 function buildModelOptions(
-  selectedProvider: string,
+  selectedProvider: AgentProvider,
   selectedModel: string,
   agents: Agent[] | undefined,
 ): ComboboxOption[] {
@@ -106,6 +110,17 @@ export default function ConfigPage(): React.JSX.Element {
     isLoading: isAgentsLoading,
     refetch: refetchAgents,
   } = useQuery(agentsQuery())
+  const { data: projects } = useQuery(projectsQuery())
+  const project = projects?.find((p) => p.id === projectId)
+  const executionModeMutation = useMutation({
+    mutationFn: (mode: 'manual' | 'autopilot') => updateProject(projectId, { execution_mode: mode }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.projects() })
+      queryClient.invalidateQueries({ queryKey: queryKeys.items(projectId) })
+      toast.success('Execution mode updated.')
+    },
+    onError: (error) => showErrorToast('Failed to update execution mode', error),
+  })
   const [dialogOpen, setDialogOpen] = useState(false)
   const form = useForm<AgentForm>({
     defaultValues: initialAgentForm,
@@ -206,6 +221,9 @@ export default function ConfigPage(): React.JSX.Element {
                             ariaLabel="Provider"
                             value={field.value}
                             onChange={(provider) => {
+                              if (!isAgentProvider(provider)) {
+                                return
+                              }
                               const previousProvider = form.getValues('provider')
                               const currentModel = form.getValues('model')
                               field.onChange(provider)
@@ -281,6 +299,36 @@ export default function ConfigPage(): React.JSX.Element {
           </Dialog>
         }
       />
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Execution Mode</CardTitle>
+          <CardDescription>
+            In autopilot mode, the daemon automatically dispatches every safe workflow step until it hits a human gate
+            (approval, escalation, findings triage, or conflict).
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-3">
+            <Button
+              variant={project?.execution_mode === 'manual' ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => executionModeMutation.mutate('manual')}
+              disabled={executionModeMutation.isPending || project?.execution_mode === 'manual'}
+            >
+              Manual
+            </Button>
+            <Button
+              variant={project?.execution_mode === 'autopilot' ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => executionModeMutation.mutate('autopilot')}
+              disabled={executionModeMutation.isPending || project?.execution_mode === 'autopilot'}
+            >
+              Autopilot
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

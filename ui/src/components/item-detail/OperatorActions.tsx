@@ -1,6 +1,6 @@
-import { ChevronRightIcon, Loader2Icon, ZapIcon } from 'lucide-react'
+import { BotIcon, ChevronRightIcon, Loader2Icon, ZapIcon } from 'lucide-react'
 import { Link } from 'react-router'
-import type { Evaluation, QueueStatus } from '../../types/domain'
+import type { Evaluation, ExecutionMode, QueueStatus } from '../../types/domain'
 import { ConfirmActionButton } from '../ConfirmActionButton'
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert'
 import { Badge } from '../ui/badge'
@@ -29,6 +29,7 @@ export function OperatorActions({
   queueBlocker,
   queue,
   agentsLoading,
+  executionMode,
 }: {
   projectId: string
   evaluation: Evaluation
@@ -36,6 +37,7 @@ export function OperatorActions({
   queueBlocker: string | null
   queue: QueueStatus | null
   agentsLoading: boolean
+  executionMode?: ExecutionMode
 }) {
   const hasDispatch = !!evaluation.dispatchable_step_id
   const hasConvergence = evaluation.next_recommended_action === 'prepare_convergence'
@@ -72,6 +74,12 @@ export function OperatorActions({
               )}
             </div>
           </div>
+          {executionMode === 'autopilot' && (
+            <Badge variant="secondary" className="gap-1 text-[11px]">
+              <BotIcon className="size-3" />
+              Autopilot
+            </Badge>
+          )}
           {queue?.state && (
             <div className="flex items-center gap-2 rounded-md bg-muted/60 px-3 py-1.5 text-xs text-muted-foreground">
               <span className="font-medium">Lane</span>

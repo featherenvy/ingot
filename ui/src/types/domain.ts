@@ -125,12 +125,15 @@ export interface JsonObject {
   [key: string]: JsonValue
 }
 
+export type ExecutionMode = 'manual' | 'autopilot'
+
 export interface Project {
   id: string
   name: string
   path: string
   default_branch: string
   color: string
+  execution_mode: ExecutionMode
 }
 
 export type ActivityEntityType =
@@ -188,6 +191,7 @@ export interface Item {
   priority: Priority
   labels: string[]
   operator_notes: string | null
+  sort_key: string
   created_at: string
   updated_at: string
   closed_at?: string
@@ -340,6 +344,7 @@ export interface RevisionContextSummary {
 
 export interface ItemDetail {
   item: Item
+  execution_mode: ExecutionMode
   current_revision: ItemRevision
   evaluation: Evaluation
   queue: QueueStatus
