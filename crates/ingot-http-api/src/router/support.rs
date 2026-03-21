@@ -1,14 +1,14 @@
 use std::path::Path as FsPath;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use axum::extract::path::ErrorKind as PathErrorKind;
 use axum::extract::rejection::{FailedToDeserializePathParams, PathRejection};
-use axum::extract::{FromRequestParts, Path};
+use axum::extract::{FromRequestParts, Path, RawPathParams};
 use axum::http::request::Parts;
 use ingot_config::IngotConfig;
 use ingot_domain::branch_name::BranchName;
 use ingot_domain::git_operation::OperationKind;
+use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::ports::RepositoryError;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ApprovalPolicy;
@@ -39,17 +39,24 @@ where
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let Path(params) = Path::<T>::from_request_parts(parts, state)
-            .await
-            .map_err(path_rejection_to_api_error)?;
+        let raw_path_params = RawPathParams::from_request_parts(parts, state).await.ok();
+        let Path(params) =
+            Path::<T>::from_request_parts(parts, state)
+                .await
+                .map_err(|rejection| {
+                    path_rejection_to_api_error(rejection, raw_path_params.as_ref())
+                })?;
         Ok(Self(params))
     }
 }
 
-fn path_rejection_to_api_error(rejection: PathRejection) -> ApiError {
+fn path_rejection_to_api_error(
+    rejection: PathRejection,
+    raw_path_params: Option<&RawPathParams>,
+) -> ApiError {
     match rejection {
         PathRejection::FailedToDeserializePathParams(error) => {
-            failed_path_params_to_api_error(error)
+            failed_path_params_to_api_error(error, raw_path_params)
         }
         PathRejection::MissingPathParams(_) => {
             ApiError::internal("missing path parameters for matched route")
@@ -58,7 +65,10 @@ fn path_rejection_to_api_error(rejection: PathRejection) -> ApiError {
     }
 }
 
-fn failed_path_params_to_api_error(error: FailedToDeserializePathParams) -> ApiError {
+fn failed_path_params_to_api_error(
+    error: FailedToDeserializePathParams,
+    raw_path_params: Option<&RawPathParams>,
+) -> ApiError {
     let body_text = error.body_text();
 
     match error.into_kind() {
@@ -75,21 +85,38 @@ fn failed_path_params_to_api_error(error: FailedToDeserializePathParams) -> ApiE
         },
         PathErrorKind::ParseErrorAtIndex { value, .. }
         | PathErrorKind::ParseError { value, .. } => ApiError::invalid_id("resource", &value),
-        PathErrorKind::WrongNumberOfParameters { .. }
-        | PathErrorKind::UnsupportedType { .. }
-        | PathErrorKind::Message(_) => ApiError::BadRequest {
-            code: "invalid_id",
-            message: body_text,
-        },
-        _ => ApiError::BadRequest {
-            code: "invalid_id",
-            message: body_text,
-        },
+        PathErrorKind::WrongNumberOfParameters { .. } | PathErrorKind::UnsupportedType { .. } => {
+            ApiError::internal(body_text)
+        }
+        PathErrorKind::Message(_) => raw_path_params
+            .and_then(invalid_id_from_raw_path_params)
+            .unwrap_or_else(|| ApiError::internal(body_text)),
+        _ => ApiError::internal(body_text),
     }
 }
 
 pub(super) fn path_param_entity_name(key: &str) -> &str {
     key.strip_suffix("_id").unwrap_or(key)
+}
+
+fn invalid_id_from_raw_path_params(raw_path_params: &RawPathParams) -> Option<ApiError> {
+    for (key, value) in raw_path_params {
+        let invalid = match key {
+            "agent_id" => value.parse::<AgentId>().is_err(),
+            "finding_id" => value.parse::<FindingId>().is_err(),
+            "item_id" => value.parse::<ItemId>().is_err(),
+            "job_id" => value.parse::<JobId>().is_err(),
+            "project_id" => value.parse::<ProjectId>().is_err(),
+            "workspace_id" => value.parse::<WorkspaceId>().is_err(),
+            _ => false,
+        };
+
+        if invalid {
+            return Some(ApiError::invalid_id(path_param_entity_name(key), value));
+        }
+    }
+
+    None
 }
 
 pub(super) fn global_config_path() -> PathBuf {
@@ -323,15 +350,6 @@ pub(super) fn ensure_workspace_not_busy(workspace: &Workspace) -> Result<(), Api
     Ok(())
 }
 
-pub(super) fn parse_id<T>(value: &str, entity: &'static str) -> Result<T, ApiError>
-where
-    T: FromStr,
-{
-    value
-        .parse()
-        .map_err(|_| ApiError::invalid_id(entity, value))
-}
-
 pub(crate) fn repo_to_internal(error: RepositoryError) -> ApiError {
     ApiError::from(UseCaseError::Repository(error))
 }
@@ -513,6 +531,47 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_slice(&body).expect("response should be valid json");
         assert_eq!(body["error"]["code"], "invalid_id");
-        assert!(body["error"]["message"].is_string());
+        assert_eq!(
+            body["error"]["message"],
+            "Invalid project id: not-a-project-id"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_path_preserves_internal_errors_for_path_shape_mismatches() {
+        #[derive(Debug, Deserialize)]
+        struct ProjectAndItemPathParams {
+            project_id: ProjectId,
+            item_id: ItemId,
+        }
+
+        async fn handler(
+            ApiPath(ProjectAndItemPathParams {
+                project_id,
+                item_id,
+            }): ApiPath<ProjectAndItemPathParams>,
+        ) -> Result<Json<()>, ApiError> {
+            let _ = (project_id, item_id);
+            Ok(Json(()))
+        }
+
+        let app = Router::new().route("/projects/{project_id}", get(handler));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/projects/prj_00000000000000000000000000000000")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("route should respond");
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(body["error"]["code"], "internal_error");
     }
 }

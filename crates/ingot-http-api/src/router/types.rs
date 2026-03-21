@@ -11,9 +11,6 @@ use ingot_domain::workspace::Workspace;
 use ingot_workflow::Evaluation;
 use serde::{Deserialize, Serialize};
 
-use super::support::parse_id;
-use crate::error::ApiError;
-
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -200,40 +197,13 @@ pub struct DismissFindingRequest {
     pub dismissal_reason: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 pub struct TriageFindingRequest {
     pub triage_state: FindingTriageState,
     pub triage_note: Option<String>,
     pub linked_item_id: Option<ItemId>,
     pub target_ref: Option<GitRef>,
     pub approval_policy: Option<ApprovalPolicy>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct TriageFindingRequestPayload {
-    pub triage_state: FindingTriageState,
-    pub triage_note: Option<String>,
-    pub linked_item_id: Option<String>,
-    pub target_ref: Option<GitRef>,
-    pub approval_policy: Option<ApprovalPolicy>,
-}
-
-impl TryFrom<TriageFindingRequestPayload> for TriageFindingRequest {
-    type Error = ApiError;
-
-    fn try_from(payload: TriageFindingRequestPayload) -> Result<Self, Self::Error> {
-        Ok(Self {
-            triage_state: payload.triage_state,
-            triage_note: payload.triage_note,
-            linked_item_id: payload
-                .linked_item_id
-                .as_deref()
-                .map(|value| parse_id::<ItemId>(value, "linked_item"))
-                .transpose()?,
-            target_ref: payload.target_ref,
-            approval_policy: payload.approval_policy,
-        })
-    }
 }
 
 #[derive(Debug, Default, Deserialize)]
