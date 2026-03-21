@@ -172,7 +172,7 @@ impl Database {
         .bind(linked_item.id)
         .bind(linked_item.project_id)
         .bind(linked_item.classification)
-        .bind(&linked_item.workflow_version)
+        .bind(linked_item.workflow_version)
         .bind(linked_item.lifecycle.as_db_str())
         .bind(linked_item.parking_state)
         .bind(linked_item.lifecycle.done_reason())

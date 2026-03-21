@@ -173,7 +173,7 @@ export interface Item {
   id: string
   project_id: string
   classification: Classification
-  workflow_version: string
+  workflow_version: 'delivery:v1'
   lifecycle_state: LifecycleState
   parking_state: ParkingState
   done_reason?: DoneReason

@@ -1,7 +1,7 @@
 use crate::ids;
 use crate::item::{
     ApprovalState, Classification, DoneReason, Escalation, EscalationReason, Item, Lifecycle,
-    Origin, ParkingState, Priority, ResolutionSource,
+    Origin, ParkingState, Priority, ResolutionSource, WorkflowVersion,
 };
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -13,7 +13,7 @@ pub struct ItemBuilder {
     project_id: ids::ProjectId,
     current_revision_id: ids::ItemRevisionId,
     classification: Classification,
-    workflow_version: String,
+    workflow_version: WorkflowVersion,
     lifecycle: Lifecycle,
     parking_state: ParkingState,
     approval_state: ApprovalState,
@@ -41,7 +41,7 @@ impl ItemBuilder {
             project_id,
             current_revision_id,
             classification: Classification::Change,
-            workflow_version: "delivery:v1".into(),
+            workflow_version: WorkflowVersion::DeliveryV1,
             lifecycle: Lifecycle::Open,
             parking_state: ParkingState::Active,
             approval_state: ApprovalState::NotRequested,

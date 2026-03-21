@@ -104,6 +104,7 @@ mod tests {
     use ingot_domain::ids::{ItemId, ItemRevisionId};
     use ingot_domain::item::{
         ApprovalState, Classification, Escalation, Item, Lifecycle, Origin, ParkingState, Priority,
+        WorkflowVersion,
     };
     use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
     use serde_json::json;
@@ -120,7 +121,7 @@ mod tests {
             id: item_id,
             project_id: ingot_domain::ids::ProjectId::from_uuid(Uuid::nil()),
             classification: Classification::Change,
-            workflow_version: "delivery:v1".into(),
+            workflow_version: WorkflowVersion::DeliveryV1,
             lifecycle: Lifecycle::Open,
             parking_state: ParkingState::Active,
             approval_state: ApprovalState::NotRequested,

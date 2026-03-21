@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use ingot_domain::item::{
     ApprovalState, Classification, Escalation, Item, Lifecycle, Origin, ParkingState, Priority,
+    WorkflowVersion,
 };
 use ingot_domain::project::Project;
 use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
@@ -11,7 +12,6 @@ use ingot_domain::git_ref::GitRef;
 
 use crate::UseCaseError;
 
-const DELIVERY_WORKFLOW_VERSION: &str = "delivery:v1";
 
 #[derive(Debug, Clone)]
 pub struct CreateItemInput {
@@ -56,7 +56,7 @@ pub fn create_manual_item(
         id: item_id,
         project_id: project.id,
         classification,
-        workflow_version: DELIVERY_WORKFLOW_VERSION.into(),
+        workflow_version: WorkflowVersion::DeliveryV1,
         lifecycle: Lifecycle::Open,
         parking_state: ParkingState::Active,
         approval_state,
@@ -120,7 +120,7 @@ pub fn default_policy_snapshot(
     integration_rework_budget: u32,
 ) -> Value {
     json!({
-        "workflow_version": DELIVERY_WORKFLOW_VERSION,
+        "workflow_version": WorkflowVersion::DeliveryV1,
         "approval_policy": approval_policy,
         "candidate_rework_budget": candidate_rework_budget,
         "integration_rework_budget": integration_rework_budget,

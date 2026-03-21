@@ -47,7 +47,7 @@ impl Database {
              WHERE id = ?",
         )
         .bind(item.classification)
-        .bind(&item.workflow_version)
+        .bind(item.workflow_version)
         .bind(item.lifecycle.as_db_str())
         .bind(item.parking_state)
         .bind(item.lifecycle.done_reason())
@@ -160,7 +160,7 @@ fn insert_item_query<'a>(item: &'a Item) -> Result<SqliteQuery<'a>, RepositoryEr
     .bind(item.id)
     .bind(item.project_id)
     .bind(item.classification)
-    .bind(&item.workflow_version)
+    .bind(item.workflow_version)
     .bind(item.lifecycle.as_db_str())
     .bind(item.parking_state)
     .bind(item.lifecycle.done_reason())

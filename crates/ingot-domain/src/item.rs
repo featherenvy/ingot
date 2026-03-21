@@ -77,6 +77,14 @@ pub enum Priority {
     Minor,
 }
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowVersion {
+    #[serde(rename = "delivery:v1")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "delivery:v1"))]
+    DeliveryV1,
+}
+
 /// Item lifecycle state. Encodes the TLA+ invariant `DoneImpliesQuiescent`:
 /// a Done item always carries its reason, resolution source, and closure timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,7 +268,7 @@ pub struct Item {
     pub id: ItemId,
     pub project_id: ProjectId,
     pub classification: Classification,
-    pub workflow_version: String,
+    pub workflow_version: WorkflowVersion,
     #[serde(flatten)]
     pub lifecycle: Lifecycle,
     pub parking_state: ParkingState,

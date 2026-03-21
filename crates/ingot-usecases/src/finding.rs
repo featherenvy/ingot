@@ -326,7 +326,7 @@ pub fn backlog_finding(
         id: item_id,
         project_id: source_item.project_id,
         classification: Classification::Bug,
-        workflow_version: source_item.workflow_version.clone(),
+        workflow_version: source_item.workflow_version,
         lifecycle: Lifecycle::Open,
         parking_state: ParkingState::Active,
         approval_state: match approval_policy {
