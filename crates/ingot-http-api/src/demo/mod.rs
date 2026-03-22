@@ -204,11 +204,6 @@ pub async fn create_demo_project(
     let configured_approval_policy = config.defaults.approval_policy;
     let target_ref = normalize_target_ref(project.default_branch.as_str())?;
     ensure_git_valid_target_ref(target_ref.as_str()).await?;
-    let repo_path = &project.path;
-    let resolved_target_head = resolve_ref_oid(repo_path, &target_ref)
-        .await
-        .map_err(git_to_internal)?
-        .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.to_string()))?;
 
     let _guard = state
         .project_locks
@@ -220,6 +215,10 @@ pub async fn create_demo_project(
     for item_def in template.items.iter() {
         let sort_key = next_sort_key_after(previous_sort_key.as_deref());
         previous_sort_key = Some(sort_key.clone());
+        let resolved_target_head = resolve_ref_oid(&project.path, &target_ref)
+            .await
+            .map_err(git_to_internal)?
+            .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.to_string()))?;
 
         let (item, revision) = create_manual_item(
             &project,

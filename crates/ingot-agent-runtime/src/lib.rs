@@ -33,8 +33,8 @@ use ingot_domain::item::{
     ApprovalState, DoneReason, Escalation, EscalationReason, Lifecycle, ResolutionSource,
 };
 use ingot_domain::job::{
-    ExecutionPermission, Job, JobAssignment, JobState, JobStatus, OutcomeClass, OutputArtifactKind,
-    PhaseKind,
+    ExecutionPermission, Job, JobAssignment, JobInput, JobState, JobStatus, OutcomeClass,
+    OutputArtifactKind, PhaseKind,
 };
 use ingot_domain::lease_owner_id::LeaseOwnerId;
 use ingot_domain::ports::{JobCompletionMutation, ProjectMutationLockPort, RepositoryError};
@@ -2450,7 +2450,7 @@ impl JobDispatcher {
             .acquire_project_mutation(queued_job.project_id)
             .await;
 
-        let job = self.db.get_job(queued_job.id).await?;
+        let mut job = self.db.get_job(queued_job.id).await?;
         if job.state.status() != JobStatus::Queued || !is_supported_runtime_job(&job) {
             return Ok(PrepareRunOutcome::NotPrepared);
         }
@@ -2477,6 +2477,13 @@ impl JobDispatcher {
             }
         };
         let paths = self.refresh_project_mirror(&project).await?;
+        job = self
+            .rebind_implicit_author_initial_job_if_needed(
+                job,
+                &revision,
+                paths.mirror_git_dir.as_path(),
+            )
+            .await?;
         let Some(agent) = self.select_agent(&job).await? else {
             debug!(
                 job_id = %job.id,
@@ -2558,6 +2565,43 @@ impl JobDispatcher {
             prompt,
             workspace_lifecycle,
         })))
+    }
+
+    async fn rebind_implicit_author_initial_job_if_needed(
+        &self,
+        mut job: Job,
+        revision: &ItemRevision,
+        repo_path: &Path,
+    ) -> Result<Job, RuntimeError> {
+        if job.step_id != step::AUTHOR_INITIAL
+            || job.workspace_kind != WorkspaceKind::Authoring
+            || job.execution_permission != ExecutionPermission::MayMutate
+            || revision.seed.is_explicit()
+        {
+            return Ok(job);
+        }
+
+        if self
+            .db
+            .find_authoring_workspace_for_revision(revision.id)
+            .await?
+            .is_some()
+        {
+            return Ok(job);
+        }
+
+        let resolved_head = resolve_ref_oid(repo_path, &revision.target_ref)
+            .await?
+            .ok_or_else(|| RuntimeError::InvalidState("target ref unresolved".into()))?;
+
+        if job.job_input.head_commit_oid() == Some(&resolved_head) {
+            return Ok(job);
+        }
+
+        job.job_input = JobInput::authoring_head(resolved_head.clone());
+        self.db.update_job(&job).await?;
+
+        Ok(job)
     }
 
     async fn select_agent(&self, job: &Job) -> Result<Option<Agent>, RuntimeError> {
@@ -5828,7 +5872,7 @@ mod tests {
         AgentBuilder, ConvergenceQueueEntryBuilder, ItemBuilder, JobBuilder, ProjectBuilder,
         RevisionBuilder, default_timestamp,
     };
-    use ingot_test_support::git::{temp_git_repo, unique_temp_path};
+    use ingot_test_support::git::{run_git as git_sync, temp_git_repo, unique_temp_path};
     use ingot_test_support::sqlite::migrated_test_db;
     use ingot_usecases::job_lifecycle;
     use ingot_workflow::step;
@@ -6082,7 +6126,8 @@ mod tests {
             .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
-            .explicit_seed(seed_commit.as_str())
+            .seed_commit_oid(None::<String>)
+            .seed_target_commit_oid(Some(seed_commit.clone()))
             .build();
         harness
             .db
@@ -6090,12 +6135,23 @@ mod tests {
             .await
             .expect("create item");
 
+        std::fs::write(harness.repo_path.join("advanced.txt"), "advanced head")
+            .expect("write advanced");
+        git_sync(&harness.repo_path, &["add", "advanced.txt"]);
+        git_sync(&harness.repo_path, &["commit", "-m", "advanced head"]);
+        let rebound_head = head_oid(&harness.repo_path)
+            .await
+            .expect("rebound head")
+            .into_inner();
+
         let job = JobBuilder::new(harness.project.id, item_id, revision_id, "author_initial")
             .phase_kind(PhaseKind::Author)
             .workspace_kind(WorkspaceKind::Authoring)
             .execution_permission(ExecutionPermission::MayMutate)
             .phase_template_slug("author-initial")
-            .job_input(JobInput::authoring_head(CommitOid::new(seed_commit)))
+            .job_input(JobInput::authoring_head(CommitOid::new(
+                seed_commit.clone(),
+            )))
             .output_artifact_kind(OutputArtifactKind::Commit)
             .build();
         harness.db.create_job(&job).await.expect("create job");
@@ -6300,6 +6356,10 @@ mod tests {
             PrepareRunOutcome::Prepared(prepared) => *prepared,
             _ => panic!("expected prepared run"),
         };
+        assert_eq!(
+            prepared.job.job_input,
+            JobInput::authoring_head(CommitOid::new(rebound_head.clone()))
+        );
 
         let workspace_before = harness
             .db
@@ -6308,6 +6368,14 @@ mod tests {
             .expect("workspace before cleanup");
         assert_eq!(workspace_before.state.status(), WorkspaceStatus::Busy);
         assert_eq!(workspace_before.state.current_job_id(), Some(job.id));
+        assert_eq!(
+            workspace_before.state.base_commit_oid(),
+            Some(&CommitOid::new(rebound_head.clone()))
+        );
+        assert_eq!(
+            workspace_before.state.head_commit_oid(),
+            Some(&CommitOid::new(rebound_head.clone()))
+        );
 
         harness
             .dispatcher
@@ -6325,8 +6393,101 @@ mod tests {
             .await
             .expect("reload workspace");
         assert_eq!(updated_job.state.status(), JobStatus::Queued);
+        assert_eq!(
+            updated_job.job_input,
+            JobInput::authoring_head(CommitOid::new(rebound_head))
+        );
         assert_eq!(updated_workspace.state.status(), WorkspaceStatus::Ready);
         assert_eq!(updated_workspace.state.current_job_id(), None);
+    }
+
+    #[tokio::test]
+    async fn prepare_run_rebinds_implicit_author_initial_head_after_target_advances() {
+        let harness = TestRuntimeHarness::new(Arc::new(BlockingRunner::new())).await;
+        harness.register_mutating_agent().await;
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let seeded_target_head = head_oid(&harness.repo_path)
+            .await
+            .expect("seed target head")
+            .into_inner();
+        let item = ItemBuilder::new(harness.project.id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .seed_commit_oid(None::<String>)
+            .seed_target_commit_oid(Some(seeded_target_head.clone()))
+            .template_map_snapshot(serde_json::json!({ "author_initial": "author-initial" }))
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let job = JobBuilder::new(harness.project.id, item_id, revision_id, "author_initial")
+            .phase_kind(PhaseKind::Author)
+            .workspace_kind(WorkspaceKind::Authoring)
+            .execution_permission(ExecutionPermission::MayMutate)
+            .phase_template_slug("author-initial")
+            .job_input(JobInput::authoring_head(CommitOid::new(
+                seeded_target_head.clone(),
+            )))
+            .output_artifact_kind(OutputArtifactKind::Commit)
+            .build();
+        harness.db.create_job(&job).await.expect("create job");
+
+        std::fs::write(
+            harness.repo_path.join("advanced.txt"),
+            "advanced target head",
+        )
+        .expect("write advanced");
+        git_sync(&harness.repo_path, &["add", "advanced.txt"]);
+        git_sync(
+            &harness.repo_path,
+            &["commit", "-m", "advanced target head"],
+        );
+        let advanced_target_head = head_oid(&harness.repo_path)
+            .await
+            .expect("advanced target head")
+            .into_inner();
+
+        let prepared = match harness
+            .dispatcher
+            .prepare_run(harness.db.get_job(job.id).await.expect("load queued job"))
+            .await
+            .expect("prepare run")
+        {
+            PrepareRunOutcome::Prepared(prepared) => *prepared,
+            _ => panic!("expected prepared run"),
+        };
+
+        assert_eq!(
+            prepared.job.job_input,
+            JobInput::authoring_head(CommitOid::new(advanced_target_head.clone()))
+        );
+
+        let reloaded_job = harness.db.get_job(job.id).await.expect("reload job");
+        assert_eq!(
+            reloaded_job.job_input,
+            JobInput::authoring_head(CommitOid::new(advanced_target_head.clone()))
+        );
+
+        let workspace = harness
+            .db
+            .get_workspace(prepared.workspace.id)
+            .await
+            .expect("reload workspace");
+        assert_eq!(
+            workspace.state.base_commit_oid(),
+            Some(&CommitOid::new(advanced_target_head.clone()))
+        );
+        assert_eq!(
+            workspace.state.head_commit_oid(),
+            Some(&CommitOid::new(advanced_target_head))
+        );
     }
 
     #[tokio::test]

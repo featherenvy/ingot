@@ -101,9 +101,9 @@ fn bind_autopilot_authoring_head_if_needed(
     }
 
     let head_commit_oid = match job.step_id {
-        step::AUTHOR_INITIAL => author_initial_head_commit_oid
-            .cloned()
-            .or_else(|| Some(revision.seed.seed_target_commit_oid().to_owned())),
+        step::AUTHOR_INITIAL => author_initial_head_commit_oid.cloned().or_else(|| {
+            current_authoring_head_for_revision_with_workspace(revision, jobs, workspace)
+        }),
         _ => current_authoring_head_for_revision_with_workspace(revision, jobs, workspace),
     };
 
@@ -469,7 +469,7 @@ mod tests {
             &[],
             &[],
             &[],
-            None,
+            Some("target-head".into()),
         )
         .await
         .expect("autopilot dispatch")
@@ -479,6 +479,59 @@ mod tests {
         assert_eq!(
             job.job_input,
             JobInput::authoring_head("target-head".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn autopilot_dispatch_rejects_implicit_author_initial_without_live_head() {
+        let db = migrated_test_db("ingot-usecases-dispatch").await;
+        let project_id = ProjectId::new();
+        let item_id = ItemId::new();
+        let revision_id = ItemRevisionId::new();
+
+        let project = ProjectBuilder::new(
+            std::env::temp_dir().join(format!("ingot-usecases-dispatch-{}", Uuid::now_v7())),
+        )
+        .id(project_id)
+        .execution_mode(ExecutionMode::Autopilot)
+        .build();
+        let item = ItemBuilder::new(project_id, revision_id)
+            .id(item_id)
+            .approval_state(ApprovalState::NotRequired)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .approval_policy(ApprovalPolicy::NotRequired)
+            .seed(AuthoringBaseSeed::Implicit {
+                seed_target_commit_oid: "stale-seed-target".into(),
+            })
+            .template_map_snapshot(serde_json::json!({"author_initial":"author-initial"}))
+            .build();
+
+        db.create_project(&project).await.expect("persist project");
+        db.create_item_with_revision(&item, &revision)
+            .await
+            .expect("persist item");
+
+        let error = auto_dispatch_autopilot(
+            &db,
+            &db,
+            &db,
+            &project,
+            &item,
+            &revision,
+            &[],
+            &[],
+            &[],
+            None,
+        )
+        .await
+        .expect_err("implicit author_initial requires a live target head");
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing authoring head for autopilot-dispatched step author_initial")
         );
     }
 }
