@@ -1289,7 +1289,7 @@ mod tests {
         use ingot_domain::ids::ProjectId;
         use ingot_domain::item::ApprovalState;
         use ingot_domain::job::OutputArtifactKind;
-        use ingot_domain::ports::{FindingRepository, ItemRepository};
+        use ingot_domain::ports::{ActivityRepository, FindingRepository, ItemRepository};
         use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
         use ingot_domain::revision::ApprovalPolicy;
         use ingot_test_support::fixtures::{ItemBuilder, ProjectBuilder, RevisionBuilder};
@@ -1330,10 +1330,120 @@ mod tests {
             .build();
         db.create_job(&job).await.expect("create job");
 
+        // Low severity → Backlog (non-blocking, resolved) → triggers approval
+        let finding = FindingBuilder::new(project_id, item_id, revision_id, job_id)
+            .source_step_id("validate_integrated")
+            .severity(ingot_domain::finding::FindingSeverity::Low)
+            .summary("Minor cosmetic issue")
+            .evidence(serde_json::json!(["trivial"]))
+            .build();
+        db.create_finding(&finding).await.expect("create finding");
+
+        let policy = AutoTriagePolicy {
+            critical: AutoTriageDecision::FixNow,
+            high: AutoTriageDecision::FixNow,
+            medium: AutoTriageDecision::FixNow,
+            low: AutoTriageDecision::Backlog,
+        };
+
+        super::execute_auto_triage(
+            &db,
+            &db,
+            &db,
+            &db,
+            &project,
+            &item,
+            job_id,
+            StepId::ValidateIntegrated,
+            &policy,
+        )
+        .await
+        .expect("execute auto triage");
+
+        // Finding should be triaged to Backlog (non-blocking)
+        let findings = FindingRepository::list_by_item(&db, item_id)
+            .await
+            .expect("list findings");
+        let triaged = findings
+            .iter()
+            .find(|f| f.source_job_id == job_id)
+            .expect("find original finding");
+        assert_eq!(triaged.triage.state(), FindingTriageState::Backlog);
+
+        // All findings resolved non-blocking → approval should transition to Pending
+        let updated_item = ItemRepository::get(&db, item_id)
+            .await
+            .expect("reload item");
+        assert_eq!(
+            updated_item.approval_state,
+            ApprovalState::Pending,
+            "non-blocking Backlog findings on ValidateIntegrated should trigger Pending approval"
+        );
+
+        // Verify ApprovalRequested activity was appended
+        let activities = ActivityRepository::list_by_project(&db, project_id, 100, 0)
+            .await
+            .expect("list activities");
+        assert!(
+            activities
+                .iter()
+                .any(|a| a.event_type
+                    == ingot_domain::activity::ActivityEventType::ApprovalRequested),
+            "ApprovalRequested activity should be appended"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_auto_triage_does_not_transition_approval_for_fix_now_findings() {
+        use ingot_domain::ids::ProjectId;
+        use ingot_domain::item::ApprovalState;
+        use ingot_domain::job::OutputArtifactKind;
+        use ingot_domain::ports::{FindingRepository, ItemRepository};
+        use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
+        use ingot_domain::revision::ApprovalPolicy;
+        use ingot_test_support::fixtures::{ItemBuilder, ProjectBuilder, RevisionBuilder};
+        use ingot_test_support::sqlite::migrated_test_db;
+
+        let db = migrated_test_db("ingot-usecases-finding-fixnow").await;
+        let project_id = ProjectId::new();
+        let item_id = ItemId::new();
+        let revision_id = ItemRevisionId::new();
+        let job_id = JobId::new();
+
+        let project = ProjectBuilder::new(
+            std::env::temp_dir().join(format!("ingot-finding-fixnow-{}", uuid::Uuid::now_v7())),
+        )
+        .id(project_id)
+        .execution_mode(ExecutionMode::Autopilot)
+        .build();
+        let item = ItemBuilder::new(project_id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .approval_policy(ApprovalPolicy::Required)
+            .explicit_seed("seed")
+            .build();
+
+        db.create_project(&project).await.expect("create project");
+        db.create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let job = JobBuilder::new(project_id, item_id, revision_id, "validate_integrated")
+            .id(job_id)
+            .status(JobStatus::Completed)
+            .outcome_class(OutcomeClass::Findings)
+            .output_artifact_kind(OutputArtifactKind::ValidationReport)
+            .ended_at(Utc::now())
+            .build();
+        db.create_job(&job).await.expect("create job");
+
+        // High severity → FixNow (blocking) → should NOT trigger approval
         let finding = FindingBuilder::new(project_id, item_id, revision_id, job_id)
             .source_step_id("validate_integrated")
             .severity(ingot_domain::finding::FindingSeverity::High)
-            .summary("Test finding")
+            .summary("Critical bug")
             .evidence(serde_json::json!(["broken"]))
             .build();
         db.create_finding(&finding).await.expect("create finding");
@@ -1364,10 +1474,9 @@ mod tests {
             .await
             .expect("list findings");
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].triage.state(), FindingTriageState::FixNow,);
+        assert_eq!(findings[0].triage.state(), FindingTriageState::FixNow);
 
-        // All findings resolved non-blocking is FALSE (FixNow is blocking),
-        // so approval should NOT transition
+        // FixNow is blocking → approval should NOT transition
         let updated_item = ItemRepository::get(&db, item_id)
             .await
             .expect("reload item");
