@@ -15,6 +15,15 @@ use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use ingot_domain::step_id::StepId;
 use serde::Deserialize;
 
+use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
+use ingot_domain::ids::{ActivityId, JobId};
+use ingot_domain::item::ApprovalState;
+use ingot_domain::ports::{
+    ActivityRepository, FindingRepository, ItemRepository, RevisionRepository,
+};
+use ingot_domain::project::Project;
+use tracing::info;
+
 use crate::UseCaseError;
 use crate::item::approval_state_for_policy;
 
@@ -459,6 +468,126 @@ pub fn auto_triage_findings(
     }
 
     Ok(results)
+}
+
+/// Orchestrate auto-triage for findings from a completed job.
+///
+/// Applies the project's auto-triage policy to unresolved findings from the
+/// specified job: persists triage decisions, creates backlog items for Backlog
+/// findings, appends activity per finding, and transitions approval state if
+/// the job is a ValidateIntegrated step, the revision is still current, and
+/// all findings from the job are resolved as non-blocking.
+///
+/// The `step_id` parameter controls the approval guard: only
+/// `StepId::ValidateIntegrated` triggers the approval-state transition.
+/// All other step IDs skip approval entirely.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_auto_triage<F, I, R, A>(
+    finding_repo: &F,
+    item_repo: &I,
+    revision_repo: &R,
+    activity_repo: &A,
+    project: &Project,
+    item: &Item,
+    job_id: JobId,
+    step_id: StepId,
+    policy: &AutoTriagePolicy,
+) -> Result<(), UseCaseError>
+where
+    F: FindingRepository,
+    I: ItemRepository,
+    R: RevisionRepository,
+    A: ActivityRepository,
+{
+    let all_findings = finding_repo.list_by_item(item.id).await?;
+    let job_findings: Vec<_> = all_findings
+        .into_iter()
+        .filter(|f| f.source_job_id == job_id && f.triage.is_unresolved())
+        .collect();
+
+    if job_findings.is_empty() {
+        return Ok(());
+    }
+
+    let revision = revision_repo.get(item.current_revision_id).await?;
+    let existing_items = item_repo.list_by_project(item.project_id).await?;
+
+    let results = auto_triage_findings(&job_findings, policy, item, &revision, &existing_items)?;
+
+    for result in &results {
+        if let Some((ref linked_item, ref linked_revision)) = result.backlog {
+            finding_repo
+                .link_backlog(&result.finding, linked_item, linked_revision, None)
+                .await?;
+        } else {
+            finding_repo.triage(&result.finding).await?;
+        }
+
+        activity_repo
+            .append(&Activity {
+                id: ActivityId::new(),
+                project_id: project.id,
+                event_type: ActivityEventType::FindingTriaged,
+                subject: ActivitySubject::Finding(result.finding.id),
+                payload: serde_json::json!({
+                    "item_id": item.id,
+                    "origin": "auto_triage",
+                    "triage_state": result.finding.triage.state(),
+                    "linked_item_id": result.finding.triage.linked_item_id(),
+                }),
+                created_at: Utc::now(),
+            })
+            .await?;
+    }
+
+    // Approval state transition: only for ValidateIntegrated findings.
+    if step_id == StepId::ValidateIntegrated && item.current_revision_id == revision.id {
+        let updated_findings = finding_repo.list_by_item(item.id).await?;
+        let job_findings_after: Vec<_> = updated_findings
+            .iter()
+            .filter(|f| f.source_job_id == job_id && f.source_item_revision_id == revision.id)
+            .collect();
+
+        let all_resolved_non_blocking = !job_findings_after.is_empty()
+            && job_findings_after.iter().all(|f| {
+                !f.triage.is_unresolved() && f.triage.state() != FindingTriageState::FixNow
+            });
+
+        if all_resolved_non_blocking {
+            let mut current_item = item_repo.get(item.id).await?;
+            let next_approval_state = match revision.approval_policy {
+                ApprovalPolicy::Required => ApprovalState::Pending,
+                ApprovalPolicy::NotRequired => ApprovalState::NotRequired,
+            };
+            if current_item.approval_state != next_approval_state {
+                current_item.approval_state = next_approval_state;
+                current_item.updated_at = Utc::now();
+                item_repo.update(&current_item).await?;
+
+                if next_approval_state == ApprovalState::Pending {
+                    activity_repo
+                        .append(&Activity {
+                            id: ActivityId::new(),
+                            project_id: project.id,
+                            event_type: ActivityEventType::ApprovalRequested,
+                            subject: ActivitySubject::Item(item.id),
+                            payload: serde_json::json!({ "source": "auto_triage" }),
+                            created_at: Utc::now(),
+                        })
+                        .await?;
+                }
+            }
+        }
+    }
+
+    info!(
+        item_id = %item.id,
+        job_id = %job_id,
+        triaged_count = results.len(),
+        "auto-triaged findings"
+    );
+
+    Ok(())
 }
 
 pub fn parse_revision_context_summary(
@@ -1153,5 +1282,197 @@ mod tests {
         let (item1, _) = results[1].backlog.as_ref().unwrap();
         let (item2, _) = results[2].backlog.as_ref().unwrap();
         assert!(item2.sort_key > item1.sort_key);
+    }
+
+    #[tokio::test]
+    async fn execute_auto_triage_transitions_approval_for_validate_integrated() {
+        use ingot_domain::ids::ProjectId;
+        use ingot_domain::item::ApprovalState;
+        use ingot_domain::job::OutputArtifactKind;
+        use ingot_domain::ports::{FindingRepository, ItemRepository};
+        use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
+        use ingot_domain::revision::ApprovalPolicy;
+        use ingot_test_support::fixtures::{ItemBuilder, ProjectBuilder, RevisionBuilder};
+        use ingot_test_support::sqlite::migrated_test_db;
+
+        let db = migrated_test_db("ingot-usecases-finding-triage").await;
+        let project_id = ProjectId::new();
+        let item_id = ItemId::new();
+        let revision_id = ItemRevisionId::new();
+        let job_id = JobId::new();
+
+        let project = ProjectBuilder::new(
+            std::env::temp_dir().join(format!("ingot-finding-triage-{}", uuid::Uuid::now_v7())),
+        )
+        .id(project_id)
+        .execution_mode(ExecutionMode::Autopilot)
+        .build();
+        let item = ItemBuilder::new(project_id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .approval_policy(ApprovalPolicy::Required)
+            .explicit_seed("seed")
+            .build();
+
+        db.create_project(&project).await.expect("create project");
+        db.create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let job = JobBuilder::new(project_id, item_id, revision_id, "validate_integrated")
+            .id(job_id)
+            .status(JobStatus::Completed)
+            .outcome_class(OutcomeClass::Findings)
+            .output_artifact_kind(OutputArtifactKind::ValidationReport)
+            .ended_at(Utc::now())
+            .build();
+        db.create_job(&job).await.expect("create job");
+
+        let finding = FindingBuilder::new(project_id, item_id, revision_id, job_id)
+            .source_step_id("validate_integrated")
+            .severity(ingot_domain::finding::FindingSeverity::High)
+            .summary("Test finding")
+            .evidence(serde_json::json!(["broken"]))
+            .build();
+        db.create_finding(&finding).await.expect("create finding");
+
+        let policy = AutoTriagePolicy {
+            critical: AutoTriageDecision::FixNow,
+            high: AutoTriageDecision::FixNow,
+            medium: AutoTriageDecision::FixNow,
+            low: AutoTriageDecision::Backlog,
+        };
+
+        super::execute_auto_triage(
+            &db,
+            &db,
+            &db,
+            &db,
+            &project,
+            &item,
+            job_id,
+            StepId::ValidateIntegrated,
+            &policy,
+        )
+        .await
+        .expect("execute auto triage");
+
+        // Finding should be triaged to FixNow
+        let findings = FindingRepository::list_by_item(&db, item_id)
+            .await
+            .expect("list findings");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].triage.state(), FindingTriageState::FixNow,);
+
+        // All findings resolved non-blocking is FALSE (FixNow is blocking),
+        // so approval should NOT transition
+        let updated_item = ItemRepository::get(&db, item_id)
+            .await
+            .expect("reload item");
+        assert_eq!(
+            updated_item.approval_state,
+            ApprovalState::NotRequested,
+            "FixNow findings should NOT trigger approval transition"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_auto_triage_skips_approval_for_non_validate_integrated() {
+        use ingot_domain::ids::ProjectId;
+        use ingot_domain::item::ApprovalState;
+        use ingot_domain::job::OutputArtifactKind;
+        use ingot_domain::ports::{FindingRepository, ItemRepository};
+        use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
+        use ingot_domain::revision::ApprovalPolicy;
+        use ingot_test_support::fixtures::{ItemBuilder, ProjectBuilder, RevisionBuilder};
+        use ingot_test_support::sqlite::migrated_test_db;
+
+        let db = migrated_test_db("ingot-usecases-finding-guard").await;
+        let project_id = ProjectId::new();
+        let item_id = ItemId::new();
+        let revision_id = ItemRevisionId::new();
+        let job_id = JobId::new();
+
+        let project = ProjectBuilder::new(
+            std::env::temp_dir().join(format!("ingot-finding-guard-{}", uuid::Uuid::now_v7())),
+        )
+        .id(project_id)
+        .execution_mode(ExecutionMode::Autopilot)
+        .build();
+        let item = ItemBuilder::new(project_id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .approval_policy(ApprovalPolicy::Required)
+            .explicit_seed("seed")
+            .build();
+
+        db.create_project(&project).await.expect("create project");
+        db.create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let job = JobBuilder::new(project_id, item_id, revision_id, "investigate_item")
+            .id(job_id)
+            .status(JobStatus::Completed)
+            .outcome_class(OutcomeClass::Findings)
+            .output_artifact_kind(OutputArtifactKind::FindingReport)
+            .ended_at(Utc::now())
+            .build();
+        db.create_job(&job).await.expect("create job");
+
+        // Create a finding with WontFix-eligible severity (low → Backlog via policy)
+        let finding = FindingBuilder::new(project_id, item_id, revision_id, job_id)
+            .source_step_id("investigate_item")
+            .severity(ingot_domain::finding::FindingSeverity::Low)
+            .summary("Minor issue")
+            .evidence(serde_json::json!(["minor"]))
+            .build();
+        db.create_finding(&finding).await.expect("create finding");
+
+        let policy = AutoTriagePolicy {
+            critical: AutoTriageDecision::FixNow,
+            high: AutoTriageDecision::FixNow,
+            medium: AutoTriageDecision::FixNow,
+            low: AutoTriageDecision::Backlog,
+        };
+
+        // Use InvestigateItem step — NOT ValidateIntegrated
+        super::execute_auto_triage(
+            &db,
+            &db,
+            &db,
+            &db,
+            &project,
+            &item,
+            job_id,
+            StepId::InvestigateItem,
+            &policy,
+        )
+        .await
+        .expect("execute auto triage");
+
+        // Finding should be triaged (Backlog)
+        let findings = FindingRepository::list_by_item(&db, item_id)
+            .await
+            .expect("list findings");
+        let triaged = findings
+            .iter()
+            .find(|f| f.source_job_id == job_id)
+            .expect("find original finding");
+        assert_eq!(triaged.triage.state(), FindingTriageState::Backlog);
+
+        // Approval should NOT transition because step is not ValidateIntegrated
+        let updated_item = ItemRepository::get(&db, item_id)
+            .await
+            .expect("reload item");
+        assert_eq!(
+            updated_item.approval_state,
+            ApprovalState::NotRequested,
+            "non-ValidateIntegrated step must not trigger approval transition"
+        );
     }
 }

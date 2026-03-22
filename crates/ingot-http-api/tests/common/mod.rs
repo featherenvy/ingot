@@ -26,10 +26,10 @@ use ingot_domain::workspace::{
 };
 use ingot_store_sqlite::Database;
 use ingot_test_support::fixtures::{
-    default_timestamp, ConvergenceBuilder, FindingBuilder, ItemBuilder, JobBuilder, ProjectBuilder,
-    RevisionBuilder, WorkspaceBuilder,
+    ConvergenceBuilder, FindingBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
+    WorkspaceBuilder, default_timestamp,
 };
-pub use ingot_test_support::fixtures::{parse_timestamp, DEFAULT_TEST_TIMESTAMP};
+pub use ingot_test_support::fixtures::{DEFAULT_TEST_TIMESTAMP, parse_timestamp};
 pub use ingot_test_support::git::{git_output, run_git as git, temp_git_repo, write_file};
 pub use ingot_test_support::reports::clean_validation_report;
 pub use ingot_test_support::sqlite::migrated_test_db;

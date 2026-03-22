@@ -1,3 +1,4 @@
+mod autopilot;
 mod bootstrap;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -644,125 +645,9 @@ impl ConvergenceSystemActionPort for RuntimeConvergencePort {
             if project.execution_mode != ingot_domain::project::ExecutionMode::Autopilot {
                 return Ok(false);
             }
-            let mut retry_after_conflict = true;
-            loop {
-                let item = dispatcher
-                    .db
-                    .get_item(item_id)
-                    .await
-                    .map_err(ingot_usecases::UseCaseError::Repository)?;
-                let revision = dispatcher
-                    .db
-                    .get_revision(item.current_revision_id)
-                    .await
-                    .map_err(ingot_usecases::UseCaseError::Repository)?;
-                let existing = dispatcher
-                    .db
-                    .find_active_queue_entry_for_revision(revision.id)
-                    .await
-                    .map_err(ingot_usecases::UseCaseError::Repository)?;
-                if existing.is_some() {
-                    return Ok(false);
-                }
-                let jobs = dispatcher
-                    .db
-                    .list_jobs_by_item(item.id)
-                    .await
-                    .map_err(ingot_usecases::UseCaseError::Repository)?;
-                let findings = dispatcher
-                    .db
-                    .list_findings_by_item(item.id)
-                    .await
-                    .map_err(ingot_usecases::UseCaseError::Repository)?;
-                let convergences = dispatcher
-                    .hydrate_convergences(
-                        &project,
-                        dispatcher
-                            .db
-                            .list_convergences_by_item(item.id)
-                            .await
-                            .map_err(ingot_usecases::UseCaseError::Repository)?,
-                    )
-                    .await
-                    .map_err(usecase_from_runtime_error)?;
-                let evaluation =
-                    Evaluator::new().evaluate(&item, &revision, &jobs, &findings, &convergences);
-                if evaluation.next_recommended_action != RecommendedAction::PrepareConvergence {
-                    return Ok(false);
-                }
-                let lane_head = dispatcher
-                    .db
-                    .find_queue_head(project_id, &revision.target_ref)
-                    .await
-                    .map_err(ingot_usecases::UseCaseError::Repository)?;
-                let now = Utc::now();
-                let queue_entry = ingot_domain::convergence_queue::ConvergenceQueueEntry {
-                    id: ingot_domain::ids::ConvergenceQueueEntryId::new(),
-                    project_id,
-                    item_id,
-                    item_revision_id: revision.id,
-                    target_ref: revision.target_ref.clone(),
-                    status: if lane_head.is_some() {
-                        ingot_domain::convergence_queue::ConvergenceQueueEntryStatus::Queued
-                    } else {
-                        ingot_domain::convergence_queue::ConvergenceQueueEntryStatus::Head
-                    },
-                    head_acquired_at: lane_head.is_none().then_some(now),
-                    created_at: now,
-                    updated_at: now,
-                    released_at: None,
-                };
-                #[cfg(test)]
-                dispatcher.pause_before_auto_queue_insert().await;
-                match dispatcher.db.create_queue_entry(&queue_entry).await {
-                    Ok(()) => {
-                        dispatcher
-                            .db
-                            .append_activity(&ingot_domain::activity::Activity {
-                                id: ingot_domain::ids::ActivityId::new(),
-                                project_id,
-                                event_type:
-                                    ingot_domain::activity::ActivityEventType::ConvergenceQueued,
-                                subject: ingot_domain::activity::ActivitySubject::QueueEntry(
-                                    queue_entry.id,
-                                ),
-                                payload: serde_json::json!({
-                                    "item_id": item_id,
-                                    "target_ref": revision.target_ref,
-                                    "dispatch_origin": "autopilot",
-                                }),
-                                created_at: now,
-                            })
-                            .await
-                            .map_err(ingot_usecases::UseCaseError::Repository)?;
-                        info!(
-                            project_id = %project_id,
-                            item_id = %item_id,
-                            "autopilot queued convergence"
-                        );
-                        return Ok(true);
-                    }
-                    Err(RepositoryError::Conflict(_)) if retry_after_conflict => {
-                        retry_after_conflict = false;
-                    }
-                    Err(RepositoryError::Conflict(message)) => {
-                        let existing = dispatcher
-                            .db
-                            .find_active_queue_entry_for_revision(revision.id)
-                            .await
-                            .map_err(ingot_usecases::UseCaseError::Repository)?;
-                        if existing.is_some() {
-                            return Ok(false);
-                        }
-                        return Err(ingot_usecases::UseCaseError::Repository(
-                            RepositoryError::Conflict(message),
-                        ));
-                    }
-                    Err(error) => {
-                        return Err(ingot_usecases::UseCaseError::Repository(error));
-                    }
-                }
-            }
+            dispatcher
+                .auto_queue_convergence_inner(project_id, item_id, &project)
+                .await
         }
     }
 }
@@ -3167,13 +3052,8 @@ impl JobDispatcher {
         if prepared.project.execution_mode == ingot_domain::project::ExecutionMode::Autopilot
             && outcome_class == OutcomeClass::Findings
         {
-            self.auto_triage_job_findings(
-                &prepared.project,
-                prepared.item.id,
-                prepared.job.id,
-                &prepared.item,
-            )
-            .await?;
+            self.auto_triage_job_findings(&prepared.project, prepared.job.id, &prepared.item)
+                .await?;
         }
 
         self.finalize_workspace_after_success(&prepared, None)
@@ -4223,7 +4103,7 @@ impl JobDispatcher {
             let project = self.db.get_project(prepared.project_id).await?;
             if project.execution_mode == ingot_domain::project::ExecutionMode::Autopilot {
                 let item = self.db.get_item(prepared.item_id).await?;
-                self.auto_triage_job_findings(&project, prepared.item_id, prepared.job_id, &item)
+                self.auto_triage_job_findings(&project, prepared.job_id, &item)
                     .await?;
             }
         }
@@ -4562,9 +4442,7 @@ impl JobDispatcher {
                 match result {
                     Ok(dispatched) => {
                         dispatched_any |= dispatched;
-                        if dispatched
-                            && project.execution_mode
-                                == ingot_domain::project::ExecutionMode::Autopilot
+                        if project.execution_mode == ingot_domain::project::ExecutionMode::Autopilot
                         {
                             break;
                         }
@@ -4576,6 +4454,10 @@ impl JobDispatcher {
                             item_id = %item.id,
                             "projected job recovery skipped item"
                         );
+                        if project.execution_mode == ingot_domain::project::ExecutionMode::Autopilot
+                        {
+                            break;
+                        }
                     }
                 }
             }
@@ -4586,144 +4468,6 @@ impl JobDispatcher {
         }
 
         Ok(dispatched_any)
-    }
-
-    async fn project_has_active_autopilot_work(
-        &self,
-        project_id: ingot_domain::ids::ProjectId,
-    ) -> Result<bool, RuntimeError> {
-        if self
-            .db
-            .list_jobs_by_project(project_id)
-            .await?
-            .into_iter()
-            .any(|job| job.state.is_active())
-        {
-            return Ok(true);
-        }
-
-        if self
-            .db
-            .list_active_convergences()
-            .await?
-            .into_iter()
-            .any(|convergence| convergence.project_id == project_id)
-        {
-            return Ok(true);
-        }
-
-        Ok(!self
-            .db
-            .list_active_queue_entries_by_project(project_id)
-            .await?
-            .is_empty())
-    }
-
-    async fn auto_triage_job_findings(
-        &self,
-        project: &Project,
-        item_id: ingot_domain::ids::ItemId,
-        job_id: ingot_domain::ids::JobId,
-        item: &ingot_domain::item::Item,
-    ) -> Result<(), RuntimeError> {
-        let all_findings = self.db.list_findings_by_item(item_id).await?;
-        let job_findings: Vec<_> = all_findings
-            .into_iter()
-            .filter(|f| f.source_job_id == job_id && f.triage.is_unresolved())
-            .collect();
-
-        if job_findings.is_empty() {
-            return Ok(());
-        }
-
-        let Some(policy) = project.auto_triage_policy.clone() else {
-            return Ok(());
-        };
-
-        let revision = self.db.get_revision(item.current_revision_id).await?;
-        let existing_items = self.db.list_items_by_project(item.project_id).await?;
-
-        let results = ingot_usecases::finding::auto_triage_findings(
-            &job_findings,
-            &policy,
-            item,
-            &revision,
-            &existing_items,
-        )
-        .map_err(|error| RuntimeError::InvalidState(format!("auto-triage failed: {error}")))?;
-
-        for result in &results {
-            if let Some((ref linked_item, ref linked_revision)) = result.backlog {
-                self.db
-                    .link_backlog_finding(&result.finding, linked_item, linked_revision, None)
-                    .await?;
-            } else {
-                self.db.triage_finding(&result.finding).await?;
-            }
-
-            self.append_activity(
-                project.id,
-                ActivityEventType::FindingTriaged,
-                ActivitySubject::Finding(result.finding.id),
-                serde_json::json!({
-                    "item_id": item.id,
-                    "origin": "auto_triage",
-                    "triage_state": result.finding.triage.state(),
-                    "linked_item_id": result.finding.triage.linked_item_id(),
-                }),
-            )
-            .await?;
-        }
-
-        // Approval state transition: only for ValidateIntegrated findings (matching
-        // maybe_enter_approval_after_finding_triage in http-api/findings.rs).
-        let job = self.db.get_job(job_id).await?;
-        if job.step_id == StepId::ValidateIntegrated && item.current_revision_id == revision.id {
-            let updated_findings = self.db.list_findings_by_item(item_id).await?;
-            let job_findings_after: Vec<_> = updated_findings
-                .iter()
-                .filter(|f| f.source_job_id == job_id && f.source_item_revision_id == revision.id)
-                .collect();
-
-            let all_resolved_non_blocking = !job_findings_after.is_empty()
-                && job_findings_after.iter().all(|f| {
-                    !f.triage.is_unresolved() && f.triage.state() != FindingTriageState::FixNow
-                });
-
-            if all_resolved_non_blocking {
-                let mut current_item = self.db.get_item(item_id).await?;
-                let next_approval_state = match revision.approval_policy {
-                    ingot_domain::revision::ApprovalPolicy::Required => ApprovalState::Pending,
-                    ingot_domain::revision::ApprovalPolicy::NotRequired => {
-                        ingot_domain::item::ApprovalState::NotRequired
-                    }
-                };
-                if current_item.approval_state != next_approval_state {
-                    current_item.approval_state = next_approval_state;
-                    current_item.updated_at = Utc::now();
-                    self.db.update_item(&current_item).await?;
-
-                    if next_approval_state == ApprovalState::Pending {
-                        self.append_activity(
-                            project.id,
-                            ActivityEventType::ApprovalRequested,
-                            ActivitySubject::Item(item_id),
-                            serde_json::json!({ "source": "auto_triage" }),
-                        )
-                        .await?;
-                    }
-                }
-            }
-        }
-
-        info!(
-            item_id = %item_id,
-            job_id = %job_id,
-            triaged_count = results.len(),
-            "auto-triaged findings"
-        );
-
-        Ok(())
     }
 
     async fn auto_dispatch_projected_review(
@@ -4795,59 +4539,6 @@ impl JobDispatcher {
             .await?
         {
             info!(job_id = %job.id, step_id = %job.step_id, item_id = %item.id, "auto-dispatched validation");
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    pub async fn auto_dispatch_autopilot_locked(
-        &self,
-        project: &Project,
-        item_id: ingot_domain::ids::ItemId,
-    ) -> Result<bool, RuntimeError> {
-        let item = self.db.get_item(item_id).await?;
-        let revision = self.db.get_revision(item.current_revision_id).await?;
-        let jobs = self.db.list_jobs_by_item(item.id).await?;
-        let findings = self.db.list_findings_by_item(item.id).await?;
-        let convergences = self
-            .hydrate_convergences(project, self.db.list_convergences_by_item(item.id).await?)
-            .await?;
-        let author_initial_head_commit_oid = if Evaluator::new()
-            .evaluate(&item, &revision, &jobs, &findings, &convergences)
-            .dispatchable_step_id
-            == Some(step::AUTHOR_INITIAL)
-            && revision.seed.seed_commit_oid().is_none()
-        {
-            let paths = self.refresh_project_mirror(project).await?;
-            Some(
-                resolve_ref_oid(paths.mirror_git_dir.as_path(), &revision.target_ref)
-                    .await?
-                    .ok_or_else(|| RuntimeError::InvalidState("target ref unresolved".into()))?,
-            )
-        } else {
-            None
-        };
-
-        let result = ingot_usecases::dispatch::auto_dispatch_autopilot(
-            &self.db,
-            &self.db,
-            &self.db,
-            project,
-            &item,
-            &revision,
-            &jobs,
-            &findings,
-            &convergences,
-            author_initial_head_commit_oid,
-        )
-        .await
-        .map_err(|error| {
-            RuntimeError::InvalidState(format!("autopilot dispatch failed: {error}"))
-        })?;
-
-        if let Some(job) = result {
-            info!(job_id = %job.id, step_id = %job.step_id, item_id = %item.id, "autopilot dispatched step");
             Ok(true)
         } else {
             Ok(false)
@@ -6016,8 +5707,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use ingot_domain::agent::AgentCapability;
     use ingot_domain::activity::ActivityEventType;
+    use ingot_domain::agent::AgentCapability;
     use ingot_domain::finding::FindingSeverity;
     use ingot_domain::item::ApprovalState;
     use ingot_domain::job::{
@@ -7123,7 +6814,9 @@ timeout = "30s"
 
         let item_id = ingot_domain::ids::ItemId::new();
         let revision_id = ingot_domain::ids::ItemRevisionId::new();
-        let item = ItemBuilder::new(project.id, revision_id).id(item_id).build();
+        let item = ItemBuilder::new(project.id, revision_id)
+            .id(item_id)
+            .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
             .approval_policy(ApprovalPolicy::Required)
@@ -7155,7 +6848,7 @@ timeout = "30s"
 
         harness
             .dispatcher
-            .auto_triage_job_findings(&project, item_id, job.id, &item)
+            .auto_triage_job_findings(&project, job.id, &item)
             .await
             .expect("auto triage findings");
 
@@ -7175,7 +6868,11 @@ timeout = "30s"
             .list_items_by_project(project.id)
             .await
             .expect("list items");
-        assert_eq!(items.len(), 1, "disabled auto-triage should not create backlog items");
+        assert_eq!(
+            items.len(),
+            1,
+            "disabled auto-triage should not create backlog items"
+        );
 
         let activity = harness
             .db
@@ -7247,7 +6944,7 @@ timeout = "30s"
 
         harness
             .dispatcher
-            .auto_triage_job_findings(&project, item_id, job.id, &item)
+            .auto_triage_job_findings(&project, job.id, &item)
             .await
             .expect("auto triage findings");
 
@@ -7670,6 +7367,83 @@ timeout = "30s"
         assert!(
             second_jobs.is_empty(),
             "second item should still be waiting while the first item remains active"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_projected_jobs_does_not_skip_escalated_item_to_dispatch_next() {
+        let harness = TestRuntimeHarness::new(Arc::new(BlockingRunner::new())).await;
+
+        let mut project = harness
+            .db
+            .get_project(harness.project.id)
+            .await
+            .expect("project");
+        project.execution_mode = ExecutionMode::Autopilot;
+        harness
+            .db
+            .update_project(&project)
+            .await
+            .expect("update project");
+
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
+
+        // Item 1: escalated — evaluator returns nothing-to-dispatch
+        let first_item_id = ingot_domain::ids::ItemId::new();
+        let first_revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let first_item = ItemBuilder::new(project.id, first_revision_id)
+            .id(first_item_id)
+            .sort_key("10")
+            .escalated(ingot_domain::item::EscalationReason::StepFailed)
+            .build();
+        let first_revision = RevisionBuilder::new(first_item_id)
+            .id(first_revision_id)
+            .explicit_seed(seed_commit.as_str())
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&first_item, &first_revision)
+            .await
+            .expect("create first item");
+
+        // Item 2: normal — would be dispatchable if not blocked
+        let second_item_id = ingot_domain::ids::ItemId::new();
+        let second_revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let second_item = ItemBuilder::new(project.id, second_revision_id)
+            .id(second_item_id)
+            .sort_key("20")
+            .build();
+        let second_revision = RevisionBuilder::new(second_item_id)
+            .id(second_revision_id)
+            .explicit_seed(seed_commit.as_str())
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&second_item, &second_revision)
+            .await
+            .expect("create second item");
+
+        let recovered = harness
+            .dispatcher
+            .recover_projected_jobs()
+            .await
+            .expect("recover projected jobs");
+        assert!(
+            !recovered,
+            "escalated first item should block dispatch; nothing should be dispatched"
+        );
+
+        let second_jobs = harness
+            .db
+            .list_jobs_by_item(second_item.id)
+            .await
+            .expect("list second item jobs");
+        assert!(
+            second_jobs.is_empty(),
+            "second item must NOT be dispatched when the first open item is escalated"
         );
     }
 
