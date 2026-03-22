@@ -158,7 +158,9 @@ pub struct UpdateProjectRequest {
     pub default_branch: Option<String>,
     pub color: Option<String>,
     pub execution_mode: Option<ExecutionMode>,
-    pub agent_routing: Option<AgentRouting>,
+    /// Absent → keep existing; explicit null → clear to None; object → set.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub agent_routing: Option<Option<AgentRouting>>,
     /// Absent → keep existing; explicit null → clear to None; object → set.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub auto_triage_policy: Option<Option<AutoTriagePolicy>>,

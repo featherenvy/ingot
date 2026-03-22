@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
 import { createAgent, reprobeAgent, updateProject } from '../api/client'
@@ -423,24 +423,36 @@ const TRIAGE_DECISION_OPTIONS: { value: AutoTriageDecision; label: string }[] = 
 
 function AutoTriagePolicyCard({ projectId, policy }: { projectId: string; policy: AutoTriagePolicy | null }) {
   const queryClient = useQueryClient()
+  const [draftPolicy, setDraftPolicy] = useState<AutoTriagePolicy | null>(policy)
   const mutation = useMutation({
     mutationFn: (newPolicy: AutoTriagePolicy | null) => updateProject(projectId, { auto_triage_policy: newPolicy }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.projects() })
       toast.success('Auto-triage policy updated.')
     },
-    onError: (error) => showErrorToast('Failed to update auto-triage policy', error),
+    onError: (error) => {
+      setDraftPolicy(policy)
+      showErrorToast('Failed to update auto-triage policy', error)
+    },
   })
 
-  const enabled = policy !== null
-  const current = policy ?? DEFAULT_AUTO_TRIAGE_POLICY
+  useEffect(() => {
+    setDraftPolicy(policy)
+  }, [policy])
+
+  const enabled = draftPolicy !== null
+  const current = draftPolicy ?? DEFAULT_AUTO_TRIAGE_POLICY
 
   function handleToggle() {
-    mutation.mutate(enabled ? null : DEFAULT_AUTO_TRIAGE_POLICY)
+    const nextPolicy = enabled ? null : DEFAULT_AUTO_TRIAGE_POLICY
+    setDraftPolicy(nextPolicy)
+    mutation.mutate(nextPolicy)
   }
 
   function handleChange(severity: keyof AutoTriagePolicy, value: string) {
-    mutation.mutate({ ...current, [severity]: value as AutoTriageDecision })
+    const nextPolicy = { ...current, [severity]: value as AutoTriageDecision }
+    setDraftPolicy(nextPolicy)
+    mutation.mutate(nextPolicy)
   }
 
   return (
@@ -507,20 +519,30 @@ function AgentRoutingCard({
   agents: Agent[] | undefined
 }) {
   const queryClient = useQueryClient()
+  const [draftRouting, setDraftRouting] = useState<AgentRouting | null>(routing)
   const routingMutation = useMutation({
     mutationFn: (newRouting: AgentRouting) => updateProject(projectId, { agent_routing: newRouting }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.projects() })
       toast.success('Agent routing updated.')
     },
-    onError: (error) => showErrorToast('Failed to update agent routing', error),
+    onError: (error) => {
+      setDraftRouting(routing)
+      showErrorToast('Failed to update agent routing', error)
+    },
   })
 
-  const current: AgentRouting = routing ?? { author: null, review: null, investigate: null }
+  useEffect(() => {
+    setDraftRouting(routing)
+  }, [routing])
+
+  const current: AgentRouting = draftRouting ?? { author: null, review: null, investigate: null }
 
   function handleChange(phase: keyof AgentRouting, value: string) {
     const slug = value === AUTO_VALUE ? null : value
-    routingMutation.mutate({ ...current, [phase]: slug })
+    const nextRouting = { ...current, [phase]: slug }
+    setDraftRouting(nextRouting)
+    routingMutation.mutate(nextRouting)
   }
 
   return (

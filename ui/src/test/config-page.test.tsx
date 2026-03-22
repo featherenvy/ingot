@@ -357,6 +357,94 @@ describe('ConfigPage', () => {
     expect(await screen.findByText('Agent routing updated.')).toBeInTheDocument()
   })
 
+  it('preserves previous agent routing edits before the projects query refreshes', async () => {
+    const capturedBodies: unknown[] = []
+    const projects = [
+      {
+        id: 'prj_1',
+        name: 'Ingot',
+        path: '/tmp/ingot',
+        default_branch: 'main',
+        color: '#1f2937',
+        execution_mode: 'manual',
+        agent_routing: { author: 'claude-code', review: null, investigate: null },
+      },
+    ]
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+
+      if (method === 'GET' && url.endsWith('/api/agents')) {
+        return Promise.resolve(
+          jsonResponse([
+            {
+              id: 'agt_1',
+              slug: 'claude-code',
+              name: 'Claude Code',
+              adapter_kind: 'claude_code',
+              provider: 'anthropic',
+              model: 'claude-sonnet-4-20250514',
+              cli_path: 'claude',
+              capabilities: [],
+              health_check: 'ok',
+              status: 'available',
+            },
+            {
+              id: 'agt_2',
+              slug: 'codex',
+              name: 'Codex CLI',
+              adapter_kind: 'codex',
+              provider: 'openai',
+              model: 'gpt-5-codex',
+              cli_path: 'codex',
+              capabilities: [],
+              health_check: 'ok',
+              status: 'available',
+            },
+          ]),
+        )
+      }
+      if (method === 'GET' && url.endsWith('/api/projects/prj_1/config')) {
+        return Promise.resolve(jsonResponse({ branch: 'main' }))
+      }
+      if (method === 'GET' && url.endsWith('/api/projects')) {
+        return Promise.resolve(jsonResponse(projects))
+      }
+      if (method === 'PUT' && url.endsWith('/api/projects/prj_1')) {
+        capturedBodies.push(JSON.parse(init?.body as string))
+        return Promise.resolve(jsonResponse(projects[0]))
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Agent Routing')).toBeInTheDocument()
+
+    const reviewSelect = await screen.findByRole('combobox', { name: 'Review agent' })
+    fireEvent.click(reviewSelect)
+    fireEvent.click(await screen.findByText('Codex CLI (codex)'))
+
+    await waitFor(() => {
+      expect(capturedBodies[0]).toEqual({
+        agent_routing: { author: 'claude-code', review: 'codex', investigate: null },
+      })
+    })
+
+    const investigateSelect = screen.getByRole('combobox', { name: 'Investigate agent' })
+    fireEvent.click(investigateSelect)
+    const claudeOptions = await screen.findAllByText('Claude Code (claude-code)')
+    fireEvent.click(claudeOptions[claudeOptions.length - 1])
+
+    await waitFor(() => {
+      expect(capturedBodies[1]).toEqual({
+        agent_routing: { author: 'claude-code', review: 'codex', investigate: 'claude-code' },
+      })
+    })
+  })
+
   it('renders auto-triage policy card and sends update on toggle', async () => {
     let capturedBody: unknown = null
     const projects = [
@@ -415,6 +503,83 @@ describe('ConfigPage', () => {
     })
 
     expect(await screen.findByText('Auto-triage policy updated.')).toBeInTheDocument()
+  })
+
+  it('preserves previous auto-triage edits before the projects query refreshes', async () => {
+    const capturedBodies: unknown[] = []
+    const projects = [
+      {
+        id: 'prj_1',
+        name: 'Ingot',
+        path: '/tmp/ingot',
+        default_branch: 'main',
+        color: '#1f2937',
+        execution_mode: 'autopilot',
+        agent_routing: null,
+        auto_triage_policy: {
+          critical: 'fix_now',
+          high: 'fix_now',
+          medium: 'fix_now',
+          low: 'backlog',
+        },
+      },
+    ]
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+
+      if (method === 'GET' && url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (method === 'GET' && url.endsWith('/api/projects/prj_1/config')) {
+        return Promise.resolve(jsonResponse({ branch: 'main' }))
+      }
+      if (method === 'GET' && url.endsWith('/api/projects')) {
+        return Promise.resolve(jsonResponse(projects))
+      }
+      if (method === 'PUT' && url.endsWith('/api/projects/prj_1')) {
+        capturedBodies.push(JSON.parse(init?.body as string))
+        return Promise.resolve(jsonResponse(projects[0]))
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Auto-Triage Policy')).toBeInTheDocument()
+
+    const lowSelect = await screen.findByRole('combobox', { name: 'Low triage decision' })
+    fireEvent.click(lowSelect)
+    fireEvent.click(await screen.findByText('Skip (manual)'))
+
+    await waitFor(() => {
+      expect(capturedBodies[0]).toEqual({
+        auto_triage_policy: {
+          critical: 'fix_now',
+          high: 'fix_now',
+          medium: 'fix_now',
+          low: 'skip',
+        },
+      })
+    })
+
+    const mediumSelect = screen.getByRole('combobox', { name: 'Medium triage decision' })
+    fireEvent.click(mediumSelect)
+    const backlogOptions = await screen.findAllByText('Backlog')
+    fireEvent.click(backlogOptions[backlogOptions.length - 1])
+
+    await waitFor(() => {
+      expect(capturedBodies[1]).toEqual({
+        auto_triage_policy: {
+          critical: 'fix_now',
+          high: 'fix_now',
+          medium: 'backlog',
+          low: 'skip',
+        },
+      })
+    })
   })
 
   it('invalidates cached item details after changing the execution mode', async () => {

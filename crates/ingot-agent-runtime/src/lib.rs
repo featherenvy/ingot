@@ -3049,11 +3049,13 @@ impl JobDispatcher {
             }
         }
 
-        if prepared.project.execution_mode == ingot_domain::project::ExecutionMode::Autopilot
-            && outcome_class == OutcomeClass::Findings
-        {
-            self.auto_triage_job_findings(&prepared.project, prepared.job.id, &prepared.item)
-                .await?;
+        if outcome_class == OutcomeClass::Findings {
+            let project = self.db.get_project(prepared.project.id).await?;
+            if project.execution_mode == ingot_domain::project::ExecutionMode::Autopilot {
+                let item = self.db.get_item(prepared.item.id).await?;
+                self.auto_triage_job_findings(&project, prepared.job.id, &item)
+                    .await?;
+            }
         }
 
         self.finalize_workspace_after_success(&prepared, None)
@@ -5895,6 +5897,28 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct StaticResponseRunner {
+        response: AgentResponse,
+    }
+
+    impl StaticResponseRunner {
+        fn new(response: AgentResponse) -> Self {
+            Self { response }
+        }
+    }
+
+    impl AgentRunner for StaticResponseRunner {
+        fn launch<'a>(
+            &'a self,
+            _agent: &'a Agent,
+            _request: &'a AgentRequest,
+            _working_dir: &'a Path,
+        ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
+            Box::pin(async move { Ok(self.response.clone()) })
+        }
+    }
+
     struct TestRuntimeHarness {
         db: Database,
         dispatcher: JobDispatcher,
@@ -6965,6 +6989,133 @@ timeout = "30s"
                 .iter()
                 .any(|entry| entry.event_type == ActivityEventType::ApprovalRequested),
             "non-validate findings must not emit approval_requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_report_run_reloads_project_before_auto_triage() {
+        let runner = Arc::new(StaticResponseRunner::new(AgentResponse {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            result: Some(serde_json::json!({
+                "outcome": "findings",
+                "summary": "Found an issue",
+                "findings": [{
+                    "finding_key": "f-1",
+                    "code": "INV001",
+                    "severity": "low",
+                    "summary": "Needs follow-up",
+                    "paths": ["src/lib.rs"],
+                    "evidence": ["broken"],
+                }],
+            })),
+        }));
+        let harness = TestRuntimeHarness::new(runner).await;
+
+        let agent = AgentBuilder::new(
+            "codex-review",
+            vec![
+                AgentCapability::ReadOnlyJobs,
+                AgentCapability::StructuredOutput,
+            ],
+        )
+        .build();
+        harness.db.create_agent(&agent).await.expect("create agent");
+
+        let mut project = harness
+            .db
+            .get_project(harness.project.id)
+            .await
+            .expect("project");
+        project.execution_mode = ExecutionMode::Autopilot;
+        project.auto_triage_policy = Some(AutoTriagePolicy {
+            critical: AutoTriageDecision::Backlog,
+            high: AutoTriageDecision::Backlog,
+            medium: AutoTriageDecision::Backlog,
+            low: AutoTriageDecision::Backlog,
+        });
+        harness
+            .db
+            .update_project(&project)
+            .await
+            .expect("enable auto triage");
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let seed_commit = head_oid(&harness.repo_path)
+            .await
+            .expect("seed head")
+            .into_inner();
+        let item = ItemBuilder::new(project.id, revision_id).id(item_id).build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .approval_policy(ApprovalPolicy::Required)
+            .explicit_seed(seed_commit.as_str())
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let job = JobBuilder::new(project.id, item_id, revision_id, step::INVESTIGATE_ITEM)
+            .phase_kind(PhaseKind::Investigate)
+            .workspace_kind(WorkspaceKind::Review)
+            .execution_permission(ExecutionPermission::MustNotMutate)
+            .phase_template_slug("investigate-item")
+            .job_input(JobInput::candidate_subject(
+                CommitOid::new(seed_commit.clone()),
+                CommitOid::new(seed_commit.clone()),
+            ))
+            .output_artifact_kind(OutputArtifactKind::FindingReport)
+            .build();
+        harness.db.create_job(&job).await.expect("create job");
+
+        let prepared = match harness
+            .dispatcher
+            .prepare_run(harness.db.get_job(job.id).await.expect("load queued job"))
+            .await
+            .expect("prepare run")
+        {
+            PrepareRunOutcome::Prepared(prepared) => *prepared,
+            _ => panic!("expected prepared run"),
+        };
+
+        project.execution_mode = ExecutionMode::Manual;
+        project.auto_triage_policy = None;
+        harness
+            .db
+            .update_project(&project)
+            .await
+            .expect("disable auto triage");
+
+        harness
+            .dispatcher
+            .execute_prepared_agent_job(prepared)
+            .await
+            .expect("execute report job");
+
+        let findings = harness
+            .db
+            .list_findings_by_item(item_id)
+            .await
+            .expect("list findings");
+        assert_eq!(findings.len(), 1);
+        assert!(
+            findings[0].triage.is_unresolved(),
+            "latest project config should be respected when findings complete"
+        );
+
+        let items = harness
+            .db
+            .list_items_by_project(project.id)
+            .await
+            .expect("list items");
+        assert_eq!(
+            items.len(),
+            1,
+            "stale prepared project snapshots must not create backlog items"
         );
     }
 

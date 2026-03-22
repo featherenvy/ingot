@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use chrono::Utc;
-use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
+use ingot_domain::project::{AgentRouting, AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
 use tower::ServiceExt;
 
@@ -360,6 +360,58 @@ async fn update_project_route_allows_clearing_auto_triage_policy_with_null() {
     assert!(
         stored.auto_triage_policy.is_none(),
         "explicit null should clear the saved auto-triage policy"
+    );
+}
+
+#[tokio::test]
+async fn update_project_route_allows_clearing_agent_routing_with_null() {
+    let repo = temp_git_repo("ingot-http-api");
+    let db = migrated_test_db("ingot-http-api-db").await;
+    let project_id = "prj_000000000000000000000000000000a4";
+    let project = test_project_builder(&repo, project_id)
+        .execution_mode(ExecutionMode::Autopilot)
+        .agent_routing(AgentRouting {
+            author: Some("claude-code".into()),
+            review: Some("codex".into()),
+            investigate: None,
+        })
+        .build()
+        .persist(&db)
+        .await
+        .expect("persist project");
+
+    let app = test_router(db.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{project_id}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "agent_routing": null
+                    })
+                    .to_string(),
+                ))
+                .expect("build update request"),
+        )
+        .await
+        .expect("update response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read update body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("update json");
+    assert!(json["agent_routing"].is_null());
+
+    let stored = db
+        .get_project(project.id)
+        .await
+        .expect("reload stored project");
+    assert!(
+        stored.agent_routing.is_none(),
+        "explicit null should clear the saved agent routing"
     );
 }
 

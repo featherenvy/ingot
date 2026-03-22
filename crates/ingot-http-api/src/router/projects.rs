@@ -117,7 +117,9 @@ pub(super) async fn update_project(
         None => project.color,
     };
     project.execution_mode = request.execution_mode.unwrap_or(project.execution_mode);
-    project.agent_routing = request.agent_routing.or(project.agent_routing);
+    if let Some(routing) = request.agent_routing {
+        project.agent_routing = routing;
+    }
     if let Some(policy) = request.auto_triage_policy {
         project.auto_triage_policy = policy;
     }
