@@ -127,6 +127,21 @@ export interface JsonObject {
 
 export type ExecutionMode = 'manual' | 'autopilot'
 
+export type AutoTriageDecision = 'fix_now' | 'backlog' | 'skip'
+
+export interface AutoTriagePolicy {
+  critical: AutoTriageDecision
+  high: AutoTriageDecision
+  medium: AutoTriageDecision
+  low: AutoTriageDecision
+}
+
+export interface AgentRouting {
+  author: string | null
+  review: string | null
+  investigate: string | null
+}
+
 export interface Project {
   id: string
   name: string
@@ -134,6 +149,8 @@ export interface Project {
   default_branch: string
   color: string
   execution_mode: ExecutionMode
+  agent_routing: AgentRouting | null
+  auto_triage_policy: AutoTriagePolicy | null
 }
 
 export type ActivityEntityType =

@@ -8,10 +8,9 @@ use ingot_domain::finding::{
 };
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::{FindingId, ItemId, ItemRevisionId};
-use ingot_domain::item::{
-    Classification, Escalation, Item, Lifecycle, Origin, ParkingState,
-};
+use ingot_domain::item::{Classification, Escalation, Item, Lifecycle, Origin, ParkingState};
 use ingot_domain::job::{Job, OutcomeClass};
+use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy};
 use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use ingot_domain::step_id::StepId;
 use serde::Deserialize;
@@ -397,6 +396,71 @@ pub fn backlog_finding(
     Ok((linked_item, linked_revision, triaged_finding))
 }
 
+#[derive(Debug)]
+pub struct AutoTriagedFinding {
+    pub finding: Finding,
+    pub backlog: Option<(Item, ItemRevision)>,
+}
+
+pub fn auto_triage_findings(
+    findings: &[Finding],
+    policy: &AutoTriagePolicy,
+    source_item: &Item,
+    source_revision: &ItemRevision,
+    existing_items: &[Item],
+) -> Result<Vec<AutoTriagedFinding>, UseCaseError> {
+    let mut results = Vec::new();
+    let mut last_sort_key = existing_items
+        .iter()
+        .max_by_key(|item| &item.sort_key)
+        .map(|item| item.sort_key.clone());
+
+    for finding in findings.iter().filter(|f| f.triage.is_unresolved()) {
+        let decision = policy.decision_for(finding.severity);
+        match decision {
+            AutoTriageDecision::FixNow => {
+                let triaged = triage_finding(
+                    finding,
+                    TriageFindingInput {
+                        triage_state: FindingTriageState::FixNow,
+                        triage_note: None,
+                        linked_item_id: None,
+                    },
+                )?;
+                results.push(AutoTriagedFinding {
+                    finding: triaged,
+                    backlog: None,
+                });
+            }
+            AutoTriageDecision::Backlog => {
+                let sort_key = crate::item::next_sort_key_after(last_sort_key.as_deref());
+                let severity_label = match finding.severity {
+                    FindingSeverity::Critical => "critical",
+                    FindingSeverity::High => "high",
+                    FindingSeverity::Medium => "medium",
+                    FindingSeverity::Low => "low",
+                };
+                let (linked_item, linked_revision, triaged) = backlog_finding(
+                    finding,
+                    source_item,
+                    source_revision,
+                    BacklogFindingOverrides::default(),
+                    sort_key.clone(),
+                    Some(format!("auto-triaged: {severity_label} severity")),
+                )?;
+                last_sort_key = Some(sort_key);
+                results.push(AutoTriagedFinding {
+                    finding: triaged,
+                    backlog: Some((linked_item, linked_revision)),
+                });
+            }
+            AutoTriageDecision::Skip => {}
+        }
+    }
+
+    Ok(results)
+}
+
 pub fn parse_revision_context_summary(
     context: Option<&ingot_domain::revision_context::RevisionContext>,
 ) -> Option<ingot_domain::revision_context::RevisionContextSummary> {
@@ -583,8 +647,8 @@ mod tests {
     use crate::UseCaseError;
 
     use super::{
-        BacklogFindingOverrides, TriageFindingInput, backlog_finding, extract_findings,
-        parse_revision_context_summary, triage_finding,
+        BacklogFindingOverrides, TriageFindingInput, auto_triage_findings, backlog_finding,
+        extract_findings, parse_revision_context_summary, triage_finding,
     };
 
     #[test]
@@ -950,5 +1014,144 @@ mod tests {
         .prepared_commit_oid("head")
         .target_head_valid(true)
         .build()
+    }
+
+    fn test_finding_with_severity(
+        severity: ingot_domain::finding::FindingSeverity,
+    ) -> ingot_domain::finding::Finding {
+        FindingBuilder::new(
+            ProjectId::from_uuid(Uuid::nil()),
+            ItemId::from_uuid(Uuid::nil()),
+            ItemRevisionId::from_uuid(Uuid::nil()),
+            JobId::from_uuid(Uuid::nil()),
+        )
+        .source_step_id("investigate_item")
+        .severity(severity)
+        .summary("Summary")
+        .evidence(serde_json::json!(["broken"]))
+        .build()
+    }
+
+    #[test]
+    fn auto_triage_maps_severity_to_decisions() {
+        use ingot_domain::finding::FindingSeverity;
+        use ingot_domain::project::AutoTriagePolicy;
+
+        let item = nil_item();
+        let revision = nil_revision();
+        let policy = AutoTriagePolicy::default();
+
+        let findings = vec![
+            test_finding_with_severity(FindingSeverity::Critical),
+            test_finding_with_severity(FindingSeverity::High),
+            test_finding_with_severity(FindingSeverity::Medium),
+            test_finding_with_severity(FindingSeverity::Low),
+        ];
+
+        let results = auto_triage_findings(&findings, &policy, &item, &revision, &[]).unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert_eq!(
+            results[0].finding.triage.state(),
+            FindingTriageState::FixNow
+        );
+        assert!(results[0].backlog.is_none());
+        assert_eq!(
+            results[1].finding.triage.state(),
+            FindingTriageState::FixNow
+        );
+        assert!(results[1].backlog.is_none());
+        assert_eq!(
+            results[2].finding.triage.state(),
+            FindingTriageState::FixNow
+        );
+        assert!(results[2].backlog.is_none());
+        assert_eq!(
+            results[3].finding.triage.state(),
+            FindingTriageState::Backlog
+        );
+        assert!(results[3].backlog.is_some());
+    }
+
+    #[test]
+    fn auto_triage_skip_leaves_findings_untriaged() {
+        use ingot_domain::finding::FindingSeverity;
+        use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy};
+
+        let item = nil_item();
+        let revision = nil_revision();
+        let policy = AutoTriagePolicy {
+            critical: AutoTriageDecision::Skip,
+            high: AutoTriageDecision::Skip,
+            medium: AutoTriageDecision::Skip,
+            low: AutoTriageDecision::Skip,
+        };
+
+        let findings = vec![
+            test_finding_with_severity(FindingSeverity::High),
+            test_finding_with_severity(FindingSeverity::Low),
+        ];
+
+        let results = auto_triage_findings(&findings, &policy, &item, &revision, &[]).unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn auto_triage_empty_findings() {
+        use ingot_domain::project::AutoTriagePolicy;
+
+        let item = nil_item();
+        let revision = nil_revision();
+        let policy = AutoTriagePolicy::default();
+
+        let results = auto_triage_findings(&[], &policy, &item, &revision, &[]).unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn auto_triage_mix_fix_now_and_backlog() {
+        use ingot_domain::finding::FindingSeverity;
+        use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy};
+
+        let item = nil_item();
+        let revision = nil_revision();
+        let policy = AutoTriagePolicy {
+            critical: AutoTriageDecision::FixNow,
+            high: AutoTriageDecision::Backlog,
+            medium: AutoTriageDecision::FixNow,
+            low: AutoTriageDecision::Backlog,
+        };
+
+        let findings = vec![
+            test_finding_with_severity(FindingSeverity::Critical),
+            test_finding_with_severity(FindingSeverity::High),
+            test_finding_with_severity(FindingSeverity::Low),
+        ];
+
+        let results = auto_triage_findings(&findings, &policy, &item, &revision, &[]).unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            results[0].finding.triage.state(),
+            FindingTriageState::FixNow
+        );
+        assert!(results[0].backlog.is_none());
+        assert_eq!(
+            results[1].finding.triage.state(),
+            FindingTriageState::Backlog
+        );
+        assert!(results[1].backlog.is_some());
+        assert_eq!(
+            results[2].finding.triage.state(),
+            FindingTriageState::Backlog
+        );
+        assert!(results[2].backlog.is_some());
+
+        // Sort keys should be incrementing
+        let (item1, _) = results[1].backlog.as_ref().unwrap();
+        let (item2, _) = results[2].backlog.as_ref().unwrap();
+        assert!(item2.sort_key > item1.sort_key);
     }
 }

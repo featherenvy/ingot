@@ -189,6 +189,8 @@ pub async fn create_demo_project(
         default_branch,
         color: template.color.to_string(),
         execution_mode: ingot_domain::project::ExecutionMode::default(),
+        agent_routing: None,
+        auto_triage_policy: None,
         created_at: now,
         updated_at: now,
     };

@@ -2,17 +2,35 @@ use std::path::PathBuf;
 
 use ingot_domain::ids::ProjectId;
 use ingot_domain::ports::{ProjectRepository, RepositoryError};
-use ingot_domain::project::Project;
+use ingot_domain::project::{AgentRouting, AutoTriagePolicy, Project};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
-use super::helpers::{db_err, db_write_err};
+use super::helpers::{db_err, db_write_err, json_err, parse_json};
 use crate::db::Database;
+
+fn serialize_agent_routing(
+    routing: Option<&AgentRouting>,
+) -> Result<Option<String>, RepositoryError> {
+    routing
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(json_err)
+}
+
+fn serialize_auto_triage_policy(
+    policy: Option<&AutoTriagePolicy>,
+) -> Result<Option<String>, RepositoryError> {
+    policy
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(json_err)
+}
 
 impl Database {
     pub async fn list_projects(&self) -> Result<Vec<Project>, RepositoryError> {
         let rows = sqlx::query(
-            "SELECT id, name, path, default_branch, color, execution_mode, created_at, updated_at
+            "SELECT id, name, path, default_branch, color, execution_mode, agent_routing, auto_triage_policy, created_at, updated_at
              FROM projects
              ORDER BY name ASC",
         )
@@ -25,7 +43,7 @@ impl Database {
 
     pub async fn get_project(&self, project_id: ProjectId) -> Result<Project, RepositoryError> {
         let row = sqlx::query(
-            "SELECT id, name, path, default_branch, color, execution_mode, created_at, updated_at
+            "SELECT id, name, path, default_branch, color, execution_mode, agent_routing, auto_triage_policy, created_at, updated_at
              FROM projects
              WHERE id = ?",
         )
@@ -41,9 +59,12 @@ impl Database {
     }
 
     pub async fn create_project(&self, project: &Project) -> Result<(), RepositoryError> {
+        let agent_routing_json = serialize_agent_routing(project.agent_routing.as_ref())?;
+        let auto_triage_policy_json =
+            serialize_auto_triage_policy(project.auto_triage_policy.as_ref())?;
         sqlx::query(
-            "INSERT INTO projects (id, name, path, default_branch, color, execution_mode, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, path, default_branch, color, execution_mode, agent_routing, auto_triage_policy, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(project.id)
         .bind(&project.name)
@@ -51,6 +72,8 @@ impl Database {
         .bind(&project.default_branch)
         .bind(&project.color)
         .bind(project.execution_mode)
+        .bind(&agent_routing_json)
+        .bind(&auto_triage_policy_json)
         .bind(project.created_at)
         .bind(project.updated_at)
         .execute(&self.pool)
@@ -61,9 +84,12 @@ impl Database {
     }
 
     pub async fn update_project(&self, project: &Project) -> Result<(), RepositoryError> {
+        let agent_routing_json = serialize_agent_routing(project.agent_routing.as_ref())?;
+        let auto_triage_policy_json =
+            serialize_auto_triage_policy(project.auto_triage_policy.as_ref())?;
         let result = sqlx::query(
             "UPDATE projects
-             SET name = ?, path = ?, default_branch = ?, color = ?, execution_mode = ?, updated_at = ?
+             SET name = ?, path = ?, default_branch = ?, color = ?, execution_mode = ?, agent_routing = ?, auto_triage_policy = ?, updated_at = ?
              WHERE id = ?",
         )
         .bind(&project.name)
@@ -71,6 +97,8 @@ impl Database {
         .bind(&project.default_branch)
         .bind(&project.color)
         .bind(project.execution_mode)
+        .bind(&agent_routing_json)
+        .bind(&auto_triage_policy_json)
         .bind(project.updated_at)
         .bind(project.id)
         .execute(&self.pool)
@@ -118,6 +146,18 @@ impl ProjectRepository for Database {
 }
 
 fn map_project(row: &SqliteRow) -> Result<Project, RepositoryError> {
+    let agent_routing: Option<AgentRouting> = row
+        .try_get::<Option<String>, _>("agent_routing")
+        .map_err(db_err)?
+        .map(parse_json)
+        .transpose()?;
+
+    let auto_triage_policy: Option<AutoTriagePolicy> = row
+        .try_get::<Option<String>, _>("auto_triage_policy")
+        .map_err(db_err)?
+        .map(parse_json)
+        .transpose()?;
+
     Ok(Project {
         id: row.try_get("id").map_err(db_err)?,
         name: row.try_get("name").map_err(db_err)?,
@@ -125,6 +165,8 @@ fn map_project(row: &SqliteRow) -> Result<Project, RepositoryError> {
         default_branch: row.try_get("default_branch").map_err(db_err)?,
         color: row.try_get("color").map_err(db_err)?,
         execution_mode: row.try_get("execution_mode").map_err(db_err)?,
+        agent_routing,
+        auto_triage_policy,
         created_at: row.try_get("created_at").map_err(db_err)?,
         updated_at: row.try_get("updated_at").map_err(db_err)?,
     })

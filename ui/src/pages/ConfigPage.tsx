@@ -24,11 +24,12 @@ import {
 } from '../components/ui/dialog'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '../components/ui/form'
 import { Input } from '../components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Skeleton } from '../components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { useRequiredProjectId } from '../hooks/useRequiredRouteParam'
 import { showErrorToast } from '../lib/toast'
-import type { Agent, AgentProvider } from '../types/domain'
+import type { Agent, AgentProvider, AgentRouting, AutoTriageDecision, AutoTriagePolicy } from '../types/domain'
 
 type AgentForm = {
   name: string
@@ -330,6 +331,10 @@ export default function ConfigPage(): React.JSX.Element {
         </CardContent>
       </Card>
 
+      <AgentRoutingCard projectId={projectId} routing={project?.agent_routing ?? null} agents={agents} />
+
+      <AutoTriagePolicyCard projectId={projectId} policy={project?.auto_triage_policy ?? null} />
+
       <Card>
         <CardHeader>
           <CardTitle>Project Defaults</CardTitle>
@@ -393,6 +398,166 @@ export default function ConfigPage(): React.JSX.Element {
         )}
       </DataTable>
     </div>
+  )
+}
+
+const DEFAULT_AUTO_TRIAGE_POLICY: AutoTriagePolicy = {
+  critical: 'fix_now',
+  high: 'fix_now',
+  medium: 'fix_now',
+  low: 'backlog',
+}
+
+const SEVERITY_ROWS: { key: keyof AutoTriagePolicy; label: string }[] = [
+  { key: 'critical', label: 'Critical' },
+  { key: 'high', label: 'High' },
+  { key: 'medium', label: 'Medium' },
+  { key: 'low', label: 'Low' },
+]
+
+const TRIAGE_DECISION_OPTIONS: { value: AutoTriageDecision; label: string }[] = [
+  { value: 'fix_now', label: 'Fix now' },
+  { value: 'backlog', label: 'Backlog' },
+  { value: 'skip', label: 'Skip (manual)' },
+]
+
+function AutoTriagePolicyCard({ projectId, policy }: { projectId: string; policy: AutoTriagePolicy | null }) {
+  const queryClient = useQueryClient()
+  const mutation = useMutation({
+    mutationFn: (newPolicy: AutoTriagePolicy | null) => updateProject(projectId, { auto_triage_policy: newPolicy }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.projects() })
+      toast.success('Auto-triage policy updated.')
+    },
+    onError: (error) => showErrorToast('Failed to update auto-triage policy', error),
+  })
+
+  const enabled = policy !== null
+  const current = policy ?? DEFAULT_AUTO_TRIAGE_POLICY
+
+  function handleToggle() {
+    mutation.mutate(enabled ? null : DEFAULT_AUTO_TRIAGE_POLICY)
+  }
+
+  function handleChange(severity: keyof AutoTriagePolicy, value: string) {
+    mutation.mutate({ ...current, [severity]: value as AutoTriageDecision })
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Auto-Triage Policy</CardTitle>
+        <CardDescription>
+          When enabled in autopilot mode, findings are automatically triaged by severity instead of blocking for human
+          review.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center gap-3">
+          <Button
+            variant={enabled ? 'default' : 'outline'}
+            size="sm"
+            onClick={handleToggle}
+            disabled={mutation.isPending}
+          >
+            {enabled ? 'Enabled' : 'Disabled'}
+          </Button>
+        </div>
+        {enabled && (
+          <div className="grid gap-4 sm:grid-cols-4">
+            {SEVERITY_ROWS.map(({ key, label }) => (
+              <div key={key} className="space-y-1.5">
+                <span className="text-sm font-medium">{label}</span>
+                <Select value={current[key]} onValueChange={(v) => handleChange(key, v)} disabled={mutation.isPending}>
+                  <SelectTrigger aria-label={`${label} triage decision`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {TRIAGE_DECISION_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+const ROUTING_PHASES = [
+  { key: 'author' as const, label: 'Author' },
+  { key: 'review' as const, label: 'Review' },
+  { key: 'investigate' as const, label: 'Investigate' },
+]
+
+const AUTO_VALUE = '__auto__'
+
+function AgentRoutingCard({
+  projectId,
+  routing,
+  agents,
+}: {
+  projectId: string
+  routing: AgentRouting | null
+  agents: Agent[] | undefined
+}) {
+  const queryClient = useQueryClient()
+  const routingMutation = useMutation({
+    mutationFn: (newRouting: AgentRouting) => updateProject(projectId, { agent_routing: newRouting }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.projects() })
+      toast.success('Agent routing updated.')
+    },
+    onError: (error) => showErrorToast('Failed to update agent routing', error),
+  })
+
+  const current: AgentRouting = routing ?? { author: null, review: null, investigate: null }
+
+  function handleChange(phase: keyof AgentRouting, value: string) {
+    const slug = value === AUTO_VALUE ? null : value
+    routingMutation.mutate({ ...current, [phase]: slug })
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Agent Routing</CardTitle>
+        <CardDescription>
+          Choose which agent handles each workflow phase. Default (auto) picks the first available.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-4 sm:grid-cols-3">
+          {ROUTING_PHASES.map(({ key, label }) => (
+            <div key={key} className="space-y-1.5">
+              <span className="text-sm font-medium">{label}</span>
+              <Select
+                value={current[key] ?? AUTO_VALUE}
+                onValueChange={(v) => handleChange(key, v)}
+                disabled={routingMutation.isPending}
+              >
+                <SelectTrigger aria-label={`${label} agent`}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={AUTO_VALUE}>Default (auto)</SelectItem>
+                  {agents?.map((agent) => (
+                    <SelectItem key={agent.id} value={agent.slug}>
+                      {agent.name} ({agent.slug})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::branch_name::BranchName;
 use crate::ids;
-use crate::project::{ExecutionMode, Project};
+use crate::project::{AgentRouting, AutoTriagePolicy, ExecutionMode, Project};
 use chrono::{DateTime, Utc};
 
 use super::timestamps::default_timestamp;
@@ -14,6 +14,8 @@ pub struct ProjectBuilder {
     default_branch: BranchName,
     color: String,
     execution_mode: ExecutionMode,
+    agent_routing: Option<AgentRouting>,
+    auto_triage_policy: Option<AutoTriagePolicy>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -28,6 +30,8 @@ impl ProjectBuilder {
             default_branch: "main".into(),
             color: "#000".into(),
             execution_mode: ExecutionMode::Manual,
+            agent_routing: None,
+            auto_triage_policy: None,
             created_at: now,
             updated_at: now,
         }
@@ -48,6 +52,16 @@ impl ProjectBuilder {
         self
     }
 
+    pub fn agent_routing(mut self, routing: AgentRouting) -> Self {
+        self.agent_routing = Some(routing);
+        self
+    }
+
+    pub fn auto_triage_policy(mut self, policy: AutoTriagePolicy) -> Self {
+        self.auto_triage_policy = Some(policy);
+        self
+    }
+
     pub fn created_at(mut self, created_at: DateTime<Utc>) -> Self {
         self.created_at = created_at;
         self.updated_at = created_at;
@@ -62,6 +76,8 @@ impl ProjectBuilder {
             default_branch: self.default_branch,
             color: self.color,
             execution_mode: self.execution_mode,
+            agent_routing: self.agent_routing,
+            auto_triage_policy: self.auto_triage_policy,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }

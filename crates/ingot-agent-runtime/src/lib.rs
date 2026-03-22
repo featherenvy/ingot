@@ -38,7 +38,7 @@ use ingot_domain::job::{
 };
 use ingot_domain::lease_owner_id::LeaseOwnerId;
 use ingot_domain::ports::{JobCompletionMutation, ProjectMutationLockPort, RepositoryError};
-use ingot_domain::project::Project;
+use ingot_domain::project::{AgentRouting, Project};
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::revision_context::RevisionContext;
 use ingot_domain::step_id::StepId;
@@ -2484,7 +2484,10 @@ impl JobDispatcher {
                 paths.mirror_git_dir.as_path(),
             )
             .await?;
-        let Some(agent) = self.select_agent(&job).await? else {
+        let Some(agent) = self
+            .select_agent(&job, project.agent_routing.as_ref())
+            .await?
+        else {
             debug!(
                 job_id = %job.id,
                 step_id = %job.step_id,
@@ -2601,10 +2604,21 @@ impl JobDispatcher {
         job.job_input = JobInput::authoring_head(resolved_head.clone());
         self.db.update_job(&job).await?;
 
+        info!(
+            job_id = %job.id,
+            revision_id = %revision.id,
+            rebound_head_commit_oid = %resolved_head,
+            "rebound implicit author_initial head from current target ref"
+        );
+
         Ok(job)
     }
 
-    async fn select_agent(&self, job: &Job) -> Result<Option<Agent>, RuntimeError> {
+    async fn select_agent(
+        &self,
+        job: &Job,
+        routing: Option<&AgentRouting>,
+    ) -> Result<Option<Agent>, RuntimeError> {
         let mut agents = self
             .db
             .list_agents()
@@ -2614,6 +2628,19 @@ impl JobDispatcher {
             .filter(|agent| supports_job(agent, job))
             .collect::<Vec<_>>();
         agents.sort_by(|left, right| left.slug.cmp(&right.slug));
+
+        let preferred_slug = routing.and_then(|r| r.preferred_slug(job.phase_kind));
+        if let Some(slug) = preferred_slug {
+            if let Some(pos) = agents.iter().position(|a| a.slug == slug) {
+                return Ok(Some(agents.swap_remove(pos)));
+            }
+            debug!(
+                job_id = %job.id,
+                preferred_slug = slug,
+                "preferred agent not available, falling back"
+            );
+        }
+
         Ok(agents.into_iter().next())
     }
 
@@ -3135,6 +3162,18 @@ impl JobDispatcher {
                 )
                 .await?;
             }
+        }
+
+        if prepared.project.execution_mode == ingot_domain::project::ExecutionMode::Autopilot
+            && outcome_class == OutcomeClass::Findings
+        {
+            self.auto_triage_job_findings(
+                &prepared.project,
+                prepared.item.id,
+                prepared.job.id,
+                &prepared.item,
+            )
+            .await?;
         }
 
         self.finalize_workspace_after_success(&prepared, None)
@@ -4180,6 +4219,15 @@ impl JobDispatcher {
             }
         }
 
+        if outcome_class == OutcomeClass::Findings {
+            let project = self.db.get_project(prepared.project_id).await?;
+            if project.execution_mode == ingot_domain::project::ExecutionMode::Autopilot {
+                let item = self.db.get_item(prepared.item_id).await?;
+                self.auto_triage_job_findings(&project, prepared.item_id, prepared.job_id, &item)
+                    .await?;
+            }
+        }
+
         let revision = self.db.get_revision(prepared.revision_id).await?;
         let item = self.db.get_item(prepared.item_id).await?;
         let jobs = self.db.list_jobs_by_item(prepared.item_id).await?;
@@ -4569,6 +4617,113 @@ impl JobDispatcher {
             .list_active_queue_entries_by_project(project_id)
             .await?
             .is_empty())
+    }
+
+    async fn auto_triage_job_findings(
+        &self,
+        project: &Project,
+        item_id: ingot_domain::ids::ItemId,
+        job_id: ingot_domain::ids::JobId,
+        item: &ingot_domain::item::Item,
+    ) -> Result<(), RuntimeError> {
+        let all_findings = self.db.list_findings_by_item(item_id).await?;
+        let job_findings: Vec<_> = all_findings
+            .into_iter()
+            .filter(|f| f.source_job_id == job_id && f.triage.is_unresolved())
+            .collect();
+
+        if job_findings.is_empty() {
+            return Ok(());
+        }
+
+        let Some(policy) = project.auto_triage_policy.clone() else {
+            return Ok(());
+        };
+
+        let revision = self.db.get_revision(item.current_revision_id).await?;
+        let existing_items = self.db.list_items_by_project(item.project_id).await?;
+
+        let results = ingot_usecases::finding::auto_triage_findings(
+            &job_findings,
+            &policy,
+            item,
+            &revision,
+            &existing_items,
+        )
+        .map_err(|error| RuntimeError::InvalidState(format!("auto-triage failed: {error}")))?;
+
+        for result in &results {
+            if let Some((ref linked_item, ref linked_revision)) = result.backlog {
+                self.db
+                    .link_backlog_finding(&result.finding, linked_item, linked_revision, None)
+                    .await?;
+            } else {
+                self.db.triage_finding(&result.finding).await?;
+            }
+
+            self.append_activity(
+                project.id,
+                ActivityEventType::FindingTriaged,
+                ActivitySubject::Finding(result.finding.id),
+                serde_json::json!({
+                    "item_id": item.id,
+                    "origin": "auto_triage",
+                    "triage_state": result.finding.triage.state(),
+                    "linked_item_id": result.finding.triage.linked_item_id(),
+                }),
+            )
+            .await?;
+        }
+
+        // Approval state transition: only for ValidateIntegrated findings (matching
+        // maybe_enter_approval_after_finding_triage in http-api/findings.rs).
+        let job = self.db.get_job(job_id).await?;
+        if job.step_id == StepId::ValidateIntegrated && item.current_revision_id == revision.id {
+            let updated_findings = self.db.list_findings_by_item(item_id).await?;
+            let job_findings_after: Vec<_> = updated_findings
+                .iter()
+                .filter(|f| f.source_job_id == job_id && f.source_item_revision_id == revision.id)
+                .collect();
+
+            let all_resolved_non_blocking = !job_findings_after.is_empty()
+                && job_findings_after.iter().all(|f| {
+                    !f.triage.is_unresolved() && f.triage.state() != FindingTriageState::FixNow
+                });
+
+            if all_resolved_non_blocking {
+                let mut current_item = self.db.get_item(item_id).await?;
+                let next_approval_state = match revision.approval_policy {
+                    ingot_domain::revision::ApprovalPolicy::Required => ApprovalState::Pending,
+                    ingot_domain::revision::ApprovalPolicy::NotRequired => {
+                        ingot_domain::item::ApprovalState::NotRequired
+                    }
+                };
+                if current_item.approval_state != next_approval_state {
+                    current_item.approval_state = next_approval_state;
+                    current_item.updated_at = Utc::now();
+                    self.db.update_item(&current_item).await?;
+
+                    if next_approval_state == ApprovalState::Pending {
+                        self.append_activity(
+                            project.id,
+                            ActivityEventType::ApprovalRequested,
+                            ActivitySubject::Item(item_id),
+                            serde_json::json!({ "source": "auto_triage" }),
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+
+        info!(
+            item_id = %item_id,
+            job_id = %job_id,
+            triaged_count = results.len(),
+            "auto-triaged findings"
+        );
+
+        Ok(())
     }
 
     async fn auto_dispatch_projected_review(
@@ -5862,15 +6017,19 @@ mod tests {
     use std::time::Duration;
 
     use ingot_domain::agent::AgentCapability;
+    use ingot_domain::activity::ActivityEventType;
+    use ingot_domain::finding::FindingSeverity;
+    use ingot_domain::item::ApprovalState;
     use ingot_domain::job::{
         ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutputArtifactKind, PhaseKind,
     };
-    use ingot_domain::project::ExecutionMode;
+    use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
+    use ingot_domain::revision::ApprovalPolicy;
     use ingot_domain::workspace::WorkspaceStatus;
     use ingot_git::commands::head_oid;
     use ingot_test_support::fixtures::{
-        AgentBuilder, ConvergenceQueueEntryBuilder, ItemBuilder, JobBuilder, ProjectBuilder,
-        RevisionBuilder, default_timestamp,
+        AgentBuilder, ConvergenceQueueEntryBuilder, FindingBuilder, ItemBuilder, JobBuilder,
+        ProjectBuilder, RevisionBuilder, default_timestamp,
     };
     use ingot_test_support::git::{run_git as git_sync, temp_git_repo, unique_temp_path};
     use ingot_test_support::sqlite::migrated_test_db;
@@ -6228,8 +6387,7 @@ mod tests {
             .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
-            .seed_commit_oid(None::<String>)
-            .seed_target_commit_oid(Some(seed_commit.clone()))
+            .explicit_seed(seed_commit.as_str())
             .build();
         harness
             .db
@@ -6237,23 +6395,12 @@ mod tests {
             .await
             .expect("create item");
 
-        std::fs::write(harness.repo_path.join("advanced.txt"), "advanced head")
-            .expect("write advanced");
-        git_sync(&harness.repo_path, &["add", "advanced.txt"]);
-        git_sync(&harness.repo_path, &["commit", "-m", "advanced head"]);
-        let rebound_head = head_oid(&harness.repo_path)
-            .await
-            .expect("rebound head")
-            .into_inner();
-
         let job = JobBuilder::new(harness.project.id, item_id, revision_id, "author_initial")
             .phase_kind(PhaseKind::Author)
             .workspace_kind(WorkspaceKind::Authoring)
             .execution_permission(ExecutionPermission::MayMutate)
             .phase_template_slug("author-initial")
-            .job_input(JobInput::authoring_head(CommitOid::new(
-                seed_commit.clone(),
-            )))
+            .job_input(JobInput::authoring_head(CommitOid::new(seed_commit)))
             .output_artifact_kind(OutputArtifactKind::Commit)
             .build();
         harness.db.create_job(&job).await.expect("create job");
@@ -6329,7 +6476,8 @@ mod tests {
             .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
-            .explicit_seed(seed_commit.as_str())
+            .seed_commit_oid(None::<String>)
+            .seed_target_commit_oid(Some(seed_commit.clone()))
             .build();
         harness
             .db
@@ -6337,12 +6485,23 @@ mod tests {
             .await
             .expect("create item");
 
+        std::fs::write(harness.repo_path.join("advanced.txt"), "advanced head")
+            .expect("write advanced");
+        git_sync(&harness.repo_path, &["add", "advanced.txt"]);
+        git_sync(&harness.repo_path, &["commit", "-m", "advanced head"]);
+        let rebound_head = head_oid(&harness.repo_path)
+            .await
+            .expect("rebound head")
+            .into_inner();
+
         let job = JobBuilder::new(harness.project.id, item_id, revision_id, "author_initial")
             .phase_kind(PhaseKind::Author)
             .workspace_kind(WorkspaceKind::Authoring)
             .execution_permission(ExecutionPermission::MayMutate)
             .phase_template_slug("author-initial")
-            .job_input(JobInput::authoring_head(CommitOid::new(seed_commit)))
+            .job_input(JobInput::authoring_head(CommitOid::new(
+                seed_commit.clone(),
+            )))
             .output_artifact_kind(OutputArtifactKind::Commit)
             .build();
         harness.db.create_job(&job).await.expect("create job");
@@ -6943,6 +7102,173 @@ timeout = "30s"
             .expect("list queue entries");
         assert_eq!(active_entries.len(), 1);
         assert_eq!(active_entries[0].item_revision_id, revision.id);
+    }
+
+    #[tokio::test]
+    async fn auto_triage_job_findings_treats_missing_policy_as_disabled() {
+        let harness = TestRuntimeHarness::new(Arc::new(BlockingRunner::new())).await;
+
+        let mut project = harness
+            .db
+            .get_project(harness.project.id)
+            .await
+            .expect("project");
+        project.execution_mode = ExecutionMode::Autopilot;
+        project.auto_triage_policy = None;
+        harness
+            .db
+            .update_project(&project)
+            .await
+            .expect("update project");
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let item = ItemBuilder::new(project.id, revision_id).id(item_id).build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .approval_policy(ApprovalPolicy::Required)
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let job = JobBuilder::new(project.id, item_id, revision_id, step::INVESTIGATE_ITEM)
+            .phase_kind(PhaseKind::Investigate)
+            .workspace_kind(WorkspaceKind::Review)
+            .execution_permission(ExecutionPermission::MustNotMutate)
+            .phase_template_slug("investigate-item")
+            .output_artifact_kind(OutputArtifactKind::FindingReport)
+            .build();
+        harness.db.create_job(&job).await.expect("create job");
+
+        let finding = FindingBuilder::new(project.id, item_id, revision_id, job.id)
+            .source_step_id(step::INVESTIGATE_ITEM)
+            .severity(FindingSeverity::Low)
+            .build();
+        harness
+            .db
+            .create_finding(&finding)
+            .await
+            .expect("create finding");
+
+        harness
+            .dispatcher
+            .auto_triage_job_findings(&project, item_id, job.id, &item)
+            .await
+            .expect("auto triage findings");
+
+        let findings = harness
+            .db
+            .list_findings_by_item(item_id)
+            .await
+            .expect("list findings");
+        assert_eq!(findings.len(), 1);
+        assert!(
+            findings[0].triage.is_unresolved(),
+            "disabled auto-triage should leave findings unresolved"
+        );
+
+        let items = harness
+            .db
+            .list_items_by_project(project.id)
+            .await
+            .expect("list items");
+        assert_eq!(items.len(), 1, "disabled auto-triage should not create backlog items");
+
+        let activity = harness
+            .db
+            .list_activity_by_project(project.id, 20, 0)
+            .await
+            .expect("list activity");
+        assert!(
+            activity.is_empty(),
+            "disabled auto-triage should not append finding activity"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_triage_job_findings_only_requests_approval_for_validate_integrated() {
+        let harness = TestRuntimeHarness::new(Arc::new(BlockingRunner::new())).await;
+
+        let mut project = harness
+            .db
+            .get_project(harness.project.id)
+            .await
+            .expect("project");
+        project.execution_mode = ExecutionMode::Autopilot;
+        project.auto_triage_policy = Some(AutoTriagePolicy {
+            critical: AutoTriageDecision::Backlog,
+            high: AutoTriageDecision::Backlog,
+            medium: AutoTriageDecision::Backlog,
+            low: AutoTriageDecision::Backlog,
+        });
+        harness
+            .db
+            .update_project(&project)
+            .await
+            .expect("update project");
+
+        let item_id = ingot_domain::ids::ItemId::new();
+        let revision_id = ingot_domain::ids::ItemRevisionId::new();
+        let item = ItemBuilder::new(project.id, revision_id)
+            .id(item_id)
+            .approval_state(ApprovalState::NotRequested)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .approval_policy(ApprovalPolicy::Required)
+            .build();
+        harness
+            .db
+            .create_item_with_revision(&item, &revision)
+            .await
+            .expect("create item");
+
+        let job = JobBuilder::new(project.id, item_id, revision_id, step::INVESTIGATE_ITEM)
+            .phase_kind(PhaseKind::Investigate)
+            .workspace_kind(WorkspaceKind::Review)
+            .execution_permission(ExecutionPermission::MustNotMutate)
+            .phase_template_slug("investigate-item")
+            .output_artifact_kind(OutputArtifactKind::FindingReport)
+            .build();
+        harness.db.create_job(&job).await.expect("create job");
+
+        let finding = FindingBuilder::new(project.id, item_id, revision_id, job.id)
+            .source_step_id(step::INVESTIGATE_ITEM)
+            .severity(FindingSeverity::High)
+            .build();
+        harness
+            .db
+            .create_finding(&finding)
+            .await
+            .expect("create finding");
+
+        harness
+            .dispatcher
+            .auto_triage_job_findings(&project, item_id, job.id, &item)
+            .await
+            .expect("auto triage findings");
+
+        let updated_item = harness.db.get_item(item_id).await.expect("reload item");
+        assert_eq!(
+            updated_item.approval_state,
+            ApprovalState::NotRequested,
+            "non-validate findings must not move an item into approval"
+        );
+
+        let activity = harness
+            .db
+            .list_activity_by_project(project.id, 20, 0)
+            .await
+            .expect("list activity");
+        assert!(
+            !activity
+                .iter()
+                .any(|entry| entry.event_type == ActivityEventType::ApprovalRequested),
+            "non-validate findings must not emit approval_requested"
+        );
     }
 
     #[tokio::test]

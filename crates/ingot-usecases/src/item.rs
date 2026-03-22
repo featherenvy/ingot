@@ -204,6 +204,8 @@ mod tests {
             default_branch: "main".into(),
             color: "#000".into(),
             execution_mode: ingot_domain::project::ExecutionMode::default(),
+            agent_routing: None,
+            auto_triage_policy: None,
             created_at,
             updated_at: created_at,
         };

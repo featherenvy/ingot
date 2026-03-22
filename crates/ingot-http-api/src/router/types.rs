@@ -10,7 +10,7 @@ use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::{AgentId, ConvergenceId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::item::{Classification, Item, Priority};
 use ingot_domain::job::{Job, OutcomeClass};
-use ingot_domain::project::ExecutionMode;
+use ingot_domain::project::{AgentRouting, AutoTriagePolicy, ExecutionMode};
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
 use ingot_domain::revision_context::RevisionContextSummary;
 use ingot_domain::workspace::Workspace;
@@ -146,7 +146,9 @@ pub struct CreateProjectRequest {
     pub path: String,
     pub default_branch: Option<String>,
     pub color: Option<String>,
-    pub execution_mode: Option<ingot_domain::project::ExecutionMode>,
+    pub execution_mode: Option<ExecutionMode>,
+    pub agent_routing: Option<AgentRouting>,
+    pub auto_triage_policy: Option<AutoTriagePolicy>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -155,7 +157,11 @@ pub struct UpdateProjectRequest {
     pub path: Option<String>,
     pub default_branch: Option<String>,
     pub color: Option<String>,
-    pub execution_mode: Option<ingot_domain::project::ExecutionMode>,
+    pub execution_mode: Option<ExecutionMode>,
+    pub agent_routing: Option<AgentRouting>,
+    /// Absent → keep existing; explicit null → clear to None; object → set.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub auto_triage_policy: Option<Option<AutoTriagePolicy>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -321,4 +327,15 @@ pub struct FailJobRequest {
     pub outcome_class: OutcomeClass,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+}
+
+/// Distinguishes JSON field-absent (`None`) from explicit `null` (`Some(None)`).
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    // This function is only called when the field IS present in the JSON
+    // (thanks to #[serde(default)]). So we wrap the deserialized value.
+    Option::<T>::deserialize(deserializer).map(Some)
 }

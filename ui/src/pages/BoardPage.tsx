@@ -63,8 +63,8 @@ function sortItems(items: ItemSummary[]): ItemSummary[] {
     const aPri = PRIORITY_ORDER[a.item.priority]
     const bPri = PRIORITY_ORDER[b.item.priority]
     if (aPri !== bPri) return aPri - bPri
-    // Then by updated_at (newest first)
-    return b.item.updated_at.localeCompare(a.item.updated_at)
+    // Then by sort_key (preserves user-defined ordering)
+    return a.item.sort_key.localeCompare(b.item.sort_key)
   })
 }
 

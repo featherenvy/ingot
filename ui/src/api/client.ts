@@ -1,6 +1,8 @@
 import type {
   Activity,
   Agent,
+  AgentRouting,
+  AutoTriagePolicy,
   ExecutionMode,
   ItemDetail,
   ItemSummary,
@@ -55,6 +57,8 @@ export const createProject = (payload: {
   default_branch?: string
   color?: string
   execution_mode?: ExecutionMode
+  agent_routing?: AgentRouting | null
+  auto_triage_policy?: AutoTriagePolicy | null
 }) =>
   request<Project>('/projects', {
     method: 'POST',
@@ -69,6 +73,8 @@ export const updateProject = (
     default_branch?: string
     color?: string
     execution_mode?: ExecutionMode
+    agent_routing?: AgentRouting | null
+    auto_triage_policy?: AutoTriagePolicy | null
   },
 ) =>
   request<Project>(`/projects/${projectId}`, {

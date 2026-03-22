@@ -63,6 +63,8 @@ pub(super) async fn create_project(
         default_branch,
         color: normalize_project_color(request.color.as_deref())?,
         execution_mode: request.execution_mode.unwrap_or_default(),
+        agent_routing: request.agent_routing,
+        auto_triage_policy: request.auto_triage_policy,
         created_at: now,
         updated_at: now,
     };
@@ -115,6 +117,10 @@ pub(super) async fn update_project(
         None => project.color,
     };
     project.execution_mode = request.execution_mode.unwrap_or(project.execution_mode);
+    project.agent_routing = request.agent_routing.or(project.agent_routing);
+    if let Some(policy) = request.auto_triage_policy {
+        project.auto_triage_policy = policy;
+    }
     project.updated_at = Utc::now();
 
     state

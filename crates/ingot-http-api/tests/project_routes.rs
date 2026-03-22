@@ -1,10 +1,10 @@
 use std::fs;
 use std::time::Duration;
 
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode, header};
+use axum::body::{to_bytes, Body};
+use axum::http::{header, Request, StatusCode};
 use chrono::Utc;
-use ingot_domain::project::ExecutionMode;
+use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
 use tower::ServiceExt;
 
@@ -308,6 +308,59 @@ async fn update_project_route_waits_for_project_mutation_lock() {
         .expect("update task join")
         .expect("update response");
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn update_project_route_allows_clearing_auto_triage_policy_with_null() {
+    let repo = temp_git_repo("ingot-http-api");
+    let db = migrated_test_db("ingot-http-api-db").await;
+    let project_id = "prj_000000000000000000000000000000a3";
+    let project = test_project_builder(&repo, project_id)
+        .execution_mode(ExecutionMode::Autopilot)
+        .auto_triage_policy(AutoTriagePolicy {
+            critical: AutoTriageDecision::FixNow,
+            high: AutoTriageDecision::Backlog,
+            medium: AutoTriageDecision::Backlog,
+            low: AutoTriageDecision::Skip,
+        })
+        .build()
+        .persist(&db)
+        .await
+        .expect("persist project");
+
+    let app = test_router(db.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{project_id}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "auto_triage_policy": null
+                    })
+                    .to_string(),
+                ))
+                .expect("build update request"),
+        )
+        .await
+        .expect("update response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read update body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("update json");
+    assert!(json["auto_triage_policy"].is_null());
+
+    let stored = db
+        .get_project(project.id)
+        .await
+        .expect("reload stored project");
+    assert!(
+        stored.auto_triage_policy.is_none(),
+        "explicit null should clear the saved auto-triage policy"
+    );
 }
 
 #[tokio::test]
