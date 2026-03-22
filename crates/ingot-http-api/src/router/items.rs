@@ -1233,7 +1233,9 @@ pub(super) async fn prepare_convergence_workspace(
             integration_workspace.mark_error(Utc::now());
             let _ = state.db.update_workspace(&integration_workspace).await;
 
-            convergence.transition_to_conflicted(error.to_string(), Utc::now());
+            convergence
+                .transition_to_conflicted(error.to_string(), Utc::now())
+                .map_err(|error| ApiError::from(UseCaseError::Internal(error.to_string())))?;
             let _ = state.db.update_convergence(&convergence).await;
             let mut escalated_item = item.clone();
             escalated_item.escalation = Escalation::OperatorRequired {
@@ -1260,7 +1262,7 @@ pub(super) async fn prepare_convergence_workspace(
 
             operation.status = GitOperationStatus::Failed;
             operation.completed_at = Some(Utc::now());
-            operation
+            let _ = operation
                 .payload
                 .set_replay_metadata(ConvergenceReplayMetadata {
                     source_commit_oids: source_commit_oids.clone(),
@@ -1299,7 +1301,7 @@ pub(super) async fn prepare_convergence_workspace(
 
                 operation.status = GitOperationStatus::Failed;
                 operation.completed_at = Some(Utc::now());
-                operation
+                let _ = operation
                     .payload
                     .set_replay_metadata(ConvergenceReplayMetadata {
                         source_commit_oids: source_commit_oids.clone(),
@@ -1357,7 +1359,7 @@ pub(super) async fn prepare_convergence_workspace(
 
                 operation.status = GitOperationStatus::Failed;
                 operation.completed_at = Some(Utc::now());
-                operation
+                let _ = operation
                     .payload
                     .set_replay_metadata(ConvergenceReplayMetadata {
                         source_commit_oids: source_commit_oids.clone(),
@@ -1411,7 +1413,7 @@ pub(super) async fn prepare_convergence_workspace(
 
                 operation.status = GitOperationStatus::Failed;
                 operation.completed_at = Some(Utc::now());
-                operation
+                let _ = operation
                     .payload
                     .set_replay_metadata(ConvergenceReplayMetadata {
                         source_commit_oids: source_commit_oids.clone(),
@@ -1450,7 +1452,9 @@ pub(super) async fn prepare_convergence_workspace(
         .await
         .map_err(repo_to_internal)?;
 
-    convergence.transition_to_prepared(prepared_tip.clone(), Some(Utc::now()));
+    convergence
+        .transition_to_prepared(prepared_tip.clone(), Some(Utc::now()))
+        .map_err(|error| ApiError::from(UseCaseError::Internal(error.to_string())))?;
     state
         .db
         .update_convergence(&convergence)
@@ -1459,13 +1463,15 @@ pub(super) async fn prepare_convergence_workspace(
 
     operation
         .payload
-        .set_convergence_commit_result(prepared_tip);
+        .set_convergence_commit_result(prepared_tip)
+        .map_err(|error| ApiError::from(UseCaseError::Internal(error.to_string())))?;
     operation
         .payload
         .set_replay_metadata(ConvergenceReplayMetadata {
             source_commit_oids,
             prepared_commit_oids,
-        });
+        })
+        .map_err(|error| ApiError::from(UseCaseError::Internal(error.to_string())))?;
     operation.status = GitOperationStatus::Applied;
     operation.completed_at = Some(Utc::now());
     state

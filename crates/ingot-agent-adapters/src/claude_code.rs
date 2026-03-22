@@ -36,7 +36,6 @@ impl ClaudeCodeCliAdapter {
             "--model".into(),
             self.model.to_string(),
             "--no-session-persistence".into(),
-            "--bare".into(),
             "--dangerously-skip-permissions".into(),
             "--json-schema".into(),
             schema_json,
@@ -201,12 +200,13 @@ fn structured_output_schema() -> serde_json::Value {
 ///
 /// Envelope shape:
 /// ```json
-/// { "type": "result", "subtype": "success", "is_error": false, "result": "...", ... }
+/// { "type": "result", "subtype": "success", "is_error": false, "result": "...",
+///   "structured_output": { ... }, ... }
 /// ```
 ///
-/// If `is_error` is true, returns `None`. If `result` is a JSON string that
-/// parses as an object/array, returns the parsed value. If it's a plain string,
-/// wraps it as `{"summary": "<text>"}`.
+/// If `is_error` is true, returns `None`. Prefers `structured_output` (populated
+/// when `--json-schema` is used) over `result`. Falls back to parsing `result`
+/// as JSON or wrapping it as `{"summary": "<text>"}`.
 fn parse_print_output(stdout: &str) -> Option<serde_json::Value> {
     let envelope: serde_json::Value = serde_json::from_str(stdout).ok()?;
 
@@ -214,11 +214,18 @@ fn parse_print_output(stdout: &str) -> Option<serde_json::Value> {
         return None;
     }
 
+    // Prefer structured_output (set when --json-schema is used)
+    if let Some(structured) = envelope.get("structured_output") {
+        if structured.is_object() || structured.is_array() {
+            return Some(structured.clone());
+        }
+    }
+
     let result = envelope.get("result")?;
 
     match result {
         serde_json::Value::String(s) => {
-            // Try to parse as JSON first (the --json-schema case)
+            // Try to parse as JSON first
             match serde_json::from_str::<serde_json::Value>(s) {
                 Ok(parsed) if parsed.is_object() || parsed.is_array() => Some(parsed),
                 _ => Some(serde_json::json!({ "summary": s.trim() })),
@@ -251,8 +258,8 @@ mod tests {
 
         assert!(args.contains(&"--print".into()));
         assert!(args.contains(&"--dangerously-skip-permissions".into()));
-        assert!(args.contains(&"--bare".into()));
         assert!(args.contains(&"--no-session-persistence".into()));
+        assert!(!args.contains(&"--bare".into()));
         assert!(!args.contains(&"--disallowedTools".into()));
 
         // Verify model position
@@ -309,6 +316,54 @@ mod tests {
         assert_eq!(
             schema["properties"]["validation"]["type"],
             serde_json::json!(["string", "null"])
+        );
+    }
+
+    #[test]
+    fn parse_print_output_prefers_structured_output_over_result() {
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "",
+            "structured_output": {"outcome": "findings", "summary": "All good", "findings": []}
+        });
+        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        assert_eq!(
+            result,
+            Some(serde_json::json!({"outcome": "findings", "summary": "All good", "findings": []}))
+        );
+    }
+
+    #[test]
+    fn parse_print_output_falls_back_to_result_when_no_structured_output() {
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": r#"{"summary":"done","validation":null}"#,
+            "duration_ms": 1000
+        });
+        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        assert_eq!(
+            result,
+            Some(serde_json::json!({"summary": "done", "validation": null}))
+        );
+    }
+
+    #[test]
+    fn parse_print_output_ignores_null_structured_output() {
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": {"summary": "done", "validation": null},
+            "structured_output": null
+        });
+        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        assert_eq!(
+            result,
+            Some(serde_json::json!({"summary": "done", "validation": null}))
         );
     }
 

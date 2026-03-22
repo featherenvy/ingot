@@ -41,6 +41,14 @@ pub enum GitOperationStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum OperationPayloadError {
+    #[error("operation payload is not create_job_commit")]
+    NotCreateJobCommit,
+    #[error("operation payload is not prepare_convergence_commit")]
+    NotPrepareConvergenceCommit,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConvergenceReplayMetadata {
     pub source_commit_oids: Vec<CommitOid>,
@@ -264,7 +272,7 @@ impl OperationPayload {
         }
     }
 
-    pub fn set_job_commit_result(&mut self, oid: CommitOid) {
+    pub fn set_job_commit_result(&mut self, oid: CommitOid) -> Result<(), OperationPayloadError> {
         match self {
             Self::CreateJobCommit {
                 new_oid,
@@ -273,12 +281,16 @@ impl OperationPayload {
             } => {
                 *new_oid = Some(oid.clone());
                 *commit_oid = Some(oid);
+                Ok(())
             }
-            _ => panic!("set_job_commit_result called on non-CreateJobCommit payload"),
+            _ => Err(OperationPayloadError::NotCreateJobCommit),
         }
     }
 
-    pub fn set_convergence_commit_result(&mut self, tip_oid: CommitOid) {
+    pub fn set_convergence_commit_result(
+        &mut self,
+        tip_oid: CommitOid,
+    ) -> Result<(), OperationPayloadError> {
         match self {
             Self::PrepareConvergenceCommit {
                 new_oid,
@@ -287,21 +299,24 @@ impl OperationPayload {
             } => {
                 *new_oid = Some(tip_oid.clone());
                 *commit_oid = Some(tip_oid);
+                Ok(())
             }
-            _ => panic!(
-                "set_convergence_commit_result called on non-PrepareConvergenceCommit payload"
-            ),
+            _ => Err(OperationPayloadError::NotPrepareConvergenceCommit),
         }
     }
 
-    pub fn set_replay_metadata(&mut self, metadata: ConvergenceReplayMetadata) {
+    pub fn set_replay_metadata(
+        &mut self,
+        metadata: ConvergenceReplayMetadata,
+    ) -> Result<(), OperationPayloadError> {
         match self {
             Self::PrepareConvergenceCommit {
                 replay_metadata, ..
             } => {
                 *replay_metadata = Some(metadata);
+                Ok(())
             }
-            _ => panic!("set_replay_metadata called on non-PrepareConvergenceCommit payload"),
+            _ => Err(OperationPayloadError::NotPrepareConvergenceCommit),
         }
     }
 }
@@ -614,7 +629,7 @@ mod tests {
             new_oid: None,
             commit_oid: None,
         };
-        payload.set_job_commit_result("abc123".into());
+        payload.set_job_commit_result("abc123".into()).unwrap();
         assert_eq!(payload.new_oid(), Some(&CommitOid::from("abc123")));
         assert_eq!(payload.commit_oid(), Some(&CommitOid::from("abc123")));
     }
@@ -629,7 +644,9 @@ mod tests {
             commit_oid: None,
             replay_metadata: None,
         };
-        payload.set_convergence_commit_result("tip123".into());
+        payload
+            .set_convergence_commit_result("tip123".into())
+            .unwrap();
         assert_eq!(payload.new_oid(), Some(&CommitOid::from("tip123")));
         assert_eq!(payload.commit_oid(), Some(&CommitOid::from("tip123")));
     }
@@ -644,10 +661,12 @@ mod tests {
             commit_oid: None,
             replay_metadata: None,
         };
-        payload.set_replay_metadata(ConvergenceReplayMetadata {
-            source_commit_oids: vec![CommitOid::from("s1")],
-            prepared_commit_oids: vec![CommitOid::from("p1")],
-        });
+        payload
+            .set_replay_metadata(ConvergenceReplayMetadata {
+                source_commit_oids: vec![CommitOid::from("s1")],
+                prepared_commit_oids: vec![CommitOid::from("p1")],
+            })
+            .unwrap();
         match &payload {
             OperationPayload::PrepareConvergenceCommit {
                 replay_metadata, ..
@@ -658,6 +677,43 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn set_job_commit_result_rejects_non_job_payload() {
+        let mut payload = OperationPayload::FinalizeTargetRef {
+            workspace_id: None,
+            ref_name: GitRef::new("ref"),
+            expected_old_oid: "old".into(),
+            new_oid: "new".into(),
+            commit_oid: None,
+        };
+
+        let error = payload
+            .set_job_commit_result("abc123".into())
+            .expect_err("finalize payload should reject job commit result");
+
+        assert_eq!(error, OperationPayloadError::NotCreateJobCommit);
+    }
+
+    #[test]
+    fn set_replay_metadata_rejects_non_convergence_payload() {
+        let mut payload = OperationPayload::CreateJobCommit {
+            workspace_id: test_workspace_id(),
+            ref_name: GitRef::new("ref"),
+            expected_old_oid: "old".into(),
+            new_oid: None,
+            commit_oid: None,
+        };
+
+        let error = payload
+            .set_replay_metadata(ConvergenceReplayMetadata {
+                source_commit_oids: vec![CommitOid::from("s1")],
+                prepared_commit_oids: vec![CommitOid::from("p1")],
+            })
+            .expect_err("job payload should reject convergence replay metadata");
+
+        assert_eq!(error, OperationPayloadError::NotPrepareConvergenceCommit);
     }
 
     #[test]

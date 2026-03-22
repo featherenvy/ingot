@@ -266,9 +266,9 @@ where
     ) -> Result<JobCompletionPlan, CompleteJobError> {
         match context.job.output_artifact_kind {
             OutputArtifactKind::Commit => {
-                let output_commit_oid = command
-                    .output_commit_oid
-                    .expect("commit completion should be normalized");
+                let output_commit_oid = command.output_commit_oid.ok_or_else(|| {
+                    missing_normalized_completion_field("commit", "output_commit_oid")
+                })?;
 
                 let commit_is_present = self
                     .git
@@ -299,12 +299,12 @@ where
             OutputArtifactKind::ValidationReport
             | OutputArtifactKind::ReviewReport
             | OutputArtifactKind::FindingReport => {
-                let result_schema_version = command
-                    .result_schema_version
-                    .expect("report completion should include schema version");
+                let result_schema_version = command.result_schema_version.ok_or_else(|| {
+                    missing_normalized_completion_field("report", "schema version")
+                })?;
                 let result_payload = command
                     .result_payload
-                    .expect("report completion should include payload");
+                    .ok_or_else(|| missing_normalized_completion_field("report", "payload"))?;
 
                 let mut completed_job = context.job.clone();
                 completed_job.complete(
@@ -966,6 +966,16 @@ fn map_completion_apply_error(error: RepositoryError) -> CompleteJobError {
 
 fn map_git_port_error(error: GitPortError) -> CompleteJobError {
     UseCaseError::Internal(error.to_string()).into()
+}
+
+fn missing_normalized_completion_field(
+    artifact_kind: &'static str,
+    field: &'static str,
+) -> CompleteJobError {
+    UseCaseError::Internal(format!(
+        "{artifact_kind} completion missing {field} after normalization"
+    ))
+    .into()
 }
 
 fn map_target_ref_hold_error(error: TargetRefHoldError) -> CompleteJobError {

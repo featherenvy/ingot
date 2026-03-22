@@ -689,7 +689,9 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                     )
                 })?;
 
-            convergence.transition_to_finalized(final_commit_oid, now);
+            convergence
+                .transition_to_finalized(final_commit_oid, now)
+                .map_err(|error| UseCaseError::Internal(error.to_string()))?;
             state
                 .db
                 .update_convergence(&convergence)

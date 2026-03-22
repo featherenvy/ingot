@@ -27,6 +27,22 @@ pub enum ConvergenceStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ConvergenceTransitionError {
+    #[error("queued convergence is missing transition context")]
+    QueuedMissingContext,
+    #[error("finalized convergence is missing integration workspace for transition")]
+    FinalizedMissingWorkspace,
+    #[error("failed convergence is missing integration workspace for transition")]
+    FailedMissingWorkspace,
+    #[error("failed convergence is missing input target for transition")]
+    FailedMissingInputTarget,
+    #[error("cancelled convergence is missing integration workspace for transition")]
+    CancelledMissingWorkspace,
+    #[error("cancelled convergence is missing input target for transition")]
+    CancelledMissingInputTarget,
+}
+
 impl ConvergenceStatus {
     #[must_use]
     pub fn is_active(self) -> bool {
@@ -79,6 +95,20 @@ pub enum ConvergenceState {
 }
 
 impl ConvergenceState {
+    fn require_workspace_id(
+        workspace_id: Option<WorkspaceId>,
+        error: ConvergenceTransitionError,
+    ) -> Result<WorkspaceId, ConvergenceTransitionError> {
+        workspace_id.ok_or(error)
+    }
+
+    fn require_input_target_commit_oid(
+        input_target_commit_oid: Option<CommitOid>,
+        error: ConvergenceTransitionError,
+    ) -> Result<CommitOid, ConvergenceTransitionError> {
+        input_target_commit_oid.ok_or(error)
+    }
+
     #[must_use]
     pub fn status(&self) -> ConvergenceStatus {
         match self {
@@ -221,52 +251,64 @@ impl ConvergenceState {
         }
     }
 
-    fn into_required_transition_context(self) -> (WorkspaceId, CommitOid) {
+    fn into_required_transition_context(
+        self,
+    ) -> Result<(WorkspaceId, CommitOid), ConvergenceTransitionError> {
         match self {
             Self::Running {
                 integration_workspace_id,
                 input_target_commit_oid,
-            } => (integration_workspace_id, input_target_commit_oid),
+            } => Ok((integration_workspace_id, input_target_commit_oid)),
             Self::Prepared {
                 integration_workspace_id,
                 input_target_commit_oid,
                 ..
-            } => (integration_workspace_id, input_target_commit_oid),
+            } => Ok((integration_workspace_id, input_target_commit_oid)),
             Self::Finalized {
                 integration_workspace_id,
                 input_target_commit_oid,
                 ..
-            } => (
-                integration_workspace_id
-                    .expect("finalized convergence missing workspace for transition"),
+            } => Ok((
+                Self::require_workspace_id(
+                    integration_workspace_id,
+                    ConvergenceTransitionError::FinalizedMissingWorkspace,
+                )?,
                 input_target_commit_oid,
-            ),
+            )),
             Self::Conflicted {
                 integration_workspace_id,
                 input_target_commit_oid,
                 ..
-            } => (integration_workspace_id, input_target_commit_oid),
+            } => Ok((integration_workspace_id, input_target_commit_oid)),
             Self::Failed {
                 integration_workspace_id,
                 input_target_commit_oid,
                 ..
-            } => (
-                integration_workspace_id
-                    .expect("failed convergence missing workspace for transition"),
-                input_target_commit_oid
-                    .expect("failed convergence missing input_target for transition"),
-            ),
+            } => Ok((
+                Self::require_workspace_id(
+                    integration_workspace_id,
+                    ConvergenceTransitionError::FailedMissingWorkspace,
+                )?,
+                Self::require_input_target_commit_oid(
+                    input_target_commit_oid,
+                    ConvergenceTransitionError::FailedMissingInputTarget,
+                )?,
+            )),
             Self::Cancelled {
                 integration_workspace_id,
                 input_target_commit_oid,
                 ..
-            } => (
-                integration_workspace_id
-                    .expect("cancelled convergence missing workspace for transition"),
-                input_target_commit_oid
-                    .expect("cancelled convergence missing input_target for transition"),
-            ),
-            Self::Queued => panic!("cannot extract running fields from Queued state"),
+            } => Ok((
+                Self::require_workspace_id(
+                    integration_workspace_id,
+                    ConvergenceTransitionError::CancelledMissingWorkspace,
+                )?,
+                Self::require_input_target_commit_oid(
+                    input_target_commit_oid,
+                    ConvergenceTransitionError::CancelledMissingInputTarget,
+                )?,
+            )),
+            Self::Queued => Err(ConvergenceTransitionError::QueuedMissingContext),
         }
     }
 
@@ -355,33 +397,43 @@ impl Convergence {
         Some(false)
     }
 
-    pub fn transition_to_conflicted(&mut self, summary: String, completed_at: DateTime<Utc>) {
+    pub fn transition_to_conflicted(
+        &mut self,
+        summary: String,
+        completed_at: DateTime<Utc>,
+    ) -> Result<(), ConvergenceTransitionError> {
         let (integration_workspace_id, input_target_commit_oid) =
-            self.take_state().into_required_transition_context();
+            self.take_state().into_required_transition_context()?;
         self.state = ConvergenceState::Conflicted {
             integration_workspace_id,
             input_target_commit_oid,
             conflict_summary: summary,
             completed_at,
         };
+        Ok(())
     }
 
     pub fn transition_to_prepared(
         &mut self,
         prepared_oid: CommitOid,
         completed_at: Option<DateTime<Utc>>,
-    ) {
+    ) -> Result<(), ConvergenceTransitionError> {
         let (integration_workspace_id, input_target_commit_oid) =
-            self.take_state().into_required_transition_context();
+            self.take_state().into_required_transition_context()?;
         self.state = ConvergenceState::Prepared {
             integration_workspace_id,
             input_target_commit_oid,
             prepared_commit_oid: prepared_oid,
             completed_at,
         };
+        Ok(())
     }
 
-    pub fn transition_to_finalized(&mut self, final_oid: CommitOid, completed_at: DateTime<Utc>) {
+    pub fn transition_to_finalized(
+        &mut self,
+        final_oid: CommitOid,
+        completed_at: DateTime<Utc>,
+    ) -> Result<(), ConvergenceTransitionError> {
         self.state = match self.take_state() {
             ConvergenceState::Prepared {
                 integration_workspace_id,
@@ -397,7 +449,7 @@ impl Convergence {
             },
             other => {
                 let (integration_workspace_id, input_target_commit_oid) =
-                    other.into_required_transition_context();
+                    other.into_required_transition_context()?;
                 ConvergenceState::Finalized {
                     integration_workspace_id: Some(integration_workspace_id),
                     input_target_commit_oid,
@@ -407,6 +459,7 @@ impl Convergence {
                 }
             }
         };
+        Ok(())
     }
 
     pub fn transition_to_failed(&mut self, summary: Option<String>, completed_at: DateTime<Utc>) {
@@ -706,6 +759,33 @@ mod tests {
             error.to_string().contains("completed_at"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn transition_to_prepared_rejects_queued_state() {
+        let mut convergence = base_convergence(ConvergenceState::Queued);
+
+        let error = convergence
+            .transition_to_prepared("prep".into(), Some(default_timestamp()))
+            .expect_err("queued convergence should not transition directly to prepared");
+
+        assert_eq!(error, ConvergenceTransitionError::QueuedMissingContext);
+    }
+
+    #[test]
+    fn transition_to_finalized_rejects_failed_state_without_workspace() {
+        let mut convergence = base_convergence(ConvergenceState::Failed {
+            integration_workspace_id: None,
+            input_target_commit_oid: Some("base".into()),
+            conflict_summary: None,
+            completed_at: default_timestamp(),
+        });
+
+        let error = convergence
+            .transition_to_finalized("final".into(), default_timestamp())
+            .expect_err("failed convergence without workspace should not finalize");
+
+        assert_eq!(error, ConvergenceTransitionError::FailedMissingWorkspace);
     }
 
     #[test]

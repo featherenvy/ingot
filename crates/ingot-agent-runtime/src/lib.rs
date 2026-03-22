@@ -1701,7 +1701,9 @@ impl JobDispatcher {
                         "reconciled finalize_target_ref missing commit oid".into(),
                     )
                 })?;
-            convergence.transition_to_finalized(final_oid, Utc::now());
+            convergence
+                .transition_to_finalized(final_oid, Utc::now())
+                .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
             self.db.update_convergence(&convergence).await?;
         }
 
@@ -1779,7 +1781,9 @@ impl JobDispatcher {
                         "reconciled prepare_convergence_commit missing commit oid".into(),
                     )
                 })?;
-            convergence.transition_to_prepared(prepared_oid, Some(Utc::now()));
+            convergence
+                .transition_to_prepared(prepared_oid, Some(Utc::now()))
+                .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
             self.db.update_convergence(&convergence).await?;
         }
 
@@ -3219,7 +3223,9 @@ impl JobDispatcher {
 
         match failure_kind {
             PrepareFailureKind::Conflicted => {
-                convergence.transition_to_conflicted(summary.clone(), Utc::now());
+                convergence
+                    .transition_to_conflicted(summary.clone(), Utc::now())
+                    .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
             }
             PrepareFailureKind::Failed => {
                 convergence.transition_to_failed(Some(summary.clone()), Utc::now());
@@ -3255,7 +3261,8 @@ impl JobDispatcher {
             .set_replay_metadata(ConvergenceReplayMetadata {
                 source_commit_oids: source_commit_oids.to_vec(),
                 prepared_commit_oids: prepared_commit_oids.to_vec(),
-            });
+            })
+            .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
         self.db.update_git_operation(operation).await?;
 
         let event_type = match failure_kind {
@@ -3574,18 +3581,22 @@ impl JobDispatcher {
         integration_workspace.mark_ready_with_head(prepared_tip.clone(), Utc::now());
         self.db.update_workspace(&integration_workspace).await?;
 
-        convergence.transition_to_prepared(prepared_tip.clone(), Some(Utc::now()));
+        convergence
+            .transition_to_prepared(prepared_tip.clone(), Some(Utc::now()))
+            .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
         self.db.update_convergence(&convergence).await?;
 
         operation
             .payload
-            .set_convergence_commit_result(prepared_tip.clone());
+            .set_convergence_commit_result(prepared_tip.clone())
+            .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
         operation
             .payload
             .set_replay_metadata(ConvergenceReplayMetadata {
                 source_commit_oids,
                 prepared_commit_oids,
-            });
+            })
+            .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
         self.mark_git_operation_reconciled(&mut operation).await?;
 
         let mut all_convergences = convergences.to_vec();
@@ -3792,7 +3803,10 @@ impl JobDispatcher {
         )
         .await?;
 
-        operation.payload.set_job_commit_result(commit_oid.clone());
+        operation
+            .payload
+            .set_job_commit_result(commit_oid.clone())
+            .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
         operation.status = GitOperationStatus::Applied;
         operation.completed_at = Some(Utc::now());
         self.db.update_git_operation(&operation).await?;
@@ -7047,7 +7061,9 @@ timeout = "30s"
             .await
             .expect("seed head")
             .into_inner();
-        let item = ItemBuilder::new(project.id, revision_id).id(item_id).build();
+        let item = ItemBuilder::new(project.id, revision_id)
+            .id(item_id)
+            .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
             .approval_policy(ApprovalPolicy::Required)
