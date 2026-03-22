@@ -6126,8 +6126,7 @@ mod tests {
             .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
-            .seed_commit_oid(None::<String>)
-            .seed_target_commit_oid(Some(seed_commit.clone()))
+            .explicit_seed(seed_commit.as_str())
             .build();
         harness
             .db
@@ -6135,23 +6134,12 @@ mod tests {
             .await
             .expect("create item");
 
-        std::fs::write(harness.repo_path.join("advanced.txt"), "advanced head")
-            .expect("write advanced");
-        git_sync(&harness.repo_path, &["add", "advanced.txt"]);
-        git_sync(&harness.repo_path, &["commit", "-m", "advanced head"]);
-        let rebound_head = head_oid(&harness.repo_path)
-            .await
-            .expect("rebound head")
-            .into_inner();
-
         let job = JobBuilder::new(harness.project.id, item_id, revision_id, "author_initial")
             .phase_kind(PhaseKind::Author)
             .workspace_kind(WorkspaceKind::Authoring)
             .execution_permission(ExecutionPermission::MayMutate)
             .phase_template_slug("author-initial")
-            .job_input(JobInput::authoring_head(CommitOid::new(
-                seed_commit.clone(),
-            )))
+            .job_input(JobInput::authoring_head(CommitOid::new(seed_commit)))
             .output_artifact_kind(OutputArtifactKind::Commit)
             .build();
         harness.db.create_job(&job).await.expect("create job");
@@ -6240,7 +6228,8 @@ mod tests {
             .build();
         let revision = RevisionBuilder::new(item_id)
             .id(revision_id)
-            .explicit_seed(seed_commit.as_str())
+            .seed_commit_oid(None::<String>)
+            .seed_target_commit_oid(Some(seed_commit.clone()))
             .build();
         harness
             .db
@@ -6248,12 +6237,23 @@ mod tests {
             .await
             .expect("create item");
 
+        std::fs::write(harness.repo_path.join("advanced.txt"), "advanced head")
+            .expect("write advanced");
+        git_sync(&harness.repo_path, &["add", "advanced.txt"]);
+        git_sync(&harness.repo_path, &["commit", "-m", "advanced head"]);
+        let rebound_head = head_oid(&harness.repo_path)
+            .await
+            .expect("rebound head")
+            .into_inner();
+
         let job = JobBuilder::new(harness.project.id, item_id, revision_id, "author_initial")
             .phase_kind(PhaseKind::Author)
             .workspace_kind(WorkspaceKind::Authoring)
             .execution_permission(ExecutionPermission::MayMutate)
             .phase_template_slug("author-initial")
-            .job_input(JobInput::authoring_head(CommitOid::new(seed_commit)))
+            .job_input(JobInput::authoring_head(CommitOid::new(
+                seed_commit.clone(),
+            )))
             .output_artifact_kind(OutputArtifactKind::Commit)
             .build();
         harness.db.create_job(&job).await.expect("create job");
