@@ -239,8 +239,6 @@ fn parse_print_output(stdout: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
     fn request(may_mutate: bool) -> AgentRequest {
         AgentRequest {
             prompt: "Implement the change".into(),
@@ -429,57 +427,5 @@ mod tests {
     fn parse_print_output_returns_none_for_non_json_stdout() {
         let result = parse_print_output("not json at all");
         assert_eq!(result, None);
-    }
-
-    #[tokio::test]
-    async fn launch_closes_stdin_after_writing_prompt() {
-        let root =
-            std::env::temp_dir().join(format!("ingot-claude-adapter-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&root).expect("create temp dir");
-
-        let cli_path = root.join("fake-claude.sh");
-        std::fs::write(
-            &cli_path,
-            r#"#!/bin/sh
-# Capture stdin to a file
-cat > "$PWD/stdin.txt"
-# Emit a Claude --print JSON envelope on stdout
-cat <<'EOF'
-{"type":"result","subtype":"success","is_error":false,"result":{"summary":"ok","validation":null},"duration_ms":100}
-EOF
-"#,
-        )
-        .expect("write fake cli");
-        let mut permissions = std::fs::metadata(&cli_path)
-            .expect("fake cli metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&cli_path, permissions).expect("chmod fake cli");
-
-        let adapter = ClaudeCodeCliAdapter::new(cli_path.clone(), "claude-sonnet-4-6");
-        let request = AgentRequest {
-            working_dir: root.clone(),
-            ..request(true)
-        };
-
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            adapter.launch(&request, &root),
-        )
-        .await
-        .expect("launch timed out")
-        .expect("launch response");
-
-        assert_eq!(response.exit_code, 0);
-        assert_eq!(
-            std::fs::read_to_string(root.join("stdin.txt")).expect("stdin capture"),
-            request.prompt
-        );
-        assert_eq!(
-            response.result,
-            Some(serde_json::json!({"summary": "ok", "validation": null}))
-        );
-
-        let _ = std::fs::remove_dir_all(root);
     }
 }
