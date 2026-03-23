@@ -302,7 +302,7 @@ async fn retry_route_requeues_authoring_job_without_persisting_assigned_state() 
     let retried_job: (String, Option<String>) =
         sqlx::query_as("SELECT status, workspace_id FROM jobs WHERE id = ?")
             .bind(retried_job_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("retried job row");
     assert_eq!(retried_job.0, "queued");
@@ -497,7 +497,7 @@ async fn cancel_route_marks_active_job_cancelled_and_clears_workspace_attachment
     let job_state: (String, String) =
         sqlx::query_as("SELECT status, outcome_class FROM jobs WHERE id = ?")
             .bind(&job_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("job state");
     assert_eq!(job_state.0, "cancelled");
@@ -505,7 +505,7 @@ async fn cancel_route_marks_active_job_cancelled_and_clears_workspace_attachment
     let workspace_state: (String, Option<String>) =
         sqlx::query_as("SELECT status, current_job_id FROM workspaces WHERE id = ?")
             .bind(&workspace_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("workspace state");
     assert_eq!(workspace_state.0, "ready");
@@ -635,12 +635,12 @@ async fn complete_route_rejects_stale_prepared_convergence_after_target_moves() 
     let item_approval_state: String =
         sqlx::query_scalar("SELECT approval_state FROM items WHERE id = ?")
             .bind(&item_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("item approval state");
     let job_status: String = sqlx::query_scalar("SELECT status FROM jobs WHERE id = ?")
         .bind(&job_id)
-        .fetch_one(&db.pool)
+        .fetch_one(db.raw_pool())
         .await
         .expect("job status");
 
@@ -769,7 +769,7 @@ async fn complete_route_clears_item_escalation_after_successful_retry() {
     let item_row: (String, Option<String>) =
         sqlx::query_as("SELECT escalation_state, escalation_reason FROM items WHERE id = ?")
             .bind(&item_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("load item escalation");
     assert_eq!(item_row.0, "none");
@@ -898,7 +898,7 @@ async fn complete_route_auto_dispatches_candidate_review_after_clean_incremental
 
     let review_job_status: (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
         .bind(&review_job_id)
-        .fetch_one(&db.pool)
+        .fetch_one(db.raw_pool())
         .await
         .expect("review job status");
     assert_eq!(review_job_status.0, "completed");
@@ -909,7 +909,7 @@ async fn complete_route_auto_dispatches_candidate_review_after_clean_incremental
          WHERE item_id = ? AND step_id = 'review_candidate_initial' AND status = 'queued'",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("queued candidate review job");
     assert_eq!(queued_candidate_review.0, "review_candidate_initial");
@@ -1029,7 +1029,7 @@ async fn complete_route_recovers_projected_review_after_warning_only_dispatch_fa
 
     let review_job_status: (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
         .bind(&review_job_id)
-        .fetch_one(&db.pool)
+        .fetch_one(db.raw_pool())
         .await
         .expect("review job status");
     assert_eq!(review_job_status.0, "completed");
@@ -1040,7 +1040,7 @@ async fn complete_route_recovers_projected_review_after_warning_only_dispatch_fa
          WHERE item_id = ? AND step_id = 'review_candidate_initial' AND status = 'queued'",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("count queued candidate reviews");
     assert_eq!(queued_candidate_reviews, 0);
@@ -1053,13 +1053,13 @@ async fn complete_route_recovers_projected_review_after_warning_only_dispatch_fa
     .bind(&seed_head)
     .bind(&seed_head)
     .bind(&revision_id)
-    .execute(&db.pool)
+    .execute(db.raw_pool())
     .await
     .expect("repair revision seed commits");
     sqlx::query("UPDATE jobs SET output_commit_oid = ? WHERE id = ?")
         .bind(&candidate_head)
         .bind(&author_job_id)
-        .execute(&db.pool)
+        .execute(db.raw_pool())
         .await
         .expect("repair author output commit");
 
@@ -1181,7 +1181,7 @@ async fn complete_route_recovers_projected_review_after_warning_only_dispatch_fa
          WHERE item_id = ? AND step_id = 'review_candidate_initial' AND status = 'queued'",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("count recovered candidate reviews");
     assert_eq!(queued_candidate_reviews, 1);

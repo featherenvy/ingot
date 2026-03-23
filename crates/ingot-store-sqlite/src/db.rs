@@ -4,23 +4,33 @@ use std::path::Path;
 
 #[derive(Clone)]
 pub struct Database {
-    pub pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
+}
+
+pub fn sqlite_connect_options(path: &Path, create_if_missing: bool) -> SqliteConnectOptions {
+    SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(create_if_missing)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .foreign_keys(true)
 }
 
 impl Database {
-    pub async fn connect(path: &Path) -> Result<Self, sqlx::Error> {
-        let options = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .foreign_keys(true);
+    pub fn from_pool(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
+    pub async fn connect(path: &Path) -> Result<Self, sqlx::Error> {
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect_with(options)
+            .connect_with(sqlite_connect_options(path, true))
             .await?;
 
-        Ok(Self { pool })
+        Ok(Self::from_pool(pool))
+    }
+
+    pub fn raw_pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     pub async fn migrate(&self) -> Result<(), sqlx::migrate::MigrateError> {

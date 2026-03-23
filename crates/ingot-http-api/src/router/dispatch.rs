@@ -240,7 +240,7 @@ pub(super) async fn apply_pending_investigation_ref_or_cleanup(
         .await;
         let _ = sqlx::query("DELETE FROM jobs WHERE id = ?")
             .bind(job_id.to_string())
-            .execute(&state.db.pool)
+            .execute(state.db.raw_pool())
             .await;
         return Err(error);
     }
@@ -266,7 +266,7 @@ pub(super) async fn cleanup_failed_dispatch_side_effects(
         }
         let _ = sqlx::query("DELETE FROM workspaces WHERE id = ?")
             .bind(workspace.id.to_string())
-            .execute(&state.db.pool)
+            .execute(state.db.raw_pool())
             .await;
     }
 
@@ -278,7 +278,7 @@ pub(super) async fn cleanup_failed_dispatch_side_effects(
             "DELETE FROM git_operations WHERE operation_kind = 'create_investigation_ref' AND ref_name = ?",
         )
         .bind(ref_name)
-        .execute(&state.db.pool)
+        .execute(state.db.raw_pool())
         .await;
     }
 }
@@ -698,7 +698,7 @@ mod tests {
             "SELECT COUNT(*) FROM git_operations WHERE operation_kind = 'create_investigation_ref' AND ref_name = ?",
         )
         .bind(pending_investigation_ref.ref_name.as_str())
-        .fetch_one(&state.db.pool)
+        .fetch_one(state.db.raw_pool())
         .await
         .expect("git operation count");
         assert_eq!(operation_count, 0);
@@ -1016,7 +1016,7 @@ mod tests {
         let workspace_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM workspaces WHERE id = ?")
                 .bind(workspace.id.to_string())
-                .fetch_one(&state.db.pool)
+                .fetch_one(state.db.raw_pool())
                 .await
                 .expect("workspace count");
         assert_eq!(workspace_count, 0);
@@ -1024,7 +1024,7 @@ mod tests {
             "SELECT COUNT(*) FROM git_operations WHERE operation_kind = 'create_investigation_ref' AND ref_name = ?",
         )
         .bind(&investigation_ref)
-        .fetch_one(&state.db.pool)
+        .fetch_one(state.db.raw_pool())
         .await
         .expect("operation count");
         assert_eq!(op_count, 0);
@@ -1100,7 +1100,7 @@ mod tests {
         let workspace_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM workspaces WHERE id = ?")
                 .bind(workspace.id.to_string())
-                .fetch_one(&state.db.pool)
+                .fetch_one(state.db.raw_pool())
                 .await
                 .expect("workspace count");
         assert_eq!(workspace_count, 0);
@@ -1108,7 +1108,7 @@ mod tests {
             "SELECT COUNT(*) FROM git_operations WHERE operation_kind = 'create_investigation_ref' AND ref_name = ?",
         )
         .bind(&investigation_ref)
-        .fetch_one(&state.db.pool)
+        .fetch_one(state.db.raw_pool())
         .await
         .expect("operation count");
         assert_eq!(op_count, 0);

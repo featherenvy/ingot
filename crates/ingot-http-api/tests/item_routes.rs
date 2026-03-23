@@ -152,7 +152,7 @@ async fn create_item_route_derives_initial_revision_with_null_seed_commit() {
     );
 
     let revision_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM item_revisions")
-        .fetch_one(&db.pool)
+        .fetch_one(db.raw_pool())
         .await
         .expect("revision count");
     assert_eq!(revision_count, 1);
@@ -371,7 +371,7 @@ async fn resume_route_auto_dispatches_projected_review_job() {
          WHERE item_id = ? AND step_id = 'review_incremental_initial' AND status = 'queued'",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("queued review job");
     assert_eq!(queued_review.0, "review_incremental_initial");
@@ -453,7 +453,7 @@ async fn resume_route_returns_success_when_projected_review_auto_dispatch_cannot
          WHERE item_id = ? AND step_id = 'review_incremental_initial' AND status = 'queued'",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("count queued review jobs");
     assert_eq!(queued_review_jobs, 0);
@@ -573,7 +573,7 @@ async fn defer_route_cancels_lane_head_and_clears_approval_state() {
     .bind(TS)
     .bind(TS)
     .bind(TS)
-    .execute(&db.pool)
+    .execute(db.raw_pool())
     .await
     .expect("insert queue entry");
 
@@ -593,7 +593,7 @@ async fn defer_route_cancels_lane_head_and_clears_approval_state() {
         "SELECT parking_state, approval_state, escalation_state FROM items WHERE id = ?",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("item state");
     assert_eq!(item_state.0, "deferred");
@@ -603,14 +603,14 @@ async fn defer_route_cancels_lane_head_and_clears_approval_state() {
     let queue_state: (String,) =
         sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
             .bind(&revision_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("queue state");
     assert_eq!(queue_state.0, "cancelled");
 
     let job_state: (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
         .bind(&running_job_id)
-        .fetch_one(&db.pool)
+        .fetch_one(db.raw_pool())
         .await
         .expect("job state");
     assert_eq!(job_state.0, "cancelled");
@@ -618,7 +618,7 @@ async fn defer_route_cancels_lane_head_and_clears_approval_state() {
     let workspace_state: (String, Option<String>) =
         sqlx::query_as("SELECT status, current_job_id FROM workspaces WHERE id = ?")
             .bind("wrk_00000000000000000000000000000056")
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("workspace state");
     assert_eq!(workspace_state.0, "ready");
@@ -723,7 +723,7 @@ async fn defer_route_refreshes_revision_context_summary_after_cancelling_jobs() 
     .bind(stale_revision_context.to_string())
     .bind(running_job_id)
     .bind(Utc::now())
-    .execute(&db.pool)
+    .execute(db.raw_pool())
     .await
     .expect("insert stale revision context");
 
@@ -839,7 +839,7 @@ async fn revise_route_creates_superseding_revision() {
         "SELECT policy_snapshot FROM item_revisions WHERE item_id = ? AND revision_no = 2",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("load revised policy snapshot");
     let revision_policy_snapshot: serde_json::Value =
@@ -972,7 +972,7 @@ async fn revise_route_cancels_current_lane_state() {
     .bind(TS)
     .bind(TS)
     .bind(TS)
-    .execute(&db.pool)
+    .execute(db.raw_pool())
     .await
     .expect("insert queue entry");
     db.create_git_operation(&GitOperation {
@@ -1033,7 +1033,7 @@ async fn revise_route_cancels_current_lane_state() {
     let queue_state: (String,) =
         sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
             .bind(&revision_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("queue state");
     assert_eq!(queue_state.0, "cancelled");
@@ -1041,14 +1041,14 @@ async fn revise_route_cancels_current_lane_state() {
     let convergence_state: (String,) =
         sqlx::query_as("SELECT status FROM convergences WHERE id = ?")
             .bind(&convergence_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("convergence state");
     assert_eq!(convergence_state.0, "cancelled");
 
     let job_state: (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
         .bind(&running_job_id)
-        .fetch_one(&db.pool)
+        .fetch_one(db.raw_pool())
         .await
         .expect("job state");
     assert_eq!(job_state.0, "cancelled");
@@ -1056,7 +1056,7 @@ async fn revise_route_cancels_current_lane_state() {
     let workspace_state: (String, Option<String>) =
         sqlx::query_as("SELECT status, current_job_id FROM workspaces WHERE id = ?")
             .bind("wrk_00000000000000000000000000000057")
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("workspace state");
     assert_eq!(workspace_state.0, "ready");
@@ -1066,7 +1066,7 @@ async fn revise_route_cancels_current_lane_state() {
         "SELECT operation_kind, status FROM git_operations WHERE entity_id = ? ORDER BY operation_kind ASC",
     )
     .bind(&convergence_id)
-    .fetch_all(&db.pool)
+    .fetch_all(db.raw_pool())
     .await
     .expect("operation states");
     assert!(
@@ -1261,7 +1261,7 @@ async fn dismiss_and_reopen_routes_close_and_reopen_item() {
         "SELECT policy_snapshot FROM item_revisions WHERE item_id = ? AND revision_no = 2",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("load reopened policy snapshot");
     let revision_policy_snapshot: serde_json::Value =
@@ -1362,7 +1362,7 @@ async fn dismiss_route_cancels_lane_state() {
     .bind(TS)
     .bind(TS)
     .bind(TS)
-    .execute(&db.pool)
+    .execute(db.raw_pool())
     .await
     .expect("insert queue entry");
 
@@ -1383,7 +1383,7 @@ async fn dismiss_route_cancels_lane_state() {
     let queue_state: (String,) =
         sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
             .bind(&revision_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("queue state");
     assert_eq!(queue_state.0, "cancelled");
@@ -1391,7 +1391,7 @@ async fn dismiss_route_cancels_lane_state() {
     let convergence_state: (String,) =
         sqlx::query_as("SELECT status FROM convergences WHERE id = ?")
             .bind(&convergence_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("convergence state");
     assert_eq!(convergence_state.0, "cancelled");

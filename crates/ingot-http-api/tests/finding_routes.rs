@@ -141,7 +141,7 @@ async fn triaging_final_integrated_finding_enters_pending_approval() {
     let approval_state: String =
         sqlx::query_scalar("SELECT approval_state FROM items WHERE id = ?")
             .bind(item_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("load approval state");
     assert_eq!(approval_state, "pending");
@@ -149,7 +149,7 @@ async fn triaging_final_integrated_finding_enters_pending_approval() {
         "SELECT COUNT(*) FROM jobs WHERE item_id = ? AND phase_kind = 'review' AND status = 'queued'",
     )
     .bind(item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("count queued review jobs");
     assert_eq!(queued_review_jobs, 0);
@@ -386,13 +386,13 @@ async fn retriaging_backlog_created_item_clears_origin_backlink() {
     assert_eq!(response.status(), StatusCode::OK);
     let origin_kind: String = sqlx::query_scalar("SELECT origin_kind FROM items WHERE id = ?")
         .bind(linked_item_id)
-        .fetch_one(&db.pool)
+        .fetch_one(db.raw_pool())
         .await
         .expect("load origin kind");
     let origin_finding_id: Option<String> =
         sqlx::query_scalar("SELECT origin_finding_id FROM items WHERE id = ?")
             .bind(linked_item_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("load origin finding id");
     assert_eq!(origin_kind, "manual");

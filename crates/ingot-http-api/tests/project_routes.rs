@@ -247,7 +247,7 @@ async fn update_and_delete_project_routes_mutate_registered_project() {
     assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
 
     let projects: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects")
-        .fetch_one(&db.pool)
+        .fetch_one(db.raw_pool())
         .await
         .expect("project count");
     assert_eq!(projects, 0);

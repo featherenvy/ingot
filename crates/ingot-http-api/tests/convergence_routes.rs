@@ -65,7 +65,7 @@ async fn prepare_convergence_route_queues_lane_head_for_async_prepare() {
     sqlx::query("UPDATE item_revisions SET policy_snapshot = ? WHERE id = ?")
         .bind(revision_policy_snapshot.to_string())
         .bind(&revision_id)
-        .execute(&db.pool)
+        .execute(db.raw_pool())
         .await
         .expect("update revision policy snapshot");
 
@@ -177,7 +177,7 @@ async fn prepare_convergence_route_queues_lane_head_for_async_prepare() {
     let queue_state: (String,) =
         sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
             .bind(&revision_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("queue state");
     assert_eq!(queue_state.0, "head");
@@ -238,7 +238,7 @@ async fn approve_route_atomically_finalizes_convergence_and_closes_item() {
     sqlx::query("UPDATE item_revisions SET policy_snapshot = ? WHERE id = ?")
         .bind(revision_policy_snapshot.to_string())
         .bind(&revision_id)
-        .execute(&db.pool)
+        .execute(db.raw_pool())
         .await
         .expect("update revision policy snapshot");
 
@@ -289,7 +289,7 @@ async fn approve_route_atomically_finalizes_convergence_and_closes_item() {
     .bind(TS)
     .bind(TS)
     .bind(TS)
-    .execute(&db.pool)
+    .execute(db.raw_pool())
     .await
     .expect("insert queue entry");
 
@@ -313,7 +313,7 @@ async fn approve_route_atomically_finalizes_convergence_and_closes_item() {
         "SELECT lifecycle_state, approval_state, resolution_source FROM items WHERE id = ?",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("item state");
     assert_eq!(item_state.0, "done");
@@ -323,7 +323,7 @@ async fn approve_route_atomically_finalizes_convergence_and_closes_item() {
     let convergence_status: (String,) =
         sqlx::query_as("SELECT status FROM convergences WHERE id = ?")
             .bind(&convergence_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("convergence status");
     assert_eq!(convergence_status.0, "finalized");
@@ -331,7 +331,7 @@ async fn approve_route_atomically_finalizes_convergence_and_closes_item() {
     let queue_state: (String,) =
         sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
             .bind(&revision_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("queue state");
     assert_eq!(queue_state.0, "released");
@@ -404,7 +404,7 @@ async fn approve_route_succeeds_when_target_ref_is_already_at_the_prepared_commi
     sqlx::query("UPDATE item_revisions SET policy_snapshot = ? WHERE id = ?")
         .bind(revision_policy_snapshot.to_string())
         .bind(&revision_id)
-        .execute(&db.pool)
+        .execute(db.raw_pool())
         .await
         .expect("update revision policy snapshot");
 
@@ -455,7 +455,7 @@ async fn approve_route_succeeds_when_target_ref_is_already_at_the_prepared_commi
     .bind(TS)
     .bind(TS)
     .bind(TS)
-    .execute(&db.pool)
+    .execute(db.raw_pool())
     .await
     .expect("insert queue entry");
 
@@ -481,7 +481,7 @@ async fn approve_route_succeeds_when_target_ref_is_already_at_the_prepared_commi
         "SELECT lifecycle_state, approval_state, resolution_source FROM items WHERE id = ?",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("item state");
     assert_eq!(item_state.0, "done");
@@ -491,7 +491,7 @@ async fn approve_route_succeeds_when_target_ref_is_already_at_the_prepared_commi
     let convergence_status: (String,) =
         sqlx::query_as("SELECT status FROM convergences WHERE id = ?")
             .bind(&convergence_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("convergence status");
     assert_eq!(convergence_status.0, "finalized");
@@ -499,7 +499,7 @@ async fn approve_route_succeeds_when_target_ref_is_already_at_the_prepared_commi
     let queue_state: (String,) =
         sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
             .bind(&revision_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("queue state");
     assert_eq!(queue_state.0, "released");
@@ -561,7 +561,7 @@ async fn approve_route_reuses_existing_finalize_op_when_checkout_is_blocked() {
     sqlx::query("UPDATE item_revisions SET policy_snapshot = ? WHERE id = ?")
         .bind(revision_policy_snapshot.to_string())
         .bind(&revision_id)
-        .execute(&db.pool)
+        .execute(db.raw_pool())
         .await
         .expect("update revision policy snapshot");
 
@@ -616,7 +616,7 @@ async fn approve_route_reuses_existing_finalize_op_when_checkout_is_blocked() {
     .bind(TS)
     .bind(TS)
     .bind(TS)
-    .execute(&db.pool)
+    .execute(db.raw_pool())
     .await
     .expect("insert queue entry");
 
@@ -642,7 +642,7 @@ async fn approve_route_reuses_existing_finalize_op_when_checkout_is_blocked() {
         "SELECT approval_state, escalation_state, escalation_reason FROM items WHERE id = ?",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("item state");
     assert_eq!(item_state.0, "pending");
@@ -655,7 +655,7 @@ async fn approve_route_reuses_existing_finalize_op_when_checkout_is_blocked() {
          ORDER BY created_at ASC",
     )
     .bind(&convergence_id)
-    .fetch_all(&db.pool)
+    .fetch_all(db.raw_pool())
     .await
     .expect("git operations");
     assert_eq!(git_ops.len(), 1);
@@ -718,7 +718,7 @@ async fn prepare_convergence_route_only_queues_even_when_future_prepare_would_co
     sqlx::query("UPDATE item_revisions SET policy_snapshot = ? WHERE id = ?")
         .bind(revision_policy_snapshot.to_string())
         .bind(&revision_id)
-        .execute(&db.pool)
+        .execute(db.raw_pool())
         .await
         .expect("update revision policy snapshot");
 
@@ -822,7 +822,7 @@ async fn prepare_convergence_route_only_queues_even_when_future_prepare_would_co
     let item_state: (String, Option<String>) =
         sqlx::query_as("SELECT escalation_state, escalation_reason FROM items WHERE id = ?")
             .bind(&item_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("item state");
     assert_eq!(item_state.0, "none");
@@ -877,7 +877,7 @@ async fn reject_approval_route_cancels_prepared_convergence_and_creates_supersed
     sqlx::query("UPDATE item_revisions SET policy_snapshot = ? WHERE id = ?")
         .bind(revision_policy_snapshot.to_string())
         .bind(&revision_id)
-        .execute(&db.pool)
+        .execute(db.raw_pool())
         .await
         .expect("update revision policy snapshot");
 
@@ -1006,7 +1006,7 @@ async fn reject_approval_route_cancels_prepared_convergence_and_creates_supersed
         "SELECT policy_snapshot FROM item_revisions WHERE item_id = ? AND revision_no = 2",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("load rejected policy snapshot");
     let revision_policy_snapshot: serde_json::Value =
@@ -1023,7 +1023,7 @@ async fn reject_approval_route_cancels_prepared_convergence_and_creates_supersed
     let item_escalation: (String, Option<String>) =
         sqlx::query_as("SELECT escalation_state, escalation_reason FROM items WHERE id = ?")
             .bind(&item_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("item escalation");
     assert_eq!(item_escalation.0, "none");
@@ -1032,7 +1032,7 @@ async fn reject_approval_route_cancels_prepared_convergence_and_creates_supersed
     let convergence_status: String =
         sqlx::query_scalar("SELECT status FROM convergences WHERE id = ?")
             .bind(&convergence_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("convergence status");
     assert_eq!(convergence_status, "cancelled");
@@ -1040,7 +1040,7 @@ async fn reject_approval_route_cancels_prepared_convergence_and_creates_supersed
     let item_state: (String, Option<String>) =
         sqlx::query_as("SELECT escalation_state, escalation_reason FROM items WHERE id = ?")
             .bind(&item_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("item state");
     assert_eq!(item_state.0, "none");
@@ -1114,7 +1114,7 @@ async fn reject_route_allows_pending_with_queue_entry_only() {
     .bind(TS)
     .bind(TS)
     .bind(TS)
-    .execute(&db.pool)
+    .execute(db.raw_pool())
     .await
     .expect("insert queue entry");
 
@@ -1136,7 +1136,7 @@ async fn reject_route_allows_pending_with_queue_entry_only() {
     let queue_state: (String,) =
         sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
             .bind(&revision_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("queue state");
     assert_eq!(queue_state.0, "cancelled");
@@ -1144,7 +1144,7 @@ async fn reject_route_allows_pending_with_queue_entry_only() {
     let revision_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM item_revisions WHERE item_id = ?")
             .bind(&item_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("revision count");
     assert_eq!(revision_count, 2);

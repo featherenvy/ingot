@@ -6717,7 +6717,7 @@ timeout = "30s"
             .connect_with(options)
             .await
             .expect("connect db");
-        let db = Database { pool };
+        let db = Database::from_pool(pool);
         db.migrate().await.expect("migrate db");
 
         let dispatcher = JobDispatcher::with_runner(
@@ -6769,7 +6769,7 @@ timeout = "30s"
         .build();
         db.create_job(&validate_job).await.expect("create job");
 
-        let mut writer = db.pool.acquire().await.expect("acquire writer");
+        let mut writer = db.raw_pool().acquire().await.expect("acquire writer");
         query("BEGIN IMMEDIATE")
             .execute(&mut *writer)
             .await

@@ -125,7 +125,7 @@ async fn update_reprobe_and_delete_agent_routes_mutate_bootstrap_state() {
 
     sqlx::query("UPDATE agents SET cli_path = '/definitely/missing/ingot-cli' WHERE id = ?")
         .bind(agent_id)
-        .execute(&db.pool)
+        .execute(db.raw_pool())
         .await
         .expect("update cli path");
 
@@ -163,7 +163,7 @@ async fn update_reprobe_and_delete_agent_routes_mutate_bootstrap_state() {
     assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
 
     let agents: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents")
-        .fetch_one(&db.pool)
+        .fetch_one(db.raw_pool())
         .await
         .expect("agent count");
     assert_eq!(agents, 0);

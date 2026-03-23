@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use ingot_store_sqlite::db::sqlite_connect_options;
 use ingot_store_sqlite::Database;
 use ingot_test_support::sqlite::temp_db_path;
 use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::SqlitePoolOptions;
 
 #[allow(dead_code)]
 pub async fn migrated_test_db(prefix: &str) -> Database {
@@ -21,15 +22,9 @@ pub async fn migrated_test_db_with_path(prefix: &str) -> (Database, PathBuf) {
 
 #[allow(dead_code)]
 pub async fn raw_sqlite_pool(path: &Path) -> SqlitePool {
-    let options = SqliteConnectOptions::new()
-        .filename(path)
-        .create_if_missing(false)
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-        .foreign_keys(true);
-
     SqlitePoolOptions::new()
         .max_connections(1)
-        .connect_with(options)
+        .connect_with(sqlite_connect_options(path, false))
         .await
         .expect("connect raw sqlite pool")
 }

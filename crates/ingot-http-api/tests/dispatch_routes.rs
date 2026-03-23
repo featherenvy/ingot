@@ -79,7 +79,7 @@ async fn dispatch_item_job_route_creates_queued_author_initial_job_and_workspace
     let queued_job: (String, Option<String>) =
         sqlx::query_as("SELECT status, workspace_id FROM jobs WHERE id = ?")
             .bind(json["id"].as_str().expect("job id"))
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("queued job");
     assert_eq!(queued_job.0, "queued");
@@ -318,7 +318,7 @@ async fn resume_route_implicit_revision_queues_incremental_review_from_bound_wor
          WHERE item_id = ? AND step_id = 'review_incremental_initial' AND status = 'queued'",
     )
     .bind(&item_id)
-    .fetch_one(&db.pool)
+    .fetch_one(db.raw_pool())
     .await
     .expect("queued review job");
     assert_eq!(queued_review.0, "review_incremental_initial");
@@ -643,7 +643,7 @@ async fn dispatch_item_job_route_reuses_existing_authoring_workspace_for_revisio
     let workspace_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM workspaces WHERE created_for_revision_id = ?")
             .bind(&revision_id)
-            .fetch_one(&db.pool)
+            .fetch_one(db.raw_pool())
             .await
             .expect("workspace count");
     assert_eq!(workspace_count, 1);
