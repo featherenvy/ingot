@@ -1,6 +1,6 @@
 use ingot_domain::activity::{Activity, ActivitySubject};
 use ingot_domain::ids::ProjectId;
-use ingot_domain::ports::{ActivityRepository, RepositoryError};
+use ingot_domain::ports::{ActivityRepository, ConflictKind, RepositoryError};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
@@ -70,8 +70,11 @@ impl ActivityRepository for Database {
 fn map_activity(row: &SqliteRow) -> Result<Activity, RepositoryError> {
     let entity_type = row.try_get("entity_type").map_err(db_err)?;
     let entity_id: String = row.try_get("entity_id").map_err(db_err)?;
-    let subject = ActivitySubject::from_parts(entity_type, &entity_id)
-        .map_err(|e| RepositoryError::Conflict(format!("invalid activity subject: {e}")))?;
+    let subject = ActivitySubject::from_parts(entity_type, &entity_id).map_err(|e| {
+        RepositoryError::Conflict(ConflictKind::Other(format!(
+            "invalid activity subject: {e}"
+        )))
+    })?;
     Ok(Activity {
         id: row.try_get("id").map_err(db_err)?,
         project_id: row.try_get("project_id").map_err(db_err)?,

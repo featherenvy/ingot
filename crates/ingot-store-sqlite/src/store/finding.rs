@@ -2,7 +2,7 @@ use chrono::Utc;
 use ingot_domain::finding::{Finding, FindingTriage, FindingTriageState};
 use ingot_domain::ids::{FindingId, ItemId, JobId};
 use ingot_domain::item::Item;
-use ingot_domain::ports::{FindingRepository, RepositoryError};
+use ingot_domain::ports::{ConflictKind, FindingRepository, RepositoryError};
 use ingot_domain::revision::ItemRevision;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
@@ -396,7 +396,10 @@ fn map_finding(row: &SqliteRow) -> Result<Finding, RepositoryError> {
         triage_note,
         triaged_at,
         |state, field| {
-            RepositoryError::Conflict(format!("{} finding missing {field}", state.as_str()))
+            RepositoryError::Conflict(ConflictKind::Other(format!(
+                "{} finding missing {field}",
+                state.as_str()
+            )))
         },
     )?;
 

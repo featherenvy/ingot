@@ -8,7 +8,7 @@ use axum::http::request::Parts;
 use ingot_domain::branch_name::BranchName;
 use ingot_domain::git_operation::OperationKind;
 use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
-use ingot_domain::ports::RepositoryError;
+use ingot_domain::ports::{ConflictKind, RepositoryError};
 use ingot_domain::project::Project;
 use ingot_domain::workspace::{Workspace, WorkspaceStatus};
 use ingot_git::commands::{check_ref_format, current_branch_name, resolve_ref_oid};
@@ -368,9 +368,7 @@ pub(super) fn api_to_usecase_error(error: ApiError) -> UseCaseError {
 
 pub(super) fn repo_to_job_completion(error: RepositoryError) -> ApiError {
     match error {
-        RepositoryError::Conflict(message) if message == "job_not_active" => {
-            UseCaseError::JobNotActive.into()
-        }
+        RepositoryError::Conflict(ConflictKind::JobNotActive) => UseCaseError::JobNotActive.into(),
         other => repo_to_internal(other),
     }
 }
@@ -378,7 +376,7 @@ pub(super) fn repo_to_job_completion(error: RepositoryError) -> ApiError {
 #[allow(dead_code)]
 pub(super) fn repo_to_job_expiration(error: RepositoryError) -> ApiError {
     match error {
-        RepositoryError::Conflict(message) if message == "job_revision_stale" => {
+        RepositoryError::Conflict(ConflictKind::JobRevisionStale) => {
             UseCaseError::ProtocolViolation(
                 "job expiration does not match the current item revision".into(),
             )
@@ -405,13 +403,17 @@ pub(super) fn repo_to_project(error: RepositoryError) -> ApiError {
 pub(crate) fn repo_to_project_mutation(error: RepositoryError) -> ApiError {
     match error {
         RepositoryError::NotFound => UseCaseError::ProjectNotFound.into(),
-        RepositoryError::Conflict(message) if message.contains("projects.path") => {
+        RepositoryError::Conflict(ConflictKind::DatabaseConstraint(message))
+            if message.contains("projects.path") =>
+        {
             ApiError::Conflict {
                 code: "project_path_conflict",
                 message: "A project is already registered for that path".into(),
             }
         }
-        RepositoryError::Conflict(message) if message.contains("FOREIGN KEY") => {
+        RepositoryError::Conflict(ConflictKind::DatabaseConstraint(message))
+            if message.contains("FOREIGN KEY") =>
+        {
             ApiError::Conflict {
                 code: "project_in_use",
                 message: "Project cannot be deleted while related items still exist".into(),
@@ -434,13 +436,17 @@ pub(super) fn repo_to_agent(error: RepositoryError) -> ApiError {
 pub(super) fn repo_to_agent_mutation(error: RepositoryError) -> ApiError {
     match error {
         RepositoryError::NotFound => repo_to_agent(RepositoryError::NotFound),
-        RepositoryError::Conflict(message) if message.contains("agents.slug") => {
+        RepositoryError::Conflict(ConflictKind::DatabaseConstraint(message))
+            if message.contains("agents.slug") =>
+        {
             ApiError::Conflict {
                 code: "agent_slug_conflict",
                 message: "An agent with that slug already exists".into(),
             }
         }
-        RepositoryError::Conflict(message) if message.contains("FOREIGN KEY") => {
+        RepositoryError::Conflict(ConflictKind::DatabaseConstraint(message))
+            if message.contains("FOREIGN KEY") =>
+        {
             ApiError::Conflict {
                 code: "agent_in_use",
                 message: "Agent cannot be deleted while related jobs still exist".into(),
@@ -487,7 +493,8 @@ mod tests {
 
     #[test]
     fn expiration_revision_stale_maps_to_protocol_violation() {
-        let error = repo_to_job_expiration(RepositoryError::Conflict("job_revision_stale".into()));
+        let error =
+            repo_to_job_expiration(RepositoryError::Conflict(ConflictKind::JobRevisionStale));
 
         assert!(matches!(
             error,

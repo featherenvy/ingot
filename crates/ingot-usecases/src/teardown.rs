@@ -253,7 +253,7 @@ mod tests {
     };
     use ingot_domain::job::{Job, JobStatus};
     use ingot_domain::ports::{
-        RepositoryError, RevisionLaneTeardownMutation, StartJobExecutionParams,
+        ConflictKind, RepositoryError, RevisionLaneTeardownMutation, StartJobExecutionParams,
     };
     use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
     use ingot_test_support::fixtures::{JobBuilder, RevisionBuilder, WorkspaceBuilder};
@@ -268,8 +268,9 @@ mod tests {
         let job = test_active_job(revision.id, Some(workspace.id));
         let job_repo = FakeJobRepository::with_jobs(vec![job]);
         let workspace_repo = FakeWorkspaceRepository::with_workspace(workspace);
-        let teardown_repo =
-            FakeTeardownRepository::with_error(RepositoryError::Conflict("job_not_active".into()));
+        let teardown_repo = FakeTeardownRepository::with_error(RepositoryError::Conflict(
+            ConflictKind::JobNotActive,
+        ));
 
         let result = teardown_revision_lane(
             &job_repo,
@@ -298,7 +299,7 @@ mod tests {
         let job_repo = FakeJobRepository::with_jobs(vec![job]);
         let workspace_repo = FakeWorkspaceRepository::with_workspace(workspace);
         let teardown_repo = FakeTeardownRepository::with_error(RepositoryError::Conflict(
-            "job_revision_stale".into(),
+            ConflictKind::JobRevisionStale,
         ));
 
         let result = teardown_revision_lane(

@@ -1,5 +1,5 @@
 use ingot_domain::ids::{ItemId, ItemRevisionId};
-use ingot_domain::ports::RepositoryError;
+use ingot_domain::ports::{ConflictKind, RepositoryError};
 use serde::de::DeserializeOwned;
 use sqlx::{Sqlite, Transaction};
 
@@ -40,7 +40,9 @@ pub(super) fn db_write_err(err: sqlx::Error) -> RepositoryError {
             if database_error.is_unique_violation()
                 || database_error.is_foreign_key_violation() =>
         {
-            RepositoryError::Conflict(database_error.message().to_string())
+            RepositoryError::Conflict(ConflictKind::DatabaseConstraint(
+                database_error.message().to_string(),
+            ))
         }
         other => db_err(other),
     }

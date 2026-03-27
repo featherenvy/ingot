@@ -4,6 +4,8 @@ pub mod error;
 pub mod finding;
 pub mod item;
 pub mod job;
+mod job_completion;
+mod job_dispatch;
 pub mod job_lifecycle;
 pub mod locking;
 pub mod notify;

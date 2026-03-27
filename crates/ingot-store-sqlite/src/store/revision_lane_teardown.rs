@@ -1,7 +1,7 @@
 use chrono::Utc;
 use ingot_domain::git_operation::GitOperationWire;
 use ingot_domain::ports::{
-    RepositoryError, RevisionLaneTeardownMutation, RevisionLaneTeardownRepository,
+    ConflictKind, RepositoryError, RevisionLaneTeardownMutation, RevisionLaneTeardownRepository,
 };
 
 use super::helpers::{db_err, db_write_err, item_revision_is_stale, json_err};
@@ -52,7 +52,7 @@ impl Database {
                 if item_revision_is_stale(&mut tx, params.item_id, params.expected_item_revision_id)
                     .await?
                 {
-                    return Err(RepositoryError::Conflict("job_revision_stale".into()));
+                    return Err(RepositoryError::Conflict(ConflictKind::JobRevisionStale));
                 }
 
                 let job_is_active: Option<String> = sqlx::query_scalar(
@@ -64,10 +64,10 @@ impl Database {
                 .map_err(db_err)?;
 
                 if job_is_active.is_none() {
-                    return Err(RepositoryError::Conflict("job_not_active".into()));
+                    return Err(RepositoryError::Conflict(ConflictKind::JobNotActive));
                 }
 
-                return Err(RepositoryError::Conflict("job_update_conflict".into()));
+                return Err(RepositoryError::Conflict(ConflictKind::JobUpdateConflict));
             }
 
             // Update workspace if present

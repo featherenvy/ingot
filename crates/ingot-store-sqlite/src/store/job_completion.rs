@@ -5,8 +5,8 @@ use ingot_domain::ids::JobId;
 use ingot_domain::item::Escalation;
 use ingot_domain::job::JobStatus;
 use ingot_domain::ports::{
-    CompletedJobCompletion, JobCompletionContext, JobCompletionMutation, JobCompletionRepository,
-    RepositoryError,
+    CompletedJobCompletion, ConflictKind, JobCompletionContext, JobCompletionMutation,
+    JobCompletionRepository, RepositoryError,
 };
 use sqlx::Row;
 use sqlx::{Sqlite, Transaction};
@@ -165,7 +165,7 @@ impl Database {
             .map_err(db_err)?;
 
             if escalation.rows_affected() != 1 {
-                return Err(RepositoryError::Conflict("job_revision_stale".into()));
+                return Err(RepositoryError::Conflict(ConflictKind::JobRevisionStale));
             }
         }
 
@@ -186,7 +186,7 @@ impl Database {
                 .map_err(db_err)?;
 
                 if approval.rows_affected() != 1 {
-                    return Err(RepositoryError::Conflict("job_revision_stale".into()));
+                    return Err(RepositoryError::Conflict(ConflictKind::JobRevisionStale));
                 }
             }
         }
@@ -224,7 +224,7 @@ async fn classify_job_completion_conflict(
     mutation: &JobCompletionMutation,
 ) -> Result<RepositoryError, RepositoryError> {
     if item_revision_is_stale(tx, mutation.item_id, mutation.expected_item_revision_id).await? {
-        return Ok(RepositoryError::Conflict("job_revision_stale".into()));
+        return Ok(RepositoryError::Conflict(ConflictKind::JobRevisionStale));
     }
 
     if let Some(prepared_convergence_guard) = mutation.prepared_convergence_guard.as_ref() {
@@ -243,7 +243,7 @@ async fn classify_job_completion_conflict(
 
         let Some(prepared_convergence) = prepared_convergence else {
             return Ok(RepositoryError::Conflict(
-                "prepared_convergence_missing".into(),
+                ConflictKind::PreparedConvergenceMissing,
             ));
         };
 
@@ -260,10 +260,10 @@ async fn classify_job_completion_conflict(
                 != Some(&prepared_convergence_guard.expected_target_head_oid)
         {
             return Ok(RepositoryError::Conflict(
-                "prepared_convergence_stale".into(),
+                ConflictKind::PreparedConvergenceStale,
             ));
         }
     }
 
-    Ok(RepositoryError::Conflict("job_not_active".into()))
+    Ok(RepositoryError::Conflict(ConflictKind::JobNotActive))
 }

@@ -3,7 +3,7 @@ mod common;
 use ingot_domain::ids::{ActivityId, ItemId, ItemRevisionId};
 use ingot_domain::job::{JobStatus, OutcomeClass};
 use ingot_domain::ports::{
-    FinishJobNonSuccessParams, RepositoryError, RevisionLaneTeardownMutation,
+    ConflictKind, FinishJobNonSuccessParams, RepositoryError, RevisionLaneTeardownMutation,
     TeardownJobCancellation,
 };
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
@@ -189,7 +189,7 @@ async fn apply_teardown_rolls_back_on_stale_revision() {
 
     assert!(matches!(
         error,
-        RepositoryError::Conflict(message) if message == "job_revision_stale"
+        RepositoryError::Conflict(ConflictKind::JobRevisionStale)
     ));
 
     // Verify rollback: workspace should still be Busy

@@ -1,6 +1,8 @@
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::ids::{ItemId, ItemRevisionId};
-use ingot_domain::ports::{RepositoryError, RevisionContextRepository, RevisionRepository};
+use ingot_domain::ports::{
+    ConflictKind, RepositoryError, RevisionContextRepository, RevisionRepository,
+};
 use ingot_domain::revision::{AuthoringBaseSeed, ItemRevision};
 use ingot_domain::revision_context::RevisionContext;
 use sqlx::Row;
@@ -139,7 +141,9 @@ fn map_revision(row: &SqliteRow) -> Result<ItemRevision, RepositoryError> {
         .try_get::<Option<CommitOid>, _>("seed_target_commit_oid")
         .map_err(db_err)?
         .ok_or_else(|| {
-            RepositoryError::Conflict("seed_target_commit_oid must not be NULL".into())
+            RepositoryError::Conflict(ConflictKind::Other(
+                "seed_target_commit_oid must not be NULL".into(),
+            ))
         })?;
     let seed = AuthoringBaseSeed::from_parts(seed_commit_oid, seed_target_commit_oid);
 

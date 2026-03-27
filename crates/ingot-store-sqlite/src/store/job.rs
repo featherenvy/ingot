@@ -5,7 +5,8 @@ use ingot_domain::item::Escalation;
 use ingot_domain::job::{Job, JobAssignment, JobInput, JobLease, JobState, TerminalStatus};
 use ingot_domain::lease_owner_id::LeaseOwnerId;
 use ingot_domain::ports::{
-    FinishJobNonSuccessParams, JobRepository, RepositoryError, StartJobExecutionParams,
+    ConflictKind, FinishJobNonSuccessParams, JobRepository, RepositoryError,
+    StartJobExecutionParams,
 };
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
@@ -561,7 +562,7 @@ impl Database {
             .map_err(db_err)?;
 
             if escalation.rows_affected() != 1 {
-                return Err(RepositoryError::Conflict("job_revision_stale".into()));
+                return Err(RepositoryError::Conflict(ConflictKind::JobRevisionStale));
             }
         }
 
@@ -647,7 +648,7 @@ async fn classify_running_job_conflict(
     let mut tx = pool.begin().await.map_err(db_err)?;
 
     if item_revision_is_stale(&mut tx, item_id, expected_item_revision_id).await? {
-        return Ok(RepositoryError::Conflict("job_revision_stale".into()));
+        return Ok(RepositoryError::Conflict(ConflictKind::JobRevisionStale));
     }
 
     let query = format!(
@@ -668,7 +669,7 @@ async fn classify_running_job_conflict(
 
     let job_matches = query.fetch_optional(&mut *tx).await.map_err(db_err)?;
     if job_matches.is_none() {
-        return Ok(RepositoryError::Conflict("job_not_active".into()));
+        return Ok(RepositoryError::Conflict(ConflictKind::JobNotActive));
     }
 
     if require_workspace_binding {
@@ -683,11 +684,11 @@ async fn classify_running_job_conflict(
         .map_err(db_err)?
         .flatten();
         if workspace_id.is_none() {
-            return Ok(RepositoryError::Conflict("job_missing_workspace".into()));
+            return Ok(RepositoryError::Conflict(ConflictKind::JobMissingWorkspace));
         }
     }
 
-    Ok(RepositoryError::Conflict("job_update_conflict".into()))
+    Ok(RepositoryError::Conflict(ConflictKind::JobUpdateConflict))
 }
 
 async fn classify_terminal_job_conflict(
@@ -697,7 +698,7 @@ async fn classify_terminal_job_conflict(
     expected_item_revision_id: ItemRevisionId,
 ) -> Result<RepositoryError, RepositoryError> {
     if item_revision_is_stale(tx, item_id, expected_item_revision_id).await? {
-        return Ok(RepositoryError::Conflict("job_revision_stale".into()));
+        return Ok(RepositoryError::Conflict(ConflictKind::JobRevisionStale));
     }
 
     let job_is_active: Option<JobId> = sqlx::query_scalar(
@@ -712,10 +713,10 @@ async fn classify_terminal_job_conflict(
     .map_err(db_err)?;
 
     if job_is_active.is_none() {
-        return Ok(RepositoryError::Conflict("job_not_active".into()));
+        return Ok(RepositoryError::Conflict(ConflictKind::JobNotActive));
     }
 
-    Ok(RepositoryError::Conflict("job_update_conflict".into()))
+    Ok(RepositoryError::Conflict(ConflictKind::JobUpdateConflict))
 }
 
 fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {

@@ -9,7 +9,7 @@ use ingot_domain::job::{
     PhaseKind,
 };
 use ingot_domain::lease_owner_id::LeaseOwnerId;
-use ingot_domain::ports::RepositoryError;
+use ingot_domain::ports::{ConflictKind, RepositoryError};
 use ingot_domain::workspace::WorkspaceKind;
 use ingot_store_sqlite::{
     ClaimQueuedAgentJobExecutionParams, FinishJobNonSuccessParams, PersistFixture,
@@ -86,7 +86,7 @@ async fn finish_job_non_success_rolls_back_when_item_revision_changes_before_com
 
     assert!(matches!(
         error,
-        RepositoryError::Conflict(message) if message == "job_revision_stale"
+        RepositoryError::Conflict(ConflictKind::JobRevisionStale)
     ));
 
     let persisted_job = db.get_job(job.id).await.expect("load job after rollback");
@@ -153,7 +153,7 @@ async fn start_job_execution_rejects_jobs_without_workspace_binding() {
 
     assert!(matches!(
         error,
-        RepositoryError::Conflict(message) if message == "job_missing_workspace"
+        RepositoryError::Conflict(ConflictKind::JobMissingWorkspace)
     ));
 
     let persisted_job = db.get_job(job.id).await.expect("job remains readable");
@@ -300,7 +300,7 @@ async fn claim_queued_agent_job_execution_rejects_rows_that_left_queued() {
 
     assert!(matches!(
         error,
-        RepositoryError::Conflict(message) if message == "job_not_active"
+        RepositoryError::Conflict(ConflictKind::JobNotActive)
     ));
 
     let persisted_job = db.get_job(job.id).await.expect("load unchanged job");

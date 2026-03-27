@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use ingot_store_sqlite::db::sqlite_connect_options;
 use ingot_store_sqlite::Database;
+use ingot_store_sqlite::db::sqlite_connect_options;
 use ingot_test_support::sqlite::temp_db_path;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;

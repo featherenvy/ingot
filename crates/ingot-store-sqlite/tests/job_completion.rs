@@ -8,7 +8,9 @@ use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
     PhaseKind,
 };
-use ingot_domain::ports::{JobCompletionMutation, PreparedConvergenceGuard, RepositoryError};
+use ingot_domain::ports::{
+    ConflictKind, JobCompletionMutation, PreparedConvergenceGuard, RepositoryError,
+};
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::workspace::{RetentionPolicy, Workspace, WorkspaceKind};
@@ -321,7 +323,7 @@ async fn complete_job_rolls_back_when_prepared_convergence_becomes_stale() {
 
     assert!(matches!(
         error,
-        RepositoryError::Conflict(message) if message == "prepared_convergence_stale"
+        RepositoryError::Conflict(ConflictKind::PreparedConvergenceStale)
     ));
 
     let persisted_job = db.get_job(job.id).await.expect("load job after rollback");
@@ -385,7 +387,7 @@ async fn complete_job_rolls_back_when_prepared_convergence_target_ref_changes() 
 
     assert!(matches!(
         error,
-        RepositoryError::Conflict(message) if message == "prepared_convergence_stale"
+        RepositoryError::Conflict(ConflictKind::PreparedConvergenceStale)
     ));
 
     let persisted_job = db.get_job(job.id).await.expect("load job after rollback");
@@ -453,7 +455,7 @@ async fn complete_job_rolls_back_when_item_revision_changes_before_commit() {
 
     assert!(matches!(
         error,
-        RepositoryError::Conflict(message) if message == "job_revision_stale"
+        RepositoryError::Conflict(ConflictKind::JobRevisionStale)
     ));
 
     let persisted_job = db.get_job(job.id).await.expect("load job after rollback");

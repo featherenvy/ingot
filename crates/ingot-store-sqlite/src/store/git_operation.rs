@@ -1,6 +1,6 @@
 use ingot_domain::git_operation::{GitOperation, GitOperationWire};
 use ingot_domain::ids::ConvergenceId;
-use ingot_domain::ports::{GitOperationRepository, RepositoryError};
+use ingot_domain::ports::{ConflictKind, GitOperationRepository, RepositoryError};
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
@@ -163,6 +163,7 @@ fn map_git_operation(row: &SqliteRow) -> Result<GitOperation, RepositoryError> {
         created_at: row.try_get("created_at").map_err(db_err)?,
         completed_at: row.try_get("completed_at").map_err(db_err)?,
     };
-    GitOperation::try_from(wire)
-        .map_err(|e| RepositoryError::Conflict(format!("invalid git operation: {e}")))
+    GitOperation::try_from(wire).map_err(|e| {
+        RepositoryError::Conflict(ConflictKind::Other(format!("invalid git operation: {e}")))
+    })
 }

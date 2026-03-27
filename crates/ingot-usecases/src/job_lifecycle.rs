@@ -4,7 +4,7 @@ use ingot_domain::ids::{ActivityId, ItemId, ItemRevisionId, JobId, ProjectId, Wo
 use ingot_domain::item::{EscalationReason, Item};
 use ingot_domain::job::{Job, JobStatus, OutcomeClass};
 use ingot_domain::ports::{
-    ActivityRepository, FinishJobNonSuccessParams, JobRepository, RepositoryError,
+    ActivityRepository, ConflictKind, FinishJobNonSuccessParams, JobRepository, RepositoryError,
     WorkspaceRepository,
 };
 use ingot_domain::workspace::WorkspaceStatus;
@@ -272,10 +272,8 @@ pub(crate) fn map_finish_non_success_error(
     revision_stale_message: &'static str,
 ) -> UseCaseError {
     match error {
-        RepositoryError::Conflict(message) if message == "job_not_active" => {
-            UseCaseError::JobNotActive
-        }
-        RepositoryError::Conflict(message) if message == "job_revision_stale" => {
+        RepositoryError::Conflict(ConflictKind::JobNotActive) => UseCaseError::JobNotActive,
+        RepositoryError::Conflict(ConflictKind::JobRevisionStale) => {
             UseCaseError::ProtocolViolation(revision_stale_message.into())
         }
         other => UseCaseError::Repository(other),
@@ -289,7 +287,7 @@ mod tests {
     use ingot_domain::activity::Activity;
     use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
     use ingot_domain::job::{JobStatus, OutcomeClass};
-    use ingot_domain::ports::{RepositoryError, StartJobExecutionParams};
+    use ingot_domain::ports::{ConflictKind, RepositoryError, StartJobExecutionParams};
     use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
     use ingot_test_support::fixtures::{JobBuilder, WorkspaceBuilder, nil_item};
     use uuid::Uuid;
@@ -301,7 +299,7 @@ mod tests {
         let job = test_job(None);
         let item = nil_item();
         let job_repo = FakeJobRepository::with_finish_error(RepositoryError::Conflict(
-            "job_not_active".into(),
+            ConflictKind::JobNotActive,
         ));
 
         let result = cancel_job(
@@ -323,7 +321,7 @@ mod tests {
         let job = test_job(None);
         let item = nil_item();
         let job_repo = FakeJobRepository::with_finish_error(RepositoryError::Conflict(
-            "job_revision_stale".into(),
+            ConflictKind::JobRevisionStale,
         ));
 
         let result = cancel_job(
@@ -349,7 +347,7 @@ mod tests {
         let job = test_job(None);
         let item = nil_item();
         let job_repo = FakeJobRepository::with_finish_error(RepositoryError::Conflict(
-            "job_revision_stale".into(),
+            ConflictKind::JobRevisionStale,
         ));
 
         let result = fail_job(
@@ -377,7 +375,7 @@ mod tests {
         let job = test_job(None);
         let item = nil_item();
         let job_repo = FakeJobRepository::with_finish_error(RepositoryError::Conflict(
-            "job_revision_stale".into(),
+            ConflictKind::JobRevisionStale,
         ));
 
         let result = expire_job(
