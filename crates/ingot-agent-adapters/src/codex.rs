@@ -7,7 +7,7 @@ use ingot_domain::agent_model::AgentModel;
 use tokio::fs;
 use tracing::{info, warn};
 
-use crate::{structured_output_schema, subprocess};
+use crate::{output_schema, structured_output_schema, subprocess};
 
 #[derive(Debug, Clone)]
 pub struct CodexCliAdapter {
@@ -81,10 +81,7 @@ impl AgentAdapter for CodexCliAdapter {
         let _ = fs::remove_file(&response_path).await;
         let _ = fs::remove_file(&schema_path).await;
 
-        let schema = request
-            .output_schema
-            .clone()
-            .unwrap_or_else(structured_output_schema);
+        let schema = output_schema(request);
         fs::write(
             &schema_path,
             serde_json::to_vec_pretty(&schema)

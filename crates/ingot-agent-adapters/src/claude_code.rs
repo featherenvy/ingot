@@ -6,7 +6,7 @@ use ingot_agent_protocol::response::AgentResponse;
 use ingot_domain::agent_model::AgentModel;
 use tracing::info;
 
-use crate::{structured_output_schema, subprocess};
+use crate::{output_schema, structured_output_schema, subprocess};
 
 #[derive(Debug, Clone)]
 pub struct ClaudeCodeCliAdapter {
@@ -23,10 +23,7 @@ impl ClaudeCodeCliAdapter {
     }
 
     fn build_print_args(&self, request: &AgentRequest) -> Vec<String> {
-        let schema = request
-            .output_schema
-            .clone()
-            .unwrap_or_else(structured_output_schema);
+        let schema = output_schema(request);
         let schema_json = serde_json::to_string(&schema).expect("schema serialization");
 
         let mut args = vec![

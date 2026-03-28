@@ -35,6 +35,15 @@ pub async fn cancel_agent(pid: u32) -> Result<(), AgentError> {
     subprocess::cancel_process_group(pid).await
 }
 
+/// Resolve the structured-output schema for a request, falling back to the
+/// shared default schema when the caller does not provide one.
+pub(crate) fn output_schema(request: &AgentRequest) -> serde_json::Value {
+    request
+        .output_schema
+        .clone()
+        .unwrap_or_else(structured_output_schema)
+}
+
 /// Default structured-output JSON schema shared by all CLI adapters.
 pub(crate) fn structured_output_schema() -> serde_json::Value {
     serde_json::json!({
