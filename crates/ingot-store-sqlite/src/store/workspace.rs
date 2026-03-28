@@ -141,6 +141,20 @@ impl Database {
 
         rows.iter().map(map_workspace).collect()
     }
+
+    pub async fn delete_workspace(&self, workspace_id: WorkspaceId) -> Result<(), RepositoryError> {
+        let result = sqlx::query("DELETE FROM workspaces WHERE id = ?")
+            .bind(workspace_id)
+            .execute(&self.pool)
+            .await
+            .map_err(db_write_err)?;
+
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::NotFound);
+        }
+
+        Ok(())
+    }
 }
 
 impl WorkspaceRepository for Database {
@@ -168,6 +182,9 @@ impl WorkspaceRepository for Database {
     }
     async fn list_by_item(&self, item_id: ItemId) -> Result<Vec<Workspace>, RepositoryError> {
         self.list_workspaces_by_item(item_id).await
+    }
+    async fn delete(&self, id: WorkspaceId) -> Result<(), RepositoryError> {
+        self.delete_workspace(id).await
     }
 }
 

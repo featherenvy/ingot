@@ -1,4 +1,5 @@
 use ingot_domain::git_operation::{GitOperation, GitOperationWire};
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::ConvergenceId;
 use ingot_domain::ports::{ConflictKind, GitOperationRepository, RepositoryError};
 use sqlx::Row;
@@ -122,6 +123,21 @@ impl Database {
 
         row.as_ref().map(map_git_operation).transpose()
     }
+
+    pub async fn delete_investigation_ref_git_operations(
+        &self,
+        ref_name: &GitRef,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "DELETE FROM git_operations WHERE operation_kind = 'create_investigation_ref' AND ref_name = ?",
+        )
+        .bind(ref_name)
+        .execute(&self.pool)
+        .await
+        .map_err(db_write_err)?;
+
+        Ok(())
+    }
 }
 
 impl GitOperationRepository for Database {
@@ -139,6 +155,12 @@ impl GitOperationRepository for Database {
         convergence_id: ConvergenceId,
     ) -> Result<Option<GitOperation>, RepositoryError> {
         Database::find_unresolved_finalize_for_convergence(self, convergence_id).await
+    }
+    async fn delete_investigation_ref_operations(
+        &self,
+        ref_name: &GitRef,
+    ) -> Result<(), RepositoryError> {
+        self.delete_investigation_ref_git_operations(ref_name).await
     }
 }
 

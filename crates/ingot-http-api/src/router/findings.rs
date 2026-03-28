@@ -1,4 +1,5 @@
-use super::dispatch::{auto_dispatch_projected_review_job_locked, maybe_cleanup_investigation_ref};
+use super::dispatch::auto_dispatch_projected_review_job_locked;
+use super::infra_ports::HttpInfraAdapter;
 use super::items::append_activity;
 use super::support::*;
 use super::types::*;
@@ -242,7 +243,16 @@ pub(super) async fn apply_finding_triage(
         &applied.finding,
     )
     .await?;
-    maybe_cleanup_investigation_ref(state, source_item.project_id, &applied.finding).await?;
+    let infra = HttpInfraAdapter::new(state);
+    ingot_usecases::dispatch::maybe_cleanup_investigation_ref(
+        &state.db,
+        &state.db,
+        &state.db,
+        &infra,
+        source_item.project_id,
+        &applied.finding,
+    )
+    .await?;
 
     append_activity(
         state,

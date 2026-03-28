@@ -120,6 +120,7 @@ pub trait JobRepository: Send + Sync {
         &self,
         params: FinishJobNonSuccessParams,
     ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
+    fn delete(&self, id: JobId) -> impl Future<Output = Result<(), RepositoryError>> + Send;
 }
 
 pub trait WorkspaceRepository: Send + Sync {
@@ -147,6 +148,7 @@ pub trait WorkspaceRepository: Send + Sync {
         &self,
         item_id: ItemId,
     ) -> impl Future<Output = Result<Vec<Workspace>, RepositoryError>> + Send;
+    fn delete(&self, id: WorkspaceId) -> impl Future<Output = Result<(), RepositoryError>> + Send;
 }
 
 pub trait ConvergenceRepository: Send + Sync {
@@ -229,6 +231,10 @@ pub trait GitOperationRepository: Send + Sync {
         &self,
         convergence_id: ConvergenceId,
     ) -> impl Future<Output = Result<Option<GitOperation>, RepositoryError>> + Send;
+    fn delete_investigation_ref_operations(
+        &self,
+        ref_name: &GitRef,
+    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
 }
 
 pub trait ActivityRepository: Send + Sync {

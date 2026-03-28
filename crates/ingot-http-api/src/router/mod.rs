@@ -3,6 +3,7 @@ mod convergence;
 mod dispatch;
 mod findings;
 mod harness;
+mod infra_ports;
 mod item_projection;
 mod items;
 mod jobs;
@@ -58,7 +59,7 @@ use ingot_domain::project::Project;
 use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
 use ingot_git::GitJobCompletionPort;
-use ingot_git::commands::{delete_ref, git, is_commit_reachable_from_any_ref, resolve_ref_oid};
+use ingot_git::commands::{is_commit_reachable_from_any_ref, resolve_ref_oid};
 use ingot_git::commit::{
     ConvergenceCommitTrailers, abort_cherry_pick, cherry_pick_no_commit, commit_message,
     create_daemon_convergence_commit, list_commits_oldest_first, working_tree_has_changes,
@@ -83,8 +84,7 @@ use ingot_usecases::{
 };
 use ingot_workflow::{AllowedAction, Evaluation, Evaluator, PhaseStatus, RecommendedAction, step};
 use ingot_workspace::{
-    ensure_authoring_workspace_state, provision_integration_workspace, provision_review_workspace,
-    remove_workspace,
+    ensure_authoring_workspace_state, provision_integration_workspace, remove_workspace,
 };
 use tracing::warn;
 

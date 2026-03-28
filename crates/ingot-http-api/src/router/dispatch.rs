@@ -1,3 +1,4 @@
+use super::infra_ports::HttpInfraAdapter;
 use super::item_projection::{ItemRuntimeSnapshot, load_item_runtime_snapshot};
 use super::items::{
     append_activity, current_authoring_head_for_revision_with_workspace,
@@ -6,7 +7,7 @@ use super::items::{
 use super::support::*;
 use super::types::*;
 use super::*;
-use ingot_git::commands::update_ref;
+use ingot_usecases::dispatch::{PendingInvestigationRef, investigation_ref_name};
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job, retry_job};
 
 pub(super) async fn dispatch_item_job(
@@ -61,22 +62,12 @@ pub(super) async fn dispatch_item_job(
     )
     .await?;
 
-    if let Err(error) = state.db.create_job(&job).await {
-        cleanup_failed_dispatch_side_effects(
-            &state,
-            &project,
-            precreated_authoring_workspace.as_ref(),
-            pending_investigation_ref
-                .as_ref()
-                .map(|pending| &pending.ref_name),
-        )
-        .await;
-        return Err(repo_to_internal(error));
-    }
-    apply_pending_investigation_ref_or_cleanup(
+    let infra = HttpInfraAdapter::new(&state);
+    persist_dispatched_job(
         &state,
-        &project,
-        job.id,
+        &infra,
+        project_id,
+        &job,
         pending_investigation_ref.as_ref(),
         precreated_authoring_workspace.as_ref(),
     )
@@ -97,20 +88,10 @@ pub(super) async fn dispatch_item_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
-pub(super) fn investigation_ref_name(job_id: JobId) -> GitRef {
-    GitRef::new(format!("refs/ingot/investigations/{job_id}"))
-}
-
 pub(super) fn should_fill_candidate_subject_from_workspace(
     step_id: ingot_domain::step_id::StepId,
 ) -> bool {
     ingot_usecases::dispatch::should_fill_candidate_subject_from_workspace(step_id)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct PendingInvestigationRef {
-    pub(super) ref_name: GitRef,
-    pub(super) commit_oid: CommitOid,
 }
 
 pub(super) async fn bind_dispatch_subjects_if_needed(
@@ -123,6 +104,7 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
 ) -> Result<Option<PendingInvestigationRef>, ApiError> {
     let paths = refresh_project_mirror(state, project).await?;
     let repo_path = paths.mirror_git_dir.as_path();
+    let fills_candidate_subject = should_fill_candidate_subject_from_workspace(job.step_id);
 
     if job.workspace_kind == WorkspaceKind::Authoring
         && job.execution_permission == ingot_domain::job::ExecutionPermission::MayMutate
@@ -141,7 +123,7 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
     let mut base_commit_oid = job.job_input.base_commit_oid().cloned();
     let mut head_commit_oid = job.job_input.head_commit_oid().cloned();
 
-    if should_fill_candidate_subject_from_workspace(job.step_id) {
+    if fills_candidate_subject {
         if base_commit_oid.is_none() {
             base_commit_oid = effective_authoring_base_commit_oid(state, revision).await?;
         }
@@ -150,10 +132,12 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
                 current_authoring_head_for_revision_with_workspace(state, revision, jobs).await?;
         }
         if let (Some(base_commit_oid), Some(head_commit_oid)) =
-            (base_commit_oid.clone(), head_commit_oid.clone())
+            (base_commit_oid.as_ref(), head_commit_oid.as_ref())
         {
-            job.job_input =
-                ingot_domain::job::JobInput::candidate_subject(base_commit_oid, head_commit_oid);
+            job.job_input = ingot_domain::job::JobInput::candidate_subject(
+                base_commit_oid.clone(),
+                head_commit_oid.clone(),
+            );
             return Ok(None);
         }
     }
@@ -184,9 +168,7 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
         }));
     }
 
-    if should_fill_candidate_subject_from_workspace(job.step_id)
-        && !(base_commit_oid.is_some() && head_commit_oid.is_some())
-    {
+    if fills_candidate_subject && !(base_commit_oid.is_some() && head_commit_oid.is_some()) {
         return Err(UseCaseError::IllegalStepDispatch(format!(
             "Incomplete candidate subject for step: {}",
             job.step_id
@@ -195,205 +177,6 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
     }
 
     Ok(None)
-}
-
-pub(super) async fn apply_pending_investigation_ref_or_cleanup(
-    state: &AppState,
-    project: &Project,
-    job_id: JobId,
-    pending_investigation_ref: Option<&PendingInvestigationRef>,
-    precreated_authoring_workspace: Option<&Workspace>,
-) -> Result<(), ApiError> {
-    let Some(pending_investigation_ref) = pending_investigation_ref else {
-        return Ok(());
-    };
-    if let Err(error) = plan_and_apply_investigation_ref(
-        state,
-        project.id,
-        GitOperationEntityRef::Job(job_id),
-        &pending_investigation_ref.ref_name,
-        &pending_investigation_ref.commit_oid,
-    )
-    .await
-    {
-        cleanup_failed_dispatch_side_effects(
-            state,
-            project,
-            precreated_authoring_workspace,
-            Some(&pending_investigation_ref.ref_name),
-        )
-        .await;
-        let _ = sqlx::query("DELETE FROM jobs WHERE id = ?")
-            .bind(job_id.to_string())
-            .execute(state.db.raw_pool())
-            .await;
-        return Err(error);
-    }
-    Ok(())
-}
-
-pub(super) async fn cleanup_failed_dispatch_side_effects(
-    state: &AppState,
-    project: &Project,
-    precreated_authoring_workspace: Option<&Workspace>,
-    investigation_ref_name: Option<&GitRef>,
-) {
-    let mirror_paths = refresh_project_mirror(state, project).await.ok();
-
-    if let Some(workspace) = precreated_authoring_workspace {
-        if let Some(paths) = mirror_paths.as_ref() {
-            let _ =
-                ingot_workspace::remove_workspace(paths.mirror_git_dir.as_path(), &workspace.path)
-                    .await;
-            if let Some(workspace_ref) = workspace.workspace_ref.as_ref() {
-                let _ = delete_ref(paths.mirror_git_dir.as_path(), workspace_ref).await;
-            }
-        }
-        let _ = sqlx::query("DELETE FROM workspaces WHERE id = ?")
-            .bind(workspace.id.to_string())
-            .execute(state.db.raw_pool())
-            .await;
-    }
-
-    if let Some(ref_name) = investigation_ref_name {
-        if let Some(paths) = mirror_paths.as_ref() {
-            let _ = delete_ref(paths.mirror_git_dir.as_path(), ref_name).await;
-        }
-        let _ = sqlx::query(
-            "DELETE FROM git_operations WHERE operation_kind = 'create_investigation_ref' AND ref_name = ?",
-        )
-        .bind(ref_name)
-        .execute(state.db.raw_pool())
-        .await;
-    }
-}
-
-pub(super) async fn plan_and_apply_investigation_ref(
-    state: &AppState,
-    project_id: ProjectId,
-    entity: GitOperationEntityRef,
-    ref_name: &GitRef,
-    commit_oid: &CommitOid,
-) -> Result<(), ApiError> {
-    let mut operation = GitOperation {
-        id: ingot_domain::ids::GitOperationId::new(),
-        project_id,
-        entity,
-        payload: OperationPayload::CreateInvestigationRef {
-            ref_name: ref_name.clone(),
-            new_oid: commit_oid.clone(),
-            commit_oid: Some(commit_oid.clone()),
-        },
-        status: GitOperationStatus::Planned,
-        created_at: Utc::now(),
-        completed_at: None,
-    };
-    state
-        .db
-        .create_git_operation(&operation)
-        .await
-        .map_err(repo_to_internal)?;
-    append_activity(
-        state,
-        project_id,
-        ActivityEventType::GitOperationPlanned,
-        ActivitySubject::GitOperation(operation.id),
-        serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity.entity_id_string() }),
-    )
-    .await?;
-    let project = state
-        .db
-        .get_project(project_id)
-        .await
-        .map_err(repo_to_project)?;
-    let paths = refresh_project_mirror(state, &project).await?;
-    update_ref(paths.mirror_git_dir.as_path(), ref_name, commit_oid)
-        .await
-        .map_err(git_to_internal)?;
-    operation.status = GitOperationStatus::Applied;
-    operation.completed_at = Some(Utc::now());
-    state
-        .db
-        .update_git_operation(&operation)
-        .await
-        .map_err(repo_to_internal)?;
-    Ok(())
-}
-
-pub(super) async fn maybe_cleanup_investigation_ref(
-    state: &AppState,
-    project_id: ProjectId,
-    finding: &Finding,
-) -> Result<(), ApiError> {
-    if finding.source_step_id != step::INVESTIGATE_ITEM
-        || finding.source_subject_kind != ingot_domain::finding::FindingSubjectKind::Candidate
-    {
-        return Ok(());
-    }
-
-    let remaining_unresolved = state
-        .db
-        .list_findings_by_item(finding.source_item_id)
-        .await
-        .map_err(repo_to_internal)?
-        .into_iter()
-        .any(|candidate| {
-            candidate.source_job_id == finding.source_job_id && candidate.triage.is_unresolved()
-        });
-    if remaining_unresolved {
-        return Ok(());
-    }
-
-    let ref_name = investigation_ref_name(finding.source_job_id);
-    let project = state
-        .db
-        .get_project(project_id)
-        .await
-        .map_err(repo_to_project)?;
-    let paths = refresh_project_mirror(state, &project).await?;
-    let existing_oid = resolve_ref_oid(paths.mirror_git_dir.as_path(), &ref_name)
-        .await
-        .map_err(git_to_internal)?;
-    let Some(existing_oid) = existing_oid else {
-        return Ok(());
-    };
-
-    let mut operation = GitOperation {
-        id: ingot_domain::ids::GitOperationId::new(),
-        project_id,
-        entity: GitOperationEntityRef::Job(finding.source_job_id),
-        payload: OperationPayload::RemoveInvestigationRef {
-            ref_name: ref_name.clone(),
-            expected_old_oid: existing_oid.clone(),
-        },
-        status: GitOperationStatus::Planned,
-        created_at: Utc::now(),
-        completed_at: None,
-    };
-    state
-        .db
-        .create_git_operation(&operation)
-        .await
-        .map_err(repo_to_internal)?;
-    append_activity(
-        state,
-        project_id,
-        ActivityEventType::GitOperationPlanned,
-        ActivitySubject::GitOperation(operation.id),
-        serde_json::json!({ "operation_kind": operation.operation_kind(), "entity_id": operation.entity.entity_id_string() }),
-    )
-    .await?;
-    delete_ref(paths.mirror_git_dir.as_path(), &ref_name)
-        .await
-        .map_err(git_to_internal)?;
-    operation.status = GitOperationStatus::Applied;
-    operation.completed_at = Some(Utc::now());
-    state
-        .db
-        .update_git_operation(&operation)
-        .await
-        .map_err(repo_to_internal)?;
-    Ok(())
 }
 
 pub(super) async fn auto_dispatch_projected_review_job(
@@ -494,22 +277,12 @@ pub(super) async fn retry_item_job(
         &mut precreated_authoring_workspace,
     )
     .await?;
-    if let Err(error) = state.db.create_job(&job).await {
-        cleanup_failed_dispatch_side_effects(
-            &state,
-            &project,
-            precreated_authoring_workspace.as_ref(),
-            pending_investigation_ref
-                .as_ref()
-                .map(|pending| &pending.ref_name),
-        )
-        .await;
-        return Err(repo_to_internal(error));
-    }
-    apply_pending_investigation_ref_or_cleanup(
+    let infra = HttpInfraAdapter::new(&state);
+    persist_dispatched_job(
         &state,
-        &project,
-        job.id,
+        &infra,
+        project_id,
+        &job,
         pending_investigation_ref.as_ref(),
         precreated_authoring_workspace.as_ref(),
     )
@@ -532,6 +305,43 @@ pub(super) async fn retry_item_job(
     .await?;
 
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+async fn persist_dispatched_job(
+    state: &AppState,
+    infra: &HttpInfraAdapter,
+    project_id: ProjectId,
+    job: &Job,
+    pending_investigation_ref: Option<&PendingInvestigationRef>,
+    precreated_authoring_workspace: Option<&Workspace>,
+) -> Result<(), ApiError> {
+    if let Err(error) = state.db.create_job(job).await {
+        ingot_usecases::dispatch::cleanup_failed_dispatch(
+            &state.db,
+            &state.db,
+            infra,
+            project_id,
+            precreated_authoring_workspace,
+            pending_investigation_ref.map(|pending| &pending.ref_name),
+        )
+        .await;
+        return Err(repo_to_internal(error));
+    }
+
+    ingot_usecases::dispatch::apply_pending_investigation_ref_or_cleanup(
+        &state.db,
+        &state.db,
+        &state.db,
+        &state.db,
+        infra,
+        project_id,
+        job.id,
+        pending_investigation_ref,
+        precreated_authoring_workspace,
+    )
+    .await?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -942,9 +752,12 @@ mod tests {
             .await
             .expect("create git operation");
 
-        cleanup_failed_dispatch_side_effects(
-            &state,
-            &project,
+        let infra = super::infra_ports::HttpInfraAdapter::new(&state);
+        ingot_usecases::dispatch::cleanup_failed_dispatch(
+            &state.db,
+            &state.db,
+            &infra,
+            project.id,
             Some(&workspace),
             Some(&GitRef::new(&investigation_ref)),
         )
@@ -1042,9 +855,12 @@ mod tests {
             .await
             .expect("create git operation");
 
-        cleanup_failed_dispatch_side_effects(
-            &state,
-            &project,
+        let infra = super::infra_ports::HttpInfraAdapter::new(&state);
+        ingot_usecases::dispatch::cleanup_failed_dispatch(
+            &state.db,
+            &state.db,
+            &infra,
+            project.id,
             Some(&workspace),
             Some(&GitRef::new(&investigation_ref)),
         )

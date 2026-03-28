@@ -260,6 +260,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use ingot_domain::git_ref::GitRef;
 
     #[tokio::test]
     async fn teardown_maps_job_not_active_conflict() {
@@ -484,6 +485,10 @@ mod tests {
         ) -> Result<(), RepositoryError> {
             async { unreachable!("unused in test") }.await
         }
+
+        async fn delete(&self, _id: JobId) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
+        }
     }
 
     #[derive(Clone, Default)]
@@ -656,6 +661,10 @@ mod tests {
         async fn list_by_item(&self, _item_id: ItemId) -> Result<Vec<Workspace>, RepositoryError> {
             async { unreachable!("unused in test") }.await
         }
+
+        async fn delete(&self, _id: WorkspaceId) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
+        }
     }
 
     #[derive(Clone, Default)]
@@ -679,6 +688,13 @@ mod tests {
             _convergence_id: ConvergenceId,
         ) -> Result<Option<GitOperation>, RepositoryError> {
             Ok(None)
+        }
+
+        async fn delete_investigation_ref_operations(
+            &self,
+            _ref_name: &GitRef,
+        ) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
         }
     }
 

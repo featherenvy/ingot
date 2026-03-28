@@ -1,14 +1,23 @@
+use std::future::Future;
+
 use chrono::Utc;
 use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::Convergence;
 use ingot_domain::finding::Finding;
-use ingot_domain::ids::ActivityId;
+use ingot_domain::git_operation::{
+    GitOperation, GitOperationEntityRef, GitOperationStatus, OperationPayload,
+};
+use ingot_domain::git_ref::GitRef;
+use ingot_domain::ids::{ActivityId, GitOperationId, JobId, ProjectId};
 use ingot_domain::item::{EscalationReason, Item};
 use ingot_domain::job::{
     ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
 };
-use ingot_domain::ports::{ActivityRepository, JobRepository, WorkspaceRepository};
+use ingot_domain::ports::{
+    ActivityRepository, FindingRepository, GitOperationRepository, JobRepository,
+    WorkspaceRepository,
+};
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::step_id::StepId;
@@ -16,9 +25,212 @@ use ingot_domain::workspace::{Workspace, WorkspaceKind};
 use ingot_workflow::{ClosureRelevance, Evaluator, step};
 
 use crate::UseCaseError;
+use crate::git_operation_journal::{create_planned, mark_applied};
 use crate::job::{DispatchJobCommand, dispatch_job};
 
-/// Returns true for steps that need candidate subjects filled from workspace history.
+pub trait DispatchInfraPort: Send + Sync {
+    fn resolve_ref_oid(
+        &self,
+        project_id: ProjectId,
+        ref_name: &GitRef,
+    ) -> impl Future<Output = Result<Option<CommitOid>, UseCaseError>> + Send;
+
+    fn update_ref(
+        &self,
+        project_id: ProjectId,
+        ref_name: &GitRef,
+        commit_oid: &CommitOid,
+    ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
+
+    fn delete_ref(
+        &self,
+        project_id: ProjectId,
+        ref_name: &GitRef,
+    ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
+
+    fn remove_workspace_files(
+        &self,
+        project_id: ProjectId,
+        workspace: &Workspace,
+    ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
+}
+
+#[must_use]
+pub fn investigation_ref_name(job_id: JobId) -> GitRef {
+    GitRef::new(format!("refs/ingot/investigations/{job_id}"))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingInvestigationRef {
+    pub ref_name: GitRef,
+    pub commit_oid: CommitOid,
+}
+
+pub async fn plan_and_apply_investigation_ref<GO, A, G>(
+    git_op_repo: &GO,
+    activity_repo: &A,
+    git_port: &G,
+    project_id: ProjectId,
+    entity: GitOperationEntityRef,
+    ref_name: &GitRef,
+    commit_oid: &CommitOid,
+) -> Result<(), UseCaseError>
+where
+    GO: GitOperationRepository,
+    A: ActivityRepository,
+    G: DispatchInfraPort,
+{
+    let mut operation = GitOperation {
+        id: GitOperationId::new(),
+        project_id,
+        entity,
+        payload: OperationPayload::CreateInvestigationRef {
+            ref_name: ref_name.clone(),
+            new_oid: commit_oid.clone(),
+            commit_oid: Some(commit_oid.clone()),
+        },
+        status: GitOperationStatus::Planned,
+        created_at: Utc::now(),
+        completed_at: None,
+    };
+    create_planned(git_op_repo, activity_repo, &operation, project_id).await?;
+    git_port
+        .update_ref(project_id, ref_name, commit_oid)
+        .await?;
+    mark_applied(git_op_repo, &mut operation).await?;
+    Ok(())
+}
+
+pub async fn cleanup_failed_dispatch<W, GO, G>(
+    workspace_repo: &W,
+    git_op_repo: &GO,
+    git_port: &G,
+    project_id: ProjectId,
+    precreated_workspace: Option<&Workspace>,
+    investigation_ref_name: Option<&GitRef>,
+) where
+    W: WorkspaceRepository,
+    GO: GitOperationRepository,
+    G: DispatchInfraPort,
+{
+    if let Some(workspace) = precreated_workspace {
+        let _ = git_port.remove_workspace_files(project_id, workspace).await;
+        let _ = workspace_repo.delete(workspace.id).await;
+    }
+
+    if let Some(ref_name) = investigation_ref_name {
+        let _ = git_port.delete_ref(project_id, ref_name).await;
+        let _ = git_op_repo
+            .delete_investigation_ref_operations(ref_name)
+            .await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_pending_investigation_ref_or_cleanup<W, J, GO, A, G>(
+    workspace_repo: &W,
+    job_repo: &J,
+    git_op_repo: &GO,
+    activity_repo: &A,
+    git_port: &G,
+    project_id: ProjectId,
+    job_id: JobId,
+    pending_ref: Option<&PendingInvestigationRef>,
+    precreated_workspace: Option<&Workspace>,
+) -> Result<(), UseCaseError>
+where
+    W: WorkspaceRepository,
+    J: JobRepository,
+    GO: GitOperationRepository,
+    A: ActivityRepository,
+    G: DispatchInfraPort,
+{
+    let Some(pending_ref) = pending_ref else {
+        return Ok(());
+    };
+    if let Err(error) = plan_and_apply_investigation_ref(
+        git_op_repo,
+        activity_repo,
+        git_port,
+        project_id,
+        GitOperationEntityRef::Job(job_id),
+        &pending_ref.ref_name,
+        &pending_ref.commit_oid,
+    )
+    .await
+    {
+        cleanup_failed_dispatch(
+            workspace_repo,
+            git_op_repo,
+            git_port,
+            project_id,
+            precreated_workspace,
+            Some(&pending_ref.ref_name),
+        )
+        .await;
+        let _ = job_repo.delete(job_id).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub async fn maybe_cleanup_investigation_ref<F, GO, A, G>(
+    finding_repo: &F,
+    git_op_repo: &GO,
+    activity_repo: &A,
+    git_port: &G,
+    project_id: ProjectId,
+    finding: &Finding,
+) -> Result<(), UseCaseError>
+where
+    F: FindingRepository,
+    GO: GitOperationRepository,
+    A: ActivityRepository,
+    G: DispatchInfraPort,
+{
+    if finding.source_step_id != step::INVESTIGATE_ITEM
+        || finding.source_subject_kind != ingot_domain::finding::FindingSubjectKind::Candidate
+    {
+        return Ok(());
+    }
+
+    let remaining_unresolved = finding_repo
+        .list_by_item(finding.source_item_id)
+        .await
+        .map_err(UseCaseError::Repository)?
+        .into_iter()
+        .any(|candidate| {
+            candidate.source_job_id == finding.source_job_id && candidate.triage.is_unresolved()
+        });
+    if remaining_unresolved {
+        return Ok(());
+    }
+
+    let ref_name = investigation_ref_name(finding.source_job_id);
+    let existing_oid = git_port.resolve_ref_oid(project_id, &ref_name).await?;
+    let Some(existing_oid) = existing_oid else {
+        return Ok(());
+    };
+
+    let mut operation = GitOperation {
+        id: GitOperationId::new(),
+        project_id,
+        entity: GitOperationEntityRef::Job(finding.source_job_id),
+        payload: OperationPayload::RemoveInvestigationRef {
+            ref_name: ref_name.clone(),
+            expected_old_oid: existing_oid,
+        },
+        status: GitOperationStatus::Planned,
+        created_at: Utc::now(),
+        completed_at: None,
+    };
+    create_planned(git_op_repo, activity_repo, &operation, project_id).await?;
+    git_port.delete_ref(project_id, &ref_name).await?;
+    mark_applied(git_op_repo, &mut operation).await?;
+    Ok(())
+}
+
+#[must_use]
 pub fn should_fill_candidate_subject_from_workspace(step_id: StepId) -> bool {
     matches!(
         step_id,
@@ -33,8 +245,7 @@ pub fn should_fill_candidate_subject_from_workspace(step_id: StepId) -> bool {
     )
 }
 
-/// Returns the most recent output commit OID for a revision from completed authoring jobs,
-/// falling back to the revision's seed commit OID.
+#[must_use]
 pub fn current_authoring_head_for_revision(
     jobs: &[Job],
     revision: &ItemRevision,
@@ -43,21 +254,13 @@ pub fn current_authoring_head_for_revision(
         .filter(|job| job.item_revision_id == revision.id)
         .filter(|job| job.state.status() == JobStatus::Completed)
         .filter(|job| job.output_artifact_kind == OutputArtifactKind::Commit)
-        .filter_map(|job| {
-            job.state.output_commit_oid().map(|commit_oid| {
-                (
-                    (job.state.ended_at(), job.created_at),
-                    commit_oid.to_owned(),
-                )
-            })
-        })
-        .max_by_key(|(sort_key, _)| *sort_key)
-        .map(|(_, commit_oid)| commit_oid)
+        .filter(|job| job.state.output_commit_oid().is_some())
+        .max_by_key(|job| (job.state.ended_at(), job.created_at))
+        .and_then(|job| job.state.output_commit_oid().cloned())
         .or_else(|| revision.seed.seed_commit_oid().map(ToOwned::to_owned))
 }
 
-/// Returns the effective authoring head for a revision, considering both completed jobs
-/// and the authoring workspace's head commit.
+#[must_use]
 pub fn current_authoring_head_for_revision_with_workspace(
     revision: &ItemRevision,
     jobs: &[Job],
@@ -70,8 +273,7 @@ pub fn current_authoring_head_for_revision_with_workspace(
     workspace.and_then(|ws| ws.state.head_commit_oid().map(ToOwned::to_owned))
 }
 
-/// Returns the effective authoring base commit OID for a revision, using the seed commit
-/// if available, otherwise the authoring workspace's base commit.
+#[must_use]
 pub fn effective_authoring_base_commit_oid(
     revision: &ItemRevision,
     workspace: Option<&Workspace>,

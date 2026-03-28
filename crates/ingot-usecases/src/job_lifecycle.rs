@@ -531,6 +531,10 @@ mod tests {
             }
             Ok(())
         }
+
+        async fn delete(&self, _id: JobId) -> Result<(), RepositoryError> {
+            async { unreachable!("unused in test") }.await
+        }
     }
 
     #[derive(Clone, Default)]
@@ -602,6 +606,10 @@ mod tests {
         }
 
         async fn list_by_item(&self, _item_id: ItemId) -> Result<Vec<Workspace>, RepositoryError> {
+            async { unreachable!("unused in test") }.await
+        }
+
+        async fn delete(&self, _id: WorkspaceId) -> Result<(), RepositoryError> {
             async { unreachable!("unused in test") }.await
         }
     }

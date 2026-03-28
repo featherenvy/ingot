@@ -570,6 +570,20 @@ impl Database {
 
         Ok(())
     }
+
+    pub async fn delete_job(&self, job_id: JobId) -> Result<(), RepositoryError> {
+        let result = sqlx::query("DELETE FROM jobs WHERE id = ?")
+            .bind(job_id)
+            .execute(&self.pool)
+            .await
+            .map_err(db_write_err)?;
+
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::NotFound);
+        }
+
+        Ok(())
+    }
 }
 
 impl JobRepository for Database {
@@ -634,6 +648,9 @@ impl JobRepository for Database {
         params: FinishJobNonSuccessParams,
     ) -> Result<(), RepositoryError> {
         self.finish_job_non_success(params).await
+    }
+    async fn delete(&self, id: JobId) -> Result<(), RepositoryError> {
+        self.delete_job(id).await
     }
 }
 

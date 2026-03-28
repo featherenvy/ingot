@@ -2,6 +2,7 @@ pub mod convergence;
 pub mod dispatch;
 pub mod error;
 pub mod finding;
+mod git_operation_journal;
 pub mod item;
 pub mod job;
 mod job_completion;
