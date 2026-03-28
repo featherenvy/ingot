@@ -7,7 +7,7 @@ use ingot_domain::agent_model::AgentModel;
 use tokio::fs;
 use tracing::{info, warn};
 
-use crate::subprocess;
+use crate::{structured_output_schema, subprocess};
 
 #[derive(Debug, Clone)]
 pub struct CodexCliAdapter {
@@ -140,24 +140,6 @@ impl AgentAdapter for CodexCliAdapter {
     }
 }
 
-fn structured_output_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "summary": {
-                "type": "string",
-                "description": "Short summary of the completed work."
-            },
-            "validation": {
-                "type": ["string", "null"],
-                "description": "Short note describing validation that was run, if any."
-            }
-        },
-        "required": ["summary", "validation"],
-        "additionalProperties": false
-    })
-}
-
 fn parse_last_message(message: &str) -> serde_json::Value {
     serde_json::from_str(message)
         .unwrap_or_else(|_| serde_json::json!({ "summary": message.trim() }))
@@ -229,7 +211,7 @@ mod tests {
 
     #[test]
     fn fallback_structured_output_schema_requires_nullable_validation() {
-        let schema = structured_output_schema();
+        let schema = crate::structured_output_schema();
         assert_eq!(
             schema["required"],
             serde_json::json!(["summary", "validation"])

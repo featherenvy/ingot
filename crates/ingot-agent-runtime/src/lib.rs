@@ -19,13 +19,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use ingot_agent_adapters::claude_code::ClaudeCodeCliAdapter;
-use ingot_agent_adapters::codex::CodexCliAdapter;
-use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
+use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
 use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
-use ingot_domain::agent::{AdapterKind, Agent, AgentCapability};
+use ingot_domain::agent::{Agent, AgentCapability};
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::Convergence;
 use ingot_domain::convergence_queue::ConvergenceQueueEntry;
@@ -104,20 +102,7 @@ impl AgentRunner for CliAgentRunner {
         request: &'a AgentRequest,
         working_dir: &'a Path,
     ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
-        Box::pin(async move {
-            match agent.adapter_kind {
-                AdapterKind::Codex => {
-                    CodexCliAdapter::new(agent.cli_path.clone(), agent.model.clone())
-                        .launch(request, working_dir)
-                        .await
-                }
-                AdapterKind::ClaudeCode => {
-                    ClaudeCodeCliAdapter::new(agent.cli_path.clone(), agent.model.clone())
-                        .launch(request, working_dir)
-                        .await
-                }
-            }
-        })
+        Box::pin(ingot_agent_adapters::launch_agent(agent, request, working_dir))
     }
 }
 

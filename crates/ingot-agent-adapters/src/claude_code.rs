@@ -6,7 +6,7 @@ use ingot_agent_protocol::response::AgentResponse;
 use ingot_domain::agent_model::AgentModel;
 use tracing::info;
 
-use crate::subprocess;
+use crate::{structured_output_schema, subprocess};
 
 #[derive(Debug, Clone)]
 pub struct ClaudeCodeCliAdapter {
@@ -88,24 +88,6 @@ impl AgentAdapter for ClaudeCodeCliAdapter {
     async fn cancel(&self, pid: u32) -> Result<(), AgentError> {
         subprocess::cancel_process_group(pid).await
     }
-}
-
-fn structured_output_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "summary": {
-                "type": "string",
-                "description": "Short summary of the completed work."
-            },
-            "validation": {
-                "type": ["string", "null"],
-                "description": "Short note describing validation that was run, if any."
-            }
-        },
-        "required": ["summary", "validation"],
-        "additionalProperties": false
-    })
 }
 
 /// Parse Claude's `--print --output-format json` envelope.
