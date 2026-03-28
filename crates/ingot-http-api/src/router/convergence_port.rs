@@ -197,9 +197,6 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 .await
                 .map_err(repo_to_project)
                 .map_err(api_to_usecase_error)?;
-            let paths = refresh_project_mirror(&state, &project)
-                .await
-                .map_err(api_to_usecase_error)?;
             let item = state
                 .db
                 .get_item(item_id)
@@ -211,7 +208,7 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 jobs,
                 findings,
                 convergences,
-            } = load_item_runtime_snapshot(&state, paths.mirror_git_dir.as_path(), &item)
+            } = load_item_runtime_snapshot(&state, project.id, &item)
                 .await
                 .map_err(api_to_usecase_error)?;
             let active_queue_entry = state
@@ -292,9 +289,6 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 .await
                 .map_err(repo_to_project)
                 .map_err(api_to_usecase_error)?;
-            let paths = refresh_project_mirror(&state, &project)
-                .await
-                .map_err(api_to_usecase_error)?;
             let item = state
                 .db
                 .get_item(item_id)
@@ -313,7 +307,8 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 .await
                 .map_err(UseCaseError::Repository)?;
             let convergences = hydrate_convergence_validity(
-                paths.mirror_git_dir.as_path(),
+                &state,
+                project.id,
                 state
                     .db
                     .list_convergences_by_item(item.id)

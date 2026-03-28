@@ -24,7 +24,6 @@ pub(crate) use support::{
     resolve_default_branch,
 };
 
-use std::path::Path as FsPath;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -59,8 +58,7 @@ use ingot_domain::project::Project;
 use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
 use ingot_git::GitJobCompletionPort;
-use ingot_git::commands::{is_commit_reachable_from_any_ref, resolve_ref_oid};
-use ingot_git::project_repo::{CheckoutSyncStatus, checkout_sync_status, project_repo_paths};
+use ingot_git::project_repo::{CheckoutSyncStatus, project_repo_paths};
 use ingot_store_sqlite::Database;
 use ingot_usecases::convergence::{
     ConvergenceCommandPort, ConvergenceService, ConvergenceSystemActionPort,

@@ -433,12 +433,10 @@ pub(super) async fn ensure_finding_subject_reachable(
     project: &Project,
     finding: &Finding,
 ) -> Result<(), ApiError> {
-    let paths = refresh_project_mirror(state, project).await?;
-    let repo_path = paths.mirror_git_dir.as_path();
-    let head_reachable =
-        is_commit_reachable_from_any_ref(repo_path, &finding.source_subject_head_commit_oid)
-            .await
-            .map_err(|err| ApiError::from(UseCaseError::Internal(err.to_string())))?;
+    let infra = HttpInfraAdapter::new(state);
+    let head_reachable = infra
+        .is_commit_reachable_from_project(project, &finding.source_subject_head_commit_oid)
+        .await?;
 
     if !head_reachable {
         return Err(UseCaseError::FindingSubjectUnreachable.into());
@@ -448,9 +446,9 @@ pub(super) async fn ensure_finding_subject_reachable(
         let Some(base_commit_oid) = finding.source_subject_base_commit_oid.as_ref() else {
             return Err(UseCaseError::FindingSubjectUnreachable.into());
         };
-        let base_reachable = is_commit_reachable_from_any_ref(repo_path, base_commit_oid)
-            .await
-            .map_err(|err| ApiError::from(UseCaseError::Internal(err.to_string())))?;
+        let base_reachable = infra
+            .is_commit_reachable_from_project(project, base_commit_oid)
+            .await?;
 
         if !base_reachable {
             return Err(UseCaseError::FindingSubjectUnreachable.into());

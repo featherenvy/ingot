@@ -70,7 +70,6 @@ pub(super) async fn create_item(
         .project_locks
         .acquire_project_mutation(project_id)
         .await;
-    let paths = refresh_project_mirror(&state, &project).await?;
     let config = load_effective_config(Some(&project))?;
     let configured_approval_policy = config.defaults.approval_policy;
 
@@ -83,15 +82,16 @@ pub(super) async fn create_item(
     )?;
     ensure_git_valid_target_ref(target_ref.as_str()).await?;
     let infra = HttpInfraAdapter::new(&state);
-    let repo_path = paths.mirror_git_dir.as_path();
     let resolved_target_head = infra
         .resolve_project_ref_oid(project.id, &target_ref)
         .await?
         .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.to_string()))?;
 
-    let seed_commit_oid = validate_seed_commit_oid(repo_path, request.seed_commit_oid).await?;
+    let seed_commit_oid =
+        validate_seed_commit_oid(&infra, project.id, request.seed_commit_oid).await?;
     let seed_target_commit_oid = resolve_seed_target_commit_oid(
-        repo_path,
+        &infra,
+        project.id,
         request.seed_target_commit_oid,
         resolved_target_head,
     )
@@ -149,7 +149,6 @@ pub(super) async fn list_items(
         .get_project(project_id)
         .await
         .map_err(repo_to_project)?;
-    let paths = refresh_project_mirror(&state, &project).await?;
     let items = state
         .db
         .list_items_by_project(project_id)
@@ -159,8 +158,7 @@ pub(super) async fn list_items(
     let mut summaries = Vec::with_capacity(items.len());
 
     for item in items {
-        let snapshot =
-            load_item_runtime_snapshot(&state, paths.mirror_git_dir.as_path(), &item).await?;
+        let snapshot = load_item_runtime_snapshot(&state, project.id, &item).await?;
         let (evaluation, queue) =
             evaluate_item_snapshot(&state, &project, &item, &snapshot, &evaluator).await?;
 

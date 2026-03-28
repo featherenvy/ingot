@@ -1,6 +1,7 @@
 use super::support::*;
 use super::types::*;
 use super::*;
+use crate::router::infra_ports::HttpInfraAdapter;
 
 pub(super) struct ItemRuntimeSnapshot {
     pub current_revision: ItemRevision,
@@ -11,7 +12,7 @@ pub(super) struct ItemRuntimeSnapshot {
 
 pub(super) async fn load_item_runtime_snapshot(
     state: &AppState,
-    mirror_git_dir: &FsPath,
+    project_id: ProjectId,
     item: &Item,
 ) -> Result<ItemRuntimeSnapshot, ApiError> {
     let db = &state.db;
@@ -32,7 +33,7 @@ pub(super) async fn load_item_runtime_snapshot(
         .list_convergences_by_item(item.id)
         .await
         .map_err(repo_to_internal)?;
-    let convergences = hydrate_convergence_validity(mirror_git_dir, convergences).await?;
+    let convergences = hydrate_convergence_validity(state, project_id, convergences).await?;
     Ok(ItemRuntimeSnapshot {
         current_revision,
         jobs,
@@ -55,9 +56,7 @@ pub(super) async fn load_item_detail(
         .get_project(item.project_id)
         .await
         .map_err(repo_to_project)?;
-    let paths = refresh_project_mirror(state, &project).await?;
-
-    let snapshot = load_item_runtime_snapshot(state, paths.mirror_git_dir.as_path(), &item).await?;
+    let snapshot = load_item_runtime_snapshot(state, project.id, &item).await?;
     let revision_history = db
         .list_revisions_by_item(item.id)
         .await
@@ -228,10 +227,9 @@ pub(super) async fn load_queue_status(
         && evaluation.next_recommended_action
             == RecommendedAction::named(NamedRecommendedAction::FinalizePreparedConvergence);
     if should_check_checkout {
-        if let CheckoutSyncStatus::Blocked { message, .. } =
-            checkout_sync_status(&project.path, &revision.target_ref)
-                .await
-                .map_err(git_to_internal)?
+        if let CheckoutSyncStatus::Blocked { message, .. } = HttpInfraAdapter::new(state)
+            .checkout_sync_status(project, &revision.target_ref)
+            .await?
         {
             queue.checkout_sync_blocked = true;
             queue.checkout_sync_message = Some(message);
@@ -242,35 +240,29 @@ pub(super) async fn load_queue_status(
 }
 
 pub(super) async fn hydrate_convergence_validity(
-    repo_path: &FsPath,
+    state: &AppState,
+    project_id: ProjectId,
     mut convergences: Vec<Convergence>,
 ) -> Result<Vec<Convergence>, ApiError> {
+    let infra = HttpInfraAdapter::new(state);
     for convergence in &mut convergences {
-        convergence.target_head_valid = compute_target_head_valid(repo_path, convergence).await?;
+        convergence.target_head_valid = infra
+            .compute_target_head_valid(project_id, convergence)
+            .await?;
     }
 
     Ok(convergences)
-}
-
-async fn compute_target_head_valid(
-    repo_path: &FsPath,
-    convergence: &Convergence,
-) -> Result<Option<bool>, ApiError> {
-    let resolved = resolve_ref_oid(repo_path, &convergence.target_ref)
-        .await
-        .map_err(git_to_internal)?;
-
-    Ok(convergence.target_head_valid_for_resolved_oid(resolved.as_ref()))
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::compute_target_head_valid;
+    use super::hydrate_convergence_validity;
+    use crate::router::test_helpers::test_app_state;
     use chrono::Utc;
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
-    use ingot_test_support::fixtures::ConvergenceBuilder;
+    use ingot_test_support::fixtures::{ConvergenceBuilder, ProjectBuilder};
     use ingot_test_support::git::{
         git_output as support_git_output, run_git as support_git,
         temp_git_repo as support_temp_git_repo, write_file as support_write_file,
@@ -295,10 +287,20 @@ mod tests {
 
     #[tokio::test]
     async fn target_head_valid_tracks_ref_movement() {
+        let state = test_app_state().await;
         let repo = temp_git_repo();
+        let project = ProjectBuilder::new(&repo)
+            .id(ProjectId::from_uuid(Uuid::nil()))
+            .created_at(Utc::now())
+            .build();
+        state
+            .db
+            .create_project(&project)
+            .await
+            .expect("create project");
         let first = git_output(&repo, &["rev-parse", "HEAD"]);
         let mut convergence = ConvergenceBuilder::new(
-            ProjectId::from_uuid(Uuid::nil()),
+            project.id,
             ItemId::from_uuid(Uuid::nil()),
             ItemRevisionId::from_uuid(Uuid::nil()),
         )
@@ -308,18 +310,18 @@ mod tests {
         .build();
         convergence.target_ref = "refs/heads/main".into();
 
-        let valid = compute_target_head_valid(&repo, &convergence)
+        let valid = hydrate_convergence_validity(&state, project.id, vec![convergence.clone()])
             .await
             .expect("compute validity");
-        assert_eq!(valid, Some(true));
+        assert_eq!(valid[0].target_head_valid, Some(true));
 
         write_file(&repo.join("tracked.txt"), "next");
         git(&repo, &["add", "tracked.txt"]);
         git(&repo, &["commit", "-m", "next"]);
 
-        let stale = compute_target_head_valid(&repo, &convergence)
+        let stale = hydrate_convergence_validity(&state, project.id, vec![convergence])
             .await
             .expect("compute stale validity");
-        assert_eq!(stale, Some(false));
+        assert_eq!(stale[0].target_head_valid, Some(false));
     }
 }

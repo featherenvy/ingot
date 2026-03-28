@@ -35,7 +35,6 @@ pub(super) async fn dispatch_item_job(
         .get_project(project_id)
         .await
         .map_err(repo_to_project)?;
-    let paths = refresh_project_mirror(&state, &project).await?;
     let _guard = state
         .project_locks
         .acquire_project_mutation(project_id)
@@ -51,7 +50,7 @@ pub(super) async fn dispatch_item_job(
         jobs,
         findings,
         convergences,
-    } = load_item_runtime_snapshot(&state, paths.mirror_git_dir.as_path(), &item).await?;
+    } = load_item_runtime_snapshot(&state, project.id, &item).await?;
     let command = DispatchJobCommand {
         step_id: maybe_request.and_then(|Json(request)| request.step_id),
     };
@@ -114,17 +113,16 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
     job: &mut Job,
     precreated_authoring_workspace: &mut Option<Workspace>,
 ) -> Result<Option<PendingInvestigationRef>, ApiError> {
-    let paths = refresh_project_mirror(state, project).await?;
-    let repo_path = paths.mirror_git_dir.as_path();
+    let infra = HttpInfraAdapter::new(state);
     let fills_candidate_subject = should_fill_candidate_subject_from_workspace(job.step_id);
 
     if job.workspace_kind == WorkspaceKind::Authoring
         && job.execution_permission == ingot_domain::job::ExecutionPermission::MayMutate
         && job.job_input.head_commit_oid().is_none()
     {
-        let resolved_head = resolve_ref_oid(repo_path, &revision.target_ref)
-            .await
-            .map_err(git_to_internal)?
+        let resolved_head = infra
+            .resolve_project_ref_oid(project.id, &revision.target_ref)
+            .await?
             .ok_or_else(|| UseCaseError::TargetRefUnresolved(revision.target_ref.to_string()))?;
         job.job_input = ingot_domain::job::JobInput::authoring_head(resolved_head);
         let workspace = ensure_authoring_workspace(state, project, revision, job).await?;
@@ -165,9 +163,9 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
             return Ok(None);
         }
 
-        let resolved_head = resolve_ref_oid(repo_path, &revision.target_ref)
-            .await
-            .map_err(git_to_internal)?
+        let resolved_head = infra
+            .resolve_project_ref_oid(project.id, &revision.target_ref)
+            .await?
             .ok_or_else(|| UseCaseError::TargetRefUnresolved(revision.target_ref.to_string()))?;
         let ref_name = investigation_ref_name(job.id);
         job.job_input = ingot_domain::job::JobInput::candidate_subject(
@@ -209,13 +207,12 @@ pub(super) async fn auto_dispatch_projected_review_job_locked(
     item_id: ItemId,
 ) -> Result<Option<Job>, ApiError> {
     let item = state.db.get_item(item_id).await.map_err(repo_to_item)?;
-    let paths = refresh_project_mirror(state, project).await?;
     let ItemRuntimeSnapshot {
         current_revision,
         jobs,
         findings,
         convergences,
-    } = load_item_runtime_snapshot(state, paths.mirror_git_dir.as_path(), &item).await?;
+    } = load_item_runtime_snapshot(state, project.id, &item).await?;
 
     let job = ingot_usecases::dispatch::auto_dispatch_review(
         &state.db,
@@ -246,7 +243,6 @@ pub(super) async fn retry_item_job(
         .get_project(project_id)
         .await
         .map_err(repo_to_project)?;
-    let paths = refresh_project_mirror(&state, &project).await?;
     let _guard = state
         .project_locks
         .acquire_project_mutation(project_id)
@@ -261,7 +257,7 @@ pub(super) async fn retry_item_job(
         jobs,
         findings,
         convergences,
-    } = load_item_runtime_snapshot(&state, paths.mirror_git_dir.as_path(), &item).await?;
+    } = load_item_runtime_snapshot(&state, project.id, &item).await?;
     let previous_job = jobs
         .iter()
         .find(|job| job.id == job_id)

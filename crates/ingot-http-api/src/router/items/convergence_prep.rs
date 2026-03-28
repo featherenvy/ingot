@@ -14,20 +14,13 @@ use ingot_domain::item::{Escalation, EscalationReason, Item};
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::workspace::{Workspace, WorkspaceKind};
-use ingot_git::commands::resolve_ref_oid;
-use ingot_git::commit::{
-    ConvergenceCommitTrailers, abort_cherry_pick, cherry_pick_no_commit, commit_message,
-    create_daemon_convergence_commit, list_commits_oldest_first, working_tree_has_changes,
-};
+use ingot_git::commit::ConvergenceCommitTrailers;
 use ingot_usecases::UseCaseError;
-use ingot_workspace::provision_integration_workspace;
 
 use crate::error::ApiError;
 use crate::router::AppState;
-use crate::router::support::{
-    append_activity, git_to_internal, refresh_project_mirror, repo_to_internal,
-    workspace_to_api_error,
-};
+use crate::router::infra_ports::HttpInfraAdapter;
+use crate::router::support::{append_activity, repo_to_internal};
 
 use super::effective_authoring_base_commit_oid;
 
@@ -135,11 +128,11 @@ pub(in crate::router) async fn prepare_convergence_workspace(
     source_workspace: &Workspace,
     source_head_commit_oid: &CommitOid,
 ) -> Result<Convergence, ApiError> {
-    let paths = refresh_project_mirror(state, project).await?;
-    let repo_path = paths.mirror_git_dir.as_path();
-    let input_target_commit_oid = resolve_ref_oid(repo_path, &revision.target_ref)
-        .await
-        .map_err(git_to_internal)?
+    let infra = HttpInfraAdapter::new(state);
+    let paths = infra.mirror_paths(project.id).await?;
+    let input_target_commit_oid = infra
+        .resolve_project_ref_oid(project.id, &revision.target_ref)
+        .await?
         .ok_or_else(|| UseCaseError::TargetRefUnresolved(revision.target_ref.to_string()))?;
 
     let integration_workspace_id = WorkspaceId::new();
@@ -175,14 +168,14 @@ pub(in crate::router) async fn prepare_convergence_workspace(
         .await
         .map_err(repo_to_internal)?;
 
-    let provisioned = provision_integration_workspace(
-        repo_path,
-        &integration_workspace_path,
-        &integration_workspace_ref,
-        &input_target_commit_oid,
-    )
-    .await
-    .map_err(workspace_to_api_error)?;
+    let provisioned = infra
+        .provision_integration_workspace(
+            project.id,
+            &integration_workspace_path,
+            &integration_workspace_ref,
+            &input_target_commit_oid,
+        )
+        .await?;
     integration_workspace.path = provisioned.workspace_path.clone();
     integration_workspace.workspace_ref = Some(provisioned.workspace_ref);
     integration_workspace.mark_ready_with_head(provisioned.head_commit_oid, Utc::now());
@@ -229,10 +222,9 @@ pub(in crate::router) async fn prepare_convergence_workspace(
                 "convergence requires a bound authoring base commit".into(),
             ))
         })?;
-    let source_commit_oids =
-        list_commits_oldest_first(repo_path, &source_base_commit_oid, source_head_commit_oid)
-            .await
-            .map_err(git_to_internal)?;
+    let source_commit_oids = infra
+        .list_commits_oldest_first(project.id, &source_base_commit_oid, source_head_commit_oid)
+        .await?;
     let mut operation = GitOperation {
         id: ingot_domain::ids::GitOperationId::new(),
         project_id: project.id,
@@ -271,10 +263,11 @@ pub(in crate::router) async fn prepare_convergence_workspace(
     let mut prepared_commit_oids = Vec::with_capacity(source_commit_oids.len());
 
     for source_commit_oid in &source_commit_oids {
-        if let Err(error) =
-            cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid).await
+        if let Err(error) = infra
+            .cherry_pick_no_commit(&integration_workspace_dir, source_commit_oid)
+            .await
         {
-            let _ = abort_cherry_pick(&integration_workspace_dir).await;
+            let _ = infra.abort_cherry_pick(&integration_workspace_dir).await;
             return Err(record_replay_failure(
                 &mut ReplayContext {
                     state,
@@ -287,22 +280,22 @@ pub(in crate::router) async fn prepare_convergence_workspace(
                     prepared_commit_oids: &prepared_commit_oids,
                 },
                 ReplayFailureKind::Conflict,
-                error.to_string(),
+                format!("{error:?}"),
             )
             .await);
         }
 
-        let has_replay_changes = working_tree_has_changes(&integration_workspace_dir)
-            .await
-            .map_err(git_to_internal)?;
+        let has_replay_changes = infra
+            .working_tree_has_changes(&integration_workspace_dir)
+            .await?;
         if !has_replay_changes {
             continue;
         }
 
-        let original_message = match commit_message(repo_path, source_commit_oid).await {
+        let original_message = match infra.commit_message(project.id, source_commit_oid).await {
             Ok(message) => message,
             Err(error) => {
-                let summary = error.to_string();
+                let summary = format!("{error:?}");
                 return Err(record_replay_failure(
                     &mut ReplayContext {
                         state,
@@ -320,22 +313,23 @@ pub(in crate::router) async fn prepare_convergence_workspace(
                 .await);
             }
         };
-        let next_prepared_tip = match create_daemon_convergence_commit(
-            &integration_workspace_dir,
-            &original_message,
-            &ConvergenceCommitTrailers {
-                operation_id: operation.id,
-                item_id: item.id,
-                revision_no: revision.revision_no,
-                convergence_id: convergence.id,
-                source_commit_oid: source_commit_oid.clone(),
-            },
-        )
-        .await
+        let next_prepared_tip = match infra
+            .create_daemon_convergence_commit(
+                &integration_workspace_dir,
+                &original_message,
+                &ConvergenceCommitTrailers {
+                    operation_id: operation.id,
+                    item_id: item.id,
+                    revision_no: revision.revision_no,
+                    convergence_id: convergence.id,
+                    source_commit_oid: source_commit_oid.clone(),
+                },
+            )
+            .await
         {
             Ok(prepared_tip) => prepared_tip,
             Err(error) => {
-                let summary = error.to_string();
+                let summary = format!("{error:?}");
                 return Err(record_replay_failure(
                     &mut ReplayContext {
                         state,
@@ -354,17 +348,11 @@ pub(in crate::router) async fn prepare_convergence_workspace(
             }
         };
         if let Some(workspace_ref) = integration_workspace.workspace_ref.as_ref() {
-            if let Err(error) = ingot_git::commands::git(
-                repo_path,
-                &[
-                    "update-ref",
-                    workspace_ref.as_str(),
-                    next_prepared_tip.as_str(),
-                ],
-            )
-            .await
+            if let Err(error) = infra
+                .update_project_ref_oid(project.id, workspace_ref, &next_prepared_tip)
+                .await
             {
-                let summary = error.to_string();
+                let summary = format!("{error:?}");
                 return Err(record_replay_failure(
                     &mut ReplayContext {
                         state,
