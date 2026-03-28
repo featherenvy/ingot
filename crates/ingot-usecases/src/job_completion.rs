@@ -576,12 +576,7 @@ fn prepared_convergence_guard(
 }
 
 fn expected_schema_version(output_artifact_kind: OutputArtifactKind) -> &'static str {
-    match output_artifact_kind {
-        OutputArtifactKind::ValidationReport => "validation_report:v1",
-        OutputArtifactKind::ReviewReport => "review_report:v1",
-        OutputArtifactKind::FindingReport => "finding_report:v1",
-        _ => "",
-    }
+    ingot_agent_protocol::report::schema_version(output_artifact_kind).unwrap_or("")
 }
 
 fn outcome_class_name(outcome_class: OutcomeClass) -> &'static str {

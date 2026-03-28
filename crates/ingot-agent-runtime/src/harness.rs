@@ -25,7 +25,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use crate::{JobDispatcher, RunningJobResult, RuntimeError};
+use crate::{JobDispatcher, RunningJobResult, RuntimeError, report};
 
 #[cfg(test)]
 use crate::PreSpawnPausePoint;
@@ -331,7 +331,7 @@ impl JobDispatcher {
             .execute(CompleteJobCommand {
                 job_id: prepared.job_id,
                 outcome_class,
-                result_schema_version: Some("validation_report:v1".to_string()),
+                result_schema_version: Some(report::VALIDATION_REPORT_V1.to_string()),
                 result_payload: Some(result_payload),
                 output_commit_oid: None,
             })

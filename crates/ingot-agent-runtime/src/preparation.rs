@@ -27,7 +27,7 @@ use tracing::{debug, info};
 use crate::{
     HarnessPromptContext, JobDispatcher, PrepareRunOutcome, PreparedRun, RuntimeError,
     WorkspaceLifecycle, built_in_template, format_revision_context, is_closure_relevant_job,
-    is_supported_runtime_job, report_prompt_suffix, resolve_harness_prompt_context, supports_job,
+    is_supported_runtime_job, report, resolve_harness_prompt_context, supports_job,
     template_digest,
 };
 
@@ -492,7 +492,7 @@ impl JobDispatcher {
                 prompt.push_str(
                     "Protocol:\n- Do not modify files, create commits, rebase, merge, cherry-pick, or move refs.\n- Inspect the current workspace subject and produce only the canonical structured report for this step.\n- Any non-core data must go under `extensions`.\n",
                 );
-                prompt.push_str(report_prompt_suffix(job));
+                prompt.push_str(report::prompt_suffix(job.output_artifact_kind));
             }
             OutputArtifactKind::None => {
                 prompt.push_str("Protocol:\n- No output artifact is expected for this step.\n");

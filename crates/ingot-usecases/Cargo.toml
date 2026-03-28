@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ingot-agent-protocol = { workspace = true }
 ingot-domain = { workspace = true }
 ingot-workflow = { workspace = true }
 chrono = { workspace = true }

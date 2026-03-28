@@ -7,9 +7,9 @@ use ingot_domain::ports::{
     ConflictKind, FinishJobNonSuccessParams, RepositoryError, StartJobExecutionParams,
 };
 
+use super::ClaimQueuedAgentJobExecutionParams;
 use super::conflict::classify_job_conflict;
 use super::mapping::encode_job_input;
-use super::ClaimQueuedAgentJobExecutionParams;
 use crate::db::Database;
 use crate::store::helpers::{db_err, db_write_err, serialize_optional_json};
 

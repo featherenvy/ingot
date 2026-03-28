@@ -33,8 +33,8 @@ use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::{
     JobDispatcher, PreparedRun, RunningJobResult, RuntimeError, WorkspaceLifecycle, commit_subject,
-    failure_escalation_reason, non_empty_message, outcome_class_name, output_schema_for_job,
-    report_outcome_class, result_schema_version, should_clear_item_escalation_on_success,
+    failure_escalation_reason, non_empty_message, outcome_class_name, report,
+    should_clear_item_escalation_on_success,
 };
 
 #[cfg(test)]
@@ -232,7 +232,7 @@ impl JobDispatcher {
             working_dir: prepared.workspace.path.clone(),
             may_mutate: prepared.job.execution_permission == ExecutionPermission::MayMutate,
             timeout_seconds: Some(self.config.job_timeout.as_secs()),
-            output_schema: output_schema_for_job(&prepared.job),
+            output_schema: report::output_schema(prepared.job.output_artifact_kind),
         };
         match self.run_with_heartbeats(&prepared, request).await {
             AgentRunOutcome::Completed(response) => {
@@ -410,7 +410,7 @@ impl JobDispatcher {
         };
 
         let outcome_class =
-            report_outcome_class(&result_payload).map_err(RuntimeError::InvalidState);
+            report::parse_outcome_class(&result_payload).map_err(RuntimeError::InvalidState);
         let outcome_class = match outcome_class {
             Ok(outcome_class) => outcome_class,
             Err(error) => {
@@ -425,7 +425,7 @@ impl JobDispatcher {
             }
         };
 
-        let result_schema_version = result_schema_version(prepared.job.output_artifact_kind)
+        let result_schema_version = report::schema_version(prepared.job.output_artifact_kind)
             .ok_or_else(|| {
                 RuntimeError::InvalidState("report job missing schema version mapping".into())
             })?;

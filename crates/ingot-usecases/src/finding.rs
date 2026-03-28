@@ -1,27 +1,28 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
+use ingot_agent_protocol::report::{
+    self, FindingReportV1, FindingV1, ReviewReportV1, ValidationCheckV1, ValidationReportV1,
+};
+use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::finding::{
     Finding, FindingSeverity, FindingSubjectKind, FindingTriage, FindingTriageState,
 };
 use ingot_domain::git_ref::GitRef;
+use ingot_domain::ids::{ActivityId, JobId};
 use ingot_domain::ids::{FindingId, ItemId, ItemRevisionId};
+use ingot_domain::item::ApprovalState;
 use ingot_domain::item::{Classification, Escalation, Item, Lifecycle, Origin, ParkingState};
 use ingot_domain::job::{Job, OutcomeClass};
-use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy};
-use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
-use ingot_domain::step_id::StepId;
-use serde::Deserialize;
-
-use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
-use ingot_domain::ids::{ActivityId, JobId};
-use ingot_domain::item::ApprovalState;
 use ingot_domain::ports::{
     ActivityRepository, FindingRepository, ItemRepository, RevisionRepository,
 };
 use ingot_domain::project::Project;
+use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy};
+use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
+use ingot_domain::step_id::StepId;
 use tracing::info;
 
 use crate::UseCaseError;
@@ -38,71 +39,6 @@ pub struct TriageFindingInput {
     pub triage_state: FindingTriageState,
     pub triage_note: Option<String>,
     pub linked_item_id: Option<ItemId>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FindingV1 {
-    finding_key: String,
-    code: String,
-    severity: FindingSeverity,
-    summary: String,
-    paths: Vec<String>,
-    evidence: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ValidationReportV1 {
-    outcome: String,
-    summary: String,
-    checks: Vec<ValidationCheckV1>,
-    findings: Vec<FindingV1>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReviewSubjectV1 {
-    base_commit_oid: CommitOid,
-    head_commit_oid: CommitOid,
-}
-
-#[derive(Debug, Deserialize)]
-struct ReviewReportV1 {
-    outcome: String,
-    summary: String,
-    review_subject: ReviewSubjectV1,
-    overall_risk: ReviewOverallRisk,
-    findings: Vec<FindingV1>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FindingReportV1 {
-    outcome: String,
-    summary: String,
-    findings: Vec<FindingV1>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct ValidationCheckV1 {
-    name: String,
-    #[allow(dead_code)]
-    status: ValidationCheckStatus,
-    summary: String,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum ValidationCheckStatus {
-    Pass,
-    Fail,
-    Skip,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ReviewOverallRisk {
-    Low,
-    Medium,
-    High,
 }
 
 #[derive(Debug)]
@@ -130,7 +66,7 @@ pub fn extract_findings(
     };
 
     let (report_outcome, report_findings) = match schema_version {
-        "validation_report:v1" => {
+        report::VALIDATION_REPORT_V1 => {
             let report: ValidationReportV1 = serde_json::from_value(result_payload.clone())
                 .map_err(|err| UseCaseError::ProtocolViolation(err.to_string()))?;
             let outcome_class = validate_validation_report(
@@ -141,7 +77,7 @@ pub fn extract_findings(
             )?;
             (outcome_class, report.findings)
         }
-        "review_report:v1" => {
+        report::REVIEW_REPORT_V1 => {
             let report: ReviewReportV1 = serde_json::from_value(result_payload.clone())
                 .map_err(|err| UseCaseError::ProtocolViolation(err.to_string()))?;
             let outcome_class =
@@ -158,7 +94,7 @@ pub fn extract_findings(
             let _ = report.overall_risk;
             (outcome_class, report.findings)
         }
-        "finding_report:v1" => {
+        report::FINDING_REPORT_V1 => {
             let report: FindingReportV1 = serde_json::from_value(result_payload.clone())
                 .map_err(|err| UseCaseError::ProtocolViolation(err.to_string()))?;
             let outcome_class =

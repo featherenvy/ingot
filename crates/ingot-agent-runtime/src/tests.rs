@@ -35,24 +35,24 @@ use tokio::sync::Notify;
 
 #[test]
 fn commit_and_report_schemas_require_every_declared_property() {
-    assert_schema_requires_all_properties(&commit_summary_schema());
-    assert_schema_requires_all_properties(&validation_report_schema());
-    assert_schema_requires_all_properties(&review_report_schema());
-    assert_schema_requires_all_properties(&finding_report_schema());
+    assert_schema_requires_all_properties(&report::commit_summary_schema());
+    assert_schema_requires_all_properties(&report::validation_report_schema());
+    assert_schema_requires_all_properties(&report::review_report_schema());
+    assert_schema_requires_all_properties(&report::finding_report_schema());
 }
 
 #[test]
 fn nullable_fields_remain_present_in_required_schema_contracts() {
-    let commit_schema = commit_summary_schema();
+    let commit_schema = report::commit_summary_schema();
     assert_eq!(
         schema_property_type(&commit_schema, "validation"),
         Some(serde_json::json!(["string", "null"]))
     );
 
-    let validation_schema = validation_report_schema();
+    let validation_schema = report::validation_report_schema();
     assert_eq!(
         schema_property(&validation_schema, "extensions"),
-        Some(nullable_closed_extensions_schema())
+        Some(report::nullable_closed_extensions_schema())
     );
 }
 
@@ -334,7 +334,7 @@ async fn run_with_heartbeats_does_not_launch_runner_when_job_is_cancelled_before
         working_dir: prepared.workspace.path.clone(),
         may_mutate: prepared.job.execution_permission == ExecutionPermission::MayMutate,
         timeout_seconds: Some(dispatcher.config.job_timeout.as_secs()),
-        output_schema: output_schema_for_job(&prepared.job),
+        output_schema: report::output_schema(prepared.job.output_artifact_kind),
     };
 
     let run_task = tokio::spawn({
@@ -435,7 +435,7 @@ async fn run_with_heartbeats_claims_running_job_with_configured_lease_ttl() {
         working_dir: prepared.workspace.path.clone(),
         may_mutate: prepared.job.execution_permission == ExecutionPermission::MayMutate,
         timeout_seconds: Some(dispatcher.config.job_timeout.as_secs()),
-        output_schema: output_schema_for_job(&prepared.job),
+        output_schema: report::output_schema(prepared.job.output_artifact_kind),
     };
 
     let run_task = tokio::spawn({
