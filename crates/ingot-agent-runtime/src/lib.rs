@@ -83,13 +83,16 @@ impl DispatcherConfig {
     }
 }
 
+type AgentLaunchFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>>;
+
 pub trait AgentRunner: Send + Sync {
     fn launch<'a>(
         &'a self,
         agent: &'a Agent,
         request: &'a AgentRequest,
         working_dir: &'a Path,
-    ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>>;
+    ) -> AgentLaunchFuture<'a>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,8 +104,12 @@ impl AgentRunner for CliAgentRunner {
         agent: &'a Agent,
         request: &'a AgentRequest,
         working_dir: &'a Path,
-    ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
-        Box::pin(ingot_agent_adapters::launch_agent(agent, request, working_dir))
+    ) -> AgentLaunchFuture<'a> {
+        Box::pin(ingot_agent_adapters::launch_agent(
+            agent,
+            request,
+            working_dir,
+        ))
     }
 }
 
