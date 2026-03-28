@@ -9,6 +9,7 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Sqlite, Transaction};
 
 use super::helpers::{db_err, db_write_err, json_err, parse_json};
+use super::item::{insert_item_query, insert_revision_query};
 use crate::db::Database;
 
 impl Database {
@@ -161,63 +162,15 @@ impl Database {
     ) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
 
-        sqlx::query(
-            "INSERT INTO items (
-                id, project_id, classification, workflow_version, lifecycle_state, parking_state,
-                done_reason, resolution_source, approval_state, escalation_state, escalation_reason,
-                current_revision_id, origin_kind, origin_finding_id, priority, labels, operator_notes,
-                sort_key, created_at, updated_at, closed_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(linked_item.id)
-        .bind(linked_item.project_id)
-        .bind(linked_item.classification)
-        .bind(linked_item.workflow_version)
-        .bind(linked_item.lifecycle.as_db_str())
-        .bind(linked_item.parking_state)
-        .bind(linked_item.lifecycle.done_reason())
-        .bind(linked_item.lifecycle.resolution_source())
-        .bind(linked_item.approval_state)
-        .bind(linked_item.escalation.as_db_str())
-        .bind(linked_item.escalation.reason())
-        .bind(linked_item.current_revision_id)
-        .bind(linked_item.origin.as_db_str())
-        .bind(linked_item.origin.finding_id())
-        .bind(linked_item.priority)
-        .bind(serde_json::to_string(&linked_item.labels).map_err(json_err)?)
-        .bind(linked_item.operator_notes.as_deref())
-        .bind(&linked_item.sort_key)
-        .bind(linked_item.created_at)
-        .bind(linked_item.updated_at)
-        .bind(linked_item.lifecycle.closed_at())
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+        insert_item_query(linked_item)?
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
 
-        sqlx::query(
-            "INSERT INTO item_revisions (
-                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-                seed_target_commit_oid, supersedes_revision_id, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(linked_revision.id)
-        .bind(linked_revision.item_id)
-        .bind(linked_revision.revision_no as i64)
-        .bind(&linked_revision.title)
-        .bind(&linked_revision.description)
-        .bind(&linked_revision.acceptance_criteria)
-        .bind(&linked_revision.target_ref)
-        .bind(linked_revision.approval_policy)
-        .bind(serde_json::to_string(&linked_revision.policy_snapshot).map_err(json_err)?)
-        .bind(serde_json::to_string(&linked_revision.template_map_snapshot).map_err(json_err)?)
-        .bind(linked_revision.seed.seed_commit_oid().cloned())
-        .bind(linked_revision.seed.seed_target_commit_oid().clone())
-        .bind(linked_revision.supersedes_revision_id)
-        .bind(linked_revision.created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+        insert_revision_query(linked_revision)?
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
 
         sqlx::query(
             "UPDATE findings

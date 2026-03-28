@@ -8,6 +8,8 @@ use ingot_domain::revision_context::RevisionContext;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
+use super::item::insert_revision_query;
+
 use super::helpers::{db_err, db_write_err, json_err, parse_json};
 use crate::db::Database;
 
@@ -43,30 +45,10 @@ impl Database {
     }
 
     pub async fn create_revision(&self, revision: &ItemRevision) -> Result<(), RepositoryError> {
-        sqlx::query(
-            "INSERT INTO item_revisions (
-                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-                seed_target_commit_oid, supersedes_revision_id, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(revision.id)
-        .bind(revision.item_id)
-        .bind(revision.revision_no as i64)
-        .bind(&revision.title)
-        .bind(&revision.description)
-        .bind(&revision.acceptance_criteria)
-        .bind(&revision.target_ref)
-        .bind(revision.approval_policy)
-        .bind(serde_json::to_string(&revision.policy_snapshot).map_err(json_err)?)
-        .bind(serde_json::to_string(&revision.template_map_snapshot).map_err(json_err)?)
-        .bind(revision.seed.seed_commit_oid().cloned())
-        .bind(revision.seed.seed_target_commit_oid().clone())
-        .bind(revision.supersedes_revision_id)
-        .bind(revision.created_at)
-        .execute(&self.pool)
-        .await
-        .map_err(db_write_err)?;
+        insert_revision_query(revision)?
+            .execute(&self.pool)
+            .await
+            .map_err(db_write_err)?;
 
         Ok(())
     }

@@ -89,30 +89,10 @@ impl Database {
             .await
             .map_err(db_err)?;
 
-        sqlx::query(
-            "INSERT INTO item_revisions (
-                id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
-                approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
-                seed_target_commit_oid, supersedes_revision_id, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(revision.id)
-        .bind(revision.item_id)
-        .bind(revision.revision_no as i64)
-        .bind(&revision.title)
-        .bind(&revision.description)
-        .bind(&revision.acceptance_criteria)
-        .bind(&revision.target_ref)
-        .bind(revision.approval_policy)
-        .bind(serde_json::to_string(&revision.policy_snapshot).map_err(json_err)?)
-        .bind(serde_json::to_string(&revision.template_map_snapshot).map_err(json_err)?)
-        .bind(revision.seed.seed_commit_oid().cloned())
-        .bind(revision.seed.seed_target_commit_oid().clone())
-        .bind(revision.supersedes_revision_id)
-        .bind(revision.created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+        insert_revision_query(revision)?
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
 
         tx.commit().await.map_err(db_err)?;
         Ok(())
@@ -150,7 +130,33 @@ impl ItemRepository for Database {
     }
 }
 
-fn insert_item_query<'a>(item: &'a Item) -> Result<SqliteQuery<'a>, RepositoryError> {
+pub(crate) fn insert_revision_query<'a>(
+    revision: &'a ItemRevision,
+) -> Result<SqliteQuery<'a>, RepositoryError> {
+    Ok(sqlx::query(
+        "INSERT INTO item_revisions (
+            id, item_id, revision_no, title, description, acceptance_criteria, target_ref,
+            approval_policy, policy_snapshot, template_map_snapshot, seed_commit_oid,
+            seed_target_commit_oid, supersedes_revision_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(revision.id)
+    .bind(revision.item_id)
+    .bind(revision.revision_no as i64)
+    .bind(&revision.title)
+    .bind(&revision.description)
+    .bind(&revision.acceptance_criteria)
+    .bind(&revision.target_ref)
+    .bind(revision.approval_policy)
+    .bind(serde_json::to_string(&revision.policy_snapshot).map_err(json_err)?)
+    .bind(serde_json::to_string(&revision.template_map_snapshot).map_err(json_err)?)
+    .bind(revision.seed.seed_commit_oid().cloned())
+    .bind(revision.seed.seed_target_commit_oid().clone())
+    .bind(revision.supersedes_revision_id)
+    .bind(revision.created_at))
+}
+
+pub(crate) fn insert_item_query<'a>(item: &'a Item) -> Result<SqliteQuery<'a>, RepositoryError> {
     Ok(sqlx::query(
         "INSERT INTO items (
             id, project_id, classification, workflow_version, lifecycle_state, parking_state,
