@@ -76,50 +76,63 @@ impl RecommendedAction {
         }
     }
 
-    fn system_action(action: &str) -> Self {
+    fn named_action(action: &str) -> Option<Self> {
         match action {
-            "approval_approve" => Self::ApprovalApprove,
-            "operator_intervention" => Self::OperatorIntervention,
-            "finalize_prepared_convergence" => Self::FinalizePreparedConvergence,
-            "invalidate_prepared_convergence" => Self::InvalidatePreparedConvergence,
-            "triage_findings" => Self::TriageFindings,
-            "prepare_convergence" => Self::PrepareConvergence,
-            "await_convergence_lane" => Self::AwaitConvergenceLane,
-            "resolve_checkout_sync" => Self::ResolveCheckoutSync,
-            other => panic!("unknown internal recommended action: {other}"),
+            "approval_approve" => Some(Self::ApprovalApprove),
+            "operator_intervention" => Some(Self::OperatorIntervention),
+            "finalize_prepared_convergence" => Some(Self::FinalizePreparedConvergence),
+            "invalidate_prepared_convergence" => Some(Self::InvalidatePreparedConvergence),
+            "triage_findings" => Some(Self::TriageFindings),
+            "prepare_convergence" => Some(Self::PrepareConvergence),
+            "await_convergence_lane" => Some(Self::AwaitConvergenceLane),
+            "resolve_checkout_sync" => Some(Self::ResolveCheckoutSync),
+            _ => None,
         }
+    }
+
+    const fn named_action_str(&self) -> Option<&'static str> {
+        match self {
+            Self::ApprovalApprove => Some("approval_approve"),
+            Self::OperatorIntervention => Some("operator_intervention"),
+            Self::FinalizePreparedConvergence => Some("finalize_prepared_convergence"),
+            Self::InvalidatePreparedConvergence => Some("invalidate_prepared_convergence"),
+            Self::TriageFindings => Some("triage_findings"),
+            Self::PrepareConvergence => Some("prepare_convergence"),
+            Self::AwaitConvergenceLane => Some("await_convergence_lane"),
+            Self::ResolveCheckoutSync => Some("resolve_checkout_sync"),
+            Self::None | Self::DispatchStep(_) => None,
+        }
+    }
+
+    fn system_action(action: &str) -> Result<Self, String> {
+        Self::named_action(action)
+            .ok_or_else(|| format!("unknown internal recommended action: {action}"))
     }
 
     fn parse(action: &str) -> Result<Self, String> {
-        match action {
-            "none" => Ok(Self::None),
-            "approval_approve" => Ok(Self::ApprovalApprove),
-            "operator_intervention" => Ok(Self::OperatorIntervention),
-            "finalize_prepared_convergence" => Ok(Self::FinalizePreparedConvergence),
-            "invalidate_prepared_convergence" => Ok(Self::InvalidatePreparedConvergence),
-            "triage_findings" => Ok(Self::TriageFindings),
-            "prepare_convergence" => Ok(Self::PrepareConvergence),
-            "await_convergence_lane" => Ok(Self::AwaitConvergenceLane),
-            "resolve_checkout_sync" => Ok(Self::ResolveCheckoutSync),
-            _ => action
-                .parse()
-                .map(Self::DispatchStep)
-                .map_err(|error: ingot_domain::step_id::ParseStepIdError| error.to_string()),
+        if action == "none" {
+            return Ok(Self::None);
         }
+
+        if let Some(action) = Self::named_action(action) {
+            return Ok(action);
+        }
+
+        action
+            .parse()
+            .map(Self::DispatchStep)
+            .map_err(|error: ingot_domain::step_id::ParseStepIdError| error.to_string())
     }
 
     fn as_str(&self) -> &str {
+        if let Some(action) = self.named_action_str() {
+            return action;
+        }
+
         match self {
             Self::None => "none",
-            Self::ApprovalApprove => "approval_approve",
-            Self::OperatorIntervention => "operator_intervention",
-            Self::FinalizePreparedConvergence => "finalize_prepared_convergence",
-            Self::InvalidatePreparedConvergence => "invalidate_prepared_convergence",
-            Self::TriageFindings => "triage_findings",
-            Self::PrepareConvergence => "prepare_convergence",
-            Self::AwaitConvergenceLane => "await_convergence_lane",
-            Self::ResolveCheckoutSync => "resolve_checkout_sync",
             Self::DispatchStep(step_id) => step_id.as_str(),
+            _ => unreachable!("named recommended actions must be covered by named_action_str"),
         }
     }
 }
@@ -454,9 +467,14 @@ impl Evaluator {
             }
 
             if outcome == OutcomeClass::Findings && is_closure_relevant_step(last_job.step_id) {
-                if let Some(triage_projection) =
-                    triage_projection(item, revision, last_job, findings, prepared_convergence)
-                {
+                if let Some(triage_projection) = triage_projection(
+                    item,
+                    revision,
+                    last_job,
+                    findings,
+                    prepared_convergence,
+                    diagnostics,
+                ) {
                     return triage_projection;
                 }
 
@@ -507,16 +525,11 @@ impl Evaluator {
                                 );
                             }
                             TransitionTarget::SystemAction(action) => {
-                                return IdleProjection {
-                                    current_step_id: Some(last_job.step_id),
-                                    phase_status: PhaseStatus::AwaitingConvergence,
-                                    next_recommended_action: RecommendedAction::system_action(
-                                        action,
-                                    ),
-                                    dispatchable_step_id: None,
-                                    allowed_actions: vec![],
-                                    terminal_readiness: false,
-                                };
+                                return system_action_projection(
+                                    Some(last_job.step_id),
+                                    action,
+                                    diagnostics,
+                                );
                             }
                             TransitionTarget::Escalation(reason) => {
                                 diagnostics.push(format!("escalation expected: {reason}"));
@@ -626,6 +639,7 @@ fn triage_projection(
     latest_closure_job: &Job,
     findings: &[&Finding],
     prepared_convergence: Option<&Convergence>,
+    diagnostics: &mut Vec<String>,
 ) -> Option<IdleProjection> {
     let job_findings = findings
         .iter()
@@ -655,17 +669,27 @@ fn triage_projection(
         .iter()
         .any(|finding| finding.triage.state() == FindingTriageState::FixNow)
     {
-        return triaged_findings_repair_projection(latest_closure_job);
+        return triaged_findings_repair_projection(latest_closure_job, diagnostics);
     }
 
-    triaged_findings_clean_projection(item, revision, latest_closure_job, prepared_convergence)
+    triaged_findings_clean_projection(
+        item,
+        revision,
+        latest_closure_job,
+        prepared_convergence,
+        diagnostics,
+    )
 }
 
-fn triaged_findings_repair_projection(latest_closure_job: &Job) -> Option<IdleProjection> {
+fn triaged_findings_repair_projection(
+    latest_closure_job: &Job,
+    diagnostics: &mut Vec<String>,
+) -> Option<IdleProjection> {
     graph_target_projection(
         Some(latest_closure_job.step_id),
         PhaseStatus::Idle,
         WorkflowGraph::delivery_v1().next_step(latest_closure_job.step_id, &OutcomeClass::Findings),
+        diagnostics,
     )
 }
 
@@ -674,6 +698,7 @@ fn triaged_findings_clean_projection(
     revision: &ItemRevision,
     latest_closure_job: &Job,
     prepared_convergence: Option<&Convergence>,
+    diagnostics: &mut Vec<String>,
 ) -> Option<IdleProjection> {
     if latest_closure_job.step_id == step::VALIDATE_INTEGRATED {
         if prepared_convergence.is_none() {
@@ -706,6 +731,7 @@ fn triaged_findings_clean_projection(
         Some(latest_closure_job.step_id),
         PhaseStatus::Idle,
         WorkflowGraph::delivery_v1().next_step(latest_closure_job.step_id, &OutcomeClass::Clean),
+        diagnostics,
     )
 }
 
@@ -713,6 +739,7 @@ fn graph_target_projection(
     current_step_id: Option<StepId>,
     phase_status: PhaseStatus,
     target: Option<&TransitionTarget>,
+    diagnostics: &mut Vec<String>,
 ) -> Option<IdleProjection> {
     match target? {
         TransitionTarget::Step(next_step) => {
@@ -734,15 +761,33 @@ fn graph_target_projection(
                 *next_step,
             ))
         }
-        TransitionTarget::SystemAction(action) => Some(IdleProjection {
+        TransitionTarget::SystemAction(action) => Some(system_action_projection(
+            current_step_id,
+            action,
+            diagnostics,
+        )),
+        TransitionTarget::Escalation(_) => None,
+    }
+}
+
+fn system_action_projection(
+    current_step_id: Option<StepId>,
+    action: &str,
+    diagnostics: &mut Vec<String>,
+) -> IdleProjection {
+    match RecommendedAction::system_action(action) {
+        Ok(next_recommended_action) => IdleProjection {
             current_step_id,
             phase_status: PhaseStatus::AwaitingConvergence,
-            next_recommended_action: RecommendedAction::system_action(action),
+            next_recommended_action,
             dispatchable_step_id: None,
             allowed_actions: vec![],
             terminal_readiness: false,
-        }),
-        TransitionTarget::Escalation(_) => None,
+        },
+        Err(error) => {
+            diagnostics.push(error);
+            operator_intervention_projection(current_step_id)
+        }
     }
 }
 
@@ -896,6 +941,44 @@ mod tests {
 
     use super::{BoardStatus, Evaluator, PhaseStatus, RecommendedAction};
     use crate::step;
+
+    #[test]
+    fn recommended_actions_round_trip_named_and_step_actions() {
+        assert_eq!(
+            RecommendedAction::parse("resolve_checkout_sync").expect("named action"),
+            RecommendedAction::ResolveCheckoutSync
+        );
+        assert_eq!(
+            RecommendedAction::parse(step::REVIEW_INCREMENTAL_INITIAL.as_str())
+                .expect("step action"),
+            RecommendedAction::dispatch(step::REVIEW_INCREMENTAL_INITIAL)
+        );
+        assert_eq!(
+            RecommendedAction::ResolveCheckoutSync.as_str(),
+            "resolve_checkout_sync"
+        );
+    }
+
+    #[test]
+    fn unknown_system_actions_degrade_to_operator_intervention() {
+        let mut diagnostics = Vec::new();
+
+        let projection = super::system_action_projection(
+            Some(step::VALIDATE_CANDIDATE_INITIAL),
+            "unknown_internal_action",
+            &mut diagnostics,
+        );
+
+        assert_eq!(projection.phase_status, PhaseStatus::Unknown);
+        assert_eq!(
+            projection.next_recommended_action,
+            RecommendedAction::OperatorIntervention
+        );
+        assert_eq!(
+            diagnostics,
+            vec!["unknown internal recommended action: unknown_internal_action".to_owned()]
+        );
+    }
 
     #[test]
     fn report_only_jobs_keep_the_closure_position_visible() {
