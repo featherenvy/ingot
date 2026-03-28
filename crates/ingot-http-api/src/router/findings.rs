@@ -1,6 +1,6 @@
 use super::dispatch::auto_dispatch_projected_review_job_locked;
 use super::infra_ports::HttpInfraAdapter;
-use super::items::append_activity;
+use super::support::append_activity;
 use super::support::*;
 use super::types::*;
 use super::*;

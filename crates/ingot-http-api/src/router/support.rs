@@ -5,9 +5,12 @@ use axum::extract::path::ErrorKind as PathErrorKind;
 use axum::extract::rejection::{FailedToDeserializePathParams, PathRejection};
 use axum::extract::{FromRequestParts, Path, RawPathParams};
 use axum::http::request::Parts;
+use ingot_config::IngotConfig;
+use ingot_config::loader::load_config;
+use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::branch_name::BranchName;
 use ingot_domain::git_operation::OperationKind;
-use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
+use ingot_domain::ids::{ActivityId, AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::ports::{ConflictKind, RepositoryError};
 use ingot_domain::project::Project;
 use ingot_domain::workspace::{Workspace, WorkspaceStatus};
@@ -468,6 +471,61 @@ pub(super) fn complete_job_error_to_api_error(error: CompleteJobError) -> ApiErr
         CompleteJobError::BadRequest { code, message } => ApiError::BadRequest { code, message },
         CompleteJobError::UseCase(error) => error.into(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-module utilities
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn append_activity(
+    state: &AppState,
+    project_id: ProjectId,
+    event_type: ActivityEventType,
+    subject: ActivitySubject,
+    payload: serde_json::Value,
+) -> Result<(), ApiError> {
+    state
+        .db
+        .append_activity(&Activity {
+            id: ActivityId::new(),
+            project_id,
+            event_type,
+            subject,
+            payload,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(repo_to_internal)
+}
+
+pub(crate) fn load_effective_config(project: Option<&Project>) -> Result<IngotConfig, ApiError> {
+    let project_path = project.map(project_config_path);
+    load_config(global_config_path().as_path(), project_path.as_deref()).map_err(|error| {
+        ApiError::BadRequest {
+            code: "config_invalid",
+            message: error.to_string(),
+        }
+    })
+}
+
+pub(super) async fn read_optional_text(path: PathBuf) -> Result<Option<String>, ApiError> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ApiError::from(UseCaseError::Internal(error.to_string()))),
+    }
+}
+
+pub(super) async fn read_optional_json(
+    path: PathBuf,
+) -> Result<Option<serde_json::Value>, ApiError> {
+    let Some(contents) = read_optional_text(path).await? else {
+        return Ok(None);
+    };
+
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(|error| ApiError::from(UseCaseError::Internal(error.to_string())))
 }
 
 #[cfg(test)]

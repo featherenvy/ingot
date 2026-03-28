@@ -1,7 +1,6 @@
 use super::dispatch::auto_dispatch_projected_review_job;
 use super::items::{
-    append_activity, current_authoring_head_for_revision_with_workspace,
-    effective_authoring_base_commit_oid, read_optional_json, read_optional_text,
+    current_authoring_head_for_revision_with_workspace, effective_authoring_base_commit_oid,
 };
 use super::support::*;
 use super::types::*;

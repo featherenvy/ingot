@@ -1,7 +1,7 @@
 use super::item_projection::{
     ItemRuntimeSnapshot, hydrate_convergence_validity, load_item_detail, load_item_runtime_snapshot,
 };
-use super::items::{append_activity, build_superseding_revision};
+use super::items::build_superseding_revision;
 use super::support::*;
 use super::types::*;
 use super::*;

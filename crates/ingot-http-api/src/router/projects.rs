@@ -1,4 +1,4 @@
-use super::items::load_effective_config;
+use super::support::load_effective_config;
 use super::support::*;
 use super::types::*;
 use super::*;

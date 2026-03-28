@@ -1,8 +1,8 @@
 use super::infra_ports::HttpInfraAdapter;
 use super::item_projection::{ItemRuntimeSnapshot, load_item_runtime_snapshot};
 use super::items::{
-    append_activity, current_authoring_head_for_revision_with_workspace,
-    effective_authoring_base_commit_oid, ensure_authoring_workspace,
+    current_authoring_head_for_revision_with_workspace, effective_authoring_base_commit_oid,
+    ensure_authoring_workspace,
 };
 use super::support::*;
 use super::types::*;

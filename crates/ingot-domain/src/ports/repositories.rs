@@ -1,11 +1,9 @@
 use std::future::Future;
-use std::path::Path;
 
 use chrono::{DateTime, Utc};
 
 use crate::activity::Activity;
 use crate::agent::Agent;
-use crate::commit_oid::CommitOid;
 use crate::convergence::Convergence;
 use crate::convergence_queue::ConvergenceQueueEntry;
 use crate::finding::Finding;
@@ -18,7 +16,8 @@ use crate::project::Project;
 use crate::revision::ItemRevision;
 use crate::revision_context::RevisionContext;
 use crate::workspace::Workspace;
-use crate::{ids::ConvergenceId, item::ApprovalState};
+
+use super::errors::RepositoryError;
 
 pub trait ProjectRepository: Send + Sync {
     fn list(&self) -> impl Future<Output = Result<Vec<Project>, RepositoryError>> + Send;
@@ -317,213 +316,7 @@ pub struct FinishJobNonSuccessParams {
     pub escalation_reason: Option<EscalationReason>,
 }
 
-// --- Job completion types ---
-
-#[derive(Debug, Clone)]
-pub struct JobCompletionContext {
-    pub job: Job,
-    pub item: Item,
-    pub project: Project,
-    pub revision: ItemRevision,
-    pub convergences: Vec<Convergence>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PreparedConvergenceGuard {
-    pub convergence_id: ConvergenceId,
-    pub item_revision_id: ItemRevisionId,
-    pub target_ref: GitRef,
-    pub expected_target_head_oid: CommitOid,
-    pub next_approval_state: Option<ApprovalState>,
-}
-
-#[derive(Debug, Clone)]
-pub struct JobCompletionMutation {
-    pub job_id: JobId,
-    pub item_id: ItemId,
-    pub expected_item_revision_id: ItemRevisionId,
-    pub outcome_class: OutcomeClass,
-    pub clear_item_escalation: bool,
-    pub result_schema_version: Option<String>,
-    pub result_payload: Option<serde_json::Value>,
-    pub output_commit_oid: Option<CommitOid>,
-    pub findings: Vec<Finding>,
-    pub prepared_convergence_guard: Option<PreparedConvergenceGuard>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CompletedJobCompletion {
-    pub job: Job,
-    pub finding_count: usize,
-}
-
-pub trait JobCompletionRepository: Send + Sync {
-    fn load_job_completion_context(
-        &self,
-        job_id: JobId,
-    ) -> impl Future<Output = Result<JobCompletionContext, RepositoryError>> + Send;
-
-    fn load_completed_job_completion(
-        &self,
-        job_id: JobId,
-    ) -> impl Future<Output = Result<Option<CompletedJobCompletion>, RepositoryError>> + Send;
-
-    fn apply_job_completion(
-        &self,
-        mutation: JobCompletionMutation,
-    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
-}
-
-// --- Revision lane teardown types ---
-
-#[derive(Debug, Clone)]
-pub struct TeardownJobCancellation {
-    pub params: FinishJobNonSuccessParams,
-    pub workspace_update: Option<Workspace>,
-    pub activity: Activity,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RevisionLaneTeardownMutation {
-    pub job_cancellations: Vec<TeardownJobCancellation>,
-    pub convergence_updates: Vec<Convergence>,
-    pub workspace_abandonments: Vec<Workspace>,
-    pub queue_entry_update: Option<ConvergenceQueueEntry>,
-    pub git_operation_updates: Vec<GitOperation>,
-    pub git_operation_activities: Vec<Activity>,
-}
-
-pub trait RevisionLaneTeardownRepository: Send + Sync {
-    fn apply_revision_lane_teardown(
-        &self,
-        mutation: RevisionLaneTeardownMutation,
-    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
-}
-
-// --- Invalidate prepared convergence types ---
-
-#[derive(Debug, Clone)]
-pub struct InvalidatePreparedConvergenceMutation {
-    pub convergence: Convergence,
-    pub workspace_update: Option<Workspace>,
-    pub item: Item,
-    pub activity: Activity,
-}
-
-pub trait InvalidatePreparedConvergenceRepository: Send + Sync {
-    fn apply_invalidate_prepared_convergence(
-        &self,
-        mutation: InvalidatePreparedConvergenceMutation,
-    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
-}
-
-// --- Convergence service ports ---
-
-#[derive(Debug, Clone)]
-pub struct ConvergenceQueuePrepareContext {
-    pub project: Project,
-    pub item: Item,
-    pub revision: ItemRevision,
-    pub jobs: Vec<Job>,
-    pub findings: Vec<Finding>,
-    pub convergences: Vec<Convergence>,
-    pub active_queue_entry: Option<ConvergenceQueueEntry>,
-    pub lane_head: Option<ConvergenceQueueEntry>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConvergenceSystemActionContext {
-    pub project: Project,
-    pub item: Item,
-    pub revision: ItemRevision,
-    pub jobs: Vec<Job>,
-    pub findings: Vec<Finding>,
-    pub convergences: Vec<Convergence>,
-    pub active_queue_entry: Option<ConvergenceQueueEntry>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum UseCasePortError {
-    #[error("repository error: {0}")]
-    Repository(#[from] RepositoryError),
-    #[error("external error: {0}")]
-    External(String),
-}
-
-pub trait ConvergenceServicePort: Send + Sync {
-    fn queue_prepare_context(
-        &self,
-        project_id: ProjectId,
-        item_id: ItemId,
-    ) -> impl Future<Output = Result<ConvergenceQueuePrepareContext, UseCasePortError>> + Send;
-
-    fn create_queue_entry(
-        &self,
-        queue_entry: &ConvergenceQueueEntry,
-    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
-
-    fn update_queue_entry(
-        &self,
-        queue_entry: &ConvergenceQueueEntry,
-    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
-
-    fn append_activity(
-        &self,
-        activity: &Activity,
-    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
-
-    fn list_projects(&self) -> impl Future<Output = Result<Vec<Project>, UseCasePortError>> + Send;
-
-    fn list_items_by_project(
-        &self,
-        project_id: ProjectId,
-    ) -> impl Future<Output = Result<Vec<Item>, UseCasePortError>> + Send;
-
-    fn load_system_action_context(
-        &self,
-        project_id: ProjectId,
-        item_id: ItemId,
-    ) -> impl Future<Output = Result<ConvergenceSystemActionContext, UseCasePortError>> + Send;
-
-    fn promote_queue_heads(
-        &self,
-        project_id: ProjectId,
-    ) -> impl Future<Output = Result<bool, UseCasePortError>> + Send;
-
-    fn prepare_queue_head_convergence(
-        &self,
-        project_id: ProjectId,
-        item_id: ItemId,
-    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
-
-    fn auto_finalize_prepared_convergence(
-        &self,
-        project_id: ProjectId,
-        item_id: ItemId,
-    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
-
-    fn invalidate_prepared_convergence(
-        &self,
-        project_id: ProjectId,
-        item_id: ItemId,
-    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
-}
-
-pub trait ReconciliationServicePort: Send + Sync {
-    fn reconcile_git_operations(
-        &self,
-    ) -> impl Future<Output = Result<bool, UseCasePortError>> + Send;
-
-    fn reconcile_active_jobs(&self) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
-
-    fn reconcile_active_convergences(
-        &self,
-    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
-
-    fn reconcile_workspace_retention(
-        &self,
-    ) -> impl Future<Output = Result<(), UseCasePortError>> + Send;
-}
+// --- Lock ports ---
 
 pub trait ProjectMutationLockPort: Send + Sync {
     type Guard: Send;
@@ -532,76 +325,4 @@ pub trait ProjectMutationLockPort: Send + Sync {
         &self,
         project_id: ProjectId,
     ) -> impl Future<Output = Self::Guard> + Send;
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum GitPortError {
-    #[error("git operation failed: {0}")]
-    Internal(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum TargetRefHoldError {
-    #[error("target ref moved")]
-    Stale,
-    #[error("git operation failed: {0}")]
-    Internal(String),
-}
-
-pub trait JobCompletionGitPort: Send + Sync {
-    type Hold: Send;
-
-    fn commit_exists(
-        &self,
-        repo_path: &Path,
-        commit_oid: &CommitOid,
-    ) -> impl Future<Output = Result<bool, GitPortError>> + Send;
-
-    fn verify_and_hold_target_ref(
-        &self,
-        repo_path: &Path,
-        target_ref: &GitRef,
-        expected_oid: &CommitOid,
-    ) -> impl Future<Output = Result<Self::Hold, TargetRefHoldError>> + Send;
-
-    fn release_hold(
-        &self,
-        hold: Self::Hold,
-    ) -> impl Future<Output = Result<(), GitPortError>> + Send;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConflictKind {
-    JobNotActive,
-    JobRevisionStale,
-    JobMissingWorkspace,
-    JobUpdateConflict,
-    PreparedConvergenceMissing,
-    PreparedConvergenceStale,
-    DatabaseConstraint(String),
-    Other(String),
-}
-
-impl std::fmt::Display for ConflictKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::JobNotActive => write!(f, "job_not_active"),
-            Self::JobRevisionStale => write!(f, "job_revision_stale"),
-            Self::JobMissingWorkspace => write!(f, "job_missing_workspace"),
-            Self::JobUpdateConflict => write!(f, "job_update_conflict"),
-            Self::PreparedConvergenceMissing => write!(f, "prepared_convergence_missing"),
-            Self::PreparedConvergenceStale => write!(f, "prepared_convergence_stale"),
-            Self::DatabaseConstraint(msg) | Self::Other(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum RepositoryError {
-    #[error("entity not found")]
-    NotFound,
-    #[error("conflict: {0}")]
-    Conflict(ConflictKind),
-    #[error("database error: {0}")]
-    Database(#[from] Box<dyn std::error::Error + Send + Sync>),
 }

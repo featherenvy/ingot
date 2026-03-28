@@ -15,8 +15,8 @@ pub(super) mod types;
 mod workspaces;
 
 use items::RevisionLaneTeardown;
-pub(crate) use items::{append_activity, load_effective_config};
 use support::*;
+pub(crate) use support::{append_activity, load_effective_config};
 pub(crate) use support::{
     ensure_git_valid_target_ref, git_to_internal, repo_to_internal, repo_to_project_mutation,
     resolve_default_branch,
@@ -35,7 +35,6 @@ use axum::{Json, Router};
 use chrono::Utc;
 use ingot_agent_adapters::registry::{default_agent_capabilities, probe_and_apply};
 use ingot_config::IngotConfig;
-use ingot_config::loader::load_config;
 use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::agent::{Agent, AgentStatus};
 
@@ -43,10 +42,7 @@ use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::Convergence;
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::{Finding, FindingTriageState};
-use ingot_domain::git_operation::{
-    ConvergenceReplayMetadata, GitOperation, GitOperationEntityRef, GitOperationStatus,
-    OperationPayload,
-};
+use ingot_domain::git_operation::{GitOperation, GitOperationEntityRef};
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::item::{
@@ -60,10 +56,6 @@ use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
 use ingot_git::GitJobCompletionPort;
 use ingot_git::commands::{is_commit_reachable_from_any_ref, resolve_ref_oid};
-use ingot_git::commit::{
-    ConvergenceCommitTrailers, abort_cherry_pick, cherry_pick_no_commit, commit_message,
-    create_daemon_convergence_commit, list_commits_oldest_first, working_tree_has_changes,
-};
 use ingot_git::diff::changed_paths_between;
 use ingot_git::project_repo::{CheckoutSyncStatus, checkout_sync_status, project_repo_paths};
 use ingot_store_sqlite::Database;
@@ -75,17 +67,14 @@ use ingot_usecases::finding::{
     triage_finding,
 };
 use ingot_usecases::item::{
-    CreateItemInput, approval_state_for_policy, create_manual_item, default_policy_snapshot,
-    default_template_map_snapshot, normalize_target_ref, rework_budgets_from_policy_snapshot,
+    CreateItemInput, approval_state_for_policy, create_manual_item, normalize_target_ref,
 };
 use ingot_usecases::{
     CompleteJobCommand, CompleteJobService, DispatchNotify, ProjectLocks, UseCaseError,
     rebuild_revision_context,
 };
 use ingot_workflow::{AllowedAction, Evaluation, Evaluator, PhaseStatus, RecommendedAction, step};
-use ingot_workspace::{
-    ensure_authoring_workspace_state, provision_integration_workspace, remove_workspace,
-};
+use ingot_workspace::{ensure_authoring_workspace_state, remove_workspace};
 use tracing::warn;
 
 use crate::error::ApiError;
