@@ -4,9 +4,9 @@ use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
 use ingot_domain::agent_model::AgentModel;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
-use tracing::{debug, info, warn};
+use tracing::info;
+
+use crate::subprocess;
 
 #[derive(Debug, Clone)]
 pub struct ClaudeCodeCliAdapter {
@@ -48,29 +48,6 @@ impl ClaudeCodeCliAdapter {
 
         args
     }
-
-    async fn collect_stream(
-        reader: impl tokio::io::AsyncRead + Unpin,
-        stream_name: &'static str,
-    ) -> Result<String, AgentError> {
-        let mut reader = BufReader::new(reader).lines();
-        let mut lines = Vec::new();
-
-        while let Some(line) = reader
-            .next_line()
-            .await
-            .map_err(|err| AgentError::ProcessError(err.to_string()))?
-        {
-            match stream_name {
-                "stdout" => debug!(stream = stream_name, line, "claude event"),
-                "stderr" => warn!(stream = stream_name, line, "claude stderr"),
-                _ => debug!(stream = stream_name, line, "claude stream"),
-            }
-            lines.push(line);
-        }
-
-        Ok(lines.join("\n"))
-    }
 }
 
 impl AgentAdapter for ClaudeCodeCliAdapter {
@@ -89,92 +66,27 @@ impl AgentAdapter for ClaudeCodeCliAdapter {
             "launching claude --print"
         );
 
-        let mut command = Command::new(&self.cli_path);
-        command
-            .args(&args)
-            .current_dir(working_dir)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
-        let mut child = command
-            .spawn()
-            .map_err(|err| AgentError::LaunchFailed(err.to_string()))?;
-        debug!("spawned claude subprocess");
+        let output = subprocess::run_cli_subprocess(
+            &self.cli_path,
+            &args,
+            working_dir,
+            &request.prompt,
+            "claude",
+        )
+        .await?;
+        info!(exit_code = output.exit_code, "claude --print finished");
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(request.prompt.as_bytes())
-                .await
-                .map_err(|err| AgentError::ProcessError(err.to_string()))?;
-            stdin
-                .shutdown()
-                .await
-                .map_err(|err| AgentError::ProcessError(err.to_string()))?;
-        }
-        debug!("wrote prompt to claude stdin and closed input");
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AgentError::ProcessError("missing claude stdout pipe".into()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| AgentError::ProcessError("missing claude stderr pipe".into()))?;
-        let stdout_task = tokio::spawn(Self::collect_stream(stdout, "stdout"));
-        let stderr_task = tokio::spawn(Self::collect_stream(stderr, "stderr"));
-
-        let status = child
-            .wait()
-            .await
-            .map_err(|err| AgentError::ProcessError(err.to_string()))?;
-        info!(
-            exit_code = status.code().unwrap_or(-1),
-            "claude --print finished"
-        );
-
-        let stdout = stdout_task
-            .await
-            .map_err(|err| AgentError::ProcessError(err.to_string()))??;
-        let stderr = stderr_task
-            .await
-            .map_err(|err| AgentError::ProcessError(err.to_string()))??;
-
-        let result = parse_print_output(&stdout);
-
+        let result = parse_print_output(&output.stdout);
         Ok(AgentResponse {
-            exit_code: status.code().unwrap_or(-1),
-            stdout,
-            stderr,
+            exit_code: output.exit_code,
+            stdout: output.stdout,
+            stderr: output.stderr,
             result,
         })
     }
 
     async fn cancel(&self, pid: u32) -> Result<(), AgentError> {
-        #[cfg(unix)]
-        {
-            let result = unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
-            if result == 0 {
-                return Ok(());
-            }
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) {
-                return Ok(());
-            }
-            Err(AgentError::ProcessError(format!(
-                "killpg({pid}) failed: {error}"
-            )))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = pid;
-            Err(AgentError::ProcessError(
-                "claude subprocess cancellation is only supported on unix".into(),
-            ))
-        }
+        subprocess::cancel_process_group(pid).await
     }
 }
 
