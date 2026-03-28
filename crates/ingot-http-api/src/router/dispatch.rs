@@ -350,7 +350,9 @@ mod tests {
     use std::path::PathBuf;
 
     use chrono::Utc;
-    use ingot_domain::git_operation::{GitOperation, GitOperationStatus, OperationPayload};
+    use ingot_domain::git_operation::{
+        GitOperation, GitOperationEntityRef, GitOperationStatus, OperationPayload,
+    };
     use ingot_domain::ids::{
         GitOperationId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId,
     };

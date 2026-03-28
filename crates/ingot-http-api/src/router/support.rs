@@ -9,13 +9,12 @@ use ingot_config::IngotConfig;
 use ingot_config::loader::load_config;
 use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::branch_name::BranchName;
-use ingot_domain::git_operation::OperationKind;
 use ingot_domain::ids::{ActivityId, AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 use ingot_domain::ports::{ConflictKind, RepositoryError};
 use ingot_domain::project::Project;
 use ingot_domain::workspace::{Workspace, WorkspaceStatus};
 use ingot_git::commands::{check_ref_format, current_branch_name, resolve_ref_oid};
-use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
+use ingot_git::project_repo::project_repo_paths;
 use ingot_usecases::item::{next_sort_key, normalize_target_ref};
 use ingot_usecases::{CompleteJobError, UseCaseError};
 use ingot_workspace::WorkspaceError;
@@ -144,21 +143,17 @@ pub(super) async fn refresh_project_mirror(
     state: &AppState,
     project: &Project,
 ) -> Result<ingot_git::project_repo::ProjectRepoPaths, ApiError> {
-    let paths = project_paths(state, project);
-    let has_unresolved_finalize = state
-        .db
-        .list_unresolved_git_operations()
-        .await
-        .map_err(repo_to_internal)?
-        .into_iter()
-        .any(|operation| {
-            operation.project_id == project.id
-                && operation.operation_kind() == OperationKind::FinalizeTargetRef
-        });
-    if !(has_unresolved_finalize && paths.mirror_git_dir.exists()) {
-        ensure_mirror(&paths).await.map_err(git_to_internal)?;
-    }
-    Ok(paths)
+    ingot_git::project_repo::refresh_project_mirror(
+        &state.db,
+        state.state_root.as_path(),
+        project.id,
+        &project.path,
+    )
+    .await
+    .map_err(|error| match error {
+        ingot_git::project_repo::RefreshMirrorError::Repository(error) => repo_to_internal(error),
+        ingot_git::project_repo::RefreshMirrorError::Git(error) => git_to_internal(error),
+    })
 }
 
 pub(super) async fn next_project_sort_key(

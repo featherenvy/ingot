@@ -14,8 +14,9 @@ use ingot_domain::item::ApprovalState;
 use ingot_domain::job::Job;
 use ingot_domain::ports::ConvergenceQueuePrepareContext;
 use ingot_domain::ports::{
-    ActivityRepository, ConvergenceQueueRepository, InvalidatePreparedConvergenceMutation,
-    InvalidatePreparedConvergenceRepository, WorkspaceRepository,
+    ActivityRepository, ConvergenceQueueRepository, GitOperationRepository,
+    InvalidatePreparedConvergenceMutation, InvalidatePreparedConvergenceRepository,
+    RepositoryError, WorkspaceRepository,
 };
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
@@ -233,6 +234,64 @@ pub trait PreparedConvergenceFinalizePort: Send + Sync {
         target: FinalizationTarget<'_>,
         operation: &GitOperation,
     ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
+}
+
+/// Shared implementation of the find-or-create-finalize-operation logic
+/// used by both the runtime and HTTP adapter `PreparedConvergenceFinalizePort`
+/// implementations.
+pub async fn find_or_create_finalize_operation<DB>(
+    db: &DB,
+    operation: &GitOperation,
+) -> Result<GitOperation, UseCaseError>
+where
+    DB: GitOperationRepository + ActivityRepository,
+{
+    let convergence_id = match &operation.entity {
+        GitOperationEntityRef::Convergence(id) => *id,
+        other => {
+            return Err(UseCaseError::Internal(format!(
+                "expected convergence entity, got {:?}",
+                other.entity_type()
+            )));
+        }
+    };
+
+    if let Some(existing) = db
+        .find_unresolved_finalize_for_convergence(convergence_id)
+        .await
+        .map_err(UseCaseError::Repository)?
+    {
+        return Ok(existing);
+    }
+
+    match db.create(operation).await {
+        Ok(()) => {
+            db.append(&Activity {
+                id: ActivityId::new(),
+                project_id: operation.project_id,
+                event_type: ActivityEventType::GitOperationPlanned,
+                subject: ActivitySubject::GitOperation(operation.id),
+                payload: serde_json::json!({
+                    "operation_kind": operation.operation_kind(),
+                    "entity_id": operation.entity.entity_id_string(),
+                }),
+                created_at: Utc::now(),
+            })
+            .await
+            .map_err(UseCaseError::Repository)?;
+            Ok(operation.clone())
+        }
+        Err(RepositoryError::Conflict(_)) => db
+            .find_unresolved_finalize_for_convergence(convergence_id)
+            .await
+            .map_err(UseCaseError::Repository)?
+            .ok_or_else(|| {
+                UseCaseError::Internal(
+                    "finalize git operation conflict without existing row".into(),
+                )
+            }),
+        Err(other) => Err(UseCaseError::Repository(other)),
+    }
 }
 
 #[derive(Clone)]

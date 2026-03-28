@@ -469,62 +469,10 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         &self,
         operation: &GitOperation,
     ) -> impl std::future::Future<Output = Result<GitOperation, UseCaseError>> + Send {
-        let state = self.state.clone();
+        let db = self.state.db.clone();
         let operation = operation.clone();
         async move {
-            if let Some(existing) = state
-                .db
-                .find_unresolved_finalize_for_convergence(match &operation.entity {
-                    GitOperationEntityRef::Convergence(id) => *id,
-                    other => {
-                        return Err(UseCaseError::Internal(format!(
-                            "expected convergence entity, got {:?}",
-                            other.entity_type()
-                        )));
-                    }
-                })
-                .await
-                .map_err(UseCaseError::Repository)?
-            {
-                return Ok(existing);
-            }
-
-            match state.db.create_git_operation(&operation).await {
-                Ok(()) => {
-                    append_activity(
-                        &state,
-                        operation.project_id,
-                        ActivityEventType::GitOperationPlanned,
-                        ActivitySubject::GitOperation(operation.id),
-                        serde_json::json!({
-                            "operation_kind": operation.operation_kind(),
-                            "entity_id": operation.entity.entity_id_string(),
-                        }),
-                    )
-                    .await
-                    .map_err(api_to_usecase_error)?;
-                    Ok(operation)
-                }
-                Err(RepositoryError::Conflict(_)) => state
-                    .db
-                    .find_unresolved_finalize_for_convergence(match &operation.entity {
-                        GitOperationEntityRef::Convergence(id) => *id,
-                        other => {
-                            return Err(UseCaseError::Internal(format!(
-                                "expected convergence entity, got {:?}",
-                                other.entity_type()
-                            )));
-                        }
-                    })
-                    .await
-                    .map_err(UseCaseError::Repository)?
-                    .ok_or_else(|| {
-                        UseCaseError::Internal(
-                            "finalize git operation conflict without existing row".into(),
-                        )
-                    }),
-                Err(other) => Err(UseCaseError::Repository(other)),
-            }
+            ingot_usecases::convergence::find_or_create_finalize_operation(&db, &operation).await
         }
     }
 

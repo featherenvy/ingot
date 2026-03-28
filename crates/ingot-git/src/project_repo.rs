@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use ingot_domain::commit_oid::CommitOid;
+use ingot_domain::git_operation::OperationKind;
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::ProjectId;
+use ingot_domain::ports::{GitOperationRepository, RepositoryError};
 use tokio::process::Command;
 
 use crate::commands::{GitCommandError, current_head_ref, git, head_oid, resolve_ref_oid};
@@ -96,6 +98,40 @@ pub async fn ensure_mirror(paths: &ProjectRepoPaths) -> Result<(), GitCommandErr
         .await?;
     }
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RefreshMirrorError {
+    #[error(transparent)]
+    Repository(RepositoryError),
+    #[error(transparent)]
+    Git(GitCommandError),
+}
+
+/// Refresh the project mirror, skipping the fetch when an unresolved
+/// finalize-target-ref operation is in flight for this project and the
+/// mirror already exists on disk.
+pub async fn refresh_project_mirror(
+    git_ops: &impl GitOperationRepository,
+    state_root: &Path,
+    project_id: ProjectId,
+    checkout_path: &Path,
+) -> Result<ProjectRepoPaths, RefreshMirrorError> {
+    let paths = project_repo_paths(state_root, project_id, checkout_path);
+    let has_unresolved_finalize = git_ops
+        .find_unresolved()
+        .await
+        .map_err(RefreshMirrorError::Repository)?
+        .into_iter()
+        .any(|op| {
+            op.project_id == project_id && op.operation_kind() == OperationKind::FinalizeTargetRef
+        });
+    if !(has_unresolved_finalize && paths.mirror_git_dir.exists()) {
+        ensure_mirror(&paths)
+            .await
+            .map_err(RefreshMirrorError::Git)?;
+    }
+    Ok(paths)
 }
 
 pub async fn checkout_sync_status(

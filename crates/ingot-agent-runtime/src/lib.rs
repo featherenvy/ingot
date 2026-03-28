@@ -29,7 +29,7 @@ use ingot_domain::agent::{AdapterKind, Agent, AgentCapability};
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::Convergence;
 use ingot_domain::convergence_queue::ConvergenceQueueEntry;
-use ingot_domain::git_operation::{GitOperation, GitOperationEntityRef, OperationKind};
+use ingot_domain::git_operation::GitOperation;
 use ingot_domain::item::EscalationReason;
 use ingot_domain::job::{
     ExecutionPermission, Job, JobAssignment, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
@@ -47,7 +47,7 @@ use ingot_git::commands::{
     resolve_ref_oid,
 };
 use ingot_git::project_repo::{
-    CheckoutFinalizationStatus, CheckoutSyncStatus, checkout_finalization_status, ensure_mirror,
+    CheckoutFinalizationStatus, CheckoutSyncStatus, checkout_finalization_status,
     project_repo_paths, sync_checkout_to_commit,
 };
 use ingot_store_sqlite::Database;
@@ -507,53 +507,10 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
         &self,
         operation: &GitOperation,
     ) -> impl Future<Output = Result<GitOperation, ingot_usecases::UseCaseError>> + Send {
-        let dispatcher = self.dispatcher.clone();
+        let db = self.dispatcher.db.clone();
         let operation = operation.clone();
         async move {
-            let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
-                return Err(ingot_usecases::UseCaseError::Internal(format!(
-                    "expected convergence entity, got {:?}",
-                    operation.entity.entity_type()
-                )));
-            };
-            let convergence_id = *convergence_id;
-            if let Some(existing) = dispatcher
-                .db
-                .find_unresolved_finalize_for_convergence(convergence_id)
-                .await
-                .map_err(ingot_usecases::UseCaseError::Repository)?
-            {
-                return Ok(existing);
-            }
-
-            match dispatcher.db.create_git_operation(&operation).await {
-                Ok(()) => {
-                    dispatcher
-                        .append_activity(
-                            operation.project_id,
-                            ActivityEventType::GitOperationPlanned,
-                            ActivitySubject::GitOperation(operation.id),
-                            serde_json::json!({
-                                "operation_kind": operation.operation_kind(),
-                                "entity_id": operation.entity.entity_id_string(),
-                            }),
-                        )
-                        .await
-                        .map_err(usecase_from_runtime_error)?;
-                    Ok(operation)
-                }
-                Err(RepositoryError::Conflict(_)) => dispatcher
-                    .db
-                    .find_unresolved_finalize_for_convergence(convergence_id)
-                    .await
-                    .map_err(ingot_usecases::UseCaseError::Repository)?
-                    .ok_or_else(|| {
-                        ingot_usecases::UseCaseError::Internal(
-                            "finalize git operation conflict without existing row".into(),
-                        )
-                    }),
-                Err(other) => Err(ingot_usecases::UseCaseError::Repository(other)),
-            }
+            ingot_usecases::convergence::find_or_create_finalize_operation(&db, &operation).await
         }
     }
 
@@ -856,20 +813,19 @@ impl JobDispatcher {
         &self,
         project: &Project,
     ) -> Result<ingot_git::project_repo::ProjectRepoPaths, RuntimeError> {
-        let paths = self.project_paths(project);
-        let has_unresolved_finalize = self
-            .db
-            .list_unresolved_git_operations()
-            .await?
-            .into_iter()
-            .any(|operation| {
-                operation.project_id == project.id
-                    && operation.operation_kind() == OperationKind::FinalizeTargetRef
-            });
-        if !(has_unresolved_finalize && paths.mirror_git_dir.exists()) {
-            ensure_mirror(&paths).await?;
-        }
-        Ok(paths)
+        ingot_git::project_repo::refresh_project_mirror(
+            &self.db,
+            self.config.state_root.as_path(),
+            project.id,
+            &project.path,
+        )
+        .await
+        .map_err(|error| match error {
+            ingot_git::project_repo::RefreshMirrorError::Repository(error) => {
+                RuntimeError::Repository(error)
+            }
+            ingot_git::project_repo::RefreshMirrorError::Git(error) => RuntimeError::Git(error),
+        })
     }
 
     async fn hydrate_convergences(
