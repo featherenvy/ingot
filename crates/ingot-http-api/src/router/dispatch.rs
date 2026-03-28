@@ -10,6 +10,18 @@ use super::*;
 use ingot_usecases::dispatch::{PendingInvestigationRef, investigation_ref_name};
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job, retry_job};
 
+pub(super) fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/jobs",
+            post(dispatch_item_job),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/retry",
+            post(retry_item_job),
+        )
+}
+
 pub(super) async fn dispatch_item_job(
     State(state): State<AppState>,
     ApiPath(ProjectItemPathParams {

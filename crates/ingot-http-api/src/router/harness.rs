@@ -1,15 +1,24 @@
 use std::path::Path;
 
 use axum::Json;
+use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::routing::get;
 use ingot_domain::harness::HarnessProfile;
 
 use super::AppState;
 use super::support::{ApiPath, repo_to_project};
 use super::types::ProjectPathParams;
 use crate::error::ApiError;
+
+pub(super) fn routes() -> Router<AppState> {
+    Router::new().route(
+        "/api/projects/{project_id}/harness",
+        get(get_harness_profile).put(put_harness_profile),
+    )
+}
 
 pub(super) async fn get_harness_profile(
     State(state): State<AppState>,

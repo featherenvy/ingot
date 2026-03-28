@@ -3,6 +3,22 @@ use super::support::*;
 use super::types::*;
 use super::*;
 
+pub(super) fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/projects/{project_id}/workspaces/{workspace_id}/reset",
+            post(reset_workspace_route),
+        )
+        .route(
+            "/api/projects/{project_id}/workspaces/{workspace_id}/abandon",
+            post(abandon_workspace_route),
+        )
+        .route(
+            "/api/projects/{project_id}/workspaces/{workspace_id}/remove",
+            post(remove_workspace_route),
+        )
+}
+
 pub(super) async fn reset_workspace_route(
     State(state): State<AppState>,
     ApiPath(ProjectWorkspacePathParams {

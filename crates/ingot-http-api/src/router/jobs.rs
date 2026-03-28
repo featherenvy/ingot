@@ -8,6 +8,18 @@ use super::*;
 use ingot_usecases::dispatch::failure_status;
 use ingot_usecases::job_lifecycle;
 
+pub(super) fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/cancel",
+            post(cancel_item_job),
+        )
+        .route("/api/jobs/{job_id}/logs", get(get_job_logs))
+        .route("/api/jobs/{job_id}/complete", post(complete_job))
+        .route("/api/jobs/{job_id}/fail", post(fail_job))
+        .route("/api/jobs/{job_id}/expire", post(expire_job))
+}
+
 pub(super) async fn cancel_item_job(
     State(state): State<AppState>,
     ApiPath(ProjectItemJobPathParams {

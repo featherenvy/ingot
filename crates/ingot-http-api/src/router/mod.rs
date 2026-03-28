@@ -1,5 +1,6 @@
 mod agents;
 mod convergence;
+mod core;
 mod dispatch;
 mod findings;
 mod harness;
@@ -34,7 +35,7 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::Utc;
 use ingot_agent_adapters::registry::{default_agent_capabilities, probe_and_apply};
-use ingot_config::IngotConfig;
+#[cfg(not(test))]
 use ingot_config::paths::default_state_root as shared_default_state_root;
 use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::agent::{Agent, AgentStatus};
@@ -132,159 +133,21 @@ pub fn build_router_with_project_locks_and_state_root(
     };
 
     Router::new()
-        .route("/api/health", get(health))
-        .route("/api/config", get(get_global_config))
-        // Project routes
-        .route(
-            "/api/projects",
-            get(projects::list_projects).post(projects::create_project),
-        )
-        .route("/api/demo-catalog", get(crate::demo::get_demo_catalog))
-        .route("/api/demo-project", post(crate::demo::create_demo_project))
-        .route(
-            "/api/projects/{project_id}/activity",
-            get(projects::list_project_activity),
-        )
-        .route(
-            "/api/projects/{project_id}/workspaces",
-            get(projects::list_project_workspaces),
-        )
-        .route(
-            "/api/projects/{project_id}",
-            put(projects::update_project).delete(projects::delete_project),
-        )
-        .route(
-            "/api/projects/{project_id}/config",
-            get(projects::get_project_config),
-        )
-        .route(
-            "/api/projects/{project_id}/harness",
-            get(harness::get_harness_profile).put(harness::put_harness_profile),
-        )
-        .route(
-            "/api/projects/{project_id}/jobs",
-            get(projects::list_project_jobs),
-        )
-        // Workspace routes
-        .route(
-            "/api/projects/{project_id}/workspaces/{workspace_id}/reset",
-            post(workspaces::reset_workspace_route),
-        )
-        .route(
-            "/api/projects/{project_id}/workspaces/{workspace_id}/abandon",
-            post(workspaces::abandon_workspace_route),
-        )
-        .route(
-            "/api/projects/{project_id}/workspaces/{workspace_id}/remove",
-            post(workspaces::remove_workspace_route),
-        )
-        // Agent routes
-        .route(
-            "/api/agents",
-            get(agents::list_agents).post(agents::create_agent),
-        )
-        .route(
-            "/api/agents/{agent_id}",
-            put(agents::update_agent).delete(agents::delete_agent),
-        )
-        .route(
-            "/api/agents/{agent_id}/reprobe",
-            post(agents::reprobe_agent),
-        )
-        // Item routes
-        .route(
-            "/api/projects/{project_id}/items",
-            get(items::list_items).post(items::create_item),
-        )
-        .route(
-            "/api/projects/{project_id}/items/{item_id}",
-            get(items::get_item).patch(items::update_item),
-        )
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/revise",
-            post(items::revise_item),
-        )
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/defer",
-            post(items::defer_item),
-        )
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/resume",
-            post(items::resume_item),
-        )
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/dismiss",
-            post(items::dismiss_item),
-        )
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/invalidate",
-            post(items::invalidate_item),
-        )
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/reopen",
-            post(items::reopen_item),
-        )
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/findings",
-            get(items::list_item_findings),
-        )
-        // Job routes
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/jobs",
-            post(dispatch::dispatch_item_job),
-        )
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/retry",
-            post(dispatch::retry_item_job),
-        )
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/cancel",
-            post(jobs::cancel_item_job),
-        )
-        .route("/api/jobs/{job_id}/logs", get(jobs::get_job_logs))
-        .route("/api/jobs/{job_id}/complete", post(jobs::complete_job))
-        .route("/api/jobs/{job_id}/fail", post(jobs::fail_job))
-        .route("/api/jobs/{job_id}/expire", post(jobs::expire_job))
-        // Finding routes
-        .route("/api/findings/{finding_id}", get(findings::get_finding))
-        .route(
-            "/api/findings/{finding_id}/triage",
-            post(findings::triage_item_finding),
-        )
-        .route(
-            "/api/findings/{finding_id}/promote",
-            post(findings::promote_item_from_finding),
-        )
-        .route(
-            "/api/findings/{finding_id}/dismiss",
-            post(findings::dismiss_item_finding),
-        )
-        // Convergence routes
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/convergence/prepare",
-            post(convergence::prepare_item_convergence),
-        )
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/approval/approve",
-            post(convergence::approve_item),
-        )
-        .route(
-            "/api/projects/{project_id}/items/{item_id}/approval/reject",
-            post(convergence::reject_item_approval),
-        )
+        .merge(core::routes())
+        .merge(projects::routes())
+        .merge(harness::routes())
+        .merge(workspaces::routes())
+        .merge(agents::routes())
+        .merge(items::routes())
+        .merge(dispatch::routes())
+        .merge(jobs::routes())
+        .merge(findings::routes())
+        .merge(convergence::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             dispatch_notify_layer,
         ))
         .with_state(state)
-}
-
-pub(super) async fn health() -> &'static str {
-    "ok"
-}
-
-pub(super) async fn get_global_config() -> Result<Json<IngotConfig>, ApiError> {
-    Ok(Json(load_effective_config(None)?))
 }
 
 /// Wakes the background dispatcher after every successful write request.

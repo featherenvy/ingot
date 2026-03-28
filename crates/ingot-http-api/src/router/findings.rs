@@ -5,6 +5,23 @@ use super::support::*;
 use super::types::*;
 use super::*;
 
+pub(super) fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/findings/{finding_id}", get(get_finding))
+        .route(
+            "/api/findings/{finding_id}/triage",
+            post(triage_item_finding),
+        )
+        .route(
+            "/api/findings/{finding_id}/promote",
+            post(promote_item_from_finding),
+        )
+        .route(
+            "/api/findings/{finding_id}/dismiss",
+            post(dismiss_item_finding),
+        )
+}
+
 pub(super) async fn get_finding(
     State(state): State<AppState>,
     ApiPath(FindingPathParams { finding_id }): ApiPath<FindingPathParams>,

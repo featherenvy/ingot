@@ -15,6 +15,46 @@ use super::support::*;
 use super::types::*;
 use super::*;
 
+pub(super) fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/projects/{project_id}/items",
+            get(list_items).post(create_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}",
+            get(get_item).patch(update_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/revise",
+            post(revise_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/defer",
+            post(defer_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/resume",
+            post(resume_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/dismiss",
+            post(dismiss_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/invalidate",
+            post(invalidate_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/reopen",
+            post(reopen_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/findings",
+            get(list_item_findings),
+        )
+}
+
 pub(super) async fn create_item(
     State(state): State<AppState>,
     ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,

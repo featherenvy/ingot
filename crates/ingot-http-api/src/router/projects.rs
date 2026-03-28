@@ -1,7 +1,28 @@
+use ingot_config::IngotConfig;
+
 use super::support::load_effective_config;
 use super::support::*;
 use super::types::*;
 use super::*;
+
+pub(super) fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/projects", get(list_projects).post(create_project))
+        .route(
+            "/api/projects/{project_id}/activity",
+            get(list_project_activity),
+        )
+        .route(
+            "/api/projects/{project_id}/workspaces",
+            get(list_project_workspaces),
+        )
+        .route(
+            "/api/projects/{project_id}",
+            put(update_project).delete(delete_project),
+        )
+        .route("/api/projects/{project_id}/config", get(get_project_config))
+        .route("/api/projects/{project_id}/jobs", get(list_project_jobs))
+}
 
 pub(super) async fn list_project_activity(
     State(state): State<AppState>,

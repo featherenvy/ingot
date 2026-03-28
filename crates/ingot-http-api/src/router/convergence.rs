@@ -13,10 +13,26 @@ use ingot_git::project_repo::{
     checkout_sync_status, sync_checkout_to_commit,
 };
 use ingot_usecases::convergence::{
-    ApprovalFinalizeReadiness, CheckoutFinalizationReadiness, FinalizationTarget,
-    FinalizePreparedTrigger, FinalizeTargetRefResult, PreparedConvergenceFinalizePort,
-    ConvergenceQueuePrepareContext,
+    ApprovalFinalizeReadiness, CheckoutFinalizationReadiness, ConvergenceQueuePrepareContext,
+    FinalizationTarget, FinalizePreparedTrigger, FinalizeTargetRefResult,
+    PreparedConvergenceFinalizePort,
 };
+
+pub(super) fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/convergence/prepare",
+            post(prepare_item_convergence),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/approval/approve",
+            post(approve_item),
+        )
+        .route(
+            "/api/projects/{project_id}/items/{item_id}/approval/reject",
+            post(reject_item_approval),
+        )
+}
 
 #[derive(Clone)]
 pub(super) struct HttpConvergencePort {
@@ -139,9 +155,8 @@ impl ConvergenceCommandPort for HttpConvergencePort {
         &self,
         project_id: ProjectId,
         item_id: ItemId,
-    ) -> impl std::future::Future<
-        Output = Result<ConvergenceQueuePrepareContext, UseCaseError>,
-    > + Send {
+    ) -> impl std::future::Future<Output = Result<ConvergenceQueuePrepareContext, UseCaseError>> + Send
+    {
         let state = self.state.clone();
         async move {
             let project = state

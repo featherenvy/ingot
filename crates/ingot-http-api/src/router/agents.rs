@@ -4,6 +4,16 @@ use super::support::*;
 use super::types::*;
 use super::*;
 
+pub(super) fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/agents", get(list_agents).post(create_agent))
+        .route(
+            "/api/agents/{agent_id}",
+            put(update_agent).delete(delete_agent),
+        )
+        .route("/api/agents/{agent_id}/reprobe", post(reprobe_agent))
+}
+
 pub(super) async fn list_agents(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Agent>>, ApiError> {
