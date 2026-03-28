@@ -27,9 +27,6 @@ use tracing::{debug, info, warn};
 
 use crate::{JobDispatcher, RunningJobResult, RuntimeError, report};
 
-#[cfg(test)]
-use crate::PreSpawnPausePoint;
-
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedHarnessValidation {
     pub(crate) harness: HarnessProfile,
@@ -495,8 +492,7 @@ impl JobDispatcher {
         command.process_group(0);
 
         #[cfg(test)]
-        self.pause_before_pre_spawn_guard(PreSpawnPausePoint::HarnessBeforeSpawn)
-            .await;
+        self.pause_before_harness_spawn().await;
 
         if self.job_is_cancelled(prepared.job_id).await {
             info!(

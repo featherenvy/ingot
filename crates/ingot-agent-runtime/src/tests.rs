@@ -1,4 +1,8 @@
 use super::*;
+use crate::test_support::{
+    AutoQueuePauseHook, AutoQueuePausePoint, PreSpawnPauseHook, PreSpawnPausePoint,
+    ProjectedRecoveryPauseHook, ProjectedRecoveryPausePoint,
+};
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_domain::commit_oid::CommitOid;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -323,7 +327,7 @@ async fn run_with_heartbeats_does_not_launch_runner_when_job_is_cancelled_before
 
     let mut dispatcher = harness.dispatcher.clone();
     let pause_hook = PreSpawnPauseHook::new(PreSpawnPausePoint::AgentBeforeSpawn);
-    dispatcher.pre_spawn_pause_hook = Some(pause_hook.clone());
+    dispatcher.set_pre_spawn_pause_hook(pause_hook.clone());
 
     let prepared = match dispatcher
         .prepare_run(harness.db.get_job(job.id).await.expect("load queued job"))
@@ -425,7 +429,7 @@ async fn run_with_heartbeats_claims_running_job_with_configured_lease_ttl() {
 
     let mut dispatcher = harness.dispatcher.clone();
     let pause_hook = PreSpawnPauseHook::new(PreSpawnPausePoint::AgentBeforeSpawn);
-    dispatcher.pre_spawn_pause_hook = Some(pause_hook.clone());
+    dispatcher.set_pre_spawn_pause_hook(pause_hook.clone());
 
     let prepared = match dispatcher
         .prepare_run(harness.db.get_job(job.id).await.expect("load queued job"))
@@ -706,7 +710,7 @@ async fn supervisor_does_not_launch_same_job_twice_during_pre_spawn_pause() {
 
     let mut dispatcher = harness.dispatcher.clone();
     let pause_hook = PreSpawnPauseHook::new(PreSpawnPausePoint::AgentBeforeSpawn);
-    dispatcher.pre_spawn_pause_hook = Some(pause_hook.clone());
+    dispatcher.set_pre_spawn_pause_hook(pause_hook.clone());
 
     let semaphore = Arc::new(Semaphore::new(1));
     let mut running = JoinSet::<RunningJobResult>::new();
@@ -835,7 +839,7 @@ timeout = "30s"
 
     let mut dispatcher = harness.dispatcher.clone();
     let pause_hook = PreSpawnPauseHook::new(PreSpawnPausePoint::HarnessBeforeSpawn);
-    dispatcher.pre_spawn_pause_hook = Some(pause_hook.clone());
+    dispatcher.set_pre_spawn_pause_hook(pause_hook.clone());
 
     let prepared = match dispatcher
         .prepare_harness_validation(harness.db.get_job(job.id).await.expect("load queued job"))
@@ -1066,7 +1070,7 @@ async fn auto_queue_convergence_treats_conflicting_insert_as_noop() {
 
     let mut dispatcher = dispatcher.clone();
     let pause_hook = AutoQueuePauseHook::new(AutoQueuePausePoint::BeforeInsert);
-    dispatcher.auto_queue_pause_hook = Some(pause_hook.clone());
+    dispatcher.set_auto_queue_pause_hook(pause_hook.clone());
 
     let queue_task = tokio::spawn({
         let port = RuntimeConvergencePort { dispatcher };
@@ -1486,7 +1490,7 @@ async fn tick_system_action_does_not_queue_stale_autopilot_prepare_decision() {
 
     let mut dispatcher = harness.dispatcher.clone();
     let pause_hook = AutoQueuePauseHook::new(AutoQueuePausePoint::BeforeGuard);
-    dispatcher.auto_queue_pause_hook = Some(pause_hook.clone());
+    dispatcher.set_auto_queue_pause_hook(pause_hook.clone());
 
     let tick_task = tokio::spawn({
         let dispatcher = dispatcher.clone();
@@ -1605,7 +1609,7 @@ async fn tick_system_action_does_not_queue_after_execution_mode_switches_to_manu
 
     let mut dispatcher = harness.dispatcher.clone();
     let pause_hook = AutoQueuePauseHook::new(AutoQueuePausePoint::BeforeGuard);
-    dispatcher.auto_queue_pause_hook = Some(pause_hook.clone());
+    dispatcher.set_auto_queue_pause_hook(pause_hook.clone());
 
     let tick_task = tokio::spawn({
         let dispatcher = dispatcher.clone();
@@ -1682,7 +1686,7 @@ async fn recover_projected_jobs_reloads_execution_mode_after_lock() {
 
     let mut dispatcher = harness.dispatcher.clone();
     let pause_hook = ProjectedRecoveryPauseHook::new(ProjectedRecoveryPausePoint::BeforeGuard);
-    dispatcher.projected_recovery_pause_hook = Some(pause_hook.clone());
+    dispatcher.set_projected_recovery_pause_hook(pause_hook.clone());
 
     let recovery_task = tokio::spawn({
         let dispatcher = dispatcher.clone();

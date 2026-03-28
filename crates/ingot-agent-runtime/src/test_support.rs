@@ -3,6 +3,13 @@ use crate::JobDispatcher;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[derive(Clone, Default)]
+pub(super) struct DispatcherTestHooks {
+    pre_spawn_pause_hook: Option<PreSpawnPauseHook>,
+    auto_queue_pause_hook: Option<AutoQueuePauseHook>,
+    projected_recovery_pause_hook: Option<ProjectedRecoveryPauseHook>,
+}
+
 pub(super) type PreSpawnPauseHook = PauseHook<PreSpawnPausePoint>;
 pub(super) type AutoQueuePauseHook = PauseHook<AutoQueuePausePoint>;
 pub(super) type ProjectedRecoveryPauseHook = PauseHook<ProjectedRecoveryPausePoint>;
@@ -101,28 +108,48 @@ where
 }
 
 impl JobDispatcher {
-    pub(super) async fn pause_before_pre_spawn_guard(&self, point: PreSpawnPausePoint) {
-        if let Some(hook) = &self.pre_spawn_pause_hook {
-            hook.pause_if_matching(point).await;
+    pub(super) fn set_pre_spawn_pause_hook(&mut self, hook: PreSpawnPauseHook) {
+        self.test_hooks.pre_spawn_pause_hook = Some(hook);
+    }
+
+    pub(super) fn set_auto_queue_pause_hook(&mut self, hook: AutoQueuePauseHook) {
+        self.test_hooks.auto_queue_pause_hook = Some(hook);
+    }
+
+    pub(super) fn set_projected_recovery_pause_hook(&mut self, hook: ProjectedRecoveryPauseHook) {
+        self.test_hooks.projected_recovery_pause_hook = Some(hook);
+    }
+
+    pub(super) async fn pause_before_agent_spawn(&self) {
+        if let Some(hook) = &self.test_hooks.pre_spawn_pause_hook {
+            hook.pause_if_matching(PreSpawnPausePoint::AgentBeforeSpawn)
+                .await;
+        }
+    }
+
+    pub(super) async fn pause_before_harness_spawn(&self) {
+        if let Some(hook) = &self.test_hooks.pre_spawn_pause_hook {
+            hook.pause_if_matching(PreSpawnPausePoint::HarnessBeforeSpawn)
+                .await;
         }
     }
 
     pub(super) async fn pause_before_auto_queue_guard(&self) {
-        if let Some(hook) = &self.auto_queue_pause_hook {
+        if let Some(hook) = &self.test_hooks.auto_queue_pause_hook {
             hook.pause_if_matching(AutoQueuePausePoint::BeforeGuard)
                 .await;
         }
     }
 
     pub(super) async fn pause_before_auto_queue_insert(&self) {
-        if let Some(hook) = &self.auto_queue_pause_hook {
+        if let Some(hook) = &self.test_hooks.auto_queue_pause_hook {
             hook.pause_if_matching(AutoQueuePausePoint::BeforeInsert)
                 .await;
         }
     }
 
     pub(super) async fn pause_before_projected_recovery_guard(&self) {
-        if let Some(hook) = &self.projected_recovery_pause_hook {
+        if let Some(hook) = &self.test_hooks.projected_recovery_pause_hook {
             hook.pause_if_matching(ProjectedRecoveryPausePoint::BeforeGuard)
                 .await;
         }

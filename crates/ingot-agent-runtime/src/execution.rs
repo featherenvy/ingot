@@ -37,9 +37,6 @@ use crate::{
     should_clear_item_escalation_on_success,
 };
 
-#[cfg(test)]
-use crate::PreSpawnPausePoint;
-
 pub(crate) enum AgentRunOutcome {
     Completed(AgentResponse),
     TimedOut,
@@ -99,8 +96,7 @@ impl JobDispatcher {
         );
 
         #[cfg(test)]
-        self.pause_before_pre_spawn_guard(PreSpawnPausePoint::AgentBeforeSpawn)
-            .await;
+        self.pause_before_agent_spawn().await;
 
         if self.job_is_cancelled(prepared.job.id).await {
             info!(

@@ -15,11 +15,6 @@ mod test_support;
 use execution::run_prepared_agent_job;
 use harness::{HarnessPromptContext, resolve_harness_prompt_context};
 use supervisor::RunningJobResult;
-#[cfg(test)]
-use test_support::{
-    AutoQueuePauseHook, AutoQueuePausePoint, PreSpawnPauseHook, PreSpawnPausePoint,
-    ProjectedRecoveryPauseHook, ProjectedRecoveryPausePoint,
-};
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -118,11 +113,7 @@ pub struct JobDispatcher {
     runner: Arc<dyn AgentRunner>,
     dispatch_notify: DispatchNotify,
     #[cfg(test)]
-    pre_spawn_pause_hook: Option<PreSpawnPauseHook>,
-    #[cfg(test)]
-    auto_queue_pause_hook: Option<AutoQueuePauseHook>,
-    #[cfg(test)]
-    projected_recovery_pause_hook: Option<ProjectedRecoveryPauseHook>,
+    test_hooks: test_support::DispatcherTestHooks,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -172,11 +163,7 @@ impl JobDispatcher {
             runner,
             dispatch_notify,
             #[cfg(test)]
-            pre_spawn_pause_hook: None,
-            #[cfg(test)]
-            auto_queue_pause_hook: None,
-            #[cfg(test)]
-            projected_recovery_pause_hook: None,
+            test_hooks: test_support::DispatcherTestHooks::default(),
         }
     }
 
