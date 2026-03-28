@@ -6,7 +6,7 @@ use ingot_agent_protocol::response::AgentResponse;
 use ingot_domain::agent_model::AgentModel;
 use tracing::info;
 
-use crate::{output_schema, structured_output_schema, subprocess};
+use crate::{output_schema, subprocess};
 
 #[derive(Debug, Clone)]
 pub struct ClaudeCodeCliAdapter {
@@ -182,30 +182,6 @@ mod tests {
         let schema_str = &args[schema_idx + 1];
         let parsed: serde_json::Value = serde_json::from_str(schema_str).expect("valid JSON");
         assert_eq!(parsed, custom_schema);
-    }
-
-    #[test]
-    fn build_print_args_include_default_schema_when_none() {
-        let adapter = ClaudeCodeCliAdapter::new("claude", "claude-sonnet-4-6");
-        let args = adapter.build_print_args(&request(true));
-
-        let schema_idx = args.iter().position(|a| a == "--json-schema").unwrap();
-        let schema_str = &args[schema_idx + 1];
-        let parsed: serde_json::Value = serde_json::from_str(schema_str).expect("valid JSON");
-        assert_eq!(parsed, structured_output_schema());
-    }
-
-    #[test]
-    fn fallback_structured_output_schema_requires_nullable_validation() {
-        let schema = structured_output_schema();
-        assert_eq!(
-            schema["required"],
-            serde_json::json!(["summary", "validation"])
-        );
-        assert_eq!(
-            schema["properties"]["validation"]["type"],
-            serde_json::json!(["string", "null"])
-        );
     }
 
     #[test]

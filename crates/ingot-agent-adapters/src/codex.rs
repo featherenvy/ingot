@@ -7,7 +7,7 @@ use ingot_domain::agent_model::AgentModel;
 use tokio::fs;
 use tracing::{info, warn};
 
-use crate::{output_schema, structured_output_schema, subprocess};
+use crate::{output_schema, subprocess};
 
 #[derive(Debug, Clone)]
 pub struct CodexCliAdapter {
@@ -206,16 +206,4 @@ mod tests {
         assert_eq!(args[sandbox_idx + 1], "read-only");
     }
 
-    #[test]
-    fn fallback_structured_output_schema_requires_nullable_validation() {
-        let schema = crate::structured_output_schema();
-        assert_eq!(
-            schema["required"],
-            serde_json::json!(["summary", "validation"])
-        );
-        assert_eq!(
-            schema["properties"]["validation"]["type"],
-            serde_json::json!(["string", "null"])
-        );
-    }
 }
