@@ -153,7 +153,8 @@ pub(super) fn overlay_evaluation_with_queue_state(
     });
 
     let awaiting_lane = (queue.state.is_some()
-        && evaluation.next_recommended_action == RecommendedAction::PrepareConvergence)
+        && evaluation.next_recommended_action
+            == RecommendedAction::named(NamedRecommendedAction::PrepareConvergence))
         || queue.state == Some(ConvergenceQueueEntryStatus::Queued);
     if awaiting_lane {
         set_awaiting_convergence_lane(&mut evaluation);
@@ -162,9 +163,11 @@ pub(super) fn overlay_evaluation_with_queue_state(
     if queue.checkout_sync_blocked
         && revision.approval_policy == ApprovalPolicy::NotRequired
         && has_prepared_convergence
-        && evaluation.next_recommended_action == RecommendedAction::FinalizePreparedConvergence
+        && evaluation.next_recommended_action
+            == RecommendedAction::named(NamedRecommendedAction::FinalizePreparedConvergence)
     {
-        evaluation.next_recommended_action = RecommendedAction::ResolveCheckoutSync;
+        evaluation.next_recommended_action =
+            RecommendedAction::named(NamedRecommendedAction::ResolveCheckoutSync);
         evaluation.dispatchable_step_id = None;
         evaluation.allowed_actions.clear();
         evaluation.phase_status = Some(PhaseStatus::AwaitingConvergence);
@@ -174,7 +177,8 @@ pub(super) fn overlay_evaluation_with_queue_state(
 }
 
 fn set_awaiting_convergence_lane(evaluation: &mut Evaluation) {
-    evaluation.next_recommended_action = RecommendedAction::AwaitConvergenceLane;
+    evaluation.next_recommended_action =
+        RecommendedAction::named(NamedRecommendedAction::AwaitConvergenceLane);
     evaluation.dispatchable_step_id = None;
     evaluation
         .allowed_actions
@@ -221,7 +225,8 @@ pub(super) async fn load_queue_status(
     };
 
     let should_check_checkout = active_entry.status == ConvergenceQueueEntryStatus::Head
-        && evaluation.next_recommended_action == RecommendedAction::FinalizePreparedConvergence;
+        && evaluation.next_recommended_action
+            == RecommendedAction::named(NamedRecommendedAction::FinalizePreparedConvergence);
     if should_check_checkout {
         if let CheckoutSyncStatus::Blocked { message, .. } =
             checkout_sync_status(&project.path, &revision.target_ref)

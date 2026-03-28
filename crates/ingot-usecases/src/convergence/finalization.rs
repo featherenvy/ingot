@@ -11,7 +11,7 @@ use ingot_domain::job::Job;
 use ingot_domain::ports::{ActivityRepository, GitOperationRepository, RepositoryError};
 use ingot_domain::project::Project;
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
-use ingot_workflow::{Evaluator, RecommendedAction};
+use ingot_workflow::{Evaluator, NamedRecommendedAction, RecommendedAction};
 
 use crate::UseCaseError;
 
@@ -31,7 +31,7 @@ pub fn should_prepare_convergence(
     Evaluator::new()
         .evaluate(item, revision, jobs, findings, convergences)
         .next_recommended_action
-        == RecommendedAction::PrepareConvergence
+        == RecommendedAction::named(NamedRecommendedAction::PrepareConvergence)
 }
 
 #[must_use]
@@ -45,7 +45,7 @@ pub fn should_invalidate_prepared_convergence(
     Evaluator::new()
         .evaluate(item, revision, jobs, findings, convergences)
         .next_recommended_action
-        == RecommendedAction::InvalidatePreparedConvergence
+        == RecommendedAction::named(NamedRecommendedAction::InvalidatePreparedConvergence)
 }
 
 #[must_use]
@@ -65,7 +65,7 @@ pub fn should_auto_finalize_prepared_convergence(
         && Evaluator::new()
             .evaluate(item, revision, jobs, findings, convergences)
             .next_recommended_action
-            == RecommendedAction::FinalizePreparedConvergence
+            == RecommendedAction::named(NamedRecommendedAction::FinalizePreparedConvergence)
 }
 
 pub async fn find_or_create_finalize_operation<DB>(

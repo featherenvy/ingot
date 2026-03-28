@@ -75,7 +75,10 @@ use ingot_usecases::{
     CompleteJobCommand, CompleteJobService, DispatchNotify, ProjectLocks, UseCaseError,
     rebuild_revision_context,
 };
-use ingot_workflow::{AllowedAction, Evaluation, Evaluator, PhaseStatus, RecommendedAction, step};
+use ingot_workflow::{
+    AllowedAction, Evaluation, Evaluator, NamedRecommendedAction, PhaseStatus,
+    RecommendedAction, step,
+};
 use tracing::warn;
 
 use crate::error::ApiError;

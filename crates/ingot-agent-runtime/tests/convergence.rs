@@ -25,7 +25,7 @@ use ingot_test_support::fixtures::{
 };
 use ingot_test_support::git::unique_temp_path;
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
-use ingot_workflow::{Evaluator, RecommendedAction, step};
+use ingot_workflow::{Evaluator, NamedRecommendedAction, RecommendedAction, step};
 use tokio::time::timeout;
 
 struct BlockedAutoFinalizeFixture {
@@ -1060,6 +1060,6 @@ async fn candidate_repair_loop_advances_to_prepare_convergence() {
     let evaluation = Evaluator::new().evaluate(&item, &revision, &jobs, &[], &[]);
     assert_eq!(
         evaluation.next_recommended_action,
-        RecommendedAction::PrepareConvergence
+        RecommendedAction::named(NamedRecommendedAction::PrepareConvergence)
     );
 }

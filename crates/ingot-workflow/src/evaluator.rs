@@ -51,6 +51,15 @@ pub enum AttentionBadge {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecommendedAction {
     None,
+    Named(NamedRecommendedAction),
+    /// Catch-all: any step ID that doesn't match a named action above.
+    /// `From<String>` routes unrecognized strings here.
+    DispatchStep(StepId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NamedRecommendedAction {
     ApprovalApprove,
     OperatorIntervention,
     FinalizePreparedConvergence,
@@ -59,110 +68,89 @@ pub enum RecommendedAction {
     PrepareConvergence,
     AwaitConvergenceLane,
     ResolveCheckoutSync,
-    /// Catch-all: any step ID that doesn't match a named action above.
-    /// `From<String>` routes unrecognized strings here.
-    DispatchStep(StepId),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NamedRecommendedAction {
-    name: &'static str,
-    action: RecommendedAction,
-    step_alias: Option<StepId>,
-    daemon_owned: bool,
+impl NamedRecommendedAction {
+    #[cfg(test)]
+    const ALL: [Self; 8] = [
+        Self::ApprovalApprove,
+        Self::OperatorIntervention,
+        Self::FinalizePreparedConvergence,
+        Self::InvalidatePreparedConvergence,
+        Self::TriageFindings,
+        Self::PrepareConvergence,
+        Self::AwaitConvergenceLane,
+        Self::ResolveCheckoutSync,
+    ];
+
+    fn from_step_alias(step: StepId) -> Option<Self> {
+        match step {
+            StepId::PrepareConvergence => Some(Self::PrepareConvergence),
+            _ => None,
+        }
+    }
+
+    fn is_daemon_owned(self) -> bool {
+        matches!(
+            self,
+            Self::PrepareConvergence
+                | Self::FinalizePreparedConvergence
+                | Self::InvalidatePreparedConvergence
+        )
+    }
+
+    fn parse(action: &str) -> Option<Self> {
+        match action {
+            "approval_approve" => Some(Self::ApprovalApprove),
+            "operator_intervention" => Some(Self::OperatorIntervention),
+            "finalize_prepared_convergence" => Some(Self::FinalizePreparedConvergence),
+            "invalidate_prepared_convergence" => Some(Self::InvalidatePreparedConvergence),
+            "triage_findings" => Some(Self::TriageFindings),
+            "prepare_convergence" => Some(Self::PrepareConvergence),
+            "await_convergence_lane" => Some(Self::AwaitConvergenceLane),
+            "resolve_checkout_sync" => Some(Self::ResolveCheckoutSync),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ApprovalApprove => "approval_approve",
+            Self::OperatorIntervention => "operator_intervention",
+            Self::FinalizePreparedConvergence => "finalize_prepared_convergence",
+            Self::InvalidatePreparedConvergence => "invalidate_prepared_convergence",
+            Self::TriageFindings => "triage_findings",
+            Self::PrepareConvergence => "prepare_convergence",
+            Self::AwaitConvergenceLane => "await_convergence_lane",
+            Self::ResolveCheckoutSync => "resolve_checkout_sync",
+        }
+    }
 }
 
 impl RecommendedAction {
-    const NAMED_ACTIONS: [NamedRecommendedAction; 8] = [
-        NamedRecommendedAction {
-            name: "approval_approve",
-            action: Self::ApprovalApprove,
-            step_alias: None,
-            daemon_owned: false,
-        },
-        NamedRecommendedAction {
-            name: "operator_intervention",
-            action: Self::OperatorIntervention,
-            step_alias: None,
-            daemon_owned: false,
-        },
-        NamedRecommendedAction {
-            name: "finalize_prepared_convergence",
-            action: Self::FinalizePreparedConvergence,
-            step_alias: None,
-            daemon_owned: true,
-        },
-        NamedRecommendedAction {
-            name: "invalidate_prepared_convergence",
-            action: Self::InvalidatePreparedConvergence,
-            step_alias: None,
-            daemon_owned: true,
-        },
-        NamedRecommendedAction {
-            name: "triage_findings",
-            action: Self::TriageFindings,
-            step_alias: None,
-            daemon_owned: false,
-        },
-        NamedRecommendedAction {
-            name: "prepare_convergence",
-            action: Self::PrepareConvergence,
-            step_alias: Some(StepId::PrepareConvergence),
-            daemon_owned: true,
-        },
-        NamedRecommendedAction {
-            name: "await_convergence_lane",
-            action: Self::AwaitConvergenceLane,
-            step_alias: None,
-            daemon_owned: false,
-        },
-        NamedRecommendedAction {
-            name: "resolve_checkout_sync",
-            action: Self::ResolveCheckoutSync,
-            step_alias: None,
-            daemon_owned: false,
-        },
-    ];
-
     pub fn dispatch(step: StepId) -> Self {
         Self::DispatchStep(step)
     }
 
+    pub fn named(action: NamedRecommendedAction) -> Self {
+        Self::Named(action)
+    }
+
     fn from_step(step: StepId) -> Self {
-        Self::named_action_for_step(step).unwrap_or_else(|| Self::DispatchStep(step))
-    }
-
-    fn named_action_spec(action: &str) -> Option<NamedRecommendedAction> {
-        Self::NAMED_ACTIONS
-            .iter()
-            .find(|named_action| named_action.name == action)
-            .copied()
-    }
-
-    fn named_action_for_step(step: StepId) -> Option<Self> {
-        Self::NAMED_ACTIONS
-            .iter()
-            .find(|named_action| named_action.step_alias == Some(step))
-            .map(|named_action| named_action.action)
-    }
-
-    fn named_action_metadata(self) -> Option<NamedRecommendedAction> {
-        Self::NAMED_ACTIONS
-            .iter()
-            .find(|named_action| named_action.action == self)
-            .copied()
-    }
-
-    fn named_action(action: &str) -> Option<Self> {
-        Self::named_action_spec(action).map(|named_action| named_action.action)
+        NamedRecommendedAction::from_step_alias(step)
+            .map(Self::named)
+            .unwrap_or_else(|| Self::DispatchStep(step))
     }
 
     fn named_action_str(self) -> Option<&'static str> {
-        self.named_action_metadata().map(|named_action| named_action.name)
+        match self {
+            Self::Named(action) => Some(action.as_str()),
+            _ => None,
+        }
     }
 
     fn system_action(action: &str) -> Result<Self, String> {
-        Self::named_action(action)
+        NamedRecommendedAction::parse(action).map(Self::named)
             .ok_or_else(|| format!("unknown internal recommended action: {action}"))
     }
 
@@ -171,8 +159,8 @@ impl RecommendedAction {
             return Ok(Self::None);
         }
 
-        if let Some(action) = Self::named_action(action) {
-            return Ok(action);
+        if let Some(action) = NamedRecommendedAction::parse(action) {
+            return Ok(Self::named(action));
         }
 
         action
@@ -182,9 +170,10 @@ impl RecommendedAction {
     }
 
     fn is_daemon_owned(self) -> bool {
-        self.named_action_metadata()
-            .map(|named_action| named_action.daemon_owned)
-            .unwrap_or(false)
+        match self {
+            Self::Named(action) => action.is_daemon_owned(),
+            _ => false,
+        }
     }
 
     fn as_str(&self) -> &str {
@@ -468,7 +457,9 @@ impl Evaluator {
             return IdleProjection {
                 current_step_id,
                 phase_status: PhaseStatus::Escalated,
-                next_recommended_action: RecommendedAction::OperatorIntervention,
+                next_recommended_action: RecommendedAction::named(
+                    NamedRecommendedAction::OperatorIntervention,
+                ),
                 dispatchable_step_id: None,
                 allowed_actions: vec![
                     AllowedAction::Revise,
@@ -487,7 +478,9 @@ impl Evaluator {
             return IdleProjection {
                 current_step_id,
                 phase_status: PhaseStatus::Idle,
-                next_recommended_action: RecommendedAction::InvalidatePreparedConvergence,
+                next_recommended_action: RecommendedAction::named(
+                    NamedRecommendedAction::InvalidatePreparedConvergence,
+                ),
                 dispatchable_step_id: None,
                 allowed_actions: vec![],
                 terminal_readiness: false,
@@ -646,7 +639,7 @@ impl Evaluator {
             BoardStatus::Done
         } else if item.approval_state == ApprovalState::Pending
             && evaluation.next_recommended_action
-                != RecommendedAction::InvalidatePreparedConvergence
+                != RecommendedAction::named(NamedRecommendedAction::InvalidatePreparedConvergence)
         {
             BoardStatus::Approval
         } else if evaluation.phase_status == Some(PhaseStatus::Running) || has_terminal_closure_job
@@ -719,7 +712,9 @@ fn triage_projection(
         return Some(IdleProjection {
             current_step_id: Some(latest_closure_job.step_id),
             phase_status: PhaseStatus::Triaging,
-            next_recommended_action: RecommendedAction::TriageFindings,
+            next_recommended_action: RecommendedAction::named(
+                NamedRecommendedAction::TriageFindings,
+            ),
             dispatchable_step_id: None,
             allowed_actions: vec![],
             terminal_readiness: false,
@@ -766,7 +761,9 @@ fn triaged_findings_clean_projection(
             return Some(IdleProjection {
                 current_step_id: Some(step::VALIDATE_INTEGRATED),
                 phase_status: PhaseStatus::Unknown,
-                next_recommended_action: RecommendedAction::OperatorIntervention,
+                next_recommended_action: RecommendedAction::named(
+                    NamedRecommendedAction::OperatorIntervention,
+                ),
                 dispatchable_step_id: None,
                 allowed_actions: vec![],
                 terminal_readiness: false,
@@ -915,7 +912,9 @@ fn operator_intervention_projection(current_step_id: Option<StepId>) -> IdleProj
     IdleProjection {
         current_step_id,
         phase_status: PhaseStatus::Unknown,
-        next_recommended_action: RecommendedAction::OperatorIntervention,
+        next_recommended_action: RecommendedAction::named(
+            NamedRecommendedAction::OperatorIntervention,
+        ),
         dispatchable_step_id: None,
         allowed_actions: vec![],
         terminal_readiness: false,
@@ -926,7 +925,7 @@ fn pending_approval_projection(current_step_id: Option<StepId>) -> IdleProjectio
     IdleProjection {
         current_step_id,
         phase_status: PhaseStatus::PendingApproval,
-        next_recommended_action: RecommendedAction::ApprovalApprove,
+        next_recommended_action: RecommendedAction::named(NamedRecommendedAction::ApprovalApprove),
         dispatchable_step_id: None,
         allowed_actions: vec![
             AllowedAction::ApprovalApprove,
@@ -940,7 +939,9 @@ fn finalization_ready_projection(current_step_id: Option<StepId>) -> IdleProject
     IdleProjection {
         current_step_id,
         phase_status: PhaseStatus::FinalizationReady,
-        next_recommended_action: RecommendedAction::FinalizePreparedConvergence,
+        next_recommended_action: RecommendedAction::named(
+            NamedRecommendedAction::FinalizePreparedConvergence,
+        ),
         dispatchable_step_id: None,
         allowed_actions: vec![],
         terminal_readiness: true,
@@ -991,17 +992,19 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use super::{BoardStatus, Evaluator, PhaseStatus, RecommendedAction};
+    use super::{
+        BoardStatus, Evaluator, NamedRecommendedAction, PhaseStatus, RecommendedAction,
+    };
     use crate::step;
 
     #[test]
     fn recommended_actions_round_trip_named_and_step_actions() {
-        for named_action in RecommendedAction::NAMED_ACTIONS {
+        for named_action in NamedRecommendedAction::ALL {
             assert_eq!(
-                RecommendedAction::parse(named_action.name).expect("named action"),
-                named_action.action
+                RecommendedAction::parse(named_action.as_str()).expect("named action"),
+                RecommendedAction::named(named_action)
             );
-            assert_eq!(named_action.action.as_str(), named_action.name);
+            assert_eq!(RecommendedAction::named(named_action).as_str(), named_action.as_str());
         }
 
         assert_eq!(
@@ -1015,9 +1018,9 @@ mod tests {
     fn prepare_convergence_step_uses_named_action_metadata() {
         assert_eq!(
             RecommendedAction::from_step(StepId::PrepareConvergence),
-            RecommendedAction::PrepareConvergence
+            RecommendedAction::named(NamedRecommendedAction::PrepareConvergence)
         );
-        assert!(RecommendedAction::PrepareConvergence.is_daemon_owned());
+        assert!(RecommendedAction::named(NamedRecommendedAction::PrepareConvergence).is_daemon_owned());
     }
 
     #[test]
@@ -1033,7 +1036,7 @@ mod tests {
         assert_eq!(projection.phase_status, PhaseStatus::Unknown);
         assert_eq!(
             projection.next_recommended_action,
-            RecommendedAction::OperatorIntervention
+            RecommendedAction::named(NamedRecommendedAction::OperatorIntervention)
         );
         assert_eq!(
             diagnostics,
@@ -1160,7 +1163,7 @@ mod tests {
 
         assert_eq!(
             evaluation.next_recommended_action,
-            RecommendedAction::PrepareConvergence
+            RecommendedAction::named(NamedRecommendedAction::PrepareConvergence)
         );
         assert_eq!(evaluation.dispatchable_step_id, None);
         assert_eq!(
@@ -1188,7 +1191,7 @@ mod tests {
 
         assert_eq!(
             evaluation.next_recommended_action,
-            RecommendedAction::InvalidatePreparedConvergence
+            RecommendedAction::named(NamedRecommendedAction::InvalidatePreparedConvergence)
         );
         assert_eq!(evaluation.board_status, BoardStatus::Working);
         assert!(evaluation.allowed_actions.is_empty());
@@ -1240,7 +1243,7 @@ mod tests {
         assert_eq!(evaluation.phase_status, Some(PhaseStatus::Triaging));
         assert_eq!(
             evaluation.next_recommended_action,
-            RecommendedAction::TriageFindings
+            RecommendedAction::named(NamedRecommendedAction::TriageFindings)
         );
         assert_eq!(evaluation.dispatchable_step_id, None);
     }
