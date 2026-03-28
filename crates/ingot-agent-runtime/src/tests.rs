@@ -1,4 +1,6 @@
 use super::*;
+use ingot_agent_protocol::request::AgentRequest;
+use ingot_domain::commit_oid::CommitOid;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -15,11 +17,13 @@ use ingot_domain::agent::AgentCapability;
 use ingot_domain::finding::FindingSeverity;
 use ingot_domain::item::ApprovalState;
 use ingot_domain::job::{
-    ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutputArtifactKind, PhaseKind,
+    ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
+    PhaseKind,
 };
+use ingot_domain::ports::ProjectMutationLockPort;
 use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
 use ingot_domain::revision::ApprovalPolicy;
-use ingot_domain::workspace::WorkspaceStatus;
+use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
 use ingot_test_support::fixtures::{
     AgentBuilder, ConvergenceQueueEntryBuilder, FindingBuilder, ItemBuilder, JobBuilder,
@@ -27,6 +31,7 @@ use ingot_test_support::fixtures::{
 };
 use ingot_test_support::git::{run_git as git_sync, temp_git_repo, unique_temp_path};
 use ingot_test_support::sqlite::migrated_test_db;
+use ingot_usecases::convergence::ConvergenceSystemActionPort;
 use ingot_usecases::job_lifecycle;
 use ingot_workflow::step;
 use sqlx::query;
