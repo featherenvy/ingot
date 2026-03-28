@@ -1,8 +1,9 @@
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 use ingot_agent_runtime::{DispatcherConfig, JobDispatcher};
+use ingot_config::paths::{default_state_root, logs_root};
 use ingot_usecases::{DispatchNotify, ProjectLocks};
 use tokio::net::TcpListener;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -10,8 +11,9 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let state_root = dirs();
-    let _file_log_guard = init_tracing(&state_root.join("logs"))?;
+    let state_root = default_state_root();
+    std::fs::create_dir_all(&state_root).ok();
+    let _file_log_guard = init_tracing(&logs_root(&state_root))?;
 
     tracing::info!("starting ingotd");
 
@@ -81,11 +83,4 @@ fn init_tracing(log_dir: &Path) -> Result<WorkerGuard> {
         .init();
 
     Ok(file_guard)
-}
-
-fn dirs() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let path = PathBuf::from(home).join(".ingot");
-    std::fs::create_dir_all(&path).ok();
-    path
 }

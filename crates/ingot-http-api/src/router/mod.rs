@@ -35,6 +35,7 @@ use axum::{Json, Router};
 use chrono::Utc;
 use ingot_agent_adapters::registry::{default_agent_capabilities, probe_and_apply};
 use ingot_config::IngotConfig;
+use ingot_config::paths::default_state_root as shared_default_state_root;
 use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::agent::{Agent, AgentStatus};
 
@@ -382,8 +383,7 @@ pub(super) async fn teardown_revision_lane_state(
 
 #[cfg(not(test))]
 pub(super) fn default_state_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".ingot")
+    shared_default_state_root()
 }
 
 #[cfg(test)]

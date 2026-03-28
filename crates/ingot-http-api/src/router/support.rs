@@ -7,6 +7,9 @@ use axum::extract::{FromRequestParts, Path, RawPathParams};
 use axum::http::request::Parts;
 use ingot_config::IngotConfig;
 use ingot_config::loader::load_config;
+use ingot_config::paths::{
+    global_config_path as shared_global_config_path, logs_root as shared_logs_root,
+};
 use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::branch_name::BranchName;
 use ingot_domain::ids::{ActivityId, AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
@@ -120,12 +123,11 @@ fn invalid_id_from_raw_path_params(raw_path_params: &RawPathParams) -> Option<Ap
 }
 
 pub(super) fn global_config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".ingot").join("config.yml")
+    shared_global_config_path()
 }
 
 pub(super) fn logs_root(state_root: &FsPath) -> PathBuf {
-    state_root.join("logs")
+    shared_logs_root(state_root)
 }
 
 pub(super) fn project_config_path(project: &Project) -> PathBuf {
