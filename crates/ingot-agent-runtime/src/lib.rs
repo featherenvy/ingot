@@ -1091,9 +1091,5 @@ fn should_clear_item_escalation_on_success(item: &ingot_domain::item::Item, job:
     ingot_usecases::dispatch::should_clear_item_escalation_on_success(item, job)
 }
 
-fn is_closure_relevant_job(job: &Job) -> bool {
-    ingot_usecases::dispatch::is_closure_relevant_job(job)
-}
-
 #[cfg(test)]
 mod tests;

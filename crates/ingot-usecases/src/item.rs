@@ -136,6 +136,15 @@ pub fn approval_state_for_policy(approval_policy: ApprovalPolicy) -> ApprovalSta
     }
 }
 
+/// Approval state when requirements are met and approval should be
+/// requested (or auto-approved if not required).
+pub fn pending_approval_state(approval_policy: ApprovalPolicy) -> ApprovalState {
+    match approval_policy {
+        ApprovalPolicy::Required => ApprovalState::Pending,
+        ApprovalPolicy::NotRequired => ApprovalState::NotRequired,
+    }
+}
+
 pub fn default_policy_snapshot(
     approval_policy: ApprovalPolicy,
     candidate_rework_budget: u32,

@@ -351,17 +351,8 @@ pub(super) async fn maybe_enter_approval_after_finding_triage(
         .list_jobs_by_item(source_item.id)
         .await
         .map_err(repo_to_internal)?;
-    let latest_closure_findings_job = jobs
-        .iter()
-        .filter(|job| job.item_revision_id == source_revision.id)
-        .filter(|job| {
-            job.state.is_terminal() && job.state.outcome_class() == Some(OutcomeClass::Findings)
-        })
-        .filter(|job| {
-            ingot_workflow::step::find_step(job.step_id).closure_relevance
-                == ingot_workflow::ClosureRelevance::ClosureRelevant
-        })
-        .max_by_key(|job| (job.state.ended_at(), job.created_at));
+    let latest_closure_findings_job =
+        ingot_usecases::dispatch::latest_closure_findings_job(&jobs, source_revision.id);
 
     let Some(latest_job) = latest_closure_findings_job else {
         return Ok(());
@@ -394,10 +385,8 @@ pub(super) async fn maybe_enter_approval_after_finding_triage(
         .get_item(source_item.id)
         .await
         .map_err(repo_to_item)?;
-    let next_approval_state = match source_revision.approval_policy {
-        ApprovalPolicy::Required => ApprovalState::Pending,
-        ApprovalPolicy::NotRequired => ApprovalState::NotRequired,
-    };
+    let next_approval_state =
+        ingot_usecases::item::pending_approval_state(source_revision.approval_policy);
     if item.approval_state != next_approval_state {
         item.approval_state = next_approval_state;
         item.updated_at = Utc::now();

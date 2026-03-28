@@ -491,10 +491,7 @@ where
 
         if all_resolved_non_blocking {
             let mut current_item = item_repo.get(item.id).await?;
-            let next_approval_state = match revision.approval_policy {
-                ApprovalPolicy::Required => ApprovalState::Pending,
-                ApprovalPolicy::NotRequired => ApprovalState::NotRequired,
-            };
+            let next_approval_state = crate::item::pending_approval_state(revision.approval_policy);
             if current_item.approval_state != next_approval_state {
                 current_item.approval_state = next_approval_state;
                 current_item.updated_at = Utc::now();

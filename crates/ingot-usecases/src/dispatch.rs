@@ -9,7 +9,7 @@ use ingot_domain::git_operation::{
     GitOperation, GitOperationEntityRef, GitOperationStatus, OperationPayload,
 };
 use ingot_domain::git_ref::GitRef;
-use ingot_domain::ids::{ActivityId, GitOperationId, JobId, ProjectId};
+use ingot_domain::ids::{ActivityId, GitOperationId, ItemRevisionId, JobId, ProjectId};
 use ingot_domain::item::{EscalationReason, Item};
 use ingot_domain::job::{
     ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
@@ -375,6 +375,17 @@ where
 /// Returns true if the job's step is closure-relevant (i.e., failures on it should escalate).
 pub fn is_closure_relevant_job(job: &Job) -> bool {
     step::find_step(job.step_id).closure_relevance == ClosureRelevance::ClosureRelevant
+}
+
+/// Select the most-recent terminal job that produced findings on a
+/// closure-relevant step for the given revision.
+pub fn latest_closure_findings_job(jobs: &[Job], revision_id: ItemRevisionId) -> Option<&Job> {
+    jobs.iter()
+        .filter(|job| job.item_revision_id == revision_id)
+        .filter(|job| job.state.status().is_terminal())
+        .filter(|job| job.state.outcome_class() == Some(OutcomeClass::Findings))
+        .filter(|job| is_closure_relevant_job(job))
+        .max_by_key(|job| (job.state.ended_at(), job.created_at))
 }
 
 /// Returns the escalation reason for a job failure, if applicable.

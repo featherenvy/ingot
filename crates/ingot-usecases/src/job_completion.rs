@@ -14,10 +14,8 @@ use ingot_domain::ports::{
     TargetRefHoldError,
 };
 use ingot_domain::project::Project;
-use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
+use ingot_domain::revision::ItemRevision;
 use ingot_domain::step_id::StepId;
-use ingot_workflow::ClosureRelevance;
-use ingot_workflow::step;
 use serde_json::Value;
 use tracing::warn;
 
@@ -526,10 +524,7 @@ fn desired_completion_approval_state(
         return None;
     }
 
-    let approval_state = match revision.approval_policy {
-        ApprovalPolicy::Required => ApprovalState::Pending,
-        ApprovalPolicy::NotRequired => ApprovalState::NotRequired,
-    };
+    let approval_state = crate::item::pending_approval_state(revision.approval_policy);
 
     if item.approval_state == approval_state {
         None
@@ -539,9 +534,7 @@ fn desired_completion_approval_state(
 }
 
 fn should_clear_item_escalation_on_success(item: &Item, job: &Job) -> bool {
-    item.escalation.is_escalated()
-        && job.retry_no > 0
-        && step::find_step(job.step_id).closure_relevance == ClosureRelevance::ClosureRelevant
+    crate::dispatch::should_clear_item_escalation_on_success(item, job)
 }
 
 fn prepared_convergence_guard(

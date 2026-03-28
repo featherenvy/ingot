@@ -7,7 +7,7 @@ use ingot_domain::agent::{Agent, AgentStatus};
 use ingot_domain::finding::FindingTriageState;
 use ingot_domain::ids::WorkspaceId;
 use ingot_domain::job::{
-    ExecutionPermission, Job, JobAssignment, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
+    ExecutionPermission, Job, JobAssignment, JobInput, JobStatus, OutputArtifactKind,
 };
 use ingot_domain::ports::ProjectMutationLockPort;
 use ingot_domain::project::AgentRouting;
@@ -26,9 +26,8 @@ use tracing::{debug, info};
 
 use crate::{
     HarnessPromptContext, JobDispatcher, PrepareRunOutcome, PreparedRun, RuntimeError,
-    WorkspaceLifecycle, built_in_template, format_revision_context, is_closure_relevant_job,
-    is_supported_runtime_job, report, resolve_harness_prompt_context, supports_job,
-    template_digest,
+    WorkspaceLifecycle, built_in_template, format_revision_context, is_supported_runtime_job,
+    report, resolve_harness_prompt_context, supports_job, template_digest,
 };
 
 impl JobDispatcher {
@@ -428,13 +427,8 @@ impl JobDispatcher {
         ) {
             let jobs = self.db.list_jobs_by_item(item.id).await?;
             let findings = self.db.list_findings_by_item(item.id).await?;
-            let latest_closure_findings_job = jobs
-                .iter()
-                .filter(|candidate| candidate.item_revision_id == revision.id)
-                .filter(|candidate| candidate.state.status().is_terminal())
-                .filter(|candidate| candidate.state.outcome_class() == Some(OutcomeClass::Findings))
-                .filter(|candidate| is_closure_relevant_job(candidate))
-                .max_by_key(|candidate| (candidate.state.ended_at(), candidate.created_at));
+            let latest_closure_findings_job =
+                ingot_usecases::dispatch::latest_closure_findings_job(&jobs, revision.id);
 
             if let Some(latest_job) = latest_closure_findings_job {
                 let scoped_findings = findings
