@@ -231,6 +231,21 @@ where
 }
 
 #[must_use]
+pub fn autopilot_dispatch_requires_live_target_head(
+    item: &Item,
+    revision: &ItemRevision,
+    jobs: &[Job],
+    findings: &[Finding],
+    convergences: &[Convergence],
+) -> bool {
+    Evaluator::new()
+        .evaluate(item, revision, jobs, findings, convergences)
+        .dispatchable_step_id
+        == Some(step::AUTHOR_INITIAL)
+        && revision.seed.seed_commit_oid().is_none()
+}
+
+#[must_use]
 pub fn should_fill_candidate_subject_from_workspace(step_id: StepId) -> bool {
     matches!(
         step_id,
@@ -258,6 +273,19 @@ pub fn current_authoring_head_for_revision(
         .max_by_key(|job| (job.state.ended_at(), job.created_at))
         .and_then(|job| job.state.output_commit_oid().cloned())
         .or_else(|| revision.seed.seed_commit_oid().map(ToOwned::to_owned))
+}
+
+#[must_use]
+pub fn should_rebind_implicit_author_initial_job(
+    job: &Job,
+    revision: &ItemRevision,
+    has_authoring_workspace: bool,
+) -> bool {
+    job.step_id == step::AUTHOR_INITIAL
+        && job.workspace_kind == WorkspaceKind::Authoring
+        && job.execution_permission == ExecutionPermission::MayMutate
+        && !revision.seed.is_explicit()
+        && !has_authoring_workspace
 }
 
 #[must_use]
@@ -489,6 +517,69 @@ where
     Ok(Some(job))
 }
 
+/// Auto-dispatch a closure-relevant validation job if the evaluator recommends one.
+///
+/// Requires pre-hydrated convergences (with `target_head_valid` set) and pre-loaded entity state.
+/// Fills candidate subject from workspace/job history. Creates and persists the job.
+///
+/// Returns `Some(job)` if a validation step was dispatched, `None` if not dispatchable.
+#[allow(clippy::too_many_arguments)]
+pub async fn auto_dispatch_validation<J, W, A>(
+    job_repo: &J,
+    workspace_repo: &W,
+    activity_repo: &A,
+    project: &Project,
+    item: &Item,
+    revision: &ItemRevision,
+    jobs: &[Job],
+    findings: &[Finding],
+    convergences: &[Convergence],
+) -> Result<Option<Job>, UseCaseError>
+where
+    J: JobRepository,
+    W: WorkspaceRepository,
+    A: ActivityRepository,
+{
+    let evaluation = Evaluator::new().evaluate(item, revision, jobs, findings, convergences);
+    let Some(step_id) = evaluation.dispatchable_step_id else {
+        return Ok(None);
+    };
+
+    if !step::is_closure_relevant_validate_step(step_id) {
+        return Ok(None);
+    }
+
+    let mut job = dispatch_job(
+        item,
+        revision,
+        jobs,
+        findings,
+        convergences,
+        DispatchJobCommand {
+            step_id: Some(step_id),
+        },
+    )?;
+
+    if should_fill_candidate_subject_from_workspace(job.step_id) {
+        let authoring_workspace = workspace_repo
+            .find_authoring_for_revision(revision.id)
+            .await?;
+        job.job_input = build_candidate_subject_input(
+            job.step_id,
+            &job.job_input,
+            revision,
+            jobs,
+            authoring_workspace.as_ref(),
+            "auto-dispatched validation",
+        )?;
+    }
+
+    job_repo.create(&job).await?;
+    append_job_dispatched_activity(activity_repo, project.id, item.id, &job, "system").await?;
+
+    Ok(Some(job))
+}
+
 /// Auto-dispatch any evaluator-recommended step without the closure-relevance filter.
 /// Used when `project.execution_mode == Autopilot`.
 ///
@@ -638,6 +729,52 @@ mod tests {
     fn should_fill_is_false_for_authoring_steps() {
         assert!(!should_fill_candidate_subject_from_workspace(
             step::AUTHOR_INITIAL
+        ));
+    }
+
+    #[test]
+    fn implicit_autopilot_author_initial_requires_live_head() {
+        let item_id = ItemId::from_uuid(Uuid::nil());
+        let revision_id = ItemRevisionId::from_uuid(Uuid::nil());
+        let project_id = ProjectId::from_uuid(Uuid::nil());
+        let item = ItemBuilder::new(project_id, revision_id)
+            .id(item_id)
+            .build();
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .seed_commit_oid(None::<String>)
+            .seed_target_commit_oid(Some("target-head".to_string()))
+            .build();
+
+        assert!(autopilot_dispatch_requires_live_target_head(
+            &item,
+            &revision,
+            &[],
+            &[],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn implicit_author_initial_rebind_only_applies_without_workspace() {
+        let item_id = ItemId::from_uuid(Uuid::nil());
+        let revision_id = ItemRevisionId::from_uuid(Uuid::nil());
+        let project_id = ProjectId::from_uuid(Uuid::nil());
+        let revision = RevisionBuilder::new(item_id)
+            .id(revision_id)
+            .seed_commit_oid(None::<String>)
+            .seed_target_commit_oid(Some("target-head".to_string()))
+            .build();
+        let job = JobBuilder::new(project_id, item_id, revision_id, step::AUTHOR_INITIAL)
+            .workspace_kind(WorkspaceKind::Authoring)
+            .execution_permission(ExecutionPermission::MayMutate)
+            .build();
+
+        assert!(should_rebind_implicit_author_initial_job(
+            &job, &revision, false
+        ));
+        assert!(!should_rebind_implicit_author_initial_job(
+            &job, &revision, true
         ));
     }
 

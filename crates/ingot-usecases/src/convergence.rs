@@ -236,6 +236,54 @@ pub trait PreparedConvergenceFinalizePort: Send + Sync {
     ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
 }
 
+#[must_use]
+pub fn should_prepare_convergence(
+    item: &ingot_domain::item::Item,
+    revision: &ItemRevision,
+    jobs: &[Job],
+    findings: &[Finding],
+    convergences: &[Convergence],
+) -> bool {
+    Evaluator::new()
+        .evaluate(item, revision, jobs, findings, convergences)
+        .next_recommended_action
+        == RecommendedAction::PrepareConvergence
+}
+
+#[must_use]
+pub fn should_invalidate_prepared_convergence(
+    item: &ingot_domain::item::Item,
+    revision: &ItemRevision,
+    jobs: &[Job],
+    findings: &[Finding],
+    convergences: &[Convergence],
+) -> bool {
+    Evaluator::new()
+        .evaluate(item, revision, jobs, findings, convergences)
+        .next_recommended_action
+        == RecommendedAction::InvalidatePreparedConvergence
+}
+
+#[must_use]
+pub fn should_auto_finalize_prepared_convergence(
+    item: &ingot_domain::item::Item,
+    revision: &ItemRevision,
+    jobs: &[Job],
+    findings: &[Finding],
+    convergences: &[Convergence],
+    queue_entry: Option<&ConvergenceQueueEntry>,
+) -> bool {
+    revision.approval_policy == ingot_domain::revision::ApprovalPolicy::NotRequired
+        && matches!(
+            queue_entry,
+            Some(queue_entry) if queue_entry.status == ConvergenceQueueEntryStatus::Head
+        )
+        && Evaluator::new()
+            .evaluate(item, revision, jobs, findings, convergences)
+            .next_recommended_action
+            == RecommendedAction::FinalizePreparedConvergence
+}
+
 /// Shared implementation of the find-or-create-finalize-operation logic
 /// used by both the runtime and HTTP adapter `PreparedConvergenceFinalizePort`
 /// implementations.
@@ -411,15 +459,14 @@ where
             return Err(UseCaseError::ItemNotFound);
         }
 
-        let evaluation = Evaluator::new().evaluate(
-            &context.item,
-            &context.revision,
-            &context.jobs,
-            &context.findings,
-            &context.convergences,
-        );
         if context.active_queue_entry.is_none()
-            && evaluation.next_recommended_action != RecommendedAction::PrepareConvergence
+            && !should_prepare_convergence(
+                &context.item,
+                &context.revision,
+                &context.jobs,
+                &context.findings,
+                &context.convergences,
+            )
         {
             return Err(UseCaseError::ConvergenceNotPreparable);
         }
@@ -605,17 +652,13 @@ where
                 .await?;
 
             for state in &project_state.items {
-                let evaluation = Evaluator::new().evaluate(
+                if should_invalidate_prepared_convergence(
                     &state.item,
                     &state.revision,
                     &state.jobs,
                     &state.findings,
                     &state.convergences,
-                );
-
-                if evaluation.next_recommended_action
-                    == RecommendedAction::InvalidatePreparedConvergence
-                {
+                ) {
                     self.port
                         .invalidate_prepared_convergence(project_state.project.id, state.item_id)
                         .await?;
@@ -630,8 +673,13 @@ where
                 if let Some(queue_entry) = state.queue_entry.as_ref() {
                     let should_prepare_queue_head = queue_entry.status
                         == ConvergenceQueueEntryStatus::Head
-                        && evaluation.next_recommended_action
-                            == RecommendedAction::PrepareConvergence;
+                        && should_prepare_convergence(
+                            &state.item,
+                            &state.revision,
+                            &state.jobs,
+                            &state.findings,
+                            &state.convergences,
+                        );
 
                     if should_prepare_queue_head {
                         self.port
@@ -644,12 +692,15 @@ where
                         return Ok(true);
                     }
 
-                    let should_finalize = queue_entry.status == ConvergenceQueueEntryStatus::Head
-                        && has_prepared_convergence
-                        && state.revision.approval_policy
-                            == ingot_domain::revision::ApprovalPolicy::NotRequired
-                        && evaluation.next_recommended_action
-                            == RecommendedAction::FinalizePreparedConvergence;
+                    let should_finalize = has_prepared_convergence
+                        && should_auto_finalize_prepared_convergence(
+                            &state.item,
+                            &state.revision,
+                            &state.jobs,
+                            &state.findings,
+                            &state.convergences,
+                            Some(queue_entry),
+                        );
 
                     if should_finalize
                         && self
@@ -664,7 +715,13 @@ where
                     }
                 } else if project_state.project.execution_mode
                     == ingot_domain::project::ExecutionMode::Autopilot
-                    && evaluation.next_recommended_action == RecommendedAction::PrepareConvergence
+                    && should_prepare_convergence(
+                        &state.item,
+                        &state.revision,
+                        &state.jobs,
+                        &state.findings,
+                        &state.convergences,
+                    )
                     && self
                         .port
                         .auto_queue_convergence(project_state.project.id, state.item_id)

@@ -18,7 +18,6 @@ use ingot_domain::workspace::{
     WorkspaceStrategy,
 };
 use ingot_git::commands::resolve_ref_oid;
-use ingot_workflow::step;
 use ingot_workspace::{
     ensure_authoring_workspace_state, provision_integration_workspace, provision_review_workspace,
 };
@@ -166,20 +165,16 @@ impl JobDispatcher {
         revision: &ItemRevision,
         repo_path: &Path,
     ) -> Result<Job, RuntimeError> {
-        if job.step_id != step::AUTHOR_INITIAL
-            || job.workspace_kind != WorkspaceKind::Authoring
-            || job.execution_permission != ExecutionPermission::MayMutate
-            || revision.seed.is_explicit()
-        {
-            return Ok(job);
-        }
-
-        if self
+        let has_authoring_workspace = self
             .db
             .find_authoring_workspace_for_revision(revision.id)
             .await?
-            .is_some()
-        {
+            .is_some();
+        if !ingot_usecases::dispatch::should_rebind_implicit_author_initial_job(
+            &job,
+            revision,
+            has_authoring_workspace,
+        ) {
             return Ok(job);
         }
 

@@ -31,7 +31,6 @@ use ingot_git::commit::{
 use ingot_git::project_repo::{CheckoutSyncStatus, checkout_sync_status};
 use ingot_usecases::convergence::{FinalizePreparedTrigger, finalize_prepared_convergence};
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
-use ingot_workflow::{Evaluator, RecommendedAction};
 use ingot_workspace::provision_integration_workspace;
 use tracing::info;
 
@@ -56,23 +55,18 @@ impl JobDispatcher {
         let convergences = self
             .hydrate_convergences(&project, self.db.list_convergences_by_item(item.id).await?)
             .await?;
-        let evaluation =
-            Evaluator::new().evaluate(&item, &revision, &jobs, &findings, &convergences);
         let queue_entry = self
             .db
             .find_active_queue_entry_for_revision(revision.id)
             .await?;
-        if queue_entry
-            .as_ref()
-            .map(|entry| entry.status != ConvergenceQueueEntryStatus::Head)
-            .unwrap_or(true)
-        {
-            return Ok(false);
-        }
-        let should_auto_finalize = revision.approval_policy
-            == ingot_domain::revision::ApprovalPolicy::NotRequired
-            && evaluation.next_recommended_action == RecommendedAction::FinalizePreparedConvergence;
-        if !should_auto_finalize {
+        if !ingot_usecases::convergence::should_auto_finalize_prepared_convergence(
+            &item,
+            &revision,
+            &jobs,
+            &findings,
+            &convergences,
+            queue_entry.as_ref(),
+        ) {
             return Ok(false);
         }
 
@@ -142,9 +136,13 @@ impl JobDispatcher {
         let convergences = self
             .hydrate_convergences(&project, self.db.list_convergences_by_item(item.id).await?)
             .await?;
-        let evaluation =
-            Evaluator::new().evaluate(&item, &revision, &jobs, &findings, &convergences);
-        if evaluation.next_recommended_action != RecommendedAction::InvalidatePreparedConvergence {
+        if !ingot_usecases::convergence::should_invalidate_prepared_convergence(
+            &item,
+            &revision,
+            &jobs,
+            &findings,
+            &convergences,
+        ) {
             return Ok(());
         }
 

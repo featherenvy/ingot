@@ -5,7 +5,6 @@ use chrono::Utc;
 use ingot_domain::ports::RepositoryError;
 use ingot_domain::project::Project;
 use ingot_git::commands::resolve_ref_oid;
-use ingot_workflow::{Evaluator, RecommendedAction, step};
 use tracing::info;
 
 use crate::{JobDispatcher, RuntimeError, usecase_from_runtime_error};
@@ -23,21 +22,25 @@ impl JobDispatcher {
         let convergences = self
             .hydrate_convergences(project, self.db.list_convergences_by_item(item.id).await?)
             .await?;
-        let author_initial_head_commit_oid = if Evaluator::new()
-            .evaluate(&item, &revision, &jobs, &findings, &convergences)
-            .dispatchable_step_id
-            == Some(step::AUTHOR_INITIAL)
-            && revision.seed.seed_commit_oid().is_none()
-        {
-            let paths = self.refresh_project_mirror(project).await?;
-            Some(
-                resolve_ref_oid(paths.mirror_git_dir.as_path(), &revision.target_ref)
-                    .await?
-                    .ok_or_else(|| RuntimeError::InvalidState("target ref unresolved".into()))?,
-            )
-        } else {
-            None
-        };
+        let author_initial_head_commit_oid =
+            if ingot_usecases::dispatch::autopilot_dispatch_requires_live_target_head(
+                &item,
+                &revision,
+                &jobs,
+                &findings,
+                &convergences,
+            ) {
+                let paths = self.refresh_project_mirror(project).await?;
+                Some(
+                    resolve_ref_oid(paths.mirror_git_dir.as_path(), &revision.target_ref)
+                        .await?
+                        .ok_or_else(|| {
+                            RuntimeError::InvalidState("target ref unresolved".into())
+                        })?,
+                )
+            } else {
+                None
+            };
 
         let result = ingot_usecases::dispatch::auto_dispatch_autopilot(
             &self.db,
@@ -166,9 +169,13 @@ impl JobDispatcher {
                 )
                 .await
                 .map_err(usecase_from_runtime_error)?;
-            let evaluation =
-                Evaluator::new().evaluate(&item, &revision, &jobs, &findings, &convergences);
-            if evaluation.next_recommended_action != RecommendedAction::PrepareConvergence {
+            if !ingot_usecases::convergence::should_prepare_convergence(
+                &item,
+                &revision,
+                &jobs,
+                &findings,
+                &convergences,
+            ) {
                 return Ok(false);
             }
             let lane_head = self

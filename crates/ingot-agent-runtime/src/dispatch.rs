@@ -1,13 +1,10 @@
 // Job projection and auto-dispatch for review/validation jobs.
 
-use ingot_domain::activity::{ActivityEventType, ActivitySubject};
 use ingot_domain::convergence::Convergence;
 use ingot_domain::job::Job;
 use ingot_domain::ports::ProjectMutationLockPort;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
-use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
-use ingot_workflow::{Evaluator, step};
 use tracing::{info, warn};
 
 use crate::{JobDispatcher, RuntimeError};
@@ -178,76 +175,20 @@ impl JobDispatcher {
         findings: &[ingot_domain::finding::Finding],
         convergences: &[Convergence],
     ) -> Result<Option<Job>, RuntimeError> {
-        let evaluation = Evaluator::new().evaluate(item, revision, jobs, findings, convergences);
-        let Some(step_id) = evaluation.dispatchable_step_id else {
-            return Ok(None);
-        };
-        if !step::is_closure_relevant_validate_step(step_id) {
-            return Ok(None);
-        }
-
-        let mut job = dispatch_job(
+        ingot_usecases::dispatch::auto_dispatch_validation(
+            &self.db,
+            &self.db,
+            &self.db,
+            project,
             item,
             revision,
             jobs,
             findings,
             convergences,
-            DispatchJobCommand {
-                step_id: Some(step_id),
-            },
         )
+        .await
         .map_err(|error| {
             RuntimeError::InvalidState(format!("failed to auto-dispatch validation: {error}"))
-        })?;
-
-        if ingot_usecases::dispatch::should_fill_candidate_subject_from_workspace(job.step_id) {
-            let authoring_workspace = self
-                .db
-                .find_authoring_workspace_for_revision(revision.id)
-                .await?;
-            let base = job
-                .job_input
-                .base_commit_oid()
-                .map(ToOwned::to_owned)
-                .or_else(|| {
-                    ingot_usecases::dispatch::effective_authoring_base_commit_oid(
-                        revision,
-                        authoring_workspace.as_ref(),
-                    )
-                });
-            let head = job
-                .job_input
-                .head_commit_oid()
-                .map(ToOwned::to_owned)
-                .or_else(|| {
-                    ingot_usecases::dispatch::current_authoring_head_for_revision_with_workspace(
-                        revision,
-                        jobs,
-                        authoring_workspace.as_ref(),
-                    )
-                });
-            match (base, head) {
-                (Some(base), Some(head)) => {
-                    job.job_input = ingot_domain::job::JobInput::candidate_subject(base, head);
-                }
-                _ => {
-                    return Err(RuntimeError::InvalidState(format!(
-                        "failed to auto-dispatch validation: incomplete candidate subject for {}",
-                        job.step_id
-                    )));
-                }
-            }
-        }
-
-        self.db.create_job(&job).await?;
-        self.append_activity(
-            project.id,
-            ActivityEventType::JobDispatched,
-            ActivitySubject::Job(job.id),
-            serde_json::json!({ "item_id": item.id, "step_id": job.step_id }),
-        )
-        .await?;
-
-        Ok(Some(job))
+        })
     }
 }
