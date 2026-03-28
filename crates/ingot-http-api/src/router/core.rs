@@ -2,7 +2,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use super::AppState;
-use super::load_effective_config;
+use super::support::config::load_effective_config;
 use crate::error::ApiError;
 
 pub(super) fn routes() -> Router<AppState> {

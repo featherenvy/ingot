@@ -1,12 +1,17 @@
+use super::deps::*;
 use super::infra_ports::HttpInfraAdapter;
 use super::item_projection::{ItemRuntimeSnapshot, load_item_runtime_snapshot};
 use super::items::{
     current_authoring_head_for_revision_with_workspace, effective_authoring_base_commit_oid,
     ensure_authoring_workspace,
 };
-use super::support::*;
+use super::support::{
+    activity::append_activity,
+    errors::{repo_to_internal, repo_to_item, repo_to_project},
+    path::ApiPath,
+};
 use super::types::*;
-use super::*;
+use ingot_domain::step_id::StepId;
 use ingot_usecases::dispatch::{PendingInvestigationRef, investigation_ref_name};
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job, retry_job};
 
@@ -152,7 +157,7 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
         }
     }
 
-    if job.step_id == step::INVESTIGATE_ITEM
+    if job.step_id == StepId::InvestigateItem
         && (base_commit_oid.is_none() || head_commit_oid.is_none())
     {
         if let Some(seed_commit_oid) = revision.seed.seed_commit_oid() {
@@ -365,18 +370,15 @@ mod tests {
         GitOperationId, ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId,
     };
     use ingot_domain::job::{ExecutionPermission, Job, JobInput, OutputArtifactKind, PhaseKind};
+    use ingot_domain::test_support::{ItemBuilder, JobBuilder, RevisionBuilder, WorkspaceBuilder};
     use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
     use ingot_git::commands::resolve_ref_oid;
     use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
-    use ingot_test_support::fixtures::{
-        ItemBuilder, JobBuilder, RevisionBuilder, WorkspaceBuilder,
-    };
     use ingot_test_support::git::{
         git_output as support_git_output, run_git as support_git,
         temp_git_repo as support_temp_git_repo,
     };
     use ingot_usecases::UseCaseError;
-    use ingot_workflow::step;
     use uuid::Uuid;
 
     use crate::error::ApiError;
@@ -429,7 +431,7 @@ mod tests {
         let revision = RevisionBuilder::new(ItemId::from_uuid(Uuid::now_v7()))
             .seed_target_commit_oid(Some(head.clone()))
             .build();
-        let mut job = test_job(step::INVESTIGATE_ITEM, OutputArtifactKind::FindingReport);
+        let mut job = test_job(StepId::InvestigateItem, OutputArtifactKind::FindingReport);
         job.project_id = project.id;
         job.item_revision_id = revision.id;
         job.workspace_kind = WorkspaceKind::Review;
@@ -522,7 +524,7 @@ mod tests {
             .await
             .expect("create partial workspace");
 
-        let mut job = test_job(step::INVESTIGATE_ITEM, OutputArtifactKind::FindingReport);
+        let mut job = test_job(StepId::InvestigateItem, OutputArtifactKind::FindingReport);
         job.project_id = project.id;
         job.item_revision_id = revision.id;
         job.workspace_kind = WorkspaceKind::Review;
@@ -608,7 +610,7 @@ mod tests {
             .expect("create partial workspace");
 
         let mut job = test_job(
-            step::REVIEW_INCREMENTAL_INITIAL,
+            StepId::ReviewIncrementalInitial,
             OutputArtifactKind::ReviewReport,
         );
         job.project_id = project.id;
@@ -659,7 +661,7 @@ mod tests {
             .expect("create item with revision");
 
         let mut job = test_job(
-            step::REVIEW_CANDIDATE_INITIAL,
+            StepId::ReviewCandidateInitial,
             OutputArtifactKind::ReviewReport,
         );
         job.project_id = project.id;
@@ -762,7 +764,7 @@ mod tests {
             .await
             .expect("create git operation");
 
-        let infra = super::infra_ports::HttpInfraAdapter::new(&state);
+        let infra = super::HttpInfraAdapter::new(&state);
         ingot_usecases::dispatch::cleanup_failed_dispatch(
             &state.db,
             &state.db,
@@ -865,7 +867,7 @@ mod tests {
             .await
             .expect("create git operation");
 
-        let infra = super::infra_ports::HttpInfraAdapter::new(&state);
+        let infra = super::HttpInfraAdapter::new(&state);
         ingot_usecases::dispatch::cleanup_failed_dispatch(
             &state.db,
             &state.db,

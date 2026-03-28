@@ -20,7 +20,7 @@ use ingot_usecases::UseCaseError;
 use crate::error::ApiError;
 use crate::router::AppState;
 use crate::router::infra_ports::HttpInfraAdapter;
-use crate::router::support::{append_activity, repo_to_internal};
+use crate::router::support::{activity::append_activity, errors::repo_to_internal};
 
 use super::effective_authoring_base_commit_oid;
 

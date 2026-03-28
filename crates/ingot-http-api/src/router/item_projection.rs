@@ -1,6 +1,6 @@
-use super::support::*;
+use super::deps::*;
+use super::support::errors::{repo_to_internal, repo_to_item, repo_to_project};
 use super::types::*;
-use super::*;
 use crate::router::infra_ports::HttpInfraAdapter;
 
 pub(super) struct ItemRuntimeSnapshot {
@@ -262,7 +262,7 @@ mod tests {
     use crate::router::test_helpers::test_app_state;
     use chrono::Utc;
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
-    use ingot_test_support::fixtures::{ConvergenceBuilder, ProjectBuilder};
+    use ingot_domain::test_support::{ConvergenceBuilder, ProjectBuilder};
     use ingot_test_support::git::{
         git_output as support_git_output, run_git as support_git,
         temp_git_repo as support_temp_git_repo, write_file as support_write_file,

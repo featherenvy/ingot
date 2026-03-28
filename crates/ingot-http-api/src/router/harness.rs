@@ -9,7 +9,7 @@ use axum::routing::get;
 use ingot_domain::harness::HarnessProfile;
 
 use super::AppState;
-use super::support::{ApiPath, repo_to_project};
+use super::support::{errors::repo_to_project, path::ApiPath};
 use super::types::ProjectPathParams;
 use crate::error::ApiError;
 

@@ -1,9 +1,13 @@
 use super::convergence_port::HttpConvergencePort;
+use super::deps::*;
 use super::item_projection::load_item_detail;
 use super::items::build_superseding_revision;
-use super::support::*;
+use super::support::{
+    activity::append_activity,
+    errors::{repo_to_internal, repo_to_item, repo_to_project},
+    path::ApiPath,
+};
 use super::types::*;
-use super::*;
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()

@@ -28,7 +28,10 @@ use ingot_workspace::{
 };
 
 use super::AppState;
-use super::support::{git_to_internal, refresh_project_mirror, workspace_to_api_error};
+use super::support::{
+    errors::{git_to_internal, workspace_to_api_error},
+    project_repo::refresh_project_mirror,
+};
 use crate::error::ApiError;
 
 fn api_to_uc(err: crate::error::ApiError) -> UseCaseError {

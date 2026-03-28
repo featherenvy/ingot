@@ -1,9 +1,12 @@
+use super::deps::*;
 use super::infra_ports::HttpInfraAdapter;
 use super::item_projection::{
     ItemRuntimeSnapshot, hydrate_convergence_validity, load_item_runtime_snapshot,
 };
-use super::support::*;
-use super::*;
+use super::support::{
+    activity::append_activity,
+    errors::{api_to_usecase_error, repo_to_item, repo_to_project},
+};
 use chrono::Utc;
 use ingot_domain::convergence::ConvergenceStatus;
 use ingot_domain::ids::ItemRevisionId;
@@ -736,7 +739,7 @@ mod tests {
     use chrono::Utc;
     use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
     use ingot_domain::item::ApprovalState;
-    use ingot_test_support::fixtures::{ItemBuilder, ProjectBuilder, RevisionBuilder};
+    use ingot_domain::test_support::{ItemBuilder, ProjectBuilder, RevisionBuilder};
     use ingot_test_support::git::{
         git_output as support_git_output, temp_git_repo as support_temp_git_repo,
     };

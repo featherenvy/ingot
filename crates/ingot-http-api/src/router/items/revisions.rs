@@ -15,7 +15,7 @@ use ingot_usecases::item::{
 use crate::error::ApiError;
 use crate::router::AppState;
 use crate::router::infra_ports::HttpInfraAdapter;
-use crate::router::support::ensure_git_valid_target_ref;
+use crate::router::support::errors::ensure_git_valid_target_ref;
 use crate::router::types::ReviseItemRequest;
 
 use super::current_authoring_head_for_revision_with_workspace;

@@ -1,9 +1,13 @@
+use super::deps::*;
 use super::dispatch::auto_dispatch_projected_review_job_locked;
 use super::infra_ports::HttpInfraAdapter;
-use super::support::append_activity;
-use super::support::*;
+use super::support::{
+    activity::append_activity,
+    errors::{repo_to_finding, repo_to_internal, repo_to_item, repo_to_project},
+    path::ApiPath,
+    project_repo::next_project_sort_key,
+};
 use super::types::*;
-use super::*;
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -466,7 +470,7 @@ mod tests {
     use chrono::Utc;
     use ingot_domain::finding::FindingSubjectKind;
     use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId};
-    use ingot_test_support::fixtures::FindingBuilder;
+    use ingot_domain::test_support::FindingBuilder;
     use ingot_test_support::git::temp_git_repo as support_temp_git_repo;
     use ingot_usecases::UseCaseError;
     use uuid::Uuid;
