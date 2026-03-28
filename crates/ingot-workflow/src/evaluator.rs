@@ -48,7 +48,7 @@ pub enum AttentionBadge {
     Deferred,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecommendedAction {
     None,
     ApprovalApprove,
@@ -65,6 +65,23 @@ pub enum RecommendedAction {
 }
 
 impl RecommendedAction {
+    const NAMED_ACTIONS: [(&str, Self); 8] = [
+        ("approval_approve", Self::ApprovalApprove),
+        ("operator_intervention", Self::OperatorIntervention),
+        (
+            "finalize_prepared_convergence",
+            Self::FinalizePreparedConvergence,
+        ),
+        (
+            "invalidate_prepared_convergence",
+            Self::InvalidatePreparedConvergence,
+        ),
+        ("triage_findings", Self::TriageFindings),
+        ("prepare_convergence", Self::PrepareConvergence),
+        ("await_convergence_lane", Self::AwaitConvergenceLane),
+        ("resolve_checkout_sync", Self::ResolveCheckoutSync),
+    ];
+
     pub fn dispatch(step: StepId) -> Self {
         Self::DispatchStep(step)
     }
@@ -77,31 +94,15 @@ impl RecommendedAction {
     }
 
     fn named_action(action: &str) -> Option<Self> {
-        match action {
-            "approval_approve" => Some(Self::ApprovalApprove),
-            "operator_intervention" => Some(Self::OperatorIntervention),
-            "finalize_prepared_convergence" => Some(Self::FinalizePreparedConvergence),
-            "invalidate_prepared_convergence" => Some(Self::InvalidatePreparedConvergence),
-            "triage_findings" => Some(Self::TriageFindings),
-            "prepare_convergence" => Some(Self::PrepareConvergence),
-            "await_convergence_lane" => Some(Self::AwaitConvergenceLane),
-            "resolve_checkout_sync" => Some(Self::ResolveCheckoutSync),
-            _ => None,
-        }
+        Self::NAMED_ACTIONS
+            .iter()
+            .find_map(|(name, named_action)| (*name == action).then_some(*named_action))
     }
 
-    const fn named_action_str(&self) -> Option<&'static str> {
-        match self {
-            Self::ApprovalApprove => Some("approval_approve"),
-            Self::OperatorIntervention => Some("operator_intervention"),
-            Self::FinalizePreparedConvergence => Some("finalize_prepared_convergence"),
-            Self::InvalidatePreparedConvergence => Some("invalidate_prepared_convergence"),
-            Self::TriageFindings => Some("triage_findings"),
-            Self::PrepareConvergence => Some("prepare_convergence"),
-            Self::AwaitConvergenceLane => Some("await_convergence_lane"),
-            Self::ResolveCheckoutSync => Some("resolve_checkout_sync"),
-            Self::None | Self::DispatchStep(_) => None,
-        }
+    fn named_action_str(self) -> Option<&'static str> {
+        Self::NAMED_ACTIONS
+            .iter()
+            .find_map(|(name, named_action)| (*named_action == self).then_some(*name))
     }
 
     fn system_action(action: &str) -> Result<Self, String> {
@@ -125,14 +126,12 @@ impl RecommendedAction {
     }
 
     fn as_str(&self) -> &str {
-        if let Some(action) = self.named_action_str() {
-            return action;
-        }
-
         match self {
             Self::None => "none",
             Self::DispatchStep(step_id) => step_id.as_str(),
-            _ => unreachable!("named recommended actions must be covered by named_action_str"),
+            _ => (*self)
+                .named_action_str()
+                .expect("named recommended actions must be covered by NAMED_ACTIONS"),
         }
     }
 }
@@ -944,18 +943,18 @@ mod tests {
 
     #[test]
     fn recommended_actions_round_trip_named_and_step_actions() {
-        assert_eq!(
-            RecommendedAction::parse("resolve_checkout_sync").expect("named action"),
-            RecommendedAction::ResolveCheckoutSync
-        );
+        for (name, action) in RecommendedAction::NAMED_ACTIONS {
+            assert_eq!(
+                RecommendedAction::parse(name).expect("named action"),
+                action
+            );
+            assert_eq!(action.as_str(), name);
+        }
+
         assert_eq!(
             RecommendedAction::parse(step::REVIEW_INCREMENTAL_INITIAL.as_str())
                 .expect("step action"),
             RecommendedAction::dispatch(step::REVIEW_INCREMENTAL_INITIAL)
-        );
-        assert_eq!(
-            RecommendedAction::ResolveCheckoutSync.as_str(),
-            "resolve_checkout_sync"
         );
     }
 
