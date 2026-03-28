@@ -7,10 +7,17 @@ mod harness;
 mod preparation;
 pub(crate) mod reconciliation;
 mod supervisor;
+#[cfg(test)]
+mod test_support;
 
 use execution::run_prepared_agent_job;
 use harness::{HarnessPromptContext, resolve_harness_prompt_context};
 use supervisor::RunningJobResult;
+#[cfg(test)]
+use test_support::{
+    AutoQueuePauseHook, AutoQueuePausePoint, PreSpawnPauseHook, PreSpawnPausePoint,
+    ProjectedRecoveryPauseHook, ProjectedRecoveryPausePoint,
+};
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -127,114 +134,6 @@ pub struct JobDispatcher {
     auto_queue_pause_hook: Option<AutoQueuePauseHook>,
     #[cfg(test)]
     projected_recovery_pause_hook: Option<ProjectedRecoveryPauseHook>,
-}
-
-#[cfg(test)]
-type PreSpawnPauseHook = PauseHook<PreSpawnPausePoint>;
-
-#[cfg(test)]
-type AutoQueuePauseHook = PauseHook<AutoQueuePausePoint>;
-
-#[cfg(test)]
-type ProjectedRecoveryPauseHook = PauseHook<ProjectedRecoveryPausePoint>;
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreSpawnPausePoint {
-    AgentBeforeSpawn,
-    HarnessBeforeSpawn,
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-struct PauseHook<P> {
-    point: P,
-    state: Arc<PauseHookState>,
-}
-
-#[cfg(test)]
-struct PauseHookState {
-    entered: std::sync::Mutex<usize>,
-    released: std::sync::Mutex<bool>,
-    entered_notify: tokio::sync::Notify,
-    release_notify: tokio::sync::Notify,
-}
-
-#[cfg(test)]
-impl<P> PauseHook<P>
-where
-    P: Copy + Eq,
-{
-    fn new(point: P) -> Self {
-        Self {
-            point,
-            state: Arc::new(PauseHookState {
-                entered: std::sync::Mutex::new(0),
-                released: std::sync::Mutex::new(false),
-                entered_notify: tokio::sync::Notify::new(),
-                release_notify: tokio::sync::Notify::new(),
-            }),
-        }
-    }
-
-    async fn pause_if_matching(&self, point: P) {
-        if self.point != point {
-            return;
-        }
-
-        {
-            let mut entered = self.state.entered.lock().expect("pause hook entered lock");
-            *entered += 1;
-        }
-        self.state.entered_notify.notify_waiters();
-
-        loop {
-            if *self
-                .state
-                .released
-                .lock()
-                .expect("pause hook released lock")
-            {
-                return;
-            }
-            self.state.release_notify.notified().await;
-        }
-    }
-
-    async fn wait_until_entered(&self, expected: usize, timeout_duration: Duration) {
-        tokio::time::timeout(timeout_duration, async {
-            loop {
-                if *self.state.entered.lock().expect("pause hook entered lock") >= expected {
-                    return;
-                }
-                self.state.entered_notify.notified().await;
-            }
-        })
-        .await
-        .expect("timed out waiting for pre-spawn pause hook");
-    }
-
-    fn release(&self) {
-        *self
-            .state
-            .released
-            .lock()
-            .expect("pause hook released lock") = true;
-        self.state.release_notify.notify_waiters();
-    }
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AutoQueuePausePoint {
-    BeforeGuard,
-    BeforeInsert,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProjectedRecoveryPausePoint {
-    BeforeGuard,
 }
 
 #[derive(Clone)]
@@ -763,37 +662,6 @@ impl JobDispatcher {
                 warn!(?error, job_id = %job_id, "failed to load job for cancellation guard");
                 false
             }
-        }
-    }
-
-    #[cfg(test)]
-    async fn pause_before_pre_spawn_guard(&self, point: PreSpawnPausePoint) {
-        if let Some(hook) = &self.pre_spawn_pause_hook {
-            hook.pause_if_matching(point).await;
-        }
-    }
-
-    #[cfg(test)]
-    async fn pause_before_auto_queue_guard(&self) {
-        if let Some(hook) = &self.auto_queue_pause_hook {
-            hook.pause_if_matching(AutoQueuePausePoint::BeforeGuard)
-                .await;
-        }
-    }
-
-    #[cfg(test)]
-    async fn pause_before_auto_queue_insert(&self) {
-        if let Some(hook) = &self.auto_queue_pause_hook {
-            hook.pause_if_matching(AutoQueuePausePoint::BeforeInsert)
-                .await;
-        }
-    }
-
-    #[cfg(test)]
-    async fn pause_before_projected_recovery_guard(&self) {
-        if let Some(hook) = &self.projected_recovery_pause_hook {
-            hook.pause_if_matching(ProjectedRecoveryPausePoint::BeforeGuard)
-                .await;
         }
     }
 
