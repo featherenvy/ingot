@@ -64,22 +64,64 @@ pub enum RecommendedAction {
     DispatchStep(StepId),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NamedRecommendedAction {
+    name: &'static str,
+    action: RecommendedAction,
+    step_alias: Option<StepId>,
+    daemon_owned: bool,
+}
+
 impl RecommendedAction {
-    const NAMED_ACTIONS: [(&str, Self); 8] = [
-        ("approval_approve", Self::ApprovalApprove),
-        ("operator_intervention", Self::OperatorIntervention),
-        (
-            "finalize_prepared_convergence",
-            Self::FinalizePreparedConvergence,
-        ),
-        (
-            "invalidate_prepared_convergence",
-            Self::InvalidatePreparedConvergence,
-        ),
-        ("triage_findings", Self::TriageFindings),
-        ("prepare_convergence", Self::PrepareConvergence),
-        ("await_convergence_lane", Self::AwaitConvergenceLane),
-        ("resolve_checkout_sync", Self::ResolveCheckoutSync),
+    const NAMED_ACTIONS: [NamedRecommendedAction; 8] = [
+        NamedRecommendedAction {
+            name: "approval_approve",
+            action: Self::ApprovalApprove,
+            step_alias: None,
+            daemon_owned: false,
+        },
+        NamedRecommendedAction {
+            name: "operator_intervention",
+            action: Self::OperatorIntervention,
+            step_alias: None,
+            daemon_owned: false,
+        },
+        NamedRecommendedAction {
+            name: "finalize_prepared_convergence",
+            action: Self::FinalizePreparedConvergence,
+            step_alias: None,
+            daemon_owned: true,
+        },
+        NamedRecommendedAction {
+            name: "invalidate_prepared_convergence",
+            action: Self::InvalidatePreparedConvergence,
+            step_alias: None,
+            daemon_owned: true,
+        },
+        NamedRecommendedAction {
+            name: "triage_findings",
+            action: Self::TriageFindings,
+            step_alias: None,
+            daemon_owned: false,
+        },
+        NamedRecommendedAction {
+            name: "prepare_convergence",
+            action: Self::PrepareConvergence,
+            step_alias: Some(StepId::PrepareConvergence),
+            daemon_owned: true,
+        },
+        NamedRecommendedAction {
+            name: "await_convergence_lane",
+            action: Self::AwaitConvergenceLane,
+            step_alias: None,
+            daemon_owned: false,
+        },
+        NamedRecommendedAction {
+            name: "resolve_checkout_sync",
+            action: Self::ResolveCheckoutSync,
+            step_alias: None,
+            daemon_owned: false,
+        },
     ];
 
     pub fn dispatch(step: StepId) -> Self {
@@ -87,22 +129,36 @@ impl RecommendedAction {
     }
 
     fn from_step(step: StepId) -> Self {
-        match step {
-            StepId::PrepareConvergence => Self::PrepareConvergence,
-            _ => Self::DispatchStep(step),
-        }
+        Self::named_action_for_step(step).unwrap_or_else(|| Self::DispatchStep(step))
+    }
+
+    fn named_action_spec(action: &str) -> Option<NamedRecommendedAction> {
+        Self::NAMED_ACTIONS
+            .iter()
+            .find(|named_action| named_action.name == action)
+            .copied()
+    }
+
+    fn named_action_for_step(step: StepId) -> Option<Self> {
+        Self::NAMED_ACTIONS
+            .iter()
+            .find(|named_action| named_action.step_alias == Some(step))
+            .map(|named_action| named_action.action)
+    }
+
+    fn named_action_metadata(self) -> Option<NamedRecommendedAction> {
+        Self::NAMED_ACTIONS
+            .iter()
+            .find(|named_action| named_action.action == self)
+            .copied()
     }
 
     fn named_action(action: &str) -> Option<Self> {
-        Self::NAMED_ACTIONS
-            .iter()
-            .find_map(|(name, named_action)| (*name == action).then_some(*named_action))
+        Self::named_action_spec(action).map(|named_action| named_action.action)
     }
 
     fn named_action_str(self) -> Option<&'static str> {
-        Self::NAMED_ACTIONS
-            .iter()
-            .find_map(|(name, named_action)| (*named_action == self).then_some(*name))
+        self.named_action_metadata().map(|named_action| named_action.name)
     }
 
     fn system_action(action: &str) -> Result<Self, String> {
@@ -123,6 +179,12 @@ impl RecommendedAction {
             .parse()
             .map(Self::DispatchStep)
             .map_err(|error: ingot_domain::step_id::ParseStepIdError| error.to_string())
+    }
+
+    fn is_daemon_owned(self) -> bool {
+        self.named_action_metadata()
+            .map(|named_action| named_action.daemon_owned)
+            .unwrap_or(false)
     }
 
     fn as_str(&self) -> &str {
@@ -815,7 +877,7 @@ fn auxiliary_steps(
         || item.approval_state == ApprovalState::Pending
         || item.escalation.is_escalated()
         || !matches!(phase_status, PhaseStatus::New | PhaseStatus::Idle)
-        || is_daemon_action(next_action)
+        || next_action.is_daemon_owned()
     {
         return vec![];
     }
@@ -885,15 +947,6 @@ fn finalization_ready_projection(current_step_id: Option<StepId>) -> IdleProject
     }
 }
 
-fn is_daemon_action(action: &RecommendedAction) -> bool {
-    matches!(
-        action,
-        RecommendedAction::PrepareConvergence
-            | RecommendedAction::FinalizePreparedConvergence
-            | RecommendedAction::InvalidatePreparedConvergence
-    )
-}
-
 fn is_closure_relevant_step(step_id: StepId) -> bool {
     step::find_step(step_id).closure_relevance == ClosureRelevance::ClosureRelevant
 }
@@ -943,12 +996,12 @@ mod tests {
 
     #[test]
     fn recommended_actions_round_trip_named_and_step_actions() {
-        for (name, action) in RecommendedAction::NAMED_ACTIONS {
+        for named_action in RecommendedAction::NAMED_ACTIONS {
             assert_eq!(
-                RecommendedAction::parse(name).expect("named action"),
-                action
+                RecommendedAction::parse(named_action.name).expect("named action"),
+                named_action.action
             );
-            assert_eq!(action.as_str(), name);
+            assert_eq!(named_action.action.as_str(), named_action.name);
         }
 
         assert_eq!(
@@ -956,6 +1009,15 @@ mod tests {
                 .expect("step action"),
             RecommendedAction::dispatch(step::REVIEW_INCREMENTAL_INITIAL)
         );
+    }
+
+    #[test]
+    fn prepare_convergence_step_uses_named_action_metadata() {
+        assert_eq!(
+            RecommendedAction::from_step(StepId::PrepareConvergence),
+            RecommendedAction::PrepareConvergence
+        );
+        assert!(RecommendedAction::PrepareConvergence.is_daemon_owned());
     }
 
     #[test]
