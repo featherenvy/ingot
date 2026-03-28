@@ -205,5 +205,4 @@ mod tests {
         let sandbox_idx = args.iter().position(|arg| arg == "--sandbox").unwrap();
         assert_eq!(args[sandbox_idx + 1], "read-only");
     }
-
 }

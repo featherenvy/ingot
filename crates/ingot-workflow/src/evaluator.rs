@@ -150,7 +150,8 @@ impl RecommendedAction {
     }
 
     fn system_action(action: &str) -> Result<Self, String> {
-        NamedRecommendedAction::parse(action).map(Self::named)
+        NamedRecommendedAction::parse(action)
+            .map(Self::named)
             .ok_or_else(|| format!("unknown internal recommended action: {action}"))
     }
 
@@ -992,9 +993,7 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use super::{
-        BoardStatus, Evaluator, NamedRecommendedAction, PhaseStatus, RecommendedAction,
-    };
+    use super::{BoardStatus, Evaluator, NamedRecommendedAction, PhaseStatus, RecommendedAction};
     use crate::step;
 
     #[test]
@@ -1004,7 +1003,10 @@ mod tests {
                 RecommendedAction::parse(named_action.as_str()).expect("named action"),
                 RecommendedAction::named(named_action)
             );
-            assert_eq!(RecommendedAction::named(named_action).as_str(), named_action.as_str());
+            assert_eq!(
+                RecommendedAction::named(named_action).as_str(),
+                named_action.as_str()
+            );
         }
 
         assert_eq!(
@@ -1020,7 +1022,9 @@ mod tests {
             RecommendedAction::from_step(StepId::PrepareConvergence),
             RecommendedAction::named(NamedRecommendedAction::PrepareConvergence)
         );
-        assert!(RecommendedAction::named(NamedRecommendedAction::PrepareConvergence).is_daemon_owned());
+        assert!(
+            RecommendedAction::named(NamedRecommendedAction::PrepareConvergence).is_daemon_owned()
+        );
     }
 
     #[test]

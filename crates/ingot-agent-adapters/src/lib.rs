@@ -87,7 +87,10 @@ mod tests {
         let custom_schema =
             serde_json::json!({"type": "object", "properties": {"outcome": {"type": "string"}}});
 
-        assert_eq!(output_schema(&request(Some(custom_schema.clone()))), custom_schema);
+        assert_eq!(
+            output_schema(&request(Some(custom_schema.clone()))),
+            custom_schema
+        );
     }
 
     #[test]
