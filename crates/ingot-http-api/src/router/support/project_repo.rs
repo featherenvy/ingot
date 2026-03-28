@@ -2,7 +2,6 @@ use std::path::{Path as FsPath, PathBuf};
 
 use ingot_config::paths::logs_root as shared_logs_root;
 use ingot_domain::project::Project;
-use ingot_git::project_repo::project_repo_paths;
 use ingot_usecases::item::next_sort_key;
 
 use crate::error::ApiError;
@@ -12,13 +11,6 @@ use super::errors::{git_to_internal, repo_to_internal};
 
 pub(crate) fn logs_root(state_root: &FsPath) -> PathBuf {
     shared_logs_root(state_root)
-}
-
-pub(crate) fn project_paths(
-    state: &AppState,
-    project: &Project,
-) -> ingot_git::project_repo::ProjectRepoPaths {
-    project_repo_paths(state.state_root.as_path(), project.id, &project.path)
 }
 
 pub(crate) async fn refresh_project_mirror(

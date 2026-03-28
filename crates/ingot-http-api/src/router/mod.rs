@@ -34,6 +34,7 @@ use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::Utc;
+use infra_ports::HttpInfraAdapter;
 use ingot_agent_adapters::registry::{default_agent_capabilities, probe_and_apply};
 #[cfg(not(test))]
 use ingot_config::paths::default_state_root as shared_default_state_root;
@@ -58,7 +59,6 @@ use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
 use ingot_git::GitJobCompletionPort;
 use ingot_git::commands::{is_commit_reachable_from_any_ref, resolve_ref_oid};
-use ingot_git::diff::changed_paths_between;
 use ingot_git::project_repo::{CheckoutSyncStatus, checkout_sync_status, project_repo_paths};
 use ingot_store_sqlite::Database;
 use ingot_usecases::convergence::{
@@ -76,7 +76,6 @@ use ingot_usecases::{
     rebuild_revision_context,
 };
 use ingot_workflow::{AllowedAction, Evaluation, Evaluator, PhaseStatus, RecommendedAction, step};
-use ingot_workspace::{ensure_authoring_workspace_state, remove_workspace};
 use tracing::warn;
 
 use crate::error::ApiError;
@@ -190,9 +189,6 @@ pub(super) async fn teardown_revision_lane_state(
     item_id: ItemId,
     revision: &ItemRevision,
 ) -> Result<RevisionLaneTeardown, ApiError> {
-    let paths = refresh_project_mirror(state, project).await?;
-    let mirror_git_dir = paths.mirror_git_dir.as_path();
-
     let uc_result = ingot_usecases::teardown::teardown_revision_lane(
         &state.db, &state.db, &state.db, &state.db, &state.db, &state.db, project.id, item_id,
         revision,
@@ -200,9 +196,10 @@ pub(super) async fn teardown_revision_lane_state(
     .await?;
 
     let item = state.db.get_item(item_id).await.map_err(repo_to_item)?;
-    jobs::refresh_revision_context_for_job_like(state, &item, revision, mirror_git_dir).await?;
+    jobs::refresh_revision_context_for_job_like(state, &item, revision).await?;
 
     // Perform filesystem cleanup for integration workspaces
+    let infra = HttpInfraAdapter::new(state);
     for workspace_id in &uc_result.integration_workspace_ids {
         let workspace = state
             .db
@@ -210,7 +207,9 @@ pub(super) async fn teardown_revision_lane_state(
             .await
             .map_err(repo_to_internal)?;
         if workspace.path.exists() {
-            let _ = ingot_workspace::remove_workspace(mirror_git_dir, &workspace.path).await;
+            let _ = infra
+                .remove_workspace_path(project.id, &workspace.path)
+                .await;
         }
     }
 

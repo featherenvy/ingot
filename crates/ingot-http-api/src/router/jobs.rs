@@ -1,4 +1,5 @@
 use super::dispatch::auto_dispatch_projected_review_job;
+use super::infra_ports::HttpInfraAdapter;
 use super::items::{
     current_authoring_head_for_revision_with_workspace, effective_authoring_base_commit_oid,
 };
@@ -247,16 +248,14 @@ pub(super) async fn refresh_revision_context_for_job(
         .get_project(job.project_id)
         .await
         .map_err(repo_to_project)?;
-    let paths = refresh_project_mirror(state, &project).await?;
-    refresh_revision_context_for_job_like(state, &item, &revision, paths.mirror_git_dir.as_path())
-        .await
+    refresh_project_mirror(state, &project).await?;
+    refresh_revision_context_for_job_like(state, &item, &revision).await
 }
 
 pub(super) async fn refresh_revision_context_for_job_like(
     state: &AppState,
     item: &Item,
     revision: &ItemRevision,
-    repo_path: &FsPath,
 ) -> Result<(), ApiError> {
     let jobs = state
         .db
@@ -270,9 +269,9 @@ pub(super) async fn refresh_revision_context_for_job_like(
         authoring_base_commit_oid.as_ref(),
         authoring_head_commit_oid.as_ref(),
     ) {
-        changed_paths_between(repo_path, base_commit_oid, head_commit_oid)
-            .await
-            .map_err(git_to_internal)?
+        HttpInfraAdapter::new(state)
+            .changed_paths_between(item.project_id, base_commit_oid, head_commit_oid)
+            .await?
     } else {
         Vec::new()
     };

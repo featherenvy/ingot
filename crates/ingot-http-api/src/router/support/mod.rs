@@ -23,6 +23,4 @@ pub(super) use normalize::{
     normalize_project_name,
 };
 pub(super) use path::ApiPath;
-pub(super) use project_repo::{
-    logs_root, next_project_sort_key, project_paths, refresh_project_mirror,
-};
+pub(super) use project_repo::{logs_root, next_project_sort_key, refresh_project_mirror};

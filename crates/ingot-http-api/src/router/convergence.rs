@@ -1,3 +1,4 @@
+use super::infra_ports::HttpInfraAdapter;
 use super::item_projection::{
     ItemRuntimeSnapshot, hydrate_convergence_validity, load_item_detail, load_item_runtime_snapshot,
 };
@@ -5,13 +6,8 @@ use super::items::build_superseding_revision;
 use super::support::*;
 use super::types::*;
 use super::*;
-use ingot_git::commands::{
-    FinalizeTargetRefOutcome, finalize_target_ref as finalize_target_ref_in_repo,
-};
-use ingot_git::project_repo::{
-    CheckoutFinalizationStatus, CheckoutSyncStatus, checkout_finalization_status,
-    checkout_sync_status, sync_checkout_to_commit,
-};
+use ingot_git::commands::FinalizeTargetRefOutcome;
+use ingot_git::project_repo::{CheckoutFinalizationStatus, CheckoutSyncStatus};
 use ingot_usecases::convergence::{
     ApprovalFinalizeReadiness, CheckoutFinalizationReadiness, ConvergenceQueuePrepareContext,
     FinalizationTarget, FinalizePreparedTrigger, FinalizeTargetRefResult,
@@ -84,9 +80,9 @@ async fn reconcile_checkout_sync_state_http(
         .get_item(item_id)
         .await
         .map_err(UseCaseError::Repository)?;
-    let status = checkout_sync_status(&project.path, &revision.target_ref)
+    let status = HttpInfraAdapter::new(state)
+        .checkout_sync_status(project, &revision.target_ref)
         .await
-        .map_err(git_to_internal)
         .map_err(api_to_usecase_error)?;
     let checkout_sync_blocked = matches!(
         item.escalation,
@@ -315,11 +311,10 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                             == ingot_domain::convergence::ConvergenceStatus::Prepared
                 })
                 .cloned();
-            let resolved_target_oid =
-                resolve_ref_oid(paths.mirror_git_dir.as_path(), &revision.target_ref)
-                    .await
-                    .map_err(git_to_internal)
-                    .map_err(api_to_usecase_error)?;
+            let resolved_target_oid = HttpInfraAdapter::new(&state)
+                .resolve_project_ref_oid(project.id, &revision.target_ref)
+                .await
+                .map_err(api_to_usecase_error)?;
             let has_active_job = jobs
                 .iter()
                 .any(|job| job.item_revision_id == revision_id && job.state.is_active());
@@ -502,9 +497,6 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         let project = project.clone();
         let convergence = convergence.clone();
         async move {
-            let paths = refresh_project_mirror(&state, &project)
-                .await
-                .map_err(api_to_usecase_error)?;
             let prepared_commit_oid = convergence
                 .state
                 .prepared_commit_oid()
@@ -514,15 +506,15 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                 .input_target_commit_oid()
                 .ok_or(UseCaseError::PreparedConvergenceMissing)?;
 
-            match finalize_target_ref_in_repo(
-                paths.mirror_git_dir.as_path(),
-                &convergence.target_ref,
-                prepared_commit_oid,
-                input_target_commit_oid,
-            )
-            .await
-            .map_err(git_to_internal)
-            .map_err(api_to_usecase_error)?
+            match HttpInfraAdapter::new(&state)
+                .finalize_target_ref(
+                    project.id,
+                    &convergence.target_ref,
+                    prepared_commit_oid,
+                    input_target_commit_oid,
+                )
+                .await
+                .map_err(api_to_usecase_error)?
             {
                 FinalizeTargetRefOutcome::AlreadyFinalized => {
                     Ok(FinalizeTargetRefResult::AlreadyFinalized)
@@ -547,14 +539,10 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         let revision = revision.clone();
         let prepared_commit_oid = prepared_commit_oid.clone();
         async move {
-            let readiness = match checkout_finalization_status(
-                &project.path,
-                &revision.target_ref,
-                &prepared_commit_oid,
-            )
-            .await
-            .map_err(git_to_internal)
-            .map_err(api_to_usecase_error)?
+            let readiness = match HttpInfraAdapter::new(&state)
+                .checkout_finalization_status(&project, &revision.target_ref, &prepared_commit_oid)
+                .await
+                .map_err(api_to_usecase_error)?
             {
                 CheckoutFinalizationStatus::Blocked { message, .. } => {
                     CheckoutFinalizationReadiness::Blocked { message }
@@ -578,18 +566,14 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         let revision = revision.clone();
         let prepared_commit_oid = prepared_commit_oid.clone();
         async move {
-            let paths = refresh_project_mirror(&state, &project)
+            HttpInfraAdapter::new(&state)
+                .sync_checkout_to_prepared_commit(
+                    &project,
+                    &revision.target_ref,
+                    &prepared_commit_oid,
+                )
                 .await
                 .map_err(api_to_usecase_error)?;
-            sync_checkout_to_commit(
-                &project.path,
-                paths.mirror_git_dir.as_path(),
-                &revision.target_ref,
-                &prepared_commit_oid,
-            )
-            .await
-            .map_err(git_to_internal)
-            .map_err(api_to_usecase_error)?;
             Ok(())
         }
     }
@@ -684,10 +668,9 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                     .await
                     .map_err(UseCaseError::Repository)?;
                 if workspace.state.status() != WorkspaceStatus::Abandoned {
-                    let mirror_git_dir = project_paths(&state, &project).mirror_git_dir;
-                    remove_workspace(mirror_git_dir.as_path(), &workspace.path)
+                    HttpInfraAdapter::new(&state)
+                        .remove_workspace_path(project.id, &workspace.path)
                         .await
-                        .map_err(workspace_to_api_error)
                         .map_err(api_to_usecase_error)?;
                     workspace.mark_abandoned(now);
                     state

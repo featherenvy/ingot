@@ -8,6 +8,7 @@ pub(super) use revisions::{
 };
 
 use super::dispatch::auto_dispatch_projected_review_job_locked;
+use super::infra_ports::HttpInfraAdapter;
 use super::item_projection::{
     evaluate_item_snapshot, load_item_detail, load_item_runtime_snapshot,
 };
@@ -81,10 +82,11 @@ pub(super) async fn create_item(
             .unwrap_or(project.default_branch.as_str()),
     )?;
     ensure_git_valid_target_ref(target_ref.as_str()).await?;
+    let infra = HttpInfraAdapter::new(&state);
     let repo_path = paths.mirror_git_dir.as_path();
-    let resolved_target_head = resolve_ref_oid(repo_path, &target_ref)
-        .await
-        .map_err(git_to_internal)?
+    let resolved_target_head = infra
+        .resolve_project_ref_oid(project.id, &target_ref)
+        .await?
         .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.to_string()))?;
 
     let seed_commit_oid = validate_seed_commit_oid(repo_path, request.seed_commit_oid).await?;
@@ -672,25 +674,16 @@ pub(super) async fn ensure_authoring_workspace(
     revision: &ItemRevision,
     job: &Job,
 ) -> Result<Workspace, ApiError> {
-    let now = Utc::now();
-    let paths = refresh_project_mirror(state, project).await?;
+    let infra = HttpInfraAdapter::new(state);
     let existing = state
         .db
         .find_authoring_workspace_for_revision(revision.id)
         .await
         .map_err(repo_to_internal)?;
     let workspace_exists = existing.is_some();
-    let workspace = ensure_authoring_workspace_state(
-        existing,
-        project.id,
-        paths.mirror_git_dir.as_path(),
-        paths.worktree_root.as_path(),
-        revision,
-        job,
-        now,
-    )
-    .await
-    .map_err(workspace_to_api_error)?;
+    let workspace = infra
+        .ensure_authoring_workspace(project.id, revision, job, existing)
+        .await?;
 
     if workspace_exists {
         state
