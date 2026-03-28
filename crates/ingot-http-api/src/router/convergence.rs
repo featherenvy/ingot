@@ -1,6 +1,7 @@
-use super::items::{
-    append_activity, build_superseding_revision, hydrate_convergence_validity, load_item_detail,
+use super::item_projection::{
+    ItemRuntimeSnapshot, hydrate_convergence_validity, load_item_detail, load_item_runtime_snapshot,
 };
+use super::items::{append_activity, build_superseding_revision};
 use super::support::*;
 use super::types::*;
 use super::*;
@@ -157,46 +158,29 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 .await
                 .map_err(repo_to_item)
                 .map_err(api_to_usecase_error)?;
-            let revision = state
-                .db
-                .get_revision(item.current_revision_id)
+            let ItemRuntimeSnapshot {
+                current_revision,
+                jobs,
+                findings,
+                convergences,
+            } = load_item_runtime_snapshot(&state, paths.mirror_git_dir.as_path(), &item)
                 .await
-                .map_err(UseCaseError::Repository)?;
-            let jobs = state
-                .db
-                .list_jobs_by_item(item.id)
-                .await
-                .map_err(UseCaseError::Repository)?;
-            let findings = state
-                .db
-                .list_findings_by_item(item.id)
-                .await
-                .map_err(UseCaseError::Repository)?;
-            let convergences = hydrate_convergence_validity(
-                paths.mirror_git_dir.as_path(),
-                state
-                    .db
-                    .list_convergences_by_item(item.id)
-                    .await
-                    .map_err(UseCaseError::Repository)?,
-            )
-            .await
-            .map_err(api_to_usecase_error)?;
+                .map_err(api_to_usecase_error)?;
             let active_queue_entry = state
                 .db
-                .find_active_queue_entry_for_revision(revision.id)
+                .find_active_queue_entry_for_revision(current_revision.id)
                 .await
                 .map_err(UseCaseError::Repository)?;
             let lane_head = state
                 .db
-                .find_queue_head(project.id, &revision.target_ref)
+                .find_queue_head(project.id, &current_revision.target_ref)
                 .await
                 .map_err(UseCaseError::Repository)?;
 
             Ok(ingot_domain::ports::ConvergenceQueuePrepareContext {
                 project,
                 item,
-                revision,
+                revision: current_revision,
                 jobs,
                 findings,
                 convergences,

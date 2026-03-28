@@ -1,6 +1,7 @@
+use super::item_projection::{ItemRuntimeSnapshot, load_item_runtime_snapshot};
 use super::items::{
     append_activity, current_authoring_head_for_revision_with_workspace,
-    effective_authoring_base_commit_oid, ensure_authoring_workspace, hydrate_convergence_validity,
+    effective_authoring_base_commit_oid, ensure_authoring_workspace,
 };
 use super::support::*;
 use super::types::*;
@@ -32,28 +33,12 @@ pub(super) async fn dispatch_item_job(
         return Err(UseCaseError::ItemNotFound.into());
     }
 
-    let current_revision = state
-        .db
-        .get_revision(item.current_revision_id)
-        .await
-        .map_err(repo_to_internal)?;
-    let jobs = state
-        .db
-        .list_jobs_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    let findings = state
-        .db
-        .list_findings_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    let convergences = state
-        .db
-        .list_convergences_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    let convergences =
-        hydrate_convergence_validity(paths.mirror_git_dir.as_path(), convergences).await?;
+    let ItemRuntimeSnapshot {
+        current_revision,
+        jobs,
+        findings,
+        convergences,
+    } = load_item_runtime_snapshot(&state, paths.mirror_git_dir.as_path(), &item).await?;
     let command = DispatchJobCommand {
         step_id: maybe_request.and_then(|Json(request)| request.step_id),
     };
@@ -429,29 +414,13 @@ pub(super) async fn auto_dispatch_projected_review_job_locked(
     item_id: ItemId,
 ) -> Result<Option<Job>, ApiError> {
     let item = state.db.get_item(item_id).await.map_err(repo_to_item)?;
-    let current_revision = state
-        .db
-        .get_revision(item.current_revision_id)
-        .await
-        .map_err(repo_to_internal)?;
-    let jobs = state
-        .db
-        .list_jobs_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    let findings = state
-        .db
-        .list_findings_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    let convergences = state
-        .db
-        .list_convergences_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
     let paths = refresh_project_mirror(state, project).await?;
-    let convergences =
-        hydrate_convergence_validity(paths.mirror_git_dir.as_path(), convergences).await?;
+    let ItemRuntimeSnapshot {
+        current_revision,
+        jobs,
+        findings,
+        convergences,
+    } = load_item_runtime_snapshot(state, paths.mirror_git_dir.as_path(), &item).await?;
 
     let job = ingot_usecases::dispatch::auto_dispatch_review(
         &state.db,
@@ -492,21 +461,12 @@ pub(super) async fn retry_item_job(
     if item.project_id != project_id {
         return Err(UseCaseError::ItemNotFound.into());
     }
-    let current_revision = state
-        .db
-        .get_revision(item.current_revision_id)
-        .await
-        .map_err(repo_to_internal)?;
-    let jobs = state
-        .db
-        .list_jobs_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    let findings = state
-        .db
-        .list_findings_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
+    let ItemRuntimeSnapshot {
+        current_revision,
+        jobs,
+        findings,
+        convergences,
+    } = load_item_runtime_snapshot(&state, paths.mirror_git_dir.as_path(), &item).await?;
     let previous_job = jobs
         .iter()
         .find(|job| job.id == job_id)
@@ -515,13 +475,6 @@ pub(super) async fn retry_item_job(
             code: "job_not_found",
             message: "Job not found".into(),
         })?;
-    let convergences = state
-        .db
-        .list_convergences_by_item(item.id)
-        .await
-        .map_err(repo_to_internal)?;
-    let convergences =
-        hydrate_convergence_validity(paths.mirror_git_dir.as_path(), convergences).await?;
 
     let mut job = retry_job(
         &item,

@@ -3,6 +3,7 @@ mod convergence;
 mod dispatch;
 mod findings;
 mod harness;
+mod item_projection;
 mod items;
 mod jobs;
 mod projects;
