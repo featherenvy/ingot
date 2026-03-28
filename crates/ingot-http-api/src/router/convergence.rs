@@ -15,6 +15,7 @@ use ingot_git::project_repo::{
 use ingot_usecases::convergence::{
     ApprovalFinalizeReadiness, CheckoutFinalizationReadiness, FinalizationTarget,
     FinalizePreparedTrigger, FinalizeTargetRefResult, PreparedConvergenceFinalizePort,
+    ConvergenceQueuePrepareContext,
 };
 
 #[derive(Clone)]
@@ -139,7 +140,7 @@ impl ConvergenceCommandPort for HttpConvergencePort {
         project_id: ProjectId,
         item_id: ItemId,
     ) -> impl std::future::Future<
-        Output = Result<ingot_domain::ports::ConvergenceQueuePrepareContext, UseCaseError>,
+        Output = Result<ConvergenceQueuePrepareContext, UseCaseError>,
     > + Send {
         let state = self.state.clone();
         async move {
@@ -177,7 +178,7 @@ impl ConvergenceCommandPort for HttpConvergencePort {
                 .await
                 .map_err(UseCaseError::Repository)?;
 
-            Ok(ingot_domain::ports::ConvergenceQueuePrepareContext {
+            Ok(ConvergenceQueuePrepareContext {
                 project,
                 item,
                 revision: current_revision,

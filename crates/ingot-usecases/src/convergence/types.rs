@@ -6,12 +6,24 @@ use ingot_domain::convergence_queue::ConvergenceQueueEntry;
 use ingot_domain::finding::Finding;
 use ingot_domain::git_operation::GitOperation;
 use ingot_domain::ids::{ItemId, ProjectId};
+use ingot_domain::item::Item;
 use ingot_domain::job::Job;
-use ingot_domain::ports::ConvergenceQueuePrepareContext;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 
 use crate::UseCaseError;
+
+#[derive(Debug, Clone)]
+pub struct ConvergenceQueuePrepareContext {
+    pub project: Project,
+    pub item: Item,
+    pub revision: ItemRevision,
+    pub jobs: Vec<Job>,
+    pub findings: Vec<Finding>,
+    pub convergences: Vec<Convergence>,
+    pub active_queue_entry: Option<ConvergenceQueueEntry>,
+    pub lane_head: Option<ConvergenceQueueEntry>,
+}
 
 #[derive(Debug, Clone)]
 pub struct SystemActionItemState {

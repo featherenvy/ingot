@@ -1,6 +1,5 @@
 use chrono::Utc;
 use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
-use ingot_domain::ports::ConvergenceQueuePrepareContext;
 use ingot_test_support::fixtures::{ItemBuilder, ProjectBuilder, RevisionBuilder};
 use ingot_test_support::git::unique_temp_path;
 use uuid::Uuid;
@@ -8,7 +7,10 @@ use uuid::Uuid;
 use crate::UseCaseError;
 
 use super::test_support::{FakePort, fake_completed_validate_job, project_state};
-use super::{ApprovalFinalizeReadiness, ConvergenceService, FinalizeTargetRefResult};
+use super::{
+    ApprovalFinalizeReadiness, ConvergenceQueuePrepareContext, ConvergenceService,
+    FinalizeTargetRefResult,
+};
 
 #[tokio::test]
 async fn queue_prepare_creates_lane_head_when_lane_is_empty() {

@@ -10,7 +10,6 @@ use ingot_domain::git_operation::GitOperation;
 use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId};
 use ingot_domain::item::ApprovalState;
 use ingot_domain::job::Job;
-use ingot_domain::ports::ConvergenceQueuePrepareContext;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_test_support::fixtures::{
@@ -23,9 +22,10 @@ use crate::UseCaseError;
 
 use super::types::{
     ApprovalFinalizeReadiness, CheckoutFinalizationReadiness, ConvergenceApprovalContext,
-    ConvergenceCommandPort, ConvergenceSystemActionPort, FinalizationTarget,
-    FinalizePreparedTrigger, FinalizeTargetRefResult, PreparedConvergenceFinalizePort,
-    RejectApprovalContext, RejectApprovalTeardown, SystemActionItemState, SystemActionProjectState,
+    ConvergenceCommandPort, ConvergenceQueuePrepareContext, ConvergenceSystemActionPort,
+    FinalizationTarget, FinalizePreparedTrigger, FinalizeTargetRefResult,
+    PreparedConvergenceFinalizePort, RejectApprovalContext, RejectApprovalTeardown,
+    SystemActionItemState, SystemActionProjectState,
 };
 
 #[derive(Clone)]
