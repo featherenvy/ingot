@@ -1,6 +1,6 @@
 // DTOs mirroring backend JSON responses
 
-export type Classification = 'change' | 'bug'
+export type Classification = 'change' | 'bug' | 'investigation'
 export type LifecycleState = 'open' | 'done'
 export type ParkingState = 'active' | 'deferred'
 export type DoneReason = 'completed' | 'dismissed' | 'invalidated'
@@ -194,7 +194,7 @@ export interface Item {
   id: string
   project_id: string
   classification: Classification
-  workflow_version: 'delivery:v1'
+  workflow_version: 'delivery:v1' | 'investigation:v1'
   lifecycle_state: LifecycleState
   parking_state: ParkingState
   done_reason?: DoneReason

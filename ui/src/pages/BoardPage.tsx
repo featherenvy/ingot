@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangleIcon, ChevronDownIcon } from 'lucide-react'
+import { AlertTriangleIcon, ChevronDownIcon, SearchIcon } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { Link, useNavigate } from 'react-router'
@@ -28,6 +28,8 @@ import { showErrorToast } from '../lib/toast'
 import type { BoardStatus, ItemSummary, Priority } from '../types/domain'
 
 // ── Constants ──────────────────────────────────────────────────
+
+type CreateItemMode = 'delivery' | 'investigation'
 
 type CreateItemForm = {
   title: string
@@ -91,6 +93,7 @@ function BoardItemCard({ summary, projectId }: { summary: ItemSummary; projectId
   const { item, title: itemTitle, evaluation } = summary
   const isActive = isActivePhaseStatus(evaluation.phase_status)
   const isEscalated = item.escalation_state === 'operator_required'
+  const isInvestigation = item.classification === 'investigation'
 
   return (
     <Card
@@ -98,13 +101,16 @@ function BoardItemCard({ summary, projectId }: { summary: ItemSummary; projectId
       size="sm"
       className={cn(
         'border-l-2 px-3 transition-colors hover:bg-muted/40',
-        isEscalated ? 'border-l-red-500' : PRIORITY_ACCENT[item.priority],
+        isEscalated ? 'border-l-red-500' : isInvestigation ? 'border-l-sky-500' : PRIORITY_ACCENT[item.priority],
       )}
     >
       <Link to={`/projects/${projectId}/items/${item.id}`}>
         {/* Title + priority */}
         <div className="flex items-start justify-between gap-2">
-          <strong className="text-sm font-medium leading-snug">{itemTitle || item.id}</strong>
+          <div className="flex items-center gap-1.5 min-w-0">
+            {isInvestigation && <SearchIcon className="size-3.5 shrink-0 text-sky-500" />}
+            <strong className="text-sm font-medium leading-snug truncate">{itemTitle || item.id}</strong>
+          </div>
           <Badge
             variant="secondary"
             className={cn(
@@ -112,7 +118,7 @@ function BoardItemCard({ summary, projectId }: { summary: ItemSummary; projectId
               item.priority === 'critical' && 'bg-red-500/10 text-red-700 dark:text-red-400',
             )}
           >
-            {item.priority}
+            {isInvestigation ? 'investigation' : item.priority}
           </Badge>
         </div>
 
@@ -211,6 +217,7 @@ export default function BoardPage() {
   const queryClient = useQueryClient()
   const { data: itemSummaries, error, isError, isFetching, isLoading, refetch } = useQuery(itemsQuery(projectId))
   const [formOpen, setFormOpen] = useState(false)
+  const [createMode, setCreateMode] = useState<CreateItemMode>('delivery')
   const form = useForm<CreateItemForm>({
     defaultValues: initialCreateItemForm,
   })
@@ -220,7 +227,9 @@ export default function BoardPage() {
       createItem(projectId, {
         title: values.title,
         description: values.description,
-        acceptance_criteria: values.acceptanceCriteria,
+        acceptance_criteria:
+          createMode === 'investigation' ? 'Produce structured findings for triage' : values.acceptanceCriteria,
+        ...(createMode === 'investigation' ? { classification: 'investigation' as const } : {}),
       }),
     onSuccess: (detail) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.items(projectId) })
@@ -238,6 +247,7 @@ export default function BoardPage() {
     setFormOpen(open)
     if (!open) {
       form.reset(initialCreateItemForm)
+      setCreateMode('delivery')
       createItemMutation.reset()
     }
   }
@@ -263,11 +273,43 @@ export default function BoardPage() {
             </SheetTrigger>
             <SheetContent side="right" className="overflow-y-auto sm:max-w-2xl">
               <SheetHeader>
-                <SheetTitle>Create Item</SheetTitle>
+                <SheetTitle>{createMode === 'investigation' ? 'Create Investigation' : 'Create Item'}</SheetTitle>
                 <SheetDescription>
-                  Define the title, context, and acceptance criteria the workflow should drive toward.
+                  {createMode === 'investigation'
+                    ? 'Describe what to investigate. The agent will produce structured findings that can be promoted to delivery items.'
+                    : 'Define the title, context, and acceptance criteria the workflow should drive toward.'}
                 </SheetDescription>
               </SheetHeader>
+
+              {/* Mode toggle */}
+              <div className="flex rounded-lg border bg-muted/40 p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setCreateMode('delivery')}
+                  className={cn(
+                    'flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-all',
+                    createMode === 'delivery'
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  Delivery
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCreateMode('investigation')}
+                  className={cn(
+                    'flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-all flex items-center justify-center gap-1.5',
+                    createMode === 'investigation'
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  <SearchIcon className="size-3.5" />
+                  Investigation
+                </button>
+              </div>
+
               <Form {...form}>
                 <form
                   onSubmit={form.handleSubmit((values) => createItemMutation.mutate(values))}
@@ -279,9 +321,14 @@ export default function BoardPage() {
                     rules={{ required: 'Title is required.' }}
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Title</FormLabel>
+                        <FormLabel>{createMode === 'investigation' ? 'Investigation title' : 'Title'}</FormLabel>
                         <FormControl>
-                          <Input placeholder="Title" {...field} />
+                          <Input
+                            placeholder={
+                              createMode === 'investigation' ? 'e.g. Find helper duplication across crates' : 'Title'
+                            }
+                            {...field}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -293,31 +340,45 @@ export default function BoardPage() {
                     rules={{ required: 'Description is required.' }}
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Description</FormLabel>
+                        <FormLabel>{createMode === 'investigation' ? 'Investigation brief' : 'Description'}</FormLabel>
                         <FormControl>
-                          <Textarea placeholder="Description" rows={5} {...field} />
+                          <Textarea
+                            placeholder={
+                              createMode === 'investigation'
+                                ? 'Describe what to investigate and what kinds of findings to look for...'
+                                : 'Description'
+                            }
+                            rows={createMode === 'investigation' ? 8 : 5}
+                            {...field}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
                     )}
                   />
-                  <FormField
-                    control={form.control}
-                    name="acceptanceCriteria"
-                    rules={{ required: 'Acceptance criteria are required.' }}
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Acceptance criteria</FormLabel>
-                        <FormControl>
-                          <Textarea placeholder="Acceptance criteria" rows={5} {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
+                  {createMode === 'delivery' && (
+                    <FormField
+                      control={form.control}
+                      name="acceptanceCriteria"
+                      rules={{ required: createMode === 'delivery' ? 'Acceptance criteria are required.' : false }}
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Acceptance criteria</FormLabel>
+                          <FormControl>
+                            <Textarea placeholder="Acceptance criteria" rows={5} {...field} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  )}
                   <div className="flex items-center gap-3">
                     <Button type="submit" disabled={createItemMutation.isPending}>
-                      {createItemMutation.isPending ? 'Creating…' : 'Create item'}
+                      {createItemMutation.isPending
+                        ? 'Creating…'
+                        : createMode === 'investigation'
+                          ? 'Start investigation'
+                          : 'Create item'}
                     </Button>
                     <Button type="button" variant="outline" onClick={() => handleSheetOpenChange(false)}>
                       Cancel

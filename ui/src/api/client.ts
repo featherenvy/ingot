@@ -137,6 +137,7 @@ export interface CreateItemPayload {
   title: string
   description: string
   acceptance_criteria: string
+  classification?: 'change' | 'bug' | 'investigation'
 }
 
 export const createItem = (projectId: string, payload: CreateItemPayload) =>
