@@ -1,4 +1,5 @@
 import { type UIEventHandler, useEffect } from 'react'
+import { cn } from '@/lib/utils'
 import { CodeBlock } from './CodeBlock'
 
 export function LogBlock({
@@ -6,6 +7,8 @@ export function LogBlock({
   value,
   emptyMessage,
   autoScrollToBottom,
+  className,
+  preClassName,
   scrollContainerRef,
   onScroll,
 }: {
@@ -13,6 +16,8 @@ export function LogBlock({
   value: string | null | undefined
   emptyMessage?: string
   autoScrollToBottom?: boolean
+  className?: string
+  preClassName?: string
   scrollContainerRef?: React.Ref<HTMLDivElement>
   onScroll?: UIEventHandler<HTMLDivElement>
 }) {
@@ -33,6 +38,8 @@ export function LogBlock({
         wrap
         copyLabel={`Copy ${label.toLowerCase()}`}
         maxHeightClassName="max-h-72"
+        className={cn(className)}
+        preClassName={cn(preClassName)}
         scrollContainerRef={scrollContainerRef}
         onScroll={onScroll}
       />

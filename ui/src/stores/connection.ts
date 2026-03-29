@@ -5,11 +5,14 @@ import type { JobLogs, WsEvent } from '../types/domain'
 import { useProjectsStore } from './projects'
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected'
+type JobLogSyncState = 'live' | 'resyncing' | 'recovered'
 
 interface ConnectionState {
   status: ConnectionStatus
   lastSeq: number
   ws: WebSocket | null
+  jobLogSyncState: JobLogSyncState
+  recentLogChunkAtByJobId: Record<string, number>
 
   connect: (queryClient: QueryClient) => void
   disconnect: () => void
@@ -19,6 +22,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   status: 'disconnected',
   lastSeq: 0,
   ws: null,
+  jobLogSyncState: 'live',
+  recentLogChunkAtByJobId: {},
 
   connect: (queryClient) => {
     const existing = get().ws
@@ -67,6 +72,7 @@ function handleEvent(event: WsEvent, lastSeq: number, qc: QueryClient) {
 
   // Sequence gap — invalidate everything for the active project
   if (lastSeq > 0 && event.seq > lastSeq + 1) {
+    useConnectionStore.setState({ jobLogSyncState: 'resyncing' })
     if (projectId) {
       qc.invalidateQueries({ queryKey: queryKeys.items(projectId) })
       qc.invalidateQueries({ queryKey: queryKeys.jobs(projectId) })
@@ -81,6 +87,14 @@ function handleEvent(event: WsEvent, lastSeq: number, qc: QueryClient) {
     const stream = event.payload?.stream
     const chunk = event.payload?.chunk
     if ((stream === 'stdout' || stream === 'stderr') && typeof chunk === 'string') {
+      const nextSyncState = useConnectionStore.getState().jobLogSyncState === 'resyncing' ? 'recovered' : 'live'
+      useConnectionStore.setState((state) => ({
+        jobLogSyncState: nextSyncState,
+        recentLogChunkAtByJobId: {
+          ...state.recentLogChunkAtByJobId,
+          [event.entity_id]: Date.now(),
+        },
+      }))
       qc.setQueryData<JobLogs>(queryKeys.jobLogs(event.entity_id), (current) => {
         const next: JobLogs = current ?? {
           prompt: null,

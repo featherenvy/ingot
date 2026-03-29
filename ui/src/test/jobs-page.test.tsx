@@ -43,6 +43,8 @@ describe('JobsPage', () => {
       status: 'connected',
       lastSeq: 0,
       ws: null,
+      jobLogSyncState: 'live',
+      recentLogChunkAtByJobId: {},
     })
   })
 
@@ -52,6 +54,8 @@ describe('JobsPage', () => {
       status: 'disconnected',
       lastSeq: 0,
       ws: null,
+      jobLogSyncState: 'live',
+      recentLogChunkAtByJobId: {},
     })
   })
 
@@ -173,10 +177,77 @@ describe('JobsPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Review Candidate Initial/i }))
 
     expect(await screen.findByText('Live')).toBeInTheDocument()
+    expect(screen.getByText('waiting')).toBeInTheDocument()
     expect(await screen.findByText('Waiting for agent output...')).toBeInTheDocument()
     expect(screen.getAllByText('Stdout')).not.toHaveLength(0)
     expect(screen.getAllByText('Stderr')).not.toHaveLength(0)
     expect(screen.getByRole('tab', { name: /Prompt/i })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: /Result/i })).toBeInTheDocument()
+  })
+
+  it('shows streaming and recovered sync cues when recent chunks and recovery state exist', async () => {
+    const jobs: Job[] = [
+      {
+        id: 'job_1',
+        project_id: 'prj_1',
+        item_id: 'itm_1',
+        item_revision_id: 'rev_1',
+        step_id: 'review_candidate_initial',
+        status: 'running',
+        outcome_class: null,
+        phase_kind: 'review',
+        workspace_id: 'wrk_1',
+        job_input: {
+          kind: 'candidate_subject',
+          base_commit_oid: '0123456789abcdef',
+          head_commit_oid: 'fedcba9876543210',
+        },
+        created_at: '2026-03-11T00:00:00Z',
+        started_at: '2026-03-11T00:01:00Z',
+        ended_at: null,
+      },
+    ]
+
+    useConnectionStore.setState({
+      status: 'connected',
+      lastSeq: 4,
+      ws: null,
+      jobLogSyncState: 'recovered',
+      recentLogChunkAtByJobId: {
+        job_1: Date.now(),
+      },
+    })
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/projects/prj_1/jobs')) {
+        return Promise.resolve(jsonResponse(jobs))
+      }
+      if (url.endsWith('/api/projects/prj_1/items')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/jobs/job_1/logs')) {
+        return Promise.resolve(
+          jsonResponse({
+            prompt: 'Review the candidate diff',
+            stdout: 'streaming now\n',
+            stderr: 'warn\n',
+            result: null,
+          }),
+        )
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: /Review Candidate Initial/i }))
+
+    expect(await screen.findByText('streaming')).toBeInTheDocument()
+    expect(await screen.findByText('Log stream recovered')).toBeInTheDocument()
+    expect(screen.getByText(/Current output now reflects the persisted log plus new chunks/i)).toBeInTheDocument()
   })
 })

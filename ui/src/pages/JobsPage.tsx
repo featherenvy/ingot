@@ -8,6 +8,7 @@ import {
   SearchIcon,
   ShieldAlertIcon,
   XIcon,
+  ZapIcon,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
@@ -41,6 +42,7 @@ type LogTab = 'stdout' | 'stderr' | 'prompt' | 'result'
 const ACTIVE_STATUSES = new Set(['queued', 'assigned', 'running'])
 const FAILED_STATUSES = new Set(['failed', 'cancelled', 'expired'])
 const FOLLOW_TAIL_THRESHOLD_PX = 24
+const RECENT_STREAM_WINDOW_MS = 6_000
 
 const OUTCOME_ICON: Record<OutcomeClass, { icon: typeof CheckIcon; className: string }> = {
   clean: { icon: CheckIcon, className: 'text-emerald-500' },
@@ -100,12 +102,14 @@ function JobRow({
   itemTitle,
   projectId,
   isSelected,
+  streamState,
   onSelect,
 }: {
   job: Job
   itemTitle: string | null
   projectId: string
   isSelected: boolean
+  streamState: 'streaming' | 'waiting' | null
   onSelect: () => void
 }) {
   const isActive = ACTIVE_STATUSES.has(job.status)
@@ -144,6 +148,17 @@ function JobRow({
 
       {/* Status badge */}
       <StatusBadge status={job.status} className="h-5 text-[11px]" />
+
+      {streamState === 'streaming' ? (
+        <Badge variant="outline" className="h-5 gap-1 text-[10px] text-emerald-700">
+          <ZapIcon className="size-3 animate-pulse text-emerald-500" />
+          streaming
+        </Badge>
+      ) : streamState === 'waiting' ? (
+        <Badge variant="outline" className="h-5 text-[10px] text-muted-foreground">
+          waiting
+        </Badge>
+      ) : null}
 
       {/* Item title link */}
       {itemTitle && (
@@ -186,9 +201,12 @@ export default function JobsPage(): React.JSX.Element {
   const { data: agents } = useQuery(agentsQuery())
   const { data: logs, isLoading: isLogsLoading } = useQuery(jobLogsQuery(selectedJobId ?? ''))
   const wsStatus = useConnectionStore((state) => state.status)
+  const jobLogSyncState = useConnectionStore((state) => state.jobLogSyncState)
+  const recentLogChunkAtByJobId = useConnectionStore((state) => state.recentLogChunkAtByJobId)
   const queueBlocker = getQueuedJobBlocker(jobs ?? [], agents)
   const stdoutRef = useRef<HTMLDivElement>(null)
   const stderrRef = useRef<HTMLDivElement>(null)
+  const [now, setNow] = useState(() => Date.now())
 
   // Build item title lookup
   const itemTitles = useMemo(() => {
@@ -222,6 +240,8 @@ export default function JobsPage(): React.JSX.Element {
   const hasStderr = !!logs?.stderr?.trim()
   const hasPrompt = !!logs?.prompt?.trim()
   const hasResult = logs?.result != null
+  const showResyncingNotice = isSelectedJobRunning && jobLogSyncState === 'resyncing'
+  const showRecoveredNotice = isSelectedJobRunning && jobLogSyncState === 'recovered'
 
   useEffect(() => {
     setFollowTail(true)
@@ -229,6 +249,35 @@ export default function JobsPage(): React.JSX.Element {
       setLogTab('stdout')
     }
   }, [selectedJob?.status])
+
+  useEffect(() => {
+    const hasRunningJobs = (jobs ?? []).some((job) => job.status === 'running')
+    if (!hasRunningJobs) return
+
+    const interval = window.setInterval(() => {
+      setNow(Date.now())
+    }, 1_000)
+
+    return () => window.clearInterval(interval)
+  }, [jobs])
+
+  const streamStateByJobId = useMemo(() => {
+    const states = new Map<string, 'streaming' | 'waiting' | null>()
+    for (const job of jobs ?? []) {
+      if (job.status !== 'running') {
+        states.set(job.id, null)
+        continue
+      }
+
+      const lastChunkAt = recentLogChunkAtByJobId[job.id]
+      if (lastChunkAt && now - lastChunkAt <= RECENT_STREAM_WINDOW_MS) {
+        states.set(job.id, 'streaming')
+      } else {
+        states.set(job.id, 'waiting')
+      }
+    }
+    return states
+  }, [jobs, now, recentLogChunkAtByJobId])
 
   function handleOutputScroll(event: React.UIEvent<HTMLDivElement>) {
     setFollowTail(isNearBottom(event.currentTarget))
@@ -329,6 +378,7 @@ export default function JobsPage(): React.JSX.Element {
                         itemTitle={itemTitles.get(job.item_id) ?? null}
                         projectId={projectId}
                         isSelected={selectedJobId === job.id}
+                        streamState={streamStateByJobId.get(job.id) ?? null}
                         onSelect={() => setSelectedJobId(job.id)}
                       />
                     ))
@@ -405,78 +455,106 @@ export default function JobsPage(): React.JSX.Element {
                     <Skeleton className="h-24 w-full" />
                   </div>
                 ) : (
-                  <Tabs value={logTab} onValueChange={(value) => setLogTab(value as LogTab)}>
-                    <TabsList variant="line" className="w-full justify-start overflow-x-auto">
-                      <TabsTrigger value="stdout">
-                        Stdout
-                        {hasStdout || isSelectedJobRunning ? (
-                          <Badge variant="secondary" className="ml-1 h-4 rounded-full px-1.5 text-[10px]">
-                            {hasStdout ? 'Live' : '...'}
-                          </Badge>
-                        ) : null}
-                      </TabsTrigger>
-                      <TabsTrigger value="stderr">
-                        Stderr
-                        {hasStderr ? (
-                          <Badge variant="destructive" className="ml-1 h-4 rounded-full px-1.5 text-[10px]">
-                            !
-                          </Badge>
-                        ) : null}
-                      </TabsTrigger>
-                      <TabsTrigger value="prompt">Prompt</TabsTrigger>
-                      <TabsTrigger value="result">Result</TabsTrigger>
-                    </TabsList>
+                  <div className="space-y-4">
+                    {showResyncingNotice ? (
+                      <Alert>
+                        <AlertTitle>Resyncing log stream</AlertTitle>
+                        <AlertDescription>
+                          Websocket events were missed. The panel is reloading from persisted job logs before live
+                          chunks resume.
+                        </AlertDescription>
+                      </Alert>
+                    ) : null}
 
-                    <TabsContent value="stdout" className="mt-4">
-                      <LogBlock
-                        label="Stdout"
-                        value={logs?.stdout}
-                        emptyMessage={isSelectedJobRunning ? 'Waiting for agent output...' : 'No stdout captured.'}
-                        autoScrollToBottom={isSelectedJobRunning && followTail && logTab === 'stdout'}
-                        scrollContainerRef={stdoutRef}
-                        onScroll={handleOutputScroll}
-                      />
-                    </TabsContent>
+                    {showRecoveredNotice ? (
+                      <Alert>
+                        <AlertTitle>Log stream recovered</AlertTitle>
+                        <AlertDescription>
+                          The live stream caught up after a sequence gap. Current output now reflects the persisted log
+                          plus new chunks.
+                        </AlertDescription>
+                      </Alert>
+                    ) : null}
 
-                    <TabsContent value="stderr" className="mt-4">
-                      <LogBlock
-                        label="Stderr"
-                        value={logs?.stderr}
-                        emptyMessage={isSelectedJobRunning ? 'No stderr yet.' : 'No stderr captured.'}
-                        autoScrollToBottom={isSelectedJobRunning && followTail && logTab === 'stderr'}
-                        scrollContainerRef={stderrRef}
-                        onScroll={handleOutputScroll}
-                      />
-                    </TabsContent>
+                    <Tabs value={logTab} onValueChange={(value) => setLogTab(value as LogTab)}>
+                      <TabsList variant="line" className="w-full justify-start overflow-x-auto">
+                        <TabsTrigger value="stdout">
+                          Stdout
+                          {hasStdout || isSelectedJobRunning ? (
+                            <Badge variant="secondary" className="ml-1 h-4 rounded-full px-1.5 text-[10px]">
+                              {hasStdout ? 'Live' : '...'}
+                            </Badge>
+                          ) : null}
+                        </TabsTrigger>
+                        <TabsTrigger value="stderr">
+                          Stderr
+                          {hasStderr ? (
+                            <Badge variant="destructive" className="ml-1 h-4 rounded-full px-1.5 text-[10px]">
+                              !
+                            </Badge>
+                          ) : null}
+                        </TabsTrigger>
+                        <TabsTrigger value="prompt">Prompt</TabsTrigger>
+                        <TabsTrigger value="result">Result</TabsTrigger>
+                      </TabsList>
 
-                    <TabsContent value="prompt" className="mt-4">
-                      {hasPrompt ? (
-                        <LogBlock label="Prompt" value={logs?.prompt} />
-                      ) : (
-                        <EmptyState
-                          variant="inline"
-                          contentClassName="px-0 py-0"
-                          description="No prompt artifact available for this job."
+                      <TabsContent value="stdout" className="mt-4">
+                        <LogBlock
+                          label="Stdout"
+                          value={logs?.stdout}
+                          emptyMessage={isSelectedJobRunning ? 'Waiting for agent output...' : 'No stdout captured.'}
+                          className={cn(
+                            isSelectedJobRunning && 'border-blue-500/20 bg-blue-500/5',
+                            isSelectedJobRunning && !hasStdout && 'border-dashed',
+                          )}
+                          autoScrollToBottom={isSelectedJobRunning && followTail && logTab === 'stdout'}
+                          scrollContainerRef={stdoutRef}
+                          onScroll={handleOutputScroll}
                         />
-                      )}
-                    </TabsContent>
+                      </TabsContent>
 
-                    <TabsContent value="result" className="mt-4">
-                      {hasResult ? (
-                        <LogBlock label="Result" value={logs?.result ? JSON.stringify(logs.result, null, 2) : null} />
-                      ) : (
-                        <EmptyState
-                          variant="inline"
-                          contentClassName="px-0 py-0"
-                          description={
-                            isSelectedJobRunning
-                              ? 'Result will appear after the agent finishes.'
-                              : 'No structured result recorded for this job.'
-                          }
+                      <TabsContent value="stderr" className="mt-4">
+                        <LogBlock
+                          label="Stderr"
+                          value={logs?.stderr}
+                          emptyMessage={isSelectedJobRunning ? 'No stderr yet.' : 'No stderr captured.'}
+                          className={cn('border-amber-500/30 bg-amber-500/10', !hasStderr && 'border-dashed')}
+                          preClassName={cn(hasStderr && 'text-amber-950 dark:text-amber-100')}
+                          autoScrollToBottom={isSelectedJobRunning && followTail && logTab === 'stderr'}
+                          scrollContainerRef={stderrRef}
+                          onScroll={handleOutputScroll}
                         />
-                      )}
-                    </TabsContent>
-                  </Tabs>
+                      </TabsContent>
+
+                      <TabsContent value="prompt" className="mt-4">
+                        {hasPrompt ? (
+                          <LogBlock label="Prompt" value={logs?.prompt} />
+                        ) : (
+                          <EmptyState
+                            variant="inline"
+                            contentClassName="px-0 py-0"
+                            description="No prompt artifact available for this job."
+                          />
+                        )}
+                      </TabsContent>
+
+                      <TabsContent value="result" className="mt-4">
+                        {hasResult ? (
+                          <LogBlock label="Result" value={logs?.result ? JSON.stringify(logs.result, null, 2) : null} />
+                        ) : (
+                          <EmptyState
+                            variant="inline"
+                            contentClassName="px-0 py-0"
+                            description={
+                              isSelectedJobRunning
+                                ? 'Result will appear after the agent finishes.'
+                                : 'No structured result recorded for this job.'
+                            }
+                          />
+                        )}
+                      </TabsContent>
+                    </Tabs>
+                  </div>
                 )}
               </CardContent>
             </Card>
