@@ -75,6 +75,25 @@ pub struct PromoteFindingResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct BatchPromoteFindingsResponse {
+    pub promoted: Vec<PromotedFindingResult>,
+    pub skipped: Vec<SkippedFindingResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PromotedFindingResult {
+    pub finding_id: FindingId,
+    pub item: Item,
+    pub current_revision: ItemRevision,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkippedFindingResult {
+    pub finding_id: FindingId,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct CompleteJobResponse {
     pub finding_count: usize,
 }
@@ -278,6 +297,11 @@ pub struct DispatchJobRequest {
 pub struct PromoteFindingRequest {
     pub target_ref: Option<GitRef>,
     pub approval_policy: Option<ApprovalPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BatchPromoteFindingsRequest {
+    pub finding_ids: Vec<FindingId>,
 }
 
 #[derive(Debug, Default, Deserialize)]

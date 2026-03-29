@@ -296,7 +296,8 @@ where
             }
             OutputArtifactKind::ValidationReport
             | OutputArtifactKind::ReviewReport
-            | OutputArtifactKind::FindingReport => {
+            | OutputArtifactKind::FindingReport
+            | OutputArtifactKind::InvestigationReport => {
                 let result_schema_version = command.result_schema_version.ok_or_else(|| {
                     missing_normalized_completion_field("report", "schema version")
                 })?;
@@ -394,7 +395,8 @@ fn normalize_completion_command(
         }
         OutputArtifactKind::ValidationReport
         | OutputArtifactKind::ReviewReport
-        | OutputArtifactKind::FindingReport => {
+        | OutputArtifactKind::FindingReport
+        | OutputArtifactKind::InvestigationReport => {
             if command.output_commit_oid.is_some() {
                 return Err(CompleteJobError::BadRequest {
                     code: "invalid_completion_artifact",

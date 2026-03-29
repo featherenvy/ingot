@@ -8,4 +8,4 @@ pub use evaluator::{
 };
 pub use graph::WorkflowGraph;
 pub use recommended_action::{NamedRecommendedAction, RecommendedAction};
-pub use step::{ClosureRelevance, DELIVERY_V1_STEPS, StepContract};
+pub use step::{ClosureRelevance, DELIVERY_V1_STEPS, INVESTIGATION_V1_STEPS, StepContract};

@@ -10,6 +10,7 @@ use crate::ids::{FindingId, ItemId, ItemRevisionId, ProjectId};
 pub enum Classification {
     Change,
     Bug,
+    Investigation,
 }
 
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
@@ -83,6 +84,9 @@ pub enum WorkflowVersion {
     #[serde(rename = "delivery:v1")]
     #[cfg_attr(feature = "sqlx", sqlx(rename = "delivery:v1"))]
     DeliveryV1,
+    #[serde(rename = "investigation:v1")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "investigation:v1"))]
+    InvestigationV1,
 }
 
 /// Item lifecycle state. Encodes the TLA+ invariant `DoneImpliesQuiescent`:

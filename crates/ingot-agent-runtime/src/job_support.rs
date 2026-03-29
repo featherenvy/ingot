@@ -57,7 +57,8 @@ pub(crate) fn is_supported_runtime_job(job: &Job) -> bool {
             ExecutionPermission::MustNotMutate,
             OutputArtifactKind::ReviewReport
                 | OutputArtifactKind::ValidationReport
-                | OutputArtifactKind::FindingReport,
+                | OutputArtifactKind::FindingReport
+                | OutputArtifactKind::InvestigationReport,
         ) | (
             WorkspaceKind::Authoring | WorkspaceKind::Integration,
             ExecutionPermission::DaemonOnly,
@@ -123,6 +124,12 @@ pub(crate) fn built_in_template(template_slug: &str, step_id: StepId) -> &'stati
         "investigate-item" => {
             "Investigate the current subject and produce a finding report only when there is a concrete issue worth tracking."
         }
+        "investigate-project" => {
+            "Investigate the repository to find issues and suggest improvements. Describe your investigation methodology in the scope block. Each finding must include a promotion block with a proposed item title, description, acceptance criteria, classification, and estimated scope."
+        }
+        "reinvestigate-project" => {
+            "Re-investigate the repository based on previous findings and triage feedback. Focus on areas flagged for further investigation. Do not re-report findings that were already dismissed. Describe your methodology in the scope block."
+        }
         _ => match step_id {
             StepId::AuthorInitial => {
                 "Implement the requested change directly in the repository. Keep the edit set focused on the acceptance criteria and preserve surrounding style."
@@ -145,6 +152,9 @@ pub(crate) fn built_in_template(template_slug: &str, step_id: StepId) -> &'stati
             }
             StepId::InvestigateItem => {
                 "Investigate the current subject and produce a finding report only when there is a concrete issue worth tracking."
+            }
+            StepId::InvestigateProject | StepId::ReinvestigateProject => {
+                "Investigate the repository to find issues and suggest improvements. Each finding must include a promotion block with a proposed item title, description, acceptance criteria, classification, and estimated scope."
             }
             _ => {
                 "Update the repository for the current authoring step and keep the change set narrowly scoped to the revision contract."

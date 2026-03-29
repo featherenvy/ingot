@@ -96,40 +96,58 @@ pub(super) async fn create_item(
         .await?
         .ok_or_else(|| UseCaseError::TargetRefUnresolved(target_ref.to_string()))?;
 
-    let seed_commit_oid =
-        validate_seed_commit_oid(&infra, project.id, request.seed_commit_oid).await?;
-    let seed_target_commit_oid = resolve_seed_target_commit_oid(
-        &infra,
-        project.id,
-        request.seed_target_commit_oid,
-        resolved_target_head,
-    )
-    .await?;
-    let seed = AuthoringBaseSeed::from_parts(seed_commit_oid, seed_target_commit_oid);
-
     let sort_key = next_project_sort_key(&state, project_id).await?;
+    let classification = request.classification.unwrap_or(Classification::Change);
 
-    let (item, revision) = create_manual_item(
-        &project,
-        CreateItemInput {
-            classification: request.classification.unwrap_or(Classification::Change),
-            priority: request.priority.unwrap_or(Priority::Major),
-            labels: request.labels.unwrap_or_default(),
-            operator_notes: request.operator_notes,
-            title: request.title,
-            description: request.description,
-            acceptance_criteria: request.acceptance_criteria,
-            target_ref,
-            approval_policy: request
-                .approval_policy
-                .unwrap_or(configured_approval_policy),
-            candidate_rework_budget: config.defaults.candidate_rework_budget,
-            integration_rework_budget: config.defaults.integration_rework_budget,
-            seed,
-        },
-        sort_key,
-        Utc::now(),
-    );
+    let (item, revision) = if classification == Classification::Investigation {
+        create_investigation_item(
+            &project,
+            CreateInvestigationInput {
+                title: request.title,
+                description: request.description,
+                target_ref,
+                priority: request.priority.unwrap_or(Priority::Major),
+                labels: request.labels.unwrap_or_default(),
+                operator_notes: request.operator_notes,
+                target_ref_head: resolved_target_head,
+            },
+            sort_key,
+            Utc::now(),
+        )
+    } else {
+        let seed_commit_oid =
+            validate_seed_commit_oid(&infra, project.id, request.seed_commit_oid).await?;
+        let seed_target_commit_oid = resolve_seed_target_commit_oid(
+            &infra,
+            project.id,
+            request.seed_target_commit_oid,
+            resolved_target_head,
+        )
+        .await?;
+        let seed = AuthoringBaseSeed::from_parts(seed_commit_oid, seed_target_commit_oid);
+
+        create_manual_item(
+            &project,
+            CreateItemInput {
+                classification,
+                priority: request.priority.unwrap_or(Priority::Major),
+                labels: request.labels.unwrap_or_default(),
+                operator_notes: request.operator_notes,
+                title: request.title,
+                description: request.description,
+                acceptance_criteria: request.acceptance_criteria,
+                target_ref,
+                approval_policy: request
+                    .approval_policy
+                    .unwrap_or(configured_approval_policy),
+                candidate_rework_budget: config.defaults.candidate_rework_budget,
+                integration_rework_budget: config.defaults.integration_rework_budget,
+                seed,
+            },
+            sort_key,
+            Utc::now(),
+        )
+    };
 
     state
         .db

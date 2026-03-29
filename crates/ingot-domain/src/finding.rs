@@ -29,6 +29,16 @@ pub enum FindingSeverity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
+pub enum EstimatedScope {
+    Small,
+    Medium,
+    Large,
+}
+
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
 pub enum FindingTriageState {
     Untriaged,
     FixNow,

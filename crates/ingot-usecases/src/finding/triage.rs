@@ -3,16 +3,29 @@ use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::finding::{Finding, FindingSubjectKind, FindingTriageState};
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::{ItemId, ItemRevisionId};
-use ingot_domain::item::{Classification, Escalation, Item, Lifecycle, Origin, ParkingState};
+use ingot_domain::item::{
+    Classification, Escalation, Item, Lifecycle, Origin, ParkingState, WorkflowVersion,
+};
 use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 
 use crate::UseCaseError;
-use crate::item::approval_state_for_policy;
+use crate::item::{
+    approval_state_for_policy, default_policy_snapshot, default_template_map_snapshot,
+};
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct BacklogFindingOverrides {
     pub target_ref: Option<GitRef>,
     pub approval_policy: Option<ApprovalPolicy>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PromotionOverrides {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub acceptance_criteria: Option<String>,
+    pub classification: Option<Classification>,
+    pub workflow_version: Option<WorkflowVersion>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +92,26 @@ pub fn backlog_finding(
     sort_key: String,
     triage_note: Option<String>,
 ) -> Result<(Item, ItemRevision, Finding), UseCaseError> {
+    backlog_finding_with_promotion(
+        finding,
+        source_item,
+        source_revision,
+        overrides,
+        sort_key,
+        triage_note,
+        None,
+    )
+}
+
+pub fn backlog_finding_with_promotion(
+    finding: &Finding,
+    source_item: &Item,
+    source_revision: &ItemRevision,
+    overrides: BacklogFindingOverrides,
+    sort_key: String,
+    triage_note: Option<String>,
+    promotion: Option<PromotionOverrides>,
+) -> Result<(Item, ItemRevision, Finding), UseCaseError> {
     if !finding.triage.is_unresolved() {
         return Err(UseCaseError::FindingNotTriageable);
     }
@@ -117,11 +150,32 @@ pub fn backlog_finding(
         })
         .unwrap_or_default();
 
+    let promotion = promotion.unwrap_or_default();
+    let linked_classification = promotion.classification.unwrap_or(Classification::Bug);
+    let linked_workflow_version = promotion
+        .workflow_version
+        .unwrap_or(WorkflowVersion::DeliveryV1);
+
+    // When promoting to a different workflow version than the source, use the
+    // default policy/template snapshots for the target workflow.
+    let (policy_snapshot, template_map_snapshot) =
+        if linked_workflow_version != source_item.workflow_version {
+            (
+                default_policy_snapshot(approval_policy, 0, 0),
+                default_template_map_snapshot(),
+            )
+        } else {
+            (
+                source_revision.policy_snapshot.clone(),
+                source_revision.template_map_snapshot.clone(),
+            )
+        };
+
     let linked_item = Item {
         id: item_id,
         project_id: source_item.project_id,
-        classification: Classification::Bug,
-        workflow_version: source_item.workflow_version,
+        classification: linked_classification,
+        workflow_version: linked_workflow_version,
         lifecycle: Lifecycle::Open,
         parking_state: ParkingState::Active,
         approval_state: approval_state_for_policy(approval_policy),
@@ -138,30 +192,34 @@ pub fn backlog_finding(
         updated_at: created_at,
     };
 
+    let default_description = if evidence_lines.is_empty() {
+        finding.summary.clone()
+    } else {
+        format!(
+            "{}\n\nEvidence:\n{}",
+            finding.summary,
+            evidence_lines.join("\n")
+        )
+    };
+
     let linked_revision = ItemRevision {
         id: revision_id,
         item_id,
         revision_no: 1,
-        title: finding.summary.clone(),
-        description: if evidence_lines.is_empty() {
-            finding.summary.clone()
-        } else {
+        title: promotion.title.unwrap_or_else(|| finding.summary.clone()),
+        description: promotion.description.unwrap_or(default_description),
+        acceptance_criteria: promotion.acceptance_criteria.unwrap_or_else(|| {
             format!(
-                "{}\n\nEvidence:\n{}",
-                finding.summary,
-                evidence_lines.join("\n")
+                "Resolve finding {} and validate that it no longer reproduces.",
+                finding.code
             )
-        },
-        acceptance_criteria: format!(
-            "Resolve finding {} and validate that it no longer reproduces.",
-            finding.code
-        ),
+        }),
         target_ref: overrides
             .target_ref
             .unwrap_or_else(|| source_revision.target_ref.clone()),
         approval_policy,
-        policy_snapshot: source_revision.policy_snapshot.clone(),
-        template_map_snapshot: source_revision.template_map_snapshot.clone(),
+        policy_snapshot,
+        template_map_snapshot,
         seed: AuthoringBaseSeed::Explicit {
             seed_commit_oid: finding.source_subject_head_commit_oid.clone(),
             seed_target_commit_oid: match finding.source_subject_kind {

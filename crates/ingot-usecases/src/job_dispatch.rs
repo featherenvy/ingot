@@ -221,6 +221,9 @@ fn job_input_for_step(
         StepId::InvestigateItem => prepared_convergence
             .map(|convergence| job_input_from_prepared_convergence(convergence, false))
             .unwrap_or_else(|| job_input_from_range(seed_head, current_head, false)),
+        StepId::InvestigateProject | StepId::ReinvestigateProject => seed_head
+            .map(JobInput::authoring_head)
+            .unwrap_or(JobInput::None),
         StepId::ValidateIntegrated => prepared_convergence
             .map(|convergence| job_input_from_prepared_convergence(convergence, true))
             .unwrap_or(JobInput::None),

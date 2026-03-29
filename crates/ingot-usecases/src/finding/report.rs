@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use chrono::Utc;
 use ingot_agent_protocol::report::{
-    self, FindingReportV1, FindingV1, ReviewReportV1, ValidationCheckV1, ValidationReportV1,
+    self, FindingReportV1, FindingV1, InvestigationReportV1, ReviewReportV1, ValidationCheckV1,
+    ValidationReportV1,
 };
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::finding::{Finding, FindingSubjectKind, FindingTriage};
@@ -72,6 +73,25 @@ pub fn extract_findings(
             let outcome_class =
                 validate_finding_report(&report.outcome, &report.findings, &report.summary)?;
             (outcome_class, report.findings)
+        }
+        report::INVESTIGATION_REPORT_V1 => {
+            let report: InvestigationReportV1 = serde_json::from_value(result_payload.clone())
+                .map_err(|err| UseCaseError::ProtocolViolation(err.to_string()))?;
+            let standard_findings: Vec<FindingV1> = report
+                .findings
+                .into_iter()
+                .map(|f| FindingV1 {
+                    finding_key: f.finding_key,
+                    code: f.code,
+                    severity: f.severity,
+                    summary: f.summary,
+                    paths: f.paths,
+                    evidence: f.evidence,
+                })
+                .collect();
+            let outcome_class =
+                validate_finding_report(&report.outcome, &standard_findings, &report.summary)?;
+            (outcome_class, standard_findings)
         }
         _ => {
             return Ok(ExtractedFindings {

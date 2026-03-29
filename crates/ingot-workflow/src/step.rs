@@ -100,6 +100,24 @@ const fn system_step(step_id: StepId) -> StepContract {
     }
 }
 
+const fn investigation_step(step_id: StepId, template_slug: &'static str) -> StepContract {
+    StepContract {
+        step_id,
+        phase_kind: PhaseKind::Investigate,
+        workspace_kind: WorkspaceKind::Review,
+        execution_permission: ExecutionPermission::MustNotMutate,
+        context_policy: ContextPolicy::Fresh,
+        output_artifact_kind: OutputArtifactKind::InvestigationReport,
+        closure_relevance: ClosureRelevance::ClosureRelevant,
+        default_template_slug: Some(template_slug),
+    }
+}
+
+pub static INVESTIGATION_V1_STEPS: &[StepContract] = &[
+    investigation_step(StepId::InvestigateProject, "investigate-project"),
+    investigation_step(StepId::ReinvestigateProject, "reinvestigate-project"),
+];
+
 pub static DELIVERY_V1_STEPS: &[StepContract] = &[
     author_step(
         StepId::AuthorInitial,
@@ -144,6 +162,7 @@ pub static DELIVERY_V1_STEPS: &[StepContract] = &[
 pub fn find_step(step_id: StepId) -> &'static StepContract {
     DELIVERY_V1_STEPS
         .iter()
+        .chain(INVESTIGATION_V1_STEPS.iter())
         .find(|s| s.step_id == step_id)
         .expect("all StepId variants must have a workflow contract")
 }

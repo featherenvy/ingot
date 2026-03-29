@@ -1,3 +1,6 @@
+use ingot_usecases::finding::{BatchPromoteInput, batch_promote_findings};
+use ingot_usecases::item::next_sort_key_after;
+
 use super::deps::*;
 use super::dispatch::auto_dispatch_projected_review_job_locked;
 use super::support::{
@@ -22,6 +25,10 @@ pub(super) fn routes() -> Router<AppState> {
         .route(
             "/api/findings/{finding_id}/dismiss",
             post(dismiss_item_finding),
+        )
+        .route(
+            "/api/projects/{project_id}/findings/batch-promote",
+            post(batch_promote_findings_handler),
         )
 }
 
@@ -108,6 +115,129 @@ pub(super) async fn promote_item_from_finding(
         current_revision,
         finding: applied.finding,
     }))
+}
+
+pub(super) async fn batch_promote_findings_handler(
+    State(state): State<AppState>,
+    ApiPath(ProjectPathParams { project_id }): ApiPath<ProjectPathParams>,
+    Json(request): Json<BatchPromoteFindingsRequest>,
+) -> Result<Json<BatchPromoteFindingsResponse>, ApiError> {
+    if request.finding_ids.is_empty() {
+        return Ok(Json(BatchPromoteFindingsResponse {
+            promoted: vec![],
+            skipped: vec![],
+        }));
+    }
+
+    let _project = state
+        .db
+        .get_project(project_id)
+        .await
+        .map_err(repo_to_project)?;
+    let _guard = state
+        .project_locks
+        .acquire_project_mutation(project_id)
+        .await;
+
+    // Load the first finding to determine the source item/revision.
+    let first_finding = state
+        .db
+        .get_finding(request.finding_ids[0])
+        .await
+        .map_err(repo_to_finding)?;
+    let source_item = state
+        .db
+        .get_item(first_finding.source_item_id)
+        .await
+        .map_err(repo_to_item)?;
+    if source_item.project_id != project_id {
+        return Err(UseCaseError::ItemNotFound.into());
+    }
+    let source_revision = state
+        .db
+        .get_revision(first_finding.source_item_revision_id)
+        .await
+        .map_err(repo_to_internal)?;
+    let findings = state
+        .db
+        .list_findings_by_item(source_item.id)
+        .await
+        .map_err(repo_to_internal)?;
+    let source_jobs = state
+        .db
+        .list_jobs_by_item(source_item.id)
+        .await
+        .map_err(repo_to_internal)?;
+
+    // Generate sequential sort keys for new items.
+    let base_sort_key = next_project_sort_key(&state, project_id).await?;
+    let mut last_sort_key = base_sort_key;
+    let mut sort_key_fn = || {
+        let key = next_sort_key_after(Some(&last_sort_key));
+        last_sort_key = key.clone();
+        key
+    };
+
+    let output = batch_promote_findings(
+        &findings,
+        &source_item,
+        &source_revision,
+        &source_jobs,
+        BatchPromoteInput {
+            finding_ids: request.finding_ids,
+        },
+        &mut sort_key_fn,
+    )?;
+
+    // Persist all promoted findings.
+    for result in &output.promoted {
+        state
+            .db
+            .link_backlog_finding(
+                &result.triaged_finding,
+                &result.linked_item,
+                &result.linked_revision,
+                None,
+            )
+            .await
+            .map_err(repo_to_internal)?;
+
+        append_activity(
+            &state,
+            project_id,
+            ActivityEventType::FindingTriaged,
+            ActivitySubject::Finding(result.finding_id),
+            serde_json::json!({
+                "item_id": source_item.id,
+                "triage_state": result.triaged_finding.triage.state(),
+                "linked_item_id": result.linked_item.id,
+                "batch": true,
+            }),
+        )
+        .await?;
+    }
+
+    let response = BatchPromoteFindingsResponse {
+        promoted: output
+            .promoted
+            .into_iter()
+            .map(|r| PromotedFindingResult {
+                finding_id: r.finding_id,
+                item: r.linked_item,
+                current_revision: r.linked_revision,
+            })
+            .collect(),
+        skipped: output
+            .skipped
+            .into_iter()
+            .map(|s| SkippedFindingResult {
+                finding_id: s.finding_id,
+                reason: s.reason,
+            })
+            .collect(),
+    };
+
+    Ok(Json(response))
 }
 
 pub(super) async fn apply_finding_triage(

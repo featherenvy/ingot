@@ -104,6 +104,7 @@ pub enum OutputArtifactKind {
     ReviewReport,
     ValidationReport,
     FindingReport,
+    InvestigationReport,
     None,
 }
 

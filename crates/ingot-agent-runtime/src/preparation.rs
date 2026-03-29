@@ -477,7 +477,8 @@ impl JobDispatcher {
             }
             OutputArtifactKind::ReviewReport
             | OutputArtifactKind::ValidationReport
-            | OutputArtifactKind::FindingReport => {
+            | OutputArtifactKind::FindingReport
+            | OutputArtifactKind::InvestigationReport => {
                 prompt.push_str(
                     "Protocol:\n- Do not modify files, create commits, rebase, merge, cherry-pick, or move refs.\n- Inspect the current workspace subject and produce only the canonical structured report for this step.\n- Any non-core data must go under `extensions`.\n",
                 );

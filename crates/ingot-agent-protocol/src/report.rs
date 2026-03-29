@@ -15,6 +15,7 @@ use serde::Deserialize;
 pub const VALIDATION_REPORT_V1: &str = "validation_report:v1";
 pub const REVIEW_REPORT_V1: &str = "review_report:v1";
 pub const FINDING_REPORT_V1: &str = "finding_report:v1";
+pub const INVESTIGATION_REPORT_V1: &str = "investigation_report:v1";
 
 // ── Schema version lookup ───────────────────────────────────────────────────
 
@@ -25,6 +26,7 @@ pub fn schema_version(kind: OutputArtifactKind) -> Option<&'static str> {
         OutputArtifactKind::ValidationReport => Some(VALIDATION_REPORT_V1),
         OutputArtifactKind::ReviewReport => Some(REVIEW_REPORT_V1),
         OutputArtifactKind::FindingReport => Some(FINDING_REPORT_V1),
+        OutputArtifactKind::InvestigationReport => Some(INVESTIGATION_REPORT_V1),
         _ => None,
     }
 }
@@ -39,6 +41,7 @@ pub fn output_schema(kind: OutputArtifactKind) -> Option<serde_json::Value> {
         OutputArtifactKind::ValidationReport => Some(validation_report_schema()),
         OutputArtifactKind::ReviewReport => Some(review_report_schema()),
         OutputArtifactKind::FindingReport => Some(finding_report_schema()),
+        OutputArtifactKind::InvestigationReport => Some(investigation_report_schema()),
         OutputArtifactKind::None => None,
     }
 }
@@ -221,6 +224,66 @@ pub fn finding_report_schema() -> serde_json::Value {
     })
 }
 
+pub fn investigation_report_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "outcome": { "type": "string", "enum": ["clean", "findings"] },
+            "summary": { "type": "string" },
+            "scope": {
+                "type": "object",
+                "properties": {
+                    "description": { "type": "string" },
+                    "paths_examined": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "methodology": { "type": "string" }
+                },
+                "required": ["description", "paths_examined", "methodology"],
+                "additionalProperties": false
+            },
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "finding_key": { "type": "string" },
+                        "code": { "type": "string" },
+                        "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+                        "summary": { "type": "string" },
+                        "paths": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "evidence": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "promotion": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string", "maxLength": 120 },
+                                "description": { "type": "string" },
+                                "acceptance_criteria": { "type": "string" },
+                                "classification": { "type": "string", "enum": ["change", "bug"] },
+                                "estimated_scope": { "type": "string", "enum": ["small", "medium", "large"] }
+                            },
+                            "required": ["title", "description", "acceptance_criteria", "classification", "estimated_scope"],
+                            "additionalProperties": false
+                        },
+                        "group_key": { "type": ["string", "null"] }
+                    },
+                    "required": ["finding_key", "code", "severity", "summary", "paths", "evidence", "promotion"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["outcome", "summary", "scope", "findings"],
+        "additionalProperties": false
+    })
+}
+
 // ── Prompt suffix ───────────────────────────────────────────────────────────
 
 /// Instruction text appended to the agent prompt for report-producing jobs.
@@ -234,6 +297,9 @@ pub fn prompt_suffix(kind: OutputArtifactKind) -> &'static str {
         }
         OutputArtifactKind::FindingReport => {
             "Return JSON matching `finding_report:v1` with keys `outcome`, `summary`, `findings`, and `extensions`. Set `extensions` to null when unused."
+        }
+        OutputArtifactKind::InvestigationReport => {
+            "Return JSON matching `investigation_report:v1` with keys `outcome`, `summary`, `scope`, and `findings`. The `scope` object must include `description`, `paths_examined`, and `methodology`. Each finding must include a `promotion` object with `title`, `description`, `acceptance_criteria`, `classification` (\"change\" or \"bug\"), and `estimated_scope` (\"small\", \"medium\", or \"large\"). Use `outcome=clean` only when there are no findings."
         }
         _ => "",
     }
@@ -318,4 +384,57 @@ pub enum ReviewOverallRisk {
     Low,
     Medium,
     High,
+}
+
+// ── Investigation report v1 types ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct InvestigationReportV1 {
+    pub outcome: String,
+    pub summary: String,
+    pub scope: InvestigationScopeV1,
+    pub findings: Vec<InvestigationFindingV1>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InvestigationScopeV1 {
+    pub description: String,
+    pub paths_examined: Vec<String>,
+    pub methodology: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InvestigationFindingV1 {
+    pub finding_key: String,
+    pub code: String,
+    pub severity: FindingSeverity,
+    pub summary: String,
+    pub paths: Vec<String>,
+    pub evidence: Vec<String>,
+    pub promotion: InvestigationPromotionV1,
+    pub group_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InvestigationPromotionV1 {
+    pub title: String,
+    pub description: String,
+    pub acceptance_criteria: String,
+    pub classification: InvestigationClassification,
+    pub estimated_scope: InvestigationEstimatedScope,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvestigationClassification {
+    Change,
+    Bug,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvestigationEstimatedScope {
+    Small,
+    Medium,
+    Large,
 }

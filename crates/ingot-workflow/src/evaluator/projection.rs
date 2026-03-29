@@ -1,6 +1,6 @@
 use ingot_domain::convergence::Convergence;
 use ingot_domain::finding::{Finding, FindingTriageState};
-use ingot_domain::item::{ApprovalState, Item, ParkingState};
+use ingot_domain::item::{ApprovalState, Item, ParkingState, WorkflowVersion};
 use ingot_domain::job::{Job, JobStatus, OutcomeClass};
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
 use ingot_domain::step_id::StepId;
@@ -238,6 +238,10 @@ pub(super) fn auxiliary_steps(
     next_action: &RecommendedAction,
     phase_status: PhaseStatus,
 ) -> Vec<StepId> {
+    if item.workflow_version == WorkflowVersion::InvestigationV1 {
+        return vec![];
+    }
+
     if !item.lifecycle.is_open()
         || item.parking_state != ParkingState::Active
         || item.approval_state == ApprovalState::Pending

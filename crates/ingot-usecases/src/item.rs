@@ -1,11 +1,12 @@
 use chrono::{DateTime, Utc};
+use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::item::{
     ApprovalState, Classification, Escalation, Item, Lifecycle, Origin, ParkingState, Priority,
     WorkflowVersion,
 };
 use ingot_domain::project::Project;
 use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
-use ingot_workflow::step::DELIVERY_V1_STEPS;
+use ingot_workflow::step::{DELIVERY_V1_STEPS, INVESTIGATION_V1_STEPS};
 use serde_json::{Map, Value, json};
 
 use ingot_domain::git_ref::GitRef;
@@ -113,6 +114,68 @@ pub fn create_manual_item(
     (item, revision)
 }
 
+#[derive(Debug, Clone)]
+pub struct CreateInvestigationInput {
+    pub title: String,
+    pub description: String,
+    pub target_ref: GitRef,
+    pub priority: Priority,
+    pub labels: Vec<String>,
+    pub operator_notes: Option<String>,
+    pub target_ref_head: CommitOid,
+}
+
+pub fn create_investigation_item(
+    project: &Project,
+    input: CreateInvestigationInput,
+    sort_key: String,
+    created_at: DateTime<Utc>,
+) -> (Item, ItemRevision) {
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let approval_policy = ApprovalPolicy::NotRequired;
+
+    let item = Item {
+        id: item_id,
+        project_id: project.id,
+        classification: Classification::Investigation,
+        workflow_version: WorkflowVersion::InvestigationV1,
+        lifecycle: Lifecycle::Open,
+        parking_state: ParkingState::Active,
+        approval_state: approval_state_for_policy(approval_policy),
+        escalation: Escalation::None,
+        current_revision_id: revision_id,
+        origin: Origin::Manual,
+        priority: input.priority,
+        labels: input.labels,
+        operator_notes: input.operator_notes,
+        sort_key,
+        created_at,
+        updated_at: created_at,
+    };
+
+    let revision = ItemRevision {
+        id: revision_id,
+        item_id,
+        revision_no: 1,
+        title: input.title,
+        description: input.description,
+        acceptance_criteria: "Produce structured findings for triage".to_string(),
+        target_ref: input.target_ref,
+        approval_policy,
+        policy_snapshot: investigation_policy_snapshot(),
+        template_map_snapshot: investigation_template_map_snapshot(),
+        seed: AuthoringBaseSeed::Explicit {
+            seed_commit_oid: input.target_ref_head.clone(),
+            seed_target_commit_oid: input.target_ref_head,
+        },
+        supersedes_revision_id: None,
+        created_at,
+    };
+
+    (item, revision)
+}
+
 pub fn approval_state_for_policy(approval_policy: ApprovalPolicy) -> ApprovalState {
     match approval_policy {
         ApprovalPolicy::Required => ApprovalState::NotRequested,
@@ -144,6 +207,27 @@ pub fn default_policy_snapshot(
 
 pub fn default_template_map_snapshot() -> Value {
     let map = DELIVERY_V1_STEPS
+        .iter()
+        .filter_map(|step| {
+            step.default_template_slug
+                .map(|slug| (step.step_id.to_string(), Value::String(slug.to_string())))
+        })
+        .collect::<Map<String, Value>>();
+
+    Value::Object(map)
+}
+
+pub fn investigation_policy_snapshot() -> Value {
+    json!({
+        "workflow_version": WorkflowVersion::InvestigationV1,
+        "approval_policy": ApprovalPolicy::NotRequired,
+        "candidate_rework_budget": 0,
+        "integration_rework_budget": 0,
+    })
+}
+
+pub fn investigation_template_map_snapshot() -> Value {
+    let map = INVESTIGATION_V1_STEPS
         .iter()
         .filter_map(|step| {
             step.default_template_slug

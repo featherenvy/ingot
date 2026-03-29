@@ -1,10 +1,11 @@
+mod investigation;
 mod projection;
 #[cfg(test)]
 mod tests;
 
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::finding::Finding;
-use ingot_domain::item::{ApprovalState, Item, ParkingState};
+use ingot_domain::item::{ApprovalState, Item, ParkingState, WorkflowVersion};
 use ingot_domain::job::{Job, PhaseKind};
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::step_id::StepId;
@@ -82,7 +83,8 @@ pub struct Evaluation {
 }
 
 pub struct Evaluator {
-    graph: WorkflowGraph,
+    delivery_graph: WorkflowGraph,
+    investigation_graph: WorkflowGraph,
 }
 
 impl Default for Evaluator {
@@ -94,7 +96,8 @@ impl Default for Evaluator {
 impl Evaluator {
     pub fn new() -> Self {
         Self {
-            graph: WorkflowGraph::delivery_v1(),
+            delivery_graph: WorkflowGraph::delivery_v1(),
+            investigation_graph: WorkflowGraph::investigation_v1(),
         }
     }
 
@@ -135,6 +138,18 @@ impl Evaluator {
             };
         }
 
+        if item.workflow_version == WorkflowVersion::InvestigationV1 {
+            return investigation::evaluate_investigation(
+                &self.investigation_graph,
+                item,
+                revision,
+                jobs,
+                findings,
+                attention_badges,
+                diagnostics,
+            );
+        }
+
         let current_revision_jobs: Vec<&Job> = jobs
             .iter()
             .filter(|job| job.item_revision_id == item.current_revision_id)
@@ -172,7 +187,7 @@ impl Evaluator {
 
             if is_report_only {
                 let base = evaluate_idle_projection(
-                    &self.graph,
+                    &self.delivery_graph,
                     item,
                     revision,
                     latest_closure_job,
@@ -243,7 +258,7 @@ impl Evaluator {
         }
 
         let base = evaluate_idle_projection(
-            &self.graph,
+            &self.delivery_graph,
             item,
             revision,
             latest_closure_job,

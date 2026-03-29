@@ -176,6 +176,24 @@ impl WorkflowGraph {
         }
     }
 
+    /// Build the investigation:v1 workflow graph.
+    pub fn investigation_v1() -> Self {
+        Self {
+            transitions: vec![
+                Transition::step(
+                    StepId::InvestigateProject,
+                    TransitionOutcome::Findings,
+                    StepId::ReinvestigateProject,
+                ),
+                Transition::step(
+                    StepId::ReinvestigateProject,
+                    TransitionOutcome::Findings,
+                    StepId::ReinvestigateProject,
+                ),
+            ],
+        }
+    }
+
     /// Find the next step given a completed step and its outcome.
     pub fn next_step(
         &self,

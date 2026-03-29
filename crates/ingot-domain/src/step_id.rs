@@ -24,6 +24,8 @@ pub enum StepId {
     ReviewIncrementalAfterIntegrationRepair,
     ReviewAfterIntegrationRepair,
     ValidateAfterIntegrationRepair,
+    InvestigateProject,
+    ReinvestigateProject,
 }
 
 impl StepId {
@@ -47,6 +49,8 @@ impl StepId {
             }
             Self::ReviewAfterIntegrationRepair => "review_after_integration_repair",
             Self::ValidateAfterIntegrationRepair => "validate_after_integration_repair",
+            Self::InvestigateProject => "investigate_project",
+            Self::ReinvestigateProject => "reinvestigate_project",
         }
     }
 }
@@ -107,6 +111,8 @@ impl FromStr for StepId {
             }
             "review_after_integration_repair" => Ok(Self::ReviewAfterIntegrationRepair),
             "validate_after_integration_repair" => Ok(Self::ValidateAfterIntegrationRepair),
+            "investigate_project" => Ok(Self::InvestigateProject),
+            "reinvestigate_project" => Ok(Self::ReinvestigateProject),
             _ => Err(ParseStepIdError {
                 value: value.to_owned(),
             }),

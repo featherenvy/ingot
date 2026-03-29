@@ -328,7 +328,10 @@ impl JobDispatcher {
             OutputArtifactKind::Commit => self.finish_commit_run(prepared, response).await,
             OutputArtifactKind::ReviewReport
             | OutputArtifactKind::ValidationReport
-            | OutputArtifactKind::FindingReport => self.finish_report_run(prepared, response).await,
+            | OutputArtifactKind::FindingReport
+            | OutputArtifactKind::InvestigationReport => {
+                self.finish_report_run(prepared, response).await
+            }
             OutputArtifactKind::None => {
                 self.fail_run(
                     &prepared,
