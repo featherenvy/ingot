@@ -6,7 +6,7 @@ use crate::test_support::{
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_domain::commit_oid::CommitOid;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,7 +17,6 @@ use tokio::sync::Semaphore;
 use tokio::task::{Id as TaskId, JoinSet};
 
 use ingot_domain::activity::ActivityEventType;
-use ingot_domain::agent::AgentCapability;
 use ingot_domain::finding::FindingSeverity;
 use ingot_domain::item::ApprovalState;
 use ingot_domain::job::{
@@ -29,18 +28,28 @@ use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode}
 use ingot_domain::revision::ApprovalPolicy;
 use ingot_domain::step_id::StepId;
 use ingot_domain::test_support::{
-    AgentBuilder, ConvergenceQueueEntryBuilder, FindingBuilder, ItemBuilder, JobBuilder,
-    ProjectBuilder, RevisionBuilder, default_timestamp,
+    ConvergenceQueueEntryBuilder, FindingBuilder, ItemBuilder, JobBuilder, ProjectBuilder,
+    RevisionBuilder, default_timestamp,
 };
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
 use ingot_test_support::git::{run_git as git_sync, temp_git_repo, unique_temp_path};
-use ingot_test_support::sqlite::migrated_test_db;
 use ingot_usecases::convergence::ConvergenceSystemActionPort;
 use ingot_usecases::job_lifecycle;
 use sqlx::query;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use tokio::sync::Notify;
+
+#[allow(dead_code)]
+mod shared_harness {
+    use crate as runtime_crate;
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/common/shared_harness.rs"
+    ));
+}
+
+use shared_harness::{BlockingRunner, TestHarness as TestRuntimeHarness};
 
 #[test]
 fn commit_and_report_schemas_require_every_declared_property() {
@@ -144,69 +153,6 @@ async fn drain_until_idle_returns_first_error() {
     assert!(script.lock().expect("script lock").is_empty());
 }
 
-#[derive(Default)]
-struct BlockingRunnerState {
-    launches: usize,
-    release_budget: usize,
-}
-
-#[derive(Clone, Default)]
-struct BlockingRunner {
-    state: Arc<Mutex<BlockingRunnerState>>,
-    launch_notify: Arc<Notify>,
-    release_notify: Arc<Notify>,
-}
-
-impl BlockingRunner {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn launch_count(&self) -> usize {
-        self.state.lock().expect("blocking runner state").launches
-    }
-}
-
-impl AgentRunner for BlockingRunner {
-    fn launch<'a>(
-        &'a self,
-        _agent: &'a Agent,
-        _request: &'a AgentRequest,
-        _working_dir: &'a Path,
-    ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
-        Box::pin(async move {
-            {
-                let mut state = self.state.lock().expect("blocking runner state");
-                state.launches += 1;
-            }
-            self.launch_notify.notify_waiters();
-
-            loop {
-                let can_release = {
-                    let mut state = self.state.lock().expect("blocking runner state");
-                    if state.release_budget > 0 {
-                        state.release_budget -= 1;
-                        true
-                    } else {
-                        false
-                    }
-                };
-                if can_release {
-                    break;
-                }
-                self.release_notify.notified().await;
-            }
-
-            Ok(AgentResponse {
-                exit_code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-                result: Some(serde_json::json!({ "message": "implemented change" })),
-            })
-        })
-    }
-}
-
 #[derive(Clone)]
 struct StaticResponseRunner {
     response: AgentResponse,
@@ -226,61 +172,6 @@ impl AgentRunner for StaticResponseRunner {
         _working_dir: &'a Path,
     ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
         Box::pin(async move { Ok(self.response.clone()) })
-    }
-}
-
-struct TestRuntimeHarness {
-    db: Database,
-    dispatcher: JobDispatcher,
-    dispatch_notify: DispatchNotify,
-    project: Project,
-    repo_path: PathBuf,
-}
-
-impl TestRuntimeHarness {
-    async fn new(runner: Arc<dyn AgentRunner>) -> Self {
-        Self::with_config(runner, None).await
-    }
-
-    async fn with_config(runner: Arc<dyn AgentRunner>, config: Option<DispatcherConfig>) -> Self {
-        let repo_path = temp_git_repo("ingot-runtime-lib");
-        let db = migrated_test_db("ingot-runtime-lib").await;
-        let state_root = unique_temp_path("ingot-runtime-lib-state");
-        let config = config.unwrap_or_else(|| DispatcherConfig::new(state_root));
-        let dispatch_notify = DispatchNotify::default();
-        let dispatcher = JobDispatcher::with_runner(
-            db.clone(),
-            ProjectLocks::default(),
-            config,
-            runner,
-            dispatch_notify.clone(),
-        );
-        let project = ProjectBuilder::new(&repo_path)
-            .created_at(default_timestamp())
-            .build();
-        db.create_project(&project).await.expect("create project");
-
-        Self {
-            db,
-            dispatcher,
-            dispatch_notify,
-            project,
-            repo_path,
-        }
-    }
-
-    async fn register_mutating_agent(&self) -> Agent {
-        let agent = AgentBuilder::new(
-            "codex",
-            vec![
-                AgentCapability::MutatingJobs,
-                AgentCapability::ReadOnlyJobs,
-                AgentCapability::StructuredOutput,
-            ],
-        )
-        .build();
-        self.db.create_agent(&agent).await.expect("create agent");
-        agent
     }
 }
 
@@ -472,11 +363,7 @@ async fn run_with_heartbeats_claims_running_job_with_configured_lease_ttl() {
     assert!(lease_duration >= ChronoDuration::seconds(16));
 
     pause_hook.release();
-    {
-        let mut state = runner.state.lock().expect("blocking runner state");
-        state.release_budget = 1;
-    }
-    runner.release_notify.notify_waiters();
+    runner.release_one();
 
     let result = run_task.await.expect("join run_with_heartbeats task");
     assert!(matches!(result, AgentRunOutcome::Completed(_)));
@@ -756,12 +643,8 @@ async fn supervisor_does_not_launch_same_job_twice_during_pre_spawn_pause() {
     assert_eq!(running_job_ids.len(), 1);
     assert_eq!(runner.launch_count(), 0);
 
-    {
-        let mut state = runner.state.lock().expect("blocking runner state");
-        state.release_budget = 1;
-    }
     pause_hook.release();
-    runner.release_notify.notify_waiters();
+    runner.release_one();
 
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -1320,15 +1203,7 @@ async fn finish_report_run_reloads_project_before_auto_triage() {
     }));
     let harness = TestRuntimeHarness::new(runner).await;
 
-    let agent = AgentBuilder::new(
-        "codex-review",
-        vec![
-            AgentCapability::ReadOnlyJobs,
-            AgentCapability::StructuredOutput,
-        ],
-    )
-    .build();
-    harness.db.create_agent(&agent).await.expect("create agent");
+    harness.register_review_agent().await;
 
     let mut project = harness
         .db

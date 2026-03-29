@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ingot_agent_runtime::{AgentRunner, DispatcherConfig, JobDispatcher};
-use ingot_domain::agent::{Agent, AgentCapability};
+use ingot_domain::agent::Agent;
 use ingot_domain::job::{JobStatus, OutcomeClass};
 use ingot_domain::step_id::StepId;
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
@@ -104,14 +104,7 @@ async fn tick_executes_a_review_job_and_persists_structured_report() {
     let project = ProjectBuilder::new(&repo).build();
     db.create_project(&project).await.expect("create project");
 
-    let agent = AgentBuilder::new(
-        "codex-review",
-        vec![
-            AgentCapability::ReadOnlyJobs,
-            AgentCapability::StructuredOutput,
-        ],
-    )
-    .build();
+    let agent = agent_fixture("codex-review", TestAgentProfile::ReviewOnly);
     db.create_agent(&agent).await.expect("create agent");
 
     let item_id = ingot_domain::ids::ItemId::new();
@@ -246,15 +239,7 @@ async fn tick_runs_healthy_queued_job_even_when_another_project_is_broken() {
     let h = TestHarness::new(Arc::new(FakeRunner)).await;
 
     // Register agent with all capabilities
-    let agent = AgentBuilder::new(
-        "codex",
-        vec![
-            AgentCapability::MutatingJobs,
-            AgentCapability::ReadOnlyJobs,
-            AgentCapability::StructuredOutput,
-        ],
-    )
-    .build();
+    let agent = agent_fixture("codex", TestAgentProfile::Full);
     h.db.create_agent(&agent).await.expect("create agent");
 
     // Create a broken project with missing path

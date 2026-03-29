@@ -586,14 +586,7 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     db.create_project(&project).await.expect("create project");
 
-    let agent = AgentBuilder::new(
-        "codex",
-        vec![
-            ingot_domain::agent::AgentCapability::ReadOnlyJobs,
-            ingot_domain::agent::AgentCapability::StructuredOutput,
-        ],
-    )
-    .build();
+    let agent = agent_fixture("codex", TestAgentProfile::ReviewOnly);
     db.create_agent(&agent).await.expect("create agent");
 
     let item_id = ingot_domain::ids::ItemId::new();
@@ -710,14 +703,7 @@ async fn clean_candidate_review_auto_dispatches_candidate_validation() {
     let project = ProjectBuilder::new(&repo).created_at(created_at).build();
     db.create_project(&project).await.expect("create project");
 
-    let agent = AgentBuilder::new(
-        "codex",
-        vec![
-            ingot_domain::agent::AgentCapability::ReadOnlyJobs,
-            ingot_domain::agent::AgentCapability::StructuredOutput,
-        ],
-    )
-    .build();
+    let agent = agent_fixture("codex", TestAgentProfile::ReviewOnly);
     db.create_agent(&agent).await.expect("create agent");
 
     let item_id = ingot_domain::ids::ItemId::new();
