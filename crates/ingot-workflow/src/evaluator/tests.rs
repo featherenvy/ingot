@@ -369,6 +369,9 @@ fn test_job(
     let nil = Uuid::nil();
     let output_artifact_kind = match step_id {
         StepId::InvestigateItem => OutputArtifactKind::FindingReport,
+        StepId::InvestigateProject | StepId::ReinvestigateProject => {
+            OutputArtifactKind::InvestigationReport
+        }
         StepId::AuthorInitial | StepId::RepairCandidate | StepId::RepairAfterIntegration => {
             OutputArtifactKind::Commit
         }
@@ -406,6 +409,13 @@ fn test_prepared_convergence(target_head_valid: bool) -> ingot_domain::convergen
     .build()
 }
 
+fn investigation_item() -> ingot_domain::item::Item {
+    let mut item = nil_item();
+    item.classification = ingot_domain::item::Classification::Investigation;
+    item.workflow_version = ingot_domain::item::WorkflowVersion::InvestigationV1;
+    item
+}
+
 fn test_finding(job: &Job, triage_state: FindingTriageState) -> ingot_domain::finding::Finding {
     let mut builder = FindingBuilder::new(
         ProjectId::from_uuid(Uuid::nil()),
@@ -423,4 +433,239 @@ fn test_finding(job: &Job, triage_state: FindingTriageState) -> ingot_domain::fi
         builder = builder.triaged_at(Utc::now());
     }
     builder.build()
+}
+
+// ── Investigation workflow tests ──────────────────────────────────────────────
+
+#[test]
+fn investigation_new_item_dispatches_investigate_project() {
+    let evaluator = Evaluator::new();
+    let item = investigation_item();
+    let revision = test_revision(ApprovalPolicy::Required);
+
+    let evaluation = evaluator.evaluate(&item, &revision, &[], &[], &[]);
+
+    // finish() promotes Inbox -> Working when dispatchable_step_id is present
+    assert_eq!(evaluation.board_status, BoardStatus::Working);
+    assert_eq!(evaluation.phase_status, Some(PhaseStatus::New));
+    assert_eq!(
+        evaluation.dispatchable_step_id.map(StepId::as_str),
+        Some(StepId::InvestigateProject.as_str())
+    );
+    assert_eq!(
+        evaluation.next_recommended_action,
+        RecommendedAction::dispatch(StepId::InvestigateProject)
+    );
+}
+
+#[test]
+fn investigation_active_job_shows_running() {
+    let evaluator = Evaluator::new();
+    let item = investigation_item();
+    let revision = test_revision(ApprovalPolicy::Required);
+    let jobs = vec![test_job(
+        StepId::InvestigateProject,
+        PhaseKind::Investigate,
+        JobStatus::Running,
+        None,
+    )];
+
+    let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
+
+    assert_eq!(evaluation.board_status, BoardStatus::Working);
+    assert_eq!(evaluation.phase_status, Some(PhaseStatus::Running));
+    assert!(
+        evaluation
+            .allowed_actions
+            .contains(&super::AllowedAction::CancelJob)
+    );
+    assert_eq!(evaluation.dispatchable_step_id, None);
+}
+
+#[test]
+fn investigation_clean_outcome_shows_terminal_readiness() {
+    let evaluator = Evaluator::new();
+    let item = investigation_item();
+    let revision = test_revision(ApprovalPolicy::Required);
+    let jobs = vec![test_job(
+        StepId::InvestigateProject,
+        PhaseKind::Investigate,
+        JobStatus::Completed,
+        Some(OutcomeClass::Clean),
+    )];
+
+    let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
+
+    assert!(evaluation.terminal_readiness);
+    assert_eq!(evaluation.phase_status, Some(PhaseStatus::Idle));
+    assert_eq!(evaluation.board_status, BoardStatus::Working);
+    assert_eq!(evaluation.dispatchable_step_id, None);
+}
+
+#[test]
+fn investigation_findings_with_untriaged_shows_triaging() {
+    let evaluator = Evaluator::new();
+    let item = investigation_item();
+    let revision = test_revision(ApprovalPolicy::Required);
+    let job = test_job(
+        StepId::InvestigateProject,
+        PhaseKind::Investigate,
+        JobStatus::Completed,
+        Some(OutcomeClass::Findings),
+    );
+    let jobs = vec![job.clone()];
+    let findings = vec![test_finding(&job, FindingTriageState::Untriaged)];
+
+    let evaluation = evaluator.evaluate(&item, &revision, &jobs, &findings, &[]);
+
+    assert_eq!(evaluation.phase_status, Some(PhaseStatus::Triaging));
+    assert_eq!(
+        evaluation.next_recommended_action,
+        RecommendedAction::named(NamedRecommendedAction::TriageFindings)
+    );
+    assert_eq!(evaluation.dispatchable_step_id, None);
+}
+
+#[test]
+fn investigation_all_findings_triaged_non_blocking_shows_terminal() {
+    let evaluator = Evaluator::new();
+    let item = investigation_item();
+    let revision = test_revision(ApprovalPolicy::Required);
+    let job = test_job(
+        StepId::InvestigateProject,
+        PhaseKind::Investigate,
+        JobStatus::Completed,
+        Some(OutcomeClass::Findings),
+    );
+    let jobs = vec![job.clone()];
+    let findings = vec![test_finding(&job, FindingTriageState::WontFix)];
+
+    let evaluation = evaluator.evaluate(&item, &revision, &jobs, &findings, &[]);
+
+    assert!(evaluation.terminal_readiness);
+    assert_eq!(evaluation.phase_status, Some(PhaseStatus::Idle));
+    assert_eq!(evaluation.dispatchable_step_id, None);
+}
+
+#[test]
+fn investigation_fix_now_findings_dispatch_reinvestigate() {
+    let evaluator = Evaluator::new();
+    let item = investigation_item();
+    let revision = test_revision(ApprovalPolicy::Required);
+    let job = test_job(
+        StepId::InvestigateProject,
+        PhaseKind::Investigate,
+        JobStatus::Completed,
+        Some(OutcomeClass::Findings),
+    );
+    let jobs = vec![job.clone()];
+    let findings = vec![test_finding(&job, FindingTriageState::FixNow)];
+
+    let evaluation = evaluator.evaluate(&item, &revision, &jobs, &findings, &[]);
+
+    assert_eq!(
+        evaluation.dispatchable_step_id.map(StepId::as_str),
+        Some(StepId::ReinvestigateProject.as_str())
+    );
+    assert_eq!(
+        evaluation.next_recommended_action,
+        RecommendedAction::dispatch(StepId::ReinvestigateProject)
+    );
+}
+
+#[test]
+fn investigation_needs_investigation_shows_triaging() {
+    let evaluator = Evaluator::new();
+    let item = investigation_item();
+    let revision = test_revision(ApprovalPolicy::Required);
+    let job = test_job(
+        StepId::InvestigateProject,
+        PhaseKind::Investigate,
+        JobStatus::Completed,
+        Some(OutcomeClass::Findings),
+    );
+    let jobs = vec![job.clone()];
+    // NeedsInvestigation is_unresolved()==true, so it gates at the triage check
+    // just like Untriaged, requiring operator triage before dispatch.
+    let findings = vec![test_finding(&job, FindingTriageState::NeedsInvestigation)];
+
+    let evaluation = evaluator.evaluate(&item, &revision, &jobs, &findings, &[]);
+
+    assert_eq!(evaluation.phase_status, Some(PhaseStatus::Triaging));
+    assert_eq!(
+        evaluation.next_recommended_action,
+        RecommendedAction::named(NamedRecommendedAction::TriageFindings)
+    );
+    assert_eq!(evaluation.dispatchable_step_id, None);
+}
+
+#[test]
+fn investigation_escalated_shows_operator_intervention() {
+    let evaluator = Evaluator::new();
+    let mut item = investigation_item();
+    item.escalation = ingot_domain::item::Escalation::OperatorRequired {
+        reason: ingot_domain::item::EscalationReason::ManualDecisionRequired,
+    };
+    let revision = test_revision(ApprovalPolicy::Required);
+
+    let evaluation = evaluator.evaluate(&item, &revision, &[], &[], &[]);
+
+    assert_eq!(evaluation.phase_status, Some(PhaseStatus::Escalated));
+    assert_eq!(
+        evaluation.next_recommended_action,
+        RecommendedAction::named(NamedRecommendedAction::OperatorIntervention)
+    );
+    assert_eq!(evaluation.board_status, BoardStatus::Working);
+}
+
+#[test]
+fn investigation_deferred_shows_deferred() {
+    let evaluator = Evaluator::new();
+    let mut item = investigation_item();
+    item.parking_state = ingot_domain::item::ParkingState::Deferred;
+    let revision = test_revision(ApprovalPolicy::Required);
+
+    let evaluation = evaluator.evaluate(&item, &revision, &[], &[], &[]);
+
+    assert_eq!(evaluation.phase_status, Some(PhaseStatus::Deferred));
+    assert_eq!(evaluation.board_status, BoardStatus::Inbox);
+    assert_eq!(evaluation.next_recommended_action, RecommendedAction::None);
+    assert!(
+        evaluation
+            .allowed_actions
+            .contains(&super::AllowedAction::Resume)
+    );
+}
+
+#[test]
+fn investigation_items_have_no_auxiliary_steps() {
+    let evaluator = Evaluator::new();
+    let item = investigation_item();
+    let revision = test_revision(ApprovalPolicy::Required);
+
+    // New item — no jobs
+    let evaluation = evaluator.evaluate(&item, &revision, &[], &[], &[]);
+    assert!(evaluation.auxiliary_dispatchable_step_ids.is_empty());
+
+    // Completed clean job — idle state
+    let jobs = vec![test_job(
+        StepId::InvestigateProject,
+        PhaseKind::Investigate,
+        JobStatus::Completed,
+        Some(OutcomeClass::Clean),
+    )];
+    let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &[]);
+    assert!(evaluation.auxiliary_dispatchable_step_ids.is_empty());
+
+    // Findings with dispatch available
+    let job = test_job(
+        StepId::InvestigateProject,
+        PhaseKind::Investigate,
+        JobStatus::Completed,
+        Some(OutcomeClass::Findings),
+    );
+    let jobs = vec![job.clone()];
+    let findings = vec![test_finding(&job, FindingTriageState::FixNow)];
+    let evaluation = evaluator.evaluate(&item, &revision, &jobs, &findings, &[]);
+    assert!(evaluation.auxiliary_dispatchable_step_ids.is_empty());
 }
