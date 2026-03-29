@@ -16,7 +16,9 @@ use ingot_domain::step_id::StepId;
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
 use ingot_test_support::git::unique_temp_path;
-use ingot_test_support::reports::{clean_review_report, findings_review_report};
+use ingot_test_support::reports::{
+    clean_review_report, clean_validation_report, findings_review_report,
+};
 use ingot_usecases::DispatchNotify;
 use ingot_workspace::{provision_authoring_workspace, provision_integration_workspace};
 
@@ -305,6 +307,106 @@ async fn auto_dispatch_projected_review_rejects_missing_candidate_subject() {
         Err(RuntimeError::InvalidState(message))
             if message.contains("incomplete candidate subject")
     ));
+}
+
+#[tokio::test]
+async fn auto_dispatch_projected_review_dispatches_integrated_validation_for_prepared_convergence()
+{
+    let h = TestHarness::new(Arc::new(FakeRunner)).await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let target_head = head_oid(&h.repo_path)
+        .await
+        .expect("target head")
+        .into_inner();
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id).id(revision_id).build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let completed_validation = JobBuilder::new(
+        h.project.id,
+        item_id,
+        revision_id,
+        StepId::ValidateCandidateInitial,
+    )
+    .status(JobStatus::Completed)
+    .outcome_class(OutcomeClass::Clean)
+    .phase_kind(PhaseKind::Validate)
+    .workspace_kind(WorkspaceKind::Authoring)
+    .execution_permission(ExecutionPermission::DaemonOnly)
+    .context_policy(ContextPolicy::None)
+    .phase_template_slug("validate-candidate")
+    .job_input(JobInput::candidate_subject(
+        CommitOid::new("candidate-base"),
+        CommitOid::new("candidate-head"),
+    ))
+    .output_artifact_kind(OutputArtifactKind::ValidationReport)
+    .result_schema_version("validation_report:v1")
+    .result_payload(clean_validation_report("candidate clean"))
+    .build();
+    h.db.create_job(&completed_validation)
+        .await
+        .expect("create completed validation");
+
+    let source_workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Authoring)
+        .created_for_revision_id(revision_id)
+        .build();
+    h.db.create_workspace(&source_workspace)
+        .await
+        .expect("create source workspace");
+
+    let integration_workspace = WorkspaceBuilder::new(h.project.id, WorkspaceKind::Integration)
+        .created_for_revision_id(revision_id)
+        .build();
+    h.db.create_workspace(&integration_workspace)
+        .await
+        .expect("create integration workspace");
+
+    let convergence = ConvergenceBuilder::new(h.project.id, item_id, revision_id)
+        .source_workspace_id(source_workspace.id)
+        .integration_workspace_id(integration_workspace.id)
+        .input_target_commit_oid(target_head.clone())
+        .prepared_commit_oid("prepared-head")
+        .build();
+    h.db.create_convergence(&convergence)
+        .await
+        .expect("create prepared convergence");
+
+    let dispatched = h
+        .dispatcher
+        .auto_dispatch_projected_review_locked(&h.project, item_id)
+        .await
+        .expect("auto-dispatch projected validation");
+    assert!(
+        dispatched,
+        "prepared convergence should allow integrated validation"
+    );
+
+    let jobs = h.db.list_jobs_by_item(item.id).await.expect("jobs");
+    let validation_job = jobs
+        .iter()
+        .find(|job| job.step_id == StepId::ValidateIntegrated)
+        .expect("auto-dispatched integrated validation job");
+    assert_eq!(validation_job.state.status(), JobStatus::Queued);
+    assert_eq!(
+        validation_job
+            .job_input
+            .base_commit_oid()
+            .map(CommitOid::as_str),
+        Some(target_head.as_str())
+    );
+    assert_eq!(
+        validation_job
+            .job_input
+            .head_commit_oid()
+            .map(CommitOid::as_str),
+        Some("prepared-head")
+    );
 }
 
 #[tokio::test]

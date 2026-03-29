@@ -27,10 +27,11 @@ pub fn dispatch_job(
     command: DispatchJobCommand,
 ) -> Result<Job, UseCaseError> {
     ensure_item_dispatchable(item)?;
-    ensure_no_active_execution(item.current_revision_id, jobs, convergences)?;
+    ensure_no_active_jobs(item.current_revision_id, jobs)?;
 
     let evaluation = Evaluator::new().evaluate(item, revision, jobs, findings, convergences);
     let step_id = select_dispatch_step(&evaluation, command.step_id)?;
+    ensure_no_conflicting_convergence(step_id, item.current_revision_id, convergences)?;
     let contract = step::find_step(step_id);
 
     if !contract.is_dispatchable_job() {
@@ -80,7 +81,7 @@ pub fn retry_job(
         ));
     }
 
-    ensure_no_active_execution(item.current_revision_id, jobs, convergences)?;
+    ensure_no_active_jobs(item.current_revision_id, jobs)?;
 
     if !previous_job.state.is_terminal()
         || matches!(
@@ -114,6 +115,11 @@ pub fn retry_job(
             previous_job.step_id
         )));
     }
+    ensure_no_conflicting_convergence(
+        previous_job.step_id,
+        item.current_revision_id,
+        convergences,
+    )?;
 
     let template_slug = template_slug_for_step(
         revision,
@@ -248,10 +254,9 @@ fn ensure_item_dispatchable(item: &Item) -> Result<(), UseCaseError> {
     Ok(())
 }
 
-fn ensure_no_active_execution(
+fn ensure_no_active_jobs(
     revision_id: ingot_domain::ids::ItemRevisionId,
     jobs: &[Job],
-    convergences: &[Convergence],
 ) -> Result<(), UseCaseError> {
     if jobs
         .iter()
@@ -260,8 +265,28 @@ fn ensure_no_active_execution(
         return Err(UseCaseError::ActiveJobExists);
     }
 
+    Ok(())
+}
+
+fn ensure_no_conflicting_convergence(
+    step_id: StepId,
+    revision_id: ingot_domain::ids::ItemRevisionId,
+    convergences: &[Convergence],
+) -> Result<(), UseCaseError> {
     if convergences.iter().any(|convergence| {
-        convergence.item_revision_id == revision_id && convergence.state.is_active()
+        convergence.item_revision_id == revision_id
+            && match convergence.state.status() {
+                ingot_domain::convergence::ConvergenceStatus::Queued
+                | ingot_domain::convergence::ConvergenceStatus::Running => true,
+                ingot_domain::convergence::ConvergenceStatus::Prepared => !matches!(
+                    step_id,
+                    StepId::ValidateIntegrated | StepId::InvestigateItem
+                ),
+                ingot_domain::convergence::ConvergenceStatus::Conflicted
+                | ingot_domain::convergence::ConvergenceStatus::Finalized
+                | ingot_domain::convergence::ConvergenceStatus::Failed
+                | ingot_domain::convergence::ConvergenceStatus::Cancelled => false,
+            }
     }) {
         return Err(UseCaseError::ActiveConvergenceExists);
     }
@@ -291,7 +316,7 @@ mod tests {
         ContextPolicy, ExecutionPermission, JobInput, JobState, JobStatus, OutcomeClass,
         OutputArtifactKind, PhaseKind,
     };
-    use ingot_domain::test_support::{JobBuilder, nil_item, nil_revision};
+    use ingot_domain::test_support::{ConvergenceBuilder, JobBuilder, nil_item, nil_revision};
     use ingot_domain::workspace::WorkspaceKind;
     use serde_json::json;
     use uuid::Uuid;
@@ -520,6 +545,56 @@ mod tests {
                 .head_commit_oid()
                 .map(CommitOid::as_str),
             Some("commit-2")
+        );
+    }
+
+    #[test]
+    fn dispatch_allows_integrated_validation_while_prepared_convergence_exists() {
+        let item = nil_item();
+        let revision = nil_revision();
+
+        let mut validation_candidate = test_job(
+            "validate_candidate_initial",
+            OutputArtifactKind::ValidationReport,
+        );
+        validation_candidate.phase_kind = PhaseKind::Validate;
+        validation_candidate.workspace_kind = WorkspaceKind::Authoring;
+        validation_candidate.execution_permission = ExecutionPermission::DaemonOnly;
+        validation_candidate.job_input =
+            JobInput::candidate_subject("seed".into(), "candidate-head".into());
+        validation_candidate.state = JobState::Completed {
+            assignment: validation_candidate.state.assignment().cloned(),
+            started_at: validation_candidate.state.started_at(),
+            outcome_class: OutcomeClass::Clean,
+            ended_at: Utc::now(),
+            output_commit_oid: None,
+            result_schema_version: None,
+            result_payload: None,
+        };
+
+        let convergence = ConvergenceBuilder::new(item.project_id, item.id, revision.id)
+            .input_target_commit_oid("target-head")
+            .prepared_commit_oid("prepared-head")
+            .build();
+
+        let job = dispatch_job(
+            &item,
+            &revision,
+            &[validation_candidate],
+            &[],
+            &[convergence],
+            DispatchJobCommand { step_id: None },
+        )
+        .expect("dispatch integrated validation");
+
+        assert_eq!(job.step_id, StepId::ValidateIntegrated);
+        assert_eq!(
+            job.job_input.base_commit_oid().map(CommitOid::as_str),
+            Some("target-head")
+        );
+        assert_eq!(
+            job.job_input.head_commit_oid().map(CommitOid::as_str),
+            Some("prepared-head")
         );
     }
 }
