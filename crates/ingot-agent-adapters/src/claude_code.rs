@@ -2,11 +2,9 @@ use std::path::{Path, PathBuf};
 
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
-use ingot_agent_protocol::response::AgentResponse;
 use ingot_domain::agent_model::AgentModel;
-use tracing::info;
 
-use crate::{output_schema, subprocess};
+use crate::{result_from_text, subprocess};
 
 #[derive(Debug, Clone)]
 pub struct ClaudeCodeCliAdapter {
@@ -22,10 +20,7 @@ impl ClaudeCodeCliAdapter {
         }
     }
 
-    fn build_print_args(&self, request: &AgentRequest) -> Vec<String> {
-        let schema = output_schema(request);
-        let schema_json = serde_json::to_string(&schema).expect("schema serialization");
-
+    fn build_print_args(&self, request: &AgentRequest) -> Result<Vec<String>, AgentError> {
         let mut args = vec![
             "--print".into(),
             "--output-format".into(),
@@ -35,7 +30,7 @@ impl ClaudeCodeCliAdapter {
             "--no-session-persistence".into(),
             "--dangerously-skip-permissions".into(),
             "--json-schema".into(),
-            schema_json,
+            subprocess::inline_output_schema(request)?,
         ];
 
         if !request.may_mutate {
@@ -43,7 +38,7 @@ impl ClaudeCodeCliAdapter {
             args.push("Edit,Write,NotebookEdit".into());
         }
 
-        args
+        Ok(args)
     }
 }
 
@@ -52,34 +47,20 @@ impl AgentAdapter for ClaudeCodeCliAdapter {
         &self,
         request: &AgentRequest,
         working_dir: &Path,
-    ) -> Result<AgentResponse, AgentError> {
-        let args = self.build_print_args(request);
-        info!(
-            cli_path = %self.cli_path.display(),
-            model = %self.model,
-            working_dir = %working_dir.display(),
-            may_mutate = request.may_mutate,
-            args = ?args,
-            "launching claude --print"
-        );
-
-        let output = subprocess::run_cli_subprocess(
+    ) -> Result<ingot_agent_protocol::response::AgentResponse, AgentError> {
+        subprocess::launch_adapter(
             &self.cli_path,
-            &args,
+            &self.model,
+            request,
             working_dir,
-            &request.prompt,
+            self.build_print_args(request)?,
             "claude",
+            |output| {
+                let stdout = output.stdout.clone();
+                async move { Ok(parse_print_output(&stdout)) }
+            },
         )
-        .await?;
-        info!(exit_code = output.exit_code, "claude --print finished");
-
-        let result = parse_print_output(&output.stdout);
-        Ok(AgentResponse {
-            exit_code: output.exit_code,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            result,
-        })
+        .await
     }
 
     async fn cancel(&self, pid: u32) -> Result<(), AgentError> {
@@ -119,7 +100,7 @@ fn parse_print_output(stdout: &str) -> Option<serde_json::Value> {
             // Try to parse as JSON first
             match serde_json::from_str::<serde_json::Value>(s) {
                 Ok(parsed) if parsed.is_object() || parsed.is_array() => Some(parsed),
-                _ => Some(serde_json::json!({ "summary": s.trim() })),
+                _ => Some(result_from_text(s)),
             }
         }
         serde_json::Value::Object(_) | serde_json::Value::Array(_) => Some(result.clone()),
@@ -143,7 +124,9 @@ mod tests {
     #[test]
     fn build_print_args_for_mutating_job() {
         let adapter = ClaudeCodeCliAdapter::new("claude", "claude-sonnet-4-6");
-        let args = adapter.build_print_args(&request(true));
+        let args = adapter
+            .build_print_args(&request(true))
+            .expect("build args");
 
         assert!(args.contains(&"--print".into()));
         assert!(args.contains(&"--dangerously-skip-permissions".into()));
@@ -159,7 +142,9 @@ mod tests {
     #[test]
     fn build_print_args_for_read_only_job() {
         let adapter = ClaudeCodeCliAdapter::new("claude", "claude-sonnet-4-6");
-        let args = adapter.build_print_args(&request(false));
+        let args = adapter
+            .build_print_args(&request(false))
+            .expect("build args");
 
         assert!(args.contains(&"--disallowedTools".into()));
         let idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
@@ -176,7 +161,7 @@ mod tests {
             ..request(true)
         };
         let adapter = ClaudeCodeCliAdapter::new("claude", "claude-sonnet-4-6");
-        let args = adapter.build_print_args(&req);
+        let args = adapter.build_print_args(&req).expect("build args");
 
         let schema_idx = args.iter().position(|a| a == "--json-schema").unwrap();
         let schema_str = &args[schema_idx + 1];

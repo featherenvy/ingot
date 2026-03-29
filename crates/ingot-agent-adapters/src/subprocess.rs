@@ -1,12 +1,83 @@
 //! Shared CLI subprocess lifecycle: spawn, stdin pipe, stream collection,
 //! wait, and process-group cancellation.
 
-use std::path::Path;
+use std::future::Future;
+use std::path::{Path, PathBuf};
 
 use ingot_agent_protocol::adapter::AgentError;
+use ingot_agent_protocol::request::AgentRequest;
+use ingot_agent_protocol::response::AgentResponse;
+use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
+
+use crate::output_schema;
+
+#[derive(Debug, Clone)]
+pub(crate) struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    pub(crate) fn new(working_dir: &Path, stem: &str, extension: &str) -> Self {
+        Self::from_path(working_dir.join(format!("{stem}-{}.{}", uuid::Uuid::now_v7(), extension)))
+    }
+
+    pub(crate) fn from_path(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn cli_arg(&self, label: &str) -> Result<String, AgentError> {
+        self.path
+            .to_str()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| AgentError::LaunchFailed(format!("invalid {label} path")))
+    }
+
+    pub(crate) async fn write_json(&self, value: &serde_json::Value) -> Result<(), AgentError> {
+        fs::write(
+            &self.path,
+            serde_json::to_vec_pretty(value)
+                .map_err(|err| AgentError::LaunchFailed(err.to_string()))?,
+        )
+        .await
+        .map_err(|err| AgentError::LaunchFailed(err.to_string()))
+    }
+
+    pub(crate) async fn read_to_string(&self) -> Result<String, AgentError> {
+        fs::read_to_string(&self.path)
+            .await
+            .map_err(|err| AgentError::ProcessError(err.to_string()))
+    }
+
+    pub(crate) async fn cleanup(&self) {
+        let _ = fs::remove_file(&self.path).await;
+    }
+}
+
+pub(crate) async fn output_schema_file(
+    request: &AgentRequest,
+    working_dir: &Path,
+    adapter_name: &str,
+) -> Result<TempFile, AgentError> {
+    let file = TempFile::new(
+        working_dir,
+        &format!(".ingot-{adapter_name}-schema"),
+        "json",
+    );
+    file.write_json(&output_schema(request)).await?;
+    Ok(file)
+}
+
+pub(crate) fn inline_output_schema(request: &AgentRequest) -> Result<String, AgentError> {
+    serde_json::to_string(&output_schema(request))
+        .map_err(|err| AgentError::LaunchFailed(err.to_string()))
+}
 
 pub(crate) struct SubprocessOutput {
     pub exit_code: i32,
@@ -81,6 +152,48 @@ pub(crate) async fn run_cli_subprocess(
         exit_code: status.code().unwrap_or(-1),
         stdout,
         stderr,
+    })
+}
+
+pub(crate) async fn launch_adapter<Model, Parse, ParseFuture>(
+    cli_path: &Path,
+    model: &Model,
+    request: &AgentRequest,
+    working_dir: &Path,
+    args: Vec<String>,
+    adapter_name: &'static str,
+    parse_result: Parse,
+) -> Result<AgentResponse, AgentError>
+where
+    Model: std::fmt::Display + ?Sized,
+    Parse: FnOnce(&SubprocessOutput) -> ParseFuture,
+    ParseFuture: Future<Output = Result<Option<serde_json::Value>, AgentError>>,
+{
+    info!(
+        adapter = adapter_name,
+        cli_path = %cli_path.display(),
+        model = %model,
+        working_dir = %working_dir.display(),
+        may_mutate = request.may_mutate,
+        args = ?args,
+        "launching adapter subprocess"
+    );
+
+    let output =
+        run_cli_subprocess(cli_path, &args, working_dir, &request.prompt, adapter_name).await?;
+    info!(
+        adapter = adapter_name,
+        exit_code = output.exit_code,
+        "adapter subprocess finished"
+    );
+
+    let result = parse_result(&output).await?;
+
+    Ok(AgentResponse {
+        exit_code: output.exit_code,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        result,
     })
 }
 

@@ -44,6 +44,13 @@ pub(crate) fn output_schema(request: &AgentRequest) -> serde_json::Value {
         .unwrap_or_else(structured_output_schema)
 }
 
+/// Parse a textual adapter payload as JSON when possible, otherwise wrap it in
+/// the default summary envelope.
+pub(crate) fn result_from_text(payload: &str) -> serde_json::Value {
+    serde_json::from_str(payload)
+        .unwrap_or_else(|_| serde_json::json!({ "summary": payload.trim() }))
+}
+
 /// Default structured-output JSON schema shared by all CLI adapters.
 pub(crate) fn structured_output_schema() -> serde_json::Value {
     serde_json::json!({
@@ -103,6 +110,22 @@ mod tests {
         assert_eq!(
             schema["properties"]["validation"]["type"],
             serde_json::json!(["string", "null"])
+        );
+    }
+
+    #[test]
+    fn result_from_text_parses_json_when_present() {
+        assert_eq!(
+            result_from_text(r#"{"summary":"done","validation":null}"#),
+            serde_json::json!({"summary":"done","validation":null})
+        );
+    }
+
+    #[test]
+    fn result_from_text_wraps_plain_text_summary() {
+        assert_eq!(
+            result_from_text("  completed work  "),
+            serde_json::json!({"summary":"completed work"})
         );
     }
 }

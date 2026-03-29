@@ -2,12 +2,10 @@ use std::path::{Path, PathBuf};
 
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
-use ingot_agent_protocol::response::AgentResponse;
 use ingot_domain::agent_model::AgentModel;
-use tokio::fs;
-use tracing::{info, warn};
+use tracing::warn;
 
-use crate::{output_schema, subprocess};
+use crate::{result_from_text, subprocess};
 
 #[derive(Debug, Clone)]
 pub struct CodexCliAdapter {
@@ -23,22 +21,11 @@ impl CodexCliAdapter {
         }
     }
 
-    fn response_path(&self, working_dir: &Path) -> PathBuf {
-        working_dir.join(format!(
-            ".ingot-codex-last-message-{}.txt",
-            uuid::Uuid::now_v7()
-        ))
-    }
-
-    fn schema_path(&self, working_dir: &Path) -> PathBuf {
-        working_dir.join(format!(".ingot-codex-schema-{}.json", uuid::Uuid::now_v7()))
-    }
-
     fn build_exec_args(
         &self,
         request: &AgentRequest,
-        schema_path: &Path,
-        response_path: &Path,
+        schema_file: &subprocess::TempFile,
+        response_file: &subprocess::TempFile,
     ) -> Result<Vec<String>, AgentError> {
         let sandbox = if request.may_mutate {
             "danger-full-access"
@@ -56,15 +43,9 @@ impl CodexCliAdapter {
             self.model.to_string(),
             "--json".into(),
             "--output-schema".into(),
-            schema_path
-                .to_str()
-                .ok_or_else(|| AgentError::LaunchFailed("invalid schema path".into()))?
-                .into(),
+            schema_file.cli_arg("schema")?,
             "--output-last-message".into(),
-            response_path
-                .to_str()
-                .ok_or_else(|| AgentError::LaunchFailed("invalid response path".into()))?
-                .into(),
+            response_file.cli_arg("response")?,
             "-".into(),
         ])
     }
@@ -75,71 +56,42 @@ impl AgentAdapter for CodexCliAdapter {
         &self,
         request: &AgentRequest,
         working_dir: &Path,
-    ) -> Result<AgentResponse, AgentError> {
-        let response_path = self.response_path(working_dir);
-        let schema_path = self.schema_path(working_dir);
-        let _ = fs::remove_file(&response_path).await;
-        let _ = fs::remove_file(&schema_path).await;
-
-        let schema = output_schema(request);
-        fs::write(
-            &schema_path,
-            serde_json::to_vec_pretty(&schema)
-                .map_err(|err| AgentError::LaunchFailed(err.to_string()))?,
-        )
-        .await
-        .map_err(|err| AgentError::LaunchFailed(err.to_string()))?;
-
-        let args = self.build_exec_args(request, &schema_path, &response_path)?;
-        info!(
-            cli_path = %self.cli_path.display(),
-            model = %self.model,
-            working_dir = %request.working_dir.display(),
-            may_mutate = request.may_mutate,
-            args = ?args,
-            "launching codex exec"
-        );
-
-        let output = subprocess::run_cli_subprocess(
+    ) -> Result<ingot_agent_protocol::response::AgentResponse, AgentError> {
+        let response_file =
+            subprocess::TempFile::new(working_dir, ".ingot-codex-last-message", "txt");
+        let schema_file = subprocess::output_schema_file(request, working_dir, "codex").await?;
+        let launch_result = subprocess::launch_adapter(
             &self.cli_path,
-            &args,
+            &self.model,
+            request,
             working_dir,
-            &request.prompt,
+            self.build_exec_args(request, &schema_file, &response_file)?,
             "codex",
+            |_output| async {
+                let final_message = response_file.read_to_string().await.ok();
+                if final_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+                {
+                    warn!(
+                        response_path = %response_file.path().display(),
+                        "codex did not produce a last-message payload"
+                    );
+                }
+                Ok(final_message.as_deref().map(result_from_text))
+            },
         )
-        .await?;
-        info!(exit_code = output.exit_code, "codex exec finished");
-
-        let final_message = fs::read_to_string(&response_path).await.ok();
-        if final_message
-            .as_deref()
-            .unwrap_or_default()
-            .trim()
-            .is_empty()
-        {
-            warn!(response_path = %response_path.display(), "codex did not produce a last-message payload");
-        }
-        let _ = fs::remove_file(&response_path).await;
-        let _ = fs::remove_file(&schema_path).await;
-
-        let result = final_message.as_deref().map(parse_last_message);
-
-        Ok(AgentResponse {
-            exit_code: output.exit_code,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            result,
-        })
+        .await;
+        response_file.cleanup().await;
+        schema_file.cleanup().await;
+        launch_result
     }
 
     async fn cancel(&self, pid: u32) -> Result<(), AgentError> {
         subprocess::cancel_process_group(pid).await
     }
-}
-
-fn parse_last_message(message: &str) -> serde_json::Value {
-    serde_json::from_str(message)
-        .unwrap_or_else(|_| serde_json::json!({ "summary": message.trim() }))
 }
 
 #[cfg(test)]
@@ -159,12 +111,10 @@ mod tests {
     #[test]
     fn build_exec_args_match_current_codex_exec_flags() {
         let adapter = CodexCliAdapter::new("codex", "gpt-5");
+        let schema_file = subprocess::TempFile::from_path("/tmp/schema.json");
+        let response_file = subprocess::TempFile::from_path("/tmp/last-message.json");
         let args = adapter
-            .build_exec_args(
-                &request(true),
-                Path::new("/tmp/schema.json"),
-                Path::new("/tmp/last-message.json"),
-            )
+            .build_exec_args(&request(true), &schema_file, &response_file)
             .expect("build args");
 
         assert!(args.iter().all(|arg| arg != "--ask-for-approval"));
@@ -194,12 +144,10 @@ mod tests {
     #[test]
     fn build_exec_args_use_read_only_sandbox_for_non_mutating_jobs() {
         let adapter = CodexCliAdapter::new("codex", "gpt-5");
+        let schema_file = subprocess::TempFile::from_path("/tmp/schema.json");
+        let response_file = subprocess::TempFile::from_path("/tmp/last-message.json");
         let args = adapter
-            .build_exec_args(
-                &request(false),
-                Path::new("/tmp/schema.json"),
-                Path::new("/tmp/last-message.json"),
-            )
+            .build_exec_args(&request(false), &schema_file, &response_file)
             .expect("build args");
 
         let sandbox_idx = args.iter().position(|arg| arg == "--sandbox").unwrap();
