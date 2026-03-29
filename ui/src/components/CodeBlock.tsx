@@ -1,5 +1,5 @@
 import { CheckIcon, CopyIcon } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { type UIEventHandler, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { showErrorToast } from '../lib/toast'
 import { cn } from '../lib/utils'
@@ -13,6 +13,8 @@ type CodeBlockProps = {
   className?: string
   preClassName?: string
   copyLabel?: string
+  scrollContainerRef?: React.Ref<HTMLDivElement>
+  onScroll?: UIEventHandler<HTMLDivElement>
 }
 
 export function CodeBlock({
@@ -23,6 +25,8 @@ export function CodeBlock({
   className,
   preClassName,
   copyLabel = 'Copy to clipboard',
+  scrollContainerRef,
+  onScroll,
 }: CodeBlockProps): React.JSX.Element {
   const [copied, setCopied] = useState(false)
   const text = value ?? ''
@@ -68,7 +72,11 @@ export function CodeBlock({
           {copied ? <CheckIcon /> : <CopyIcon />}
         </Button>
       </div>
-      <div className={cn('min-w-0 max-w-full overflow-auto rounded-lg', maxHeightClassName)}>
+      <div
+        ref={scrollContainerRef}
+        onScroll={onScroll}
+        className={cn('min-w-0 max-w-full overflow-auto rounded-lg', maxHeightClassName)}
+      >
         <pre
           className={cn(
             'p-3 pr-12 text-xs leading-6',

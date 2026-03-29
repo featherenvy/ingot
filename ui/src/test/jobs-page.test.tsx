@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { TooltipProvider } from '../components/ui/tooltip'
 import JobsPage from '../pages/JobsPage'
+import { useConnectionStore } from '../stores/connection'
 import type { Agent, Job } from '../types/domain'
 
 function jsonResponse(body: unknown) {
@@ -37,8 +38,21 @@ function renderPage() {
 }
 
 describe('JobsPage', () => {
+  beforeEach(() => {
+    useConnectionStore.setState({
+      status: 'connected',
+      lastSeq: 0,
+      ws: null,
+    })
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
+    useConnectionStore.setState({
+      status: 'disconnected',
+      lastSeq: 0,
+      ws: null,
+    })
   })
 
   it('renders job step labels and duration', async () => {
@@ -105,5 +119,64 @@ describe('JobsPage', () => {
     expect(await screen.findByText('Jobs failed to load')).toBeInTheDocument()
     expect(screen.getByText('Error: network down')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
+
+  it('shows live log tabs and waiting state for a running job', async () => {
+    const jobs: Job[] = [
+      {
+        id: 'job_1',
+        project_id: 'prj_1',
+        item_id: 'itm_1',
+        item_revision_id: 'rev_1',
+        step_id: 'review_candidate_initial',
+        status: 'running',
+        outcome_class: null,
+        phase_kind: 'review',
+        workspace_id: 'wrk_1',
+        job_input: {
+          kind: 'candidate_subject',
+          base_commit_oid: '0123456789abcdef',
+          head_commit_oid: 'fedcba9876543210',
+        },
+        created_at: '2026-03-11T00:00:00Z',
+        started_at: '2026-03-11T00:01:00Z',
+        ended_at: null,
+      },
+    ]
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/projects/prj_1/jobs')) {
+        return Promise.resolve(jsonResponse(jobs))
+      }
+      if (url.endsWith('/api/projects/prj_1/items')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/jobs/job_1/logs')) {
+        return Promise.resolve(
+          jsonResponse({
+            prompt: 'Review the candidate diff',
+            stdout: null,
+            stderr: null,
+            result: null,
+          }),
+        )
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: /Review Candidate Initial/i }))
+
+    expect(await screen.findByText('Live')).toBeInTheDocument()
+    expect(await screen.findByText('Waiting for agent output...')).toBeInTheDocument()
+    expect(screen.getAllByText('Stdout')).not.toHaveLength(0)
+    expect(screen.getAllByText('Stderr')).not.toHaveLength(0)
+    expect(screen.getByRole('tab', { name: /Prompt/i })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /Result/i })).toBeInTheDocument()
   })
 })

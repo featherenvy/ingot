@@ -1,6 +1,15 @@
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangleIcon, CheckIcon, ClockIcon, Loader2Icon, SearchIcon, ShieldAlertIcon, XIcon } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import {
+  AlertTriangleIcon,
+  ArrowDownIcon,
+  CheckIcon,
+  ClockIcon,
+  Loader2Icon,
+  SearchIcon,
+  ShieldAlertIcon,
+  XIcon,
+} from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { cn } from '@/lib/utils'
 import { agentsQuery, itemsQuery, jobLogsQuery, projectJobsQuery } from '../api/queries'
@@ -21,14 +30,17 @@ import { useRequiredProjectId } from '../hooks/useRequiredRouteParam'
 import { getQueuedJobBlocker } from '../jobBlockers'
 import { formatDuration, formatRelativeTime, formatStepLabel } from '../lib/format'
 import { shortId } from '../lib/git'
+import { useConnectionStore } from '../stores/connection'
 import type { Job, OutcomeClass } from '../types/domain'
 
 // ── Constants ──────────────────────────────────────────────────
 
 type FilterTab = 'all' | 'active' | 'completed' | 'failed'
+type LogTab = 'stdout' | 'stderr' | 'prompt' | 'result'
 
 const ACTIVE_STATUSES = new Set(['queued', 'assigned', 'running'])
 const FAILED_STATUSES = new Set(['failed', 'cancelled', 'expired'])
+const FOLLOW_TAIL_THRESHOLD_PX = 24
 
 const OUTCOME_ICON: Record<OutcomeClass, { icon: typeof CheckIcon; className: string }> = {
   clean: { icon: CheckIcon, className: 'text-emerald-500' },
@@ -46,6 +58,10 @@ function filterJobs(jobs: Job[], tab: FilterTab): Job[] {
   if (tab === 'completed') return jobs.filter((j) => j.status === 'completed')
   if (tab === 'failed') return jobs.filter((j) => FAILED_STATUSES.has(j.status) || j.status === 'superseded')
   return jobs
+}
+
+function isNearBottom(element: HTMLDivElement): boolean {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_TAIL_THRESHOLD_PX
 }
 
 // ── Status Summary ─────────────────────────────────────────────
@@ -163,11 +179,16 @@ export default function JobsPage(): React.JSX.Element {
   const projectId = useRequiredProjectId()
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<FilterTab>('all')
+  const [logTab, setLogTab] = useState<LogTab>('stdout')
+  const [followTail, setFollowTail] = useState(true)
   const { data: jobs, error, isError, isFetching, isLoading, refetch } = useQuery(projectJobsQuery(projectId))
   const { data: itemSummaries } = useQuery(itemsQuery(projectId))
   const { data: agents } = useQuery(agentsQuery())
   const { data: logs, isLoading: isLogsLoading } = useQuery(jobLogsQuery(selectedJobId ?? ''))
+  const wsStatus = useConnectionStore((state) => state.status)
   const queueBlocker = getQueuedJobBlocker(jobs ?? [], agents)
+  const stdoutRef = useRef<HTMLDivElement>(null)
+  const stderrRef = useRef<HTMLDivElement>(null)
 
   // Build item title lookup
   const itemTitles = useMemo(() => {
@@ -195,6 +216,30 @@ export default function JobsPage(): React.JSX.Element {
 
   // Selected job metadata
   const selectedJob = selectedJobId ? jobs?.find((j) => j.id === selectedJobId) : null
+  const isSelectedJobRunning = selectedJob?.status === 'running'
+  const activeOutputRef = logTab === 'stdout' ? stdoutRef : logTab === 'stderr' ? stderrRef : null
+  const hasStdout = !!logs?.stdout?.trim()
+  const hasStderr = !!logs?.stderr?.trim()
+  const hasPrompt = !!logs?.prompt?.trim()
+  const hasResult = logs?.result != null
+
+  useEffect(() => {
+    setFollowTail(true)
+    if (selectedJob?.status === 'running') {
+      setLogTab('stdout')
+    }
+  }, [selectedJob?.status])
+
+  function handleOutputScroll(event: React.UIEvent<HTMLDivElement>) {
+    setFollowTail(isNearBottom(event.currentTarget))
+  }
+
+  function jumpToLatest() {
+    const element = activeOutputRef?.current
+    if (!element) return
+    element.scrollTop = element.scrollHeight
+    setFollowTail(true)
+  }
 
   if (isLoading) {
     return (
@@ -297,19 +342,54 @@ export default function JobsPage(): React.JSX.Element {
             {/* Logs panel */}
             <Card className="sticky top-14 max-h-[calc(100vh-5rem)] overflow-y-auto">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  Logs
-                  {selectedJob && (
-                    <Badge variant="outline" className="font-mono text-[11px] font-normal">
-                      {formatStepLabel(selectedJob.step_id)}
-                    </Badge>
-                  )}
-                </CardTitle>
-                <CardDescription>
-                  {selectedJob
-                    ? `${selectedJob.status}${selectedJob.outcome_class ? ` \u2192 ${selectedJob.outcome_class}` : ''}`
-                    : 'Select a job to inspect prompt and logs.'}
-                </CardDescription>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-2">
+                    <CardTitle className="flex items-center gap-2">
+                      Logs
+                      {selectedJob && (
+                        <Badge variant="outline" className="font-mono text-[11px] font-normal">
+                          {formatStepLabel(selectedJob.step_id)}
+                        </Badge>
+                      )}
+                    </CardTitle>
+                    <CardDescription>
+                      {selectedJob
+                        ? `${selectedJob.status}${selectedJob.outcome_class ? ` \u2192 ${selectedJob.outcome_class}` : ''}`
+                        : 'Select a job to inspect prompt and logs.'}
+                    </CardDescription>
+                  </div>
+                  {selectedJob ? (
+                    <div className="flex flex-col items-end gap-2">
+                      {isSelectedJobRunning ? (
+                        <Badge
+                          variant="outline"
+                          className={cn(
+                            'gap-1.5',
+                            wsStatus === 'connected' && 'border-emerald-500/40 text-emerald-700',
+                            wsStatus === 'connecting' && 'border-amber-500/40 text-amber-700',
+                            wsStatus === 'disconnected' && 'border-destructive/40 text-destructive',
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              'size-1.5 rounded-full',
+                              wsStatus === 'connected' && 'animate-pulse bg-emerald-500',
+                              wsStatus === 'connecting' && 'animate-pulse bg-amber-500',
+                              wsStatus === 'disconnected' && 'bg-destructive',
+                            )}
+                          />
+                          {wsStatus === 'connected' ? 'Live' : wsStatus === 'connecting' ? 'Reconnecting' : 'Offline'}
+                        </Badge>
+                      ) : null}
+                      {(logTab === 'stdout' || logTab === 'stderr') && !followTail ? (
+                        <Button type="button" variant="outline" size="sm" onClick={jumpToLatest}>
+                          <ArrowDownIcon className="size-4" />
+                          Jump to latest
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               </CardHeader>
               <CardContent>
                 {!selectedJobId ? (
@@ -325,12 +405,78 @@ export default function JobsPage(): React.JSX.Element {
                     <Skeleton className="h-24 w-full" />
                   </div>
                 ) : (
-                  <div className="grid gap-4">
-                    <LogBlock label="Prompt" value={logs?.prompt} />
-                    <LogBlock label="Stdout" value={logs?.stdout} />
-                    <LogBlock label="Stderr" value={logs?.stderr} />
-                    <LogBlock label="Result" value={logs?.result ? JSON.stringify(logs.result, null, 2) : null} />
-                  </div>
+                  <Tabs value={logTab} onValueChange={(value) => setLogTab(value as LogTab)}>
+                    <TabsList variant="line" className="w-full justify-start overflow-x-auto">
+                      <TabsTrigger value="stdout">
+                        Stdout
+                        {hasStdout || isSelectedJobRunning ? (
+                          <Badge variant="secondary" className="ml-1 h-4 rounded-full px-1.5 text-[10px]">
+                            {hasStdout ? 'Live' : '...'}
+                          </Badge>
+                        ) : null}
+                      </TabsTrigger>
+                      <TabsTrigger value="stderr">
+                        Stderr
+                        {hasStderr ? (
+                          <Badge variant="destructive" className="ml-1 h-4 rounded-full px-1.5 text-[10px]">
+                            !
+                          </Badge>
+                        ) : null}
+                      </TabsTrigger>
+                      <TabsTrigger value="prompt">Prompt</TabsTrigger>
+                      <TabsTrigger value="result">Result</TabsTrigger>
+                    </TabsList>
+
+                    <TabsContent value="stdout" className="mt-4">
+                      <LogBlock
+                        label="Stdout"
+                        value={logs?.stdout}
+                        emptyMessage={isSelectedJobRunning ? 'Waiting for agent output...' : 'No stdout captured.'}
+                        autoScrollToBottom={isSelectedJobRunning && followTail && logTab === 'stdout'}
+                        scrollContainerRef={stdoutRef}
+                        onScroll={handleOutputScroll}
+                      />
+                    </TabsContent>
+
+                    <TabsContent value="stderr" className="mt-4">
+                      <LogBlock
+                        label="Stderr"
+                        value={logs?.stderr}
+                        emptyMessage={isSelectedJobRunning ? 'No stderr yet.' : 'No stderr captured.'}
+                        autoScrollToBottom={isSelectedJobRunning && followTail && logTab === 'stderr'}
+                        scrollContainerRef={stderrRef}
+                        onScroll={handleOutputScroll}
+                      />
+                    </TabsContent>
+
+                    <TabsContent value="prompt" className="mt-4">
+                      {hasPrompt ? (
+                        <LogBlock label="Prompt" value={logs?.prompt} />
+                      ) : (
+                        <EmptyState
+                          variant="inline"
+                          contentClassName="px-0 py-0"
+                          description="No prompt artifact available for this job."
+                        />
+                      )}
+                    </TabsContent>
+
+                    <TabsContent value="result" className="mt-4">
+                      {hasResult ? (
+                        <LogBlock label="Result" value={logs?.result ? JSON.stringify(logs.result, null, 2) : null} />
+                      ) : (
+                        <EmptyState
+                          variant="inline"
+                          contentClassName="px-0 py-0"
+                          description={
+                            isSelectedJobRunning
+                              ? 'Result will appear after the agent finishes.'
+                              : 'No structured result recorded for this job.'
+                          }
+                        />
+                      )}
+                    </TabsContent>
+                  </Tabs>
                 )}
               </CardContent>
             </Card>
