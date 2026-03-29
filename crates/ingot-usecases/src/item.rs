@@ -12,8 +12,6 @@ use ingot_domain::git_ref::GitRef;
 
 use fractional_index::FractionalIndex;
 
-use crate::UseCaseError;
-
 pub fn next_sort_key_after(previous_sort_key: Option<&str>) -> String {
     previous_sort_key
         .map(|sort_key| {
@@ -115,20 +113,6 @@ pub fn create_manual_item(
     (item, revision)
 }
 
-pub fn normalize_target_ref(target_ref: &str) -> Result<GitRef, UseCaseError> {
-    if let Some(branch_name) = target_ref.strip_prefix("refs/heads/") {
-        validate_branch_name(target_ref, branch_name)?;
-        return Ok(GitRef::new(target_ref));
-    }
-
-    if target_ref.starts_with("refs/") {
-        return Err(UseCaseError::InvalidTargetRef(target_ref.into()));
-    }
-
-    validate_branch_name(target_ref, target_ref)
-        .map(|branch_name| GitRef::new(format!("refs/heads/{branch_name}")))
-}
-
 pub fn approval_state_for_policy(approval_policy: ApprovalPolicy) -> ApprovalState {
     match approval_policy {
         ApprovalPolicy::Required => ApprovalState::NotRequested,
@@ -170,13 +154,6 @@ pub fn default_template_map_snapshot() -> Value {
     Value::Object(map)
 }
 
-fn validate_branch_name(original: &str, branch_name: &str) -> Result<String, UseCaseError> {
-    if branch_name.is_empty() {
-        return Err(UseCaseError::InvalidTargetRef(original.into()));
-    }
-    Ok(branch_name.into())
-}
-
 pub fn rework_budgets_from_policy_snapshot(policy_snapshot: &Value) -> Option<(u32, u32)> {
     let candidate_rework_budget = policy_snapshot["candidate_rework_budget"].as_u64()?;
     let integration_rework_budget = policy_snapshot["integration_rework_budget"].as_u64()?;
@@ -200,7 +177,7 @@ mod tests {
 
     use super::{
         CreateItemInput, create_manual_item, next_sort_key, next_sort_key_after,
-        normalize_target_ref, rework_budgets_from_policy_snapshot,
+        rework_budgets_from_policy_snapshot,
     };
 
     #[test]
@@ -264,18 +241,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_target_ref_prefixes_branch_names() {
-        assert_eq!(
-            normalize_target_ref("main").expect("normalize main"),
-            "refs/heads/main"
-        );
-        assert_eq!(
-            normalize_target_ref("refs/heads/release").expect("normalize heads ref"),
-            "refs/heads/release"
-        );
-    }
-
-    #[test]
     fn next_sort_key_defaults_without_existing_items() {
         assert_eq!(next_sort_key(&[]), next_sort_key_after(None));
     }
@@ -286,51 +251,6 @@ mod tests {
         let second = next_sort_key_after(Some(&first));
 
         assert!(second > first);
-    }
-
-    #[test]
-    fn normalize_target_ref_rejects_non_branch_refs() {
-        assert_eq!(
-            normalize_target_ref("refs/tags/v1")
-                .expect_err("reject tag ref")
-                .to_string(),
-            "invalid target ref: refs/tags/v1"
-        );
-        assert_eq!(
-            normalize_target_ref("refs/remotes/origin/main")
-                .expect_err("reject remote ref")
-                .to_string(),
-            "invalid target ref: refs/remotes/origin/main"
-        );
-    }
-
-    #[test]
-    fn normalize_target_ref_accepts_valid_branch_names() {
-        assert_eq!(
-            normalize_target_ref("feature/ref-hardening").expect("normalize nested branch"),
-            "refs/heads/feature/ref-hardening"
-        );
-        assert_eq!(
-            normalize_target_ref("release-2026.03").expect("normalize dotted branch"),
-            "refs/heads/release-2026.03"
-        );
-        assert_eq!(
-            normalize_target_ref("refs/heads/hotfix_123").expect("normalize full ref"),
-            "refs/heads/hotfix_123"
-        );
-    }
-
-    #[test]
-    fn normalize_target_ref_only_rejects_empty_branch_names() {
-        for invalid_ref in ["", "refs/heads/"] {
-            let error = normalize_target_ref(invalid_ref)
-                .err()
-                .unwrap_or_else(|| panic!("expected invalid ref: {invalid_ref}"));
-            assert_eq!(
-                error.to_string(),
-                format!("invalid target ref: {invalid_ref}")
-            );
-        }
     }
 
     #[test]

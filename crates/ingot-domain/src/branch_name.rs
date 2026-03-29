@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::git_ref::GitRef;
+use crate::git_ref::{GitRef, TargetRefParseError};
 
 /// Newtype for bare branch names (e.g. `main`, `feature/foo`), distinct from
 /// full Git refs like `refs/heads/main`.  Use [`BranchName::to_git_ref`] to
@@ -28,6 +28,22 @@ impl BranchName {
     #[must_use]
     pub fn into_inner(self) -> String {
         self.0
+    }
+
+    pub fn parse_target_ref(value: &str) -> Result<Self, TargetRefParseError> {
+        let branch_name = if let Some(branch_name) = value.strip_prefix("refs/heads/") {
+            branch_name
+        } else if value.starts_with("refs/") {
+            return Err(TargetRefParseError::new(value));
+        } else {
+            value
+        };
+
+        if branch_name.is_empty() {
+            return Err(TargetRefParseError::new(value));
+        }
+
+        Ok(Self::new(branch_name))
     }
 
     /// Convert to a full `refs/heads/…` [`GitRef`].
@@ -84,5 +100,22 @@ impl PartialEq<str> for BranchName {
 impl PartialEq<&str> for BranchName {
     fn eq(&self, other: &&str) -> bool {
         self.0 == *other
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BranchName;
+
+    #[test]
+    fn parse_target_ref_strips_branch_prefix() {
+        assert_eq!(
+            BranchName::parse_target_ref("main").expect("parse bare branch"),
+            "main"
+        );
+        assert_eq!(
+            BranchName::parse_target_ref("refs/heads/release").expect("parse heads ref"),
+            "release"
+        );
     }
 }

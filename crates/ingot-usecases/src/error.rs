@@ -1,3 +1,5 @@
+use ingot_domain::git_ref::TargetRefParseError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum UseCaseError {
     #[error("project not found")]
@@ -54,4 +56,10 @@ pub enum UseCaseError {
     Repository(#[from] ingot_domain::ports::RepositoryError),
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+impl From<TargetRefParseError> for UseCaseError {
+    fn from(error: TargetRefParseError) -> Self {
+        Self::InvalidTargetRef(error.input().to_string())
+    }
 }

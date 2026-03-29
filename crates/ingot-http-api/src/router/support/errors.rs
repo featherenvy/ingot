@@ -1,18 +1,16 @@
 use std::path::Path as FsPath;
 
 use ingot_domain::branch_name::BranchName;
+use ingot_domain::git_ref::{GitRef, TargetRefParseError};
 use ingot_domain::ports::{ConflictKind, RepositoryError};
 use ingot_domain::workspace::{Workspace, WorkspaceStatus};
 use ingot_git::commands::{
     GitCommandError, check_ref_format, current_branch_name, resolve_ref_oid,
 };
-use ingot_usecases::item::normalize_target_ref;
 use ingot_usecases::{CompleteJobError, UseCaseError};
 use ingot_workspace::WorkspaceError;
 
 use crate::error::ApiError;
-
-use super::normalize::normalize_branch_name;
 
 pub(crate) fn workspace_to_api_error(error: WorkspaceError) -> ApiError {
     match error {
@@ -165,6 +163,10 @@ pub(crate) fn complete_job_error_to_api_error(error: CompleteJobError) -> ApiErr
     }
 }
 
+pub(crate) fn target_ref_parse_to_api_error(error: TargetRefParseError) -> ApiError {
+    UseCaseError::from(error).into()
+}
+
 pub(crate) async fn ensure_git_valid_target_ref(target_ref: &str) -> Result<(), ApiError> {
     match check_ref_format(target_ref)
         .await
@@ -180,7 +182,7 @@ pub(crate) async fn resolve_default_branch(
     requested_branch: Option<&str>,
 ) -> Result<BranchName, ApiError> {
     let branch = if let Some(branch) = requested_branch {
-        normalize_branch_name(branch)?
+        BranchName::parse_target_ref(branch).map_err(target_ref_parse_to_api_error)?
     } else {
         BranchName::new(current_branch_name(repo_path).await.map_err(|error| {
             ApiError::BadRequest {
@@ -190,7 +192,8 @@ pub(crate) async fn resolve_default_branch(
         })?)
     };
 
-    let target_ref = normalize_target_ref(branch.as_str())?;
+    let target_ref =
+        GitRef::parse_target_ref(branch.as_str()).map_err(target_ref_parse_to_api_error)?;
     ensure_git_valid_target_ref(target_ref.as_str()).await?;
     let resolved = resolve_ref_oid(repo_path, &target_ref)
         .await

@@ -1,7 +1,5 @@
 use std::path::{Path as FsPath, PathBuf};
 
-use ingot_domain::branch_name::BranchName;
-
 use crate::error::ApiError;
 
 pub(crate) fn canonicalize_repo_path(path: &str) -> Result<PathBuf, ApiError> {
@@ -43,15 +41,6 @@ pub(crate) fn normalize_project_color(color: Option<&str>) -> Result<String, Api
             message: format!("Invalid project color: {color}"),
         })
     }
-}
-
-pub(crate) fn normalize_branch_name(branch: &str) -> Result<BranchName, ApiError> {
-    let branch = normalize_non_empty("default branch", branch)?;
-    Ok(BranchName::new(
-        branch
-            .strip_prefix("refs/heads/")
-            .unwrap_or(branch.as_str()),
-    ))
 }
 
 pub(crate) fn normalize_agent_slug(

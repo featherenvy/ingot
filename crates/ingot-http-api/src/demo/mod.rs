@@ -11,15 +11,14 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use ingot_domain::activity::{ActivityEventType, ActivitySubject};
+use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::ProjectId;
 use ingot_domain::ports::ProjectMutationLockPort;
 use ingot_domain::project::Project;
 use ingot_domain::revision::AuthoringBaseSeed;
 use ingot_git::commands::resolve_ref_oid;
 use ingot_usecases::UseCaseError;
-use ingot_usecases::item::{
-    CreateItemInput, create_manual_item, next_sort_key_after, normalize_target_ref,
-};
+use ingot_usecases::item::{CreateItemInput, create_manual_item, next_sort_key_after};
 
 use crate::error::ApiError;
 use crate::router::AppState;
@@ -28,7 +27,7 @@ use crate::router::support::{
     config::load_effective_config,
     errors::{
         ensure_git_valid_target_ref, git_to_internal, repo_to_internal, repo_to_project_mutation,
-        resolve_default_branch,
+        resolve_default_branch, target_ref_parse_to_api_error,
     },
 };
 
@@ -209,7 +208,8 @@ pub async fn create_demo_project(
     // Create items from template
     let config = load_effective_config(Some(&project))?;
     let configured_approval_policy = config.defaults.approval_policy;
-    let target_ref = normalize_target_ref(project.default_branch.as_str())?;
+    let target_ref = GitRef::parse_target_ref(project.default_branch.as_str())
+        .map_err(target_ref_parse_to_api_error)?;
     ensure_git_valid_target_ref(target_ref.as_str()).await?;
 
     let _guard = state

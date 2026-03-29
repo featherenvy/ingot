@@ -8,14 +8,13 @@ use ingot_domain::project::Project;
 use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 use ingot_usecases::UseCaseError;
 use ingot_usecases::item::{
-    default_policy_snapshot, default_template_map_snapshot, normalize_target_ref,
-    rework_budgets_from_policy_snapshot,
+    default_policy_snapshot, default_template_map_snapshot, rework_budgets_from_policy_snapshot,
 };
 
 use crate::error::ApiError;
 use crate::router::AppState;
 use crate::router::infra_ports::HttpInfraAdapter;
-use crate::router::support::errors::ensure_git_valid_target_ref;
+use crate::router::support::errors::{ensure_git_valid_target_ref, target_ref_parse_to_api_error};
 use crate::router::types::ReviseItemRequest;
 
 use super::current_authoring_head_for_revision_with_workspace;
@@ -29,13 +28,14 @@ pub(in crate::router) async fn build_superseding_revision(
     request: ReviseItemRequest,
 ) -> Result<ItemRevision, ApiError> {
     let infra = state.infra();
-    let target_ref = normalize_target_ref(
+    let target_ref = GitRef::parse_target_ref(
         request
             .target_ref
             .as_ref()
             .map(GitRef::as_str)
             .unwrap_or(current_revision.target_ref.as_str()),
-    )?;
+    )
+    .map_err(target_ref_parse_to_api_error)?;
     ensure_git_valid_target_ref(target_ref.as_str()).await?;
     let derived_target_head = infra
         .resolve_project_ref_oid(project.id, &target_ref)

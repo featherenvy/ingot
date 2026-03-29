@@ -33,7 +33,7 @@ pub(crate) use ingot_usecases::finding::{
     triage_finding,
 };
 pub(crate) use ingot_usecases::item::{
-    CreateItemInput, approval_state_for_policy, create_manual_item, normalize_target_ref,
+    CreateItemInput, approval_state_for_policy, create_manual_item,
 };
 pub(crate) use ingot_usecases::{CompleteJobCommand, UseCaseError, rebuild_revision_context};
 pub(crate) use ingot_workflow::{

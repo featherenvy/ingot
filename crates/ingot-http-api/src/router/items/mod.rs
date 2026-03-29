@@ -15,7 +15,10 @@ use super::item_projection::{
 use super::support::{
     activity::append_activity,
     config::load_effective_config,
-    errors::{ensure_git_valid_target_ref, repo_to_internal, repo_to_item, repo_to_project},
+    errors::{
+        ensure_git_valid_target_ref, repo_to_internal, repo_to_item, repo_to_project,
+        target_ref_parse_to_api_error,
+    },
     path::ApiPath,
     sort_key::next_project_sort_key,
 };
@@ -78,13 +81,14 @@ pub(super) async fn create_item(
     let config = load_effective_config(Some(&project))?;
     let configured_approval_policy = config.defaults.approval_policy;
 
-    let target_ref = normalize_target_ref(
+    let target_ref = GitRef::parse_target_ref(
         request
             .target_ref
             .as_ref()
             .map(GitRef::as_str)
             .unwrap_or(project.default_branch.as_str()),
-    )?;
+    )
+    .map_err(target_ref_parse_to_api_error)?;
     ensure_git_valid_target_ref(target_ref.as_str()).await?;
     let infra = state.infra();
     let resolved_target_head = infra
