@@ -94,6 +94,20 @@ pub enum ConvergenceState {
     },
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ConvergenceStateParts {
+    pub integration_workspace_id: Option<WorkspaceId>,
+    pub input_target_commit_oid: Option<CommitOid>,
+    pub prepared_commit_oid: Option<CommitOid>,
+    pub final_target_commit_oid: Option<CommitOid>,
+    pub conflict_summary: Option<String>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+fn required_convergence_field<T>(field: &'static str, value: Option<T>) -> Result<T, String> {
+    value.ok_or_else(|| format!("convergence {field} is required for this status"))
+}
+
 impl ConvergenceState {
     fn require_workspace_id(
         workspace_id: Option<WorkspaceId>,
@@ -248,6 +262,82 @@ impl ConvergenceState {
             | Self::Failed { completed_at, .. }
             | Self::Cancelled { completed_at, .. } => Some(*completed_at),
             Self::Prepared { completed_at, .. } => *completed_at,
+        }
+    }
+
+    pub fn from_parts(
+        status: ConvergenceStatus,
+        parts: ConvergenceStateParts,
+    ) -> Result<Self, String> {
+        match status {
+            ConvergenceStatus::Queued => Ok(Self::Queued),
+            ConvergenceStatus::Running => Ok(Self::Running {
+                integration_workspace_id: required_convergence_field(
+                    "integration_workspace_id",
+                    parts.integration_workspace_id,
+                )?,
+                input_target_commit_oid: required_convergence_field(
+                    "input_target_commit_oid",
+                    parts.input_target_commit_oid,
+                )?,
+            }),
+            ConvergenceStatus::Conflicted => Ok(Self::Conflicted {
+                integration_workspace_id: required_convergence_field(
+                    "integration_workspace_id",
+                    parts.integration_workspace_id,
+                )?,
+                input_target_commit_oid: required_convergence_field(
+                    "input_target_commit_oid",
+                    parts.input_target_commit_oid,
+                )?,
+                conflict_summary: required_convergence_field(
+                    "conflict_summary",
+                    parts.conflict_summary,
+                )?,
+                completed_at: required_convergence_field("completed_at", parts.completed_at)?,
+            }),
+            ConvergenceStatus::Prepared => Ok(Self::Prepared {
+                integration_workspace_id: required_convergence_field(
+                    "integration_workspace_id",
+                    parts.integration_workspace_id,
+                )?,
+                input_target_commit_oid: required_convergence_field(
+                    "input_target_commit_oid",
+                    parts.input_target_commit_oid,
+                )?,
+                prepared_commit_oid: required_convergence_field(
+                    "prepared_commit_oid",
+                    parts.prepared_commit_oid,
+                )?,
+                completed_at: parts.completed_at,
+            }),
+            ConvergenceStatus::Finalized => Ok(Self::Finalized {
+                integration_workspace_id: parts.integration_workspace_id,
+                input_target_commit_oid: required_convergence_field(
+                    "input_target_commit_oid",
+                    parts.input_target_commit_oid,
+                )?,
+                prepared_commit_oid: required_convergence_field(
+                    "prepared_commit_oid",
+                    parts.prepared_commit_oid,
+                )?,
+                final_target_commit_oid: required_convergence_field(
+                    "final_target_commit_oid",
+                    parts.final_target_commit_oid,
+                )?,
+                completed_at: required_convergence_field("completed_at", parts.completed_at)?,
+            }),
+            ConvergenceStatus::Failed => Ok(Self::Failed {
+                integration_workspace_id: parts.integration_workspace_id,
+                input_target_commit_oid: parts.input_target_commit_oid,
+                conflict_summary: parts.conflict_summary,
+                completed_at: required_convergence_field("completed_at", parts.completed_at)?,
+            }),
+            ConvergenceStatus::Cancelled => Ok(Self::Cancelled {
+                integration_workspace_id: parts.integration_workspace_id,
+                input_target_commit_oid: parts.input_target_commit_oid,
+                completed_at: required_convergence_field("completed_at", parts.completed_at)?,
+            }),
         }
     }
 
@@ -507,84 +597,21 @@ struct ConvergenceWire {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-fn required_convergence_field<T>(field: &'static str, value: Option<T>) -> Result<T, String> {
-    value.ok_or_else(|| format!("convergence {field} is required for this status"))
-}
-
 impl TryFrom<ConvergenceWire> for Convergence {
     type Error = String;
 
     fn try_from(w: ConvergenceWire) -> Result<Self, Self::Error> {
-        let state = match w.status {
-            ConvergenceStatus::Queued => ConvergenceState::Queued,
-            ConvergenceStatus::Running => ConvergenceState::Running {
-                integration_workspace_id: required_convergence_field(
-                    "integration_workspace_id",
-                    w.integration_workspace_id,
-                )?,
-                input_target_commit_oid: required_convergence_field(
-                    "input_target_commit_oid",
-                    w.input_target_commit_oid,
-                )?,
-            },
-            ConvergenceStatus::Conflicted => ConvergenceState::Conflicted {
-                integration_workspace_id: required_convergence_field(
-                    "integration_workspace_id",
-                    w.integration_workspace_id,
-                )?,
-                input_target_commit_oid: required_convergence_field(
-                    "input_target_commit_oid",
-                    w.input_target_commit_oid,
-                )?,
-                conflict_summary: required_convergence_field(
-                    "conflict_summary",
-                    w.conflict_summary,
-                )?,
-                completed_at: required_convergence_field("completed_at", w.completed_at)?,
-            },
-            ConvergenceStatus::Prepared => ConvergenceState::Prepared {
-                integration_workspace_id: required_convergence_field(
-                    "integration_workspace_id",
-                    w.integration_workspace_id,
-                )?,
-                input_target_commit_oid: required_convergence_field(
-                    "input_target_commit_oid",
-                    w.input_target_commit_oid,
-                )?,
-                prepared_commit_oid: required_convergence_field(
-                    "prepared_commit_oid",
-                    w.prepared_commit_oid,
-                )?,
+        let state = ConvergenceState::from_parts(
+            w.status,
+            ConvergenceStateParts {
+                integration_workspace_id: w.integration_workspace_id,
+                input_target_commit_oid: w.input_target_commit_oid,
+                prepared_commit_oid: w.prepared_commit_oid,
+                final_target_commit_oid: w.final_target_commit_oid,
+                conflict_summary: w.conflict_summary,
                 completed_at: w.completed_at,
             },
-            ConvergenceStatus::Finalized => ConvergenceState::Finalized {
-                integration_workspace_id: w.integration_workspace_id,
-                input_target_commit_oid: required_convergence_field(
-                    "input_target_commit_oid",
-                    w.input_target_commit_oid,
-                )?,
-                prepared_commit_oid: required_convergence_field(
-                    "prepared_commit_oid",
-                    w.prepared_commit_oid,
-                )?,
-                final_target_commit_oid: required_convergence_field(
-                    "final_target_commit_oid",
-                    w.final_target_commit_oid,
-                )?,
-                completed_at: required_convergence_field("completed_at", w.completed_at)?,
-            },
-            ConvergenceStatus::Failed => ConvergenceState::Failed {
-                integration_workspace_id: w.integration_workspace_id,
-                input_target_commit_oid: w.input_target_commit_oid,
-                conflict_summary: w.conflict_summary,
-                completed_at: required_convergence_field("completed_at", w.completed_at)?,
-            },
-            ConvergenceStatus::Cancelled => ConvergenceState::Cancelled {
-                integration_workspace_id: w.integration_workspace_id,
-                input_target_commit_oid: w.input_target_commit_oid,
-                completed_at: required_convergence_field("completed_at", w.completed_at)?,
-            },
-        };
+        )?;
 
         Ok(Convergence {
             id: w.id,

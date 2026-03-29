@@ -271,7 +271,10 @@ mod tests {
         let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
         assert_eq!(
             result,
-            Some(serde_json::json!({"summary": "I completed the task successfully."}))
+            Some(serde_json::json!({
+                "summary": "I completed the task successfully.",
+                "validation": null
+            }))
         );
     }
 

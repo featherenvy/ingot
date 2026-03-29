@@ -5,7 +5,6 @@ use ingot_domain::test_support::{ItemBuilder, ProjectBuilder, RevisionBuilder};
 use ingot_test_support::sqlite::temp_db_path;
 
 use crate::db::Database;
-use crate::store::PersistFixture;
 
 #[tokio::test]
 async fn get_job_rejects_assigned_rows_without_workspace_id() {
@@ -13,18 +12,13 @@ async fn get_job_rejects_assigned_rows_without_workspace_id() {
     let db = Database::connect(&path).await.expect("connect db");
     db.migrate().await.expect("migrate db");
 
-    let project = ProjectBuilder::new("/tmp/test")
-        .name("Test")
-        .build()
-        .persist(&db)
-        .await
-        .expect("create project");
+    let project = ProjectBuilder::new("/tmp/test").name("Test").build();
+    db.create_project(&project).await.expect("create project");
     let revision = RevisionBuilder::new(ItemId::new()).build();
     let item = ItemBuilder::new(project.id, revision.id)
         .id(revision.item_id)
         .build();
-    let (item, revision) = (item, revision)
-        .persist(&db)
+    db.create_item_with_revision(&item, &revision)
         .await
         .expect("create item with revision");
 

@@ -1,6 +1,6 @@
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::ids::{AgentId, WorkspaceId};
-use ingot_domain::job::{Job, JobAssignment, JobInput, JobLease, JobState, TerminalStatus};
+use ingot_domain::job::{Job, JobInput, JobState, JobStateParts};
 use ingot_domain::lease_owner_id::LeaseOwnerId;
 use ingot_domain::ports::RepositoryError;
 use sqlx::Row;
@@ -104,73 +104,28 @@ pub(super) fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {
     let ended_at: Option<chrono::DateTime<chrono::Utc>> =
         row.try_get("ended_at").map_err(db_err)?;
 
-    // Build assignment from flat fields (if workspace_id present)
-    let assignment = workspace_id.map(|wid| JobAssignment {
-        workspace_id: wid,
-        agent_id,
-        prompt_snapshot,
-        phase_template_digest,
-    });
-
-    let state = match status {
-        JobStatus::Queued => JobState::Queued,
-        JobStatus::Assigned => JobState::Assigned(required_job_field("workspace_id", assignment)?),
-        JobStatus::Running => JobState::Running {
-            assignment: required_job_field("workspace_id", assignment)?,
-            lease: JobLease {
-                process_pid,
-                lease_owner_id: required_job_field("lease_owner_id", lease_owner_id)?,
-                heartbeat_at: required_job_field("heartbeat_at", heartbeat_at)?,
-                lease_expires_at: required_job_field("lease_expires_at", lease_expires_at)?,
-                started_at: required_job_field("started_at", started_at)?,
-            },
-        },
-        JobStatus::Completed => JobState::Completed {
-            assignment,
-            started_at,
-            outcome_class: required_job_field("outcome_class", outcome_class)?,
-            ended_at: required_job_field("ended_at", ended_at)?,
+    let state = JobState::from_parts(
+        status,
+        JobStateParts {
+            outcome_class,
+            workspace_id,
+            agent_id,
+            prompt_snapshot,
+            phase_template_digest,
             output_commit_oid,
             result_schema_version,
             result_payload,
-        },
-        JobStatus::Failed => JobState::Terminated {
-            terminal_status: TerminalStatus::Failed,
-            assignment,
-            started_at,
-            outcome_class,
-            ended_at: required_job_field("ended_at", ended_at)?,
+            process_pid,
+            lease_owner_id,
+            heartbeat_at,
+            lease_expires_at,
             error_code,
             error_message,
-        },
-        JobStatus::Cancelled => JobState::Terminated {
-            terminal_status: TerminalStatus::Cancelled,
-            assignment,
             started_at,
-            outcome_class,
-            ended_at: required_job_field("ended_at", ended_at)?,
-            error_code,
-            error_message,
+            ended_at,
         },
-        JobStatus::Expired => JobState::Terminated {
-            terminal_status: TerminalStatus::Expired,
-            assignment,
-            started_at,
-            outcome_class,
-            ended_at: required_job_field("ended_at", ended_at)?,
-            error_code,
-            error_message,
-        },
-        JobStatus::Superseded => JobState::Terminated {
-            terminal_status: TerminalStatus::Superseded,
-            assignment,
-            started_at,
-            outcome_class,
-            ended_at: required_job_field("ended_at", ended_at)?,
-            error_code,
-            error_message,
-        },
-    };
+    )
+    .map_err(|error| RepositoryError::Database(error.into()))?;
 
     Ok(Job {
         id: row.try_get("id").map_err(db_err)?,
@@ -197,11 +152,5 @@ pub(super) fn map_job(row: &SqliteRow) -> Result<Job, RepositoryError> {
         output_artifact_kind: row.try_get("output_artifact_kind").map_err(db_err)?,
         created_at: row.try_get("created_at").map_err(db_err)?,
         state,
-    })
-}
-
-fn required_job_field<T>(field: &'static str, value: Option<T>) -> Result<T, RepositoryError> {
-    value.ok_or_else(|| {
-        RepositoryError::Database(format!("job {field} is required for this status").into())
     })
 }

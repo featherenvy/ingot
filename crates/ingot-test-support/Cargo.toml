@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ingot-agent-protocol = { workspace = true }
 ingot-domain = { workspace = true, features = ["test-support"] }
 ingot-store-sqlite = { workspace = true }
 serde_json = { workspace = true }

@@ -18,7 +18,6 @@ use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, Job, JobAssignment, JobInput, JobLease, JobState,
     JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind, TerminalStatus,
 };
-use ingot_domain::ports::RepositoryError;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::test_support::{
@@ -32,7 +31,7 @@ use ingot_domain::workspace::{
 use ingot_store_sqlite::Database;
 pub use ingot_test_support::git::{git_output, run_git as git, temp_git_repo, write_file};
 pub use ingot_test_support::reports::clean_validation_report;
-pub use ingot_test_support::sqlite::migrated_test_db;
+pub use ingot_test_support::sqlite::{PersistFixture, migrated_test_db};
 use ingot_usecases::{DispatchNotify, ProjectLocks};
 use uuid::Uuid;
 
@@ -181,89 +180,6 @@ fn into_test_job_input(input: TestJobInput<'_>) -> JobInput {
         TestJobInput::IntegratedSubject(base_commit_oid, head_commit_oid) => {
             JobInput::integrated_subject(base_commit_oid.into(), head_commit_oid.into())
         }
-    }
-}
-
-pub trait PersistFixture: Sized {
-    async fn persist(self, db: &Database) -> Result<Self, RepositoryError>;
-}
-
-impl PersistFixture for Project {
-    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
-        db.create_project(&self).await?;
-        Ok(self)
-    }
-}
-
-impl PersistFixture for Item {
-    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
-        db.create_item(&self).await?;
-        Ok(self)
-    }
-}
-
-impl PersistFixture for ItemRevision {
-    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
-        db.create_revision(&self).await?;
-        Ok(self)
-    }
-}
-
-impl PersistFixture for (Item, ItemRevision) {
-    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
-        db.create_item_with_revision(&self.0, &self.1).await?;
-        Ok(self)
-    }
-}
-
-impl PersistFixture for Workspace {
-    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
-        db.create_workspace(&self).await?;
-        Ok(self)
-    }
-}
-
-impl PersistFixture for Convergence {
-    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
-        db.create_convergence(&self).await?;
-        Ok(self)
-    }
-}
-
-impl PersistFixture for Finding {
-    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
-        db.create_finding(&self).await?;
-        Ok(self)
-    }
-}
-
-impl PersistFixture for Job {
-    async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
-        if let Some(workspace_id) = self.state.workspace_id() {
-            if db.get_workspace(workspace_id).await.is_err() {
-                let mut workspace = WorkspaceBuilder::new(self.project_id, self.workspace_kind)
-                    .id(workspace_id)
-                    .created_for_revision_id(self.item_revision_id)
-                    .path(
-                        std::env::temp_dir()
-                            .join(format!("ingot-http-api-workspace-{workspace_id}"))
-                            .display()
-                            .to_string(),
-                    )
-                    .created_at(self.created_at);
-                workspace = if self.state.is_active() {
-                    workspace
-                        .status(WorkspaceStatus::Busy)
-                        .current_job_id(self.id)
-                } else {
-                    workspace.status(WorkspaceStatus::Ready)
-                };
-                let workspace = workspace.build();
-                db.create_workspace(&workspace).await?;
-            }
-        }
-        db.create_job(&self).await?;
-        Ok(self)
     }
 }
 

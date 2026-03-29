@@ -57,6 +57,13 @@ pub fn commit_summary_schema() -> serde_json::Value {
     })
 }
 
+pub fn commit_summary_payload(summary: &str, validation: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "summary": summary,
+        "validation": validation
+    })
+}
+
 pub fn finding_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -90,6 +97,53 @@ pub fn nullable_closed_extensions_schema() -> serde_json::Value {
                 "type": "null"
             }
         ]
+    })
+}
+
+pub fn clean_validation_report_payload(summary: &str) -> serde_json::Value {
+    serde_json::json!({
+        "outcome": "clean",
+        "summary": summary,
+        "checks": [],
+        "findings": [],
+        "extensions": null
+    })
+}
+
+pub fn clean_review_report_payload(
+    base_commit_oid: &str,
+    head_commit_oid: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "outcome": "clean",
+        "summary": "No issues found",
+        "review_subject": {
+            "base_commit_oid": base_commit_oid,
+            "head_commit_oid": head_commit_oid
+        },
+        "overall_risk": "low",
+        "findings": [],
+        "extensions": null
+    })
+}
+
+pub fn findings_review_report_payload(
+    base_commit_oid: &str,
+    head_commit_oid: &str,
+    summary: &str,
+    overall_risk: &str,
+    findings: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "outcome": "findings",
+        "summary": summary,
+        "review_subject": {
+            "base_commit_oid": base_commit_oid,
+            "head_commit_oid": head_commit_oid
+        },
+        "overall_risk": overall_risk,
+        "findings": findings,
+        "extensions": null
     })
 }
 

@@ -49,6 +49,20 @@ pub enum OutcomeClass {
     Cancelled,
 }
 
+impl OutcomeClass {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Findings => "findings",
+            Self::TransientFailure => "transient_failure",
+            Self::TerminalFailure => "terminal_failure",
+            Self::ProtocolViolation => "protocol_violation",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -313,6 +327,39 @@ pub enum JobState {
     },
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct JobStateParts {
+    pub outcome_class: Option<OutcomeClass>,
+    pub workspace_id: Option<WorkspaceId>,
+    pub agent_id: Option<AgentId>,
+    pub prompt_snapshot: Option<String>,
+    pub phase_template_digest: Option<String>,
+    pub output_commit_oid: Option<CommitOid>,
+    pub result_schema_version: Option<String>,
+    pub result_payload: Option<serde_json::Value>,
+    pub process_pid: Option<u32>,
+    pub lease_owner_id: Option<crate::lease_owner_id::LeaseOwnerId>,
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+fn build_assignment(parts: &JobStateParts) -> Option<JobAssignment> {
+    parts.workspace_id.map(|workspace_id| JobAssignment {
+        workspace_id,
+        agent_id: parts.agent_id,
+        prompt_snapshot: parts.prompt_snapshot.clone(),
+        phase_template_digest: parts.phase_template_digest.clone(),
+    })
+}
+
+fn required_field<T>(field: &'static str, value: Option<T>) -> Result<T, String> {
+    value.ok_or_else(|| format!("job {field} is required for this status"))
+}
+
 impl JobState {
     #[must_use]
     pub fn status(&self) -> JobStatus {
@@ -530,6 +577,47 @@ impl JobState {
             error_message,
         }
     }
+
+    pub fn from_parts(status: JobStatus, parts: JobStateParts) -> Result<Self, String> {
+        let assignment = build_assignment(&parts);
+
+        match status {
+            JobStatus::Queued => Ok(Self::Queued),
+            JobStatus::Assigned => Ok(Self::Assigned(required_field("workspace_id", assignment)?)),
+            JobStatus::Running => Ok(Self::Running {
+                assignment: required_field("workspace_id", assignment)?,
+                lease: JobLease {
+                    process_pid: parts.process_pid,
+                    lease_owner_id: required_field("lease_owner_id", parts.lease_owner_id)?,
+                    heartbeat_at: required_field("heartbeat_at", parts.heartbeat_at)?,
+                    lease_expires_at: required_field("lease_expires_at", parts.lease_expires_at)?,
+                    started_at: required_field("started_at", parts.started_at)?,
+                },
+            }),
+            JobStatus::Completed => Ok(Self::Completed {
+                assignment,
+                started_at: parts.started_at,
+                outcome_class: required_field("outcome_class", parts.outcome_class)?,
+                ended_at: required_field("ended_at", parts.ended_at)?,
+                output_commit_oid: parts.output_commit_oid,
+                result_schema_version: parts.result_schema_version,
+                result_payload: parts.result_payload,
+            }),
+            status @ (JobStatus::Failed
+            | JobStatus::Cancelled
+            | JobStatus::Expired
+            | JobStatus::Superseded) => Ok(Self::Terminated {
+                terminal_status: TerminalStatus::from_job_status(status)
+                    .expect("terminal job status"),
+                assignment,
+                started_at: parts.started_at,
+                outcome_class: parts.outcome_class,
+                ended_at: required_field("ended_at", parts.ended_at)?,
+                error_code: parts.error_code,
+                error_message: parts.error_message,
+            }),
+        }
+    }
 }
 
 // --- Serde: backward-compatible JSON via JobWire ---
@@ -572,70 +660,31 @@ struct JobWire {
     pub ended_at: Option<DateTime<Utc>>,
 }
 
-fn build_assignment(
-    workspace_id: Option<WorkspaceId>,
-    agent_id: Option<AgentId>,
-    prompt_snapshot: Option<String>,
-    phase_template_digest: Option<String>,
-) -> Option<JobAssignment> {
-    workspace_id.map(|workspace_id| JobAssignment {
-        workspace_id,
-        agent_id,
-        prompt_snapshot,
-        phase_template_digest,
-    })
-}
-
-fn required_field<T>(field: &'static str, value: Option<T>) -> Result<T, String> {
-    value.ok_or_else(|| format!("job {field} is required for this status"))
-}
-
 impl TryFrom<JobWire> for Job {
     type Error = String;
 
     fn try_from(w: JobWire) -> Result<Self, Self::Error> {
-        let assignment = build_assignment(
-            w.workspace_id,
-            w.agent_id,
-            w.prompt_snapshot,
-            w.phase_template_digest,
-        );
-        let state = match w.status {
-            JobStatus::Queued => JobState::Queued,
-            JobStatus::Assigned => JobState::Assigned(required_field("workspace_id", assignment)?),
-            JobStatus::Running => JobState::Running {
-                assignment: required_field("workspace_id", assignment)?,
-                lease: JobLease {
-                    process_pid: w.process_pid,
-                    lease_owner_id: required_field("lease_owner_id", w.lease_owner_id)?,
-                    heartbeat_at: required_field("heartbeat_at", w.heartbeat_at)?,
-                    lease_expires_at: required_field("lease_expires_at", w.lease_expires_at)?,
-                    started_at: required_field("started_at", w.started_at)?,
-                },
-            },
-            JobStatus::Completed => JobState::Completed {
-                assignment,
-                started_at: w.started_at,
-                outcome_class: required_field("outcome_class", w.outcome_class)?,
-                ended_at: required_field("ended_at", w.ended_at)?,
+        let state = JobState::from_parts(
+            w.status,
+            JobStateParts {
+                outcome_class: w.outcome_class,
+                workspace_id: w.workspace_id,
+                agent_id: w.agent_id,
+                prompt_snapshot: w.prompt_snapshot,
+                phase_template_digest: w.phase_template_digest,
                 output_commit_oid: w.output_commit_oid,
                 result_schema_version: w.result_schema_version,
                 result_payload: w.result_payload,
-            },
-            status @ (JobStatus::Failed
-            | JobStatus::Cancelled
-            | JobStatus::Expired
-            | JobStatus::Superseded) => JobState::Terminated {
-                terminal_status: TerminalStatus::from_job_status(status)
-                    .expect("terminal job status"),
-                assignment,
-                started_at: w.started_at,
-                outcome_class: w.outcome_class,
-                ended_at: required_field("ended_at", w.ended_at)?,
+                process_pid: w.process_pid,
+                lease_owner_id: w.lease_owner_id,
+                heartbeat_at: w.heartbeat_at,
+                lease_expires_at: w.lease_expires_at,
                 error_code: w.error_code,
                 error_message: w.error_message,
+                started_at: w.started_at,
+                ended_at: w.ended_at,
             },
-        };
+        )?;
 
         Ok(Job {
             id: w.id,
@@ -867,6 +916,15 @@ mod tests {
         assert!(
             error.to_string().contains("outcome_class"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn outcome_class_as_str_matches_wire_format() {
+        assert_eq!(OutcomeClass::TerminalFailure.as_str(), "terminal_failure");
+        assert_eq!(
+            OutcomeClass::ProtocolViolation.as_str(),
+            "protocol_violation"
         );
     }
 }

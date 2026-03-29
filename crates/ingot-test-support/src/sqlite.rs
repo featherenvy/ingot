@@ -89,7 +89,7 @@ impl PersistFixture for Finding {
     }
 }
 
-async fn ensure_job_workspace(db: &Database, job: &Job) -> Result<(), RepositoryError> {
+pub async fn ensure_job_workspace(db: &Database, job: &Job) -> Result<(), RepositoryError> {
     let Some(workspace_id) = job.state.workspace_id() else {
         return Ok(());
     };
@@ -102,7 +102,7 @@ async fn ensure_job_workspace(db: &Database, job: &Job) -> Result<(), Repository
     db.create_workspace(&workspace).await
 }
 
-fn placeholder_workspace(job: &Job, workspace_id: WorkspaceId) -> Workspace {
+pub fn placeholder_workspace(job: &Job, workspace_id: WorkspaceId) -> Workspace {
     Workspace {
         id: workspace_id,
         project_id: job.project_id,

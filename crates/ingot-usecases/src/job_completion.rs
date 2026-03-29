@@ -573,14 +573,7 @@ fn expected_schema_version(output_artifact_kind: OutputArtifactKind) -> &'static
 }
 
 fn outcome_class_name(outcome_class: OutcomeClass) -> &'static str {
-    match outcome_class {
-        OutcomeClass::Clean => "clean",
-        OutcomeClass::Findings => "findings",
-        OutcomeClass::Cancelled => "cancelled",
-        OutcomeClass::TransientFailure => "transient_failure",
-        OutcomeClass::TerminalFailure => "terminal_failure",
-        OutcomeClass::ProtocolViolation => "protocol_violation",
-    }
+    outcome_class.as_str()
 }
 
 fn map_repository_error(error: RepositoryError) -> CompleteJobError {

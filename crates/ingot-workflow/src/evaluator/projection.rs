@@ -507,14 +507,7 @@ fn is_closure_relevant_step(step_id: StepId) -> bool {
 }
 
 fn outcome_class_name(outcome_class: OutcomeClass) -> &'static str {
-    match outcome_class {
-        OutcomeClass::Clean => "clean",
-        OutcomeClass::Findings => "findings",
-        OutcomeClass::TransientFailure => "transient_failure",
-        OutcomeClass::TerminalFailure => "terminal_failure",
-        OutcomeClass::ProtocolViolation => "protocol_violation",
-        OutcomeClass::Cancelled => "cancelled",
-    }
+    outcome_class.as_str()
 }
 
 fn job_status_name(job_status: JobStatus) -> &'static str {

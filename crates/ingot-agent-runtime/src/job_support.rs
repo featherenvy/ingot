@@ -180,14 +180,7 @@ pub(crate) fn non_empty_message(message: &str) -> Option<String> {
 }
 
 pub(crate) fn outcome_class_name(outcome_class: OutcomeClass) -> &'static str {
-    match outcome_class {
-        OutcomeClass::Clean => "clean",
-        OutcomeClass::Findings => "findings",
-        OutcomeClass::TransientFailure => "transient_failure",
-        OutcomeClass::TerminalFailure => "terminal_failure",
-        OutcomeClass::ProtocolViolation => "protocol_violation",
-        OutcomeClass::Cancelled => "cancelled",
-    }
+    outcome_class.as_str()
 }
 
 pub(crate) fn template_digest(template: &str) -> String {

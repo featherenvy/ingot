@@ -6,6 +6,7 @@ mod subprocess;
 use std::path::Path;
 
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
+use ingot_agent_protocol::report;
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
 use ingot_domain::agent::{AdapterKind, Agent};
@@ -41,33 +42,20 @@ pub(crate) fn output_schema(request: &AgentRequest) -> serde_json::Value {
     request
         .output_schema
         .clone()
-        .unwrap_or_else(structured_output_schema)
+        .unwrap_or_else(report::commit_summary_schema)
 }
 
 /// Parse a textual adapter payload as JSON when possible, otherwise wrap it in
 /// the default summary envelope.
 pub(crate) fn result_from_text(payload: &str) -> serde_json::Value {
     serde_json::from_str(payload)
-        .unwrap_or_else(|_| serde_json::json!({ "summary": payload.trim() }))
+        .unwrap_or_else(|_| report::commit_summary_payload(payload.trim(), None))
 }
 
 /// Default structured-output JSON schema shared by all CLI adapters.
+#[cfg(test)]
 pub(crate) fn structured_output_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "summary": {
-                "type": "string",
-                "description": "Short summary of the completed work."
-            },
-            "validation": {
-                "type": ["string", "null"],
-                "description": "Short note describing validation that was run, if any."
-            }
-        },
-        "required": ["summary", "validation"],
-        "additionalProperties": false
-    })
+    report::commit_summary_schema()
 }
 
 #[cfg(test)]
@@ -125,7 +113,7 @@ mod tests {
     fn result_from_text_wraps_plain_text_summary() {
         assert_eq!(
             result_from_text("  completed work  "),
-            serde_json::json!({"summary":"completed work"})
+            serde_json::json!({"summary":"completed work","validation":null})
         );
     }
 }
