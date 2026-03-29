@@ -4,11 +4,11 @@ use ingot_domain::convergence::ConvergenceStatus;
 use ingot_domain::ids::{ActivityId, ItemId};
 use ingot_domain::item::ApprovalState;
 use ingot_domain::ports::{InvalidatePreparedConvergenceMutation, RepositoryError};
-use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
-use ingot_store_sqlite::PersistFixture;
-use ingot_test_support::fixtures::{
+use ingot_domain::test_support::{
     ConvergenceBuilder, ItemBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
 };
+use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
+use ingot_test_support::sqlite::PersistFixture;
 
 #[tokio::test]
 async fn apply_invalidation_fails_convergence_and_stales_workspace_atomically() {

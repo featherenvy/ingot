@@ -1,7 +1,7 @@
 use chrono::Utc;
 use ingot_domain::ids::{ItemId, JobId};
 use ingot_domain::ports::RepositoryError;
-use ingot_test_support::fixtures::{ItemBuilder, ProjectBuilder, RevisionBuilder};
+use ingot_domain::test_support::{ItemBuilder, ProjectBuilder, RevisionBuilder};
 use ingot_test_support::sqlite::temp_db_path;
 
 use crate::db::Database;

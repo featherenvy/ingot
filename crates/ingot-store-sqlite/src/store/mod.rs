@@ -1,4 +1,5 @@
 mod helpers;
+#[cfg(test)]
 mod test_fixtures;
 
 mod activity;
@@ -17,4 +18,5 @@ mod revision_lane_teardown;
 mod workspace;
 
 pub use job::ClaimQueuedAgentJobExecutionParams;
-pub use test_fixtures::PersistFixture;
+#[cfg(test)]
+pub(crate) use test_fixtures::PersistFixture;

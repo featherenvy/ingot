@@ -6,11 +6,11 @@ use ingot_domain::ports::{
     ConflictKind, FinishJobNonSuccessParams, RepositoryError, RevisionLaneTeardownMutation,
     TeardownJobCancellation,
 };
-use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
-use ingot_store_sqlite::PersistFixture;
-use ingot_test_support::fixtures::{
+use ingot_domain::test_support::{
     ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
 };
+use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
+use ingot_test_support::sqlite::PersistFixture;
 
 #[tokio::test]
 async fn apply_teardown_cancels_job_and_updates_workspace_atomically() {

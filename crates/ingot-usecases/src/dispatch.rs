@@ -188,7 +188,7 @@ where
     A: ActivityRepository,
     G: DispatchInfraPort,
 {
-    if finding.source_step_id != step::INVESTIGATE_ITEM
+    if finding.source_step_id != StepId::InvestigateItem
         || finding.source_subject_kind != ingot_domain::finding::FindingSubjectKind::Candidate
     {
         return Ok(());
@@ -241,7 +241,7 @@ pub fn autopilot_dispatch_requires_live_target_head(
     Evaluator::new()
         .evaluate(item, revision, jobs, findings, convergences)
         .dispatchable_step_id
-        == Some(step::AUTHOR_INITIAL)
+        == Some(StepId::AuthorInitial)
         && revision.seed.seed_commit_oid().is_none()
 }
 
@@ -249,14 +249,14 @@ pub fn autopilot_dispatch_requires_live_target_head(
 pub fn should_fill_candidate_subject_from_workspace(step_id: StepId) -> bool {
     matches!(
         step_id,
-        step::REVIEW_INCREMENTAL_INITIAL
-            | step::REVIEW_CANDIDATE_INITIAL
-            | step::REVIEW_CANDIDATE_REPAIR
-            | step::VALIDATE_CANDIDATE_INITIAL
-            | step::VALIDATE_CANDIDATE_REPAIR
-            | step::REVIEW_AFTER_INTEGRATION_REPAIR
-            | step::VALIDATE_AFTER_INTEGRATION_REPAIR
-            | step::INVESTIGATE_ITEM
+        StepId::ReviewIncrementalInitial
+            | StepId::ReviewCandidateInitial
+            | StepId::ReviewCandidateRepair
+            | StepId::ValidateCandidateInitial
+            | StepId::ValidateCandidateRepair
+            | StepId::ReviewAfterIntegrationRepair
+            | StepId::ValidateAfterIntegrationRepair
+            | StepId::InvestigateItem
     )
 }
 
@@ -281,7 +281,7 @@ pub fn should_rebind_implicit_author_initial_job(
     revision: &ItemRevision,
     has_authoring_workspace: bool,
 ) -> bool {
-    job.step_id == step::AUTHOR_INITIAL
+    job.step_id == StepId::AuthorInitial
         && job.workspace_kind == WorkspaceKind::Authoring
         && job.execution_permission == ExecutionPermission::MayMutate
         && !revision.seed.is_explicit()
@@ -331,7 +331,7 @@ fn bind_autopilot_authoring_head_if_needed(
     }
 
     let head_commit_oid = match job.step_id {
-        step::AUTHOR_INITIAL => author_initial_head_commit_oid.cloned().or_else(|| {
+        StepId::AuthorInitial => author_initial_head_commit_oid.cloned().or_else(|| {
             current_authoring_head_for_revision_with_workspace(revision, jobs, workspace)
         }),
         _ => current_authoring_head_for_revision_with_workspace(revision, jobs, workspace),
@@ -664,9 +664,8 @@ mod tests {
     use ingot_domain::job::OutputArtifactKind;
     use ingot_domain::project::ExecutionMode;
     use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed};
-    use ingot_test_support::fixtures::{ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder};
+    use ingot_domain::test_support::{ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder};
     use ingot_test_support::sqlite::migrated_test_db;
-    use ingot_workflow::step;
     use uuid::Uuid;
 
     use super::*;
@@ -718,17 +717,17 @@ mod tests {
     #[test]
     fn should_fill_is_true_for_review_steps() {
         assert!(should_fill_candidate_subject_from_workspace(
-            step::REVIEW_INCREMENTAL_INITIAL
+            StepId::ReviewIncrementalInitial
         ));
         assert!(should_fill_candidate_subject_from_workspace(
-            step::INVESTIGATE_ITEM
+            StepId::InvestigateItem
         ));
     }
 
     #[test]
     fn should_fill_is_false_for_authoring_steps() {
         assert!(!should_fill_candidate_subject_from_workspace(
-            step::AUTHOR_INITIAL
+            StepId::AuthorInitial
         ));
     }
 
@@ -765,7 +764,7 @@ mod tests {
             .seed_commit_oid(None::<String>)
             .seed_target_commit_oid(Some("target-head".to_string()))
             .build();
-        let job = JobBuilder::new(project_id, item_id, revision_id, step::AUTHOR_INITIAL)
+        let job = JobBuilder::new(project_id, item_id, revision_id, StepId::AuthorInitial)
             .workspace_kind(WorkspaceKind::Authoring)
             .execution_permission(ExecutionPermission::MayMutate)
             .build();
@@ -825,7 +824,7 @@ mod tests {
         .expect("autopilot dispatch")
         .expect("author_initial job");
 
-        assert_eq!(job.step_id, step::AUTHOR_INITIAL);
+        assert_eq!(job.step_id, StepId::AuthorInitial);
         assert_eq!(
             job.job_input,
             JobInput::authoring_head("target-head".into())

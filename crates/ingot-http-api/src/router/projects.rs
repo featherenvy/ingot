@@ -9,9 +9,9 @@ use super::support::{
         normalize_project_name,
     },
     path::ApiPath,
-    project_repo::refresh_project_mirror,
 };
 use super::types::*;
+use crate::router::infra_ports::HttpInfraAdapter;
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -103,7 +103,9 @@ pub(super) async fn create_project(
         .create_project(&project)
         .await
         .map_err(repo_to_project_mutation)?;
-    refresh_project_mirror(&state, &project).await?;
+    HttpInfraAdapter::new(&state)
+        .refresh_project_mirror(&project)
+        .await?;
 
     Ok((StatusCode::CREATED, Json(project)))
 }
@@ -159,7 +161,9 @@ pub(super) async fn update_project(
         .update_project(&project)
         .await
         .map_err(repo_to_project_mutation)?;
-    refresh_project_mirror(&state, &project).await?;
+    HttpInfraAdapter::new(&state)
+        .refresh_project_mirror(&project)
+        .await?;
 
     Ok(Json(project))
 }

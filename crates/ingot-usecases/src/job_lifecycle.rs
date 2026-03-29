@@ -288,8 +288,8 @@ mod tests {
     use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId, WorkspaceId};
     use ingot_domain::job::{JobStatus, OutcomeClass};
     use ingot_domain::ports::{ConflictKind, RepositoryError, StartJobExecutionParams};
+    use ingot_domain::test_support::{JobBuilder, WorkspaceBuilder, nil_item};
     use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
-    use ingot_test_support::fixtures::{JobBuilder, WorkspaceBuilder, nil_item};
     use uuid::Uuid;
 
     use super::*;

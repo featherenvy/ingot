@@ -3,7 +3,7 @@ use ingot_domain::finding::{FindingSubjectKind, FindingTriage, FindingTriageStat
 use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId};
 use ingot_domain::job::{Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind};
 use ingot_domain::step_id::StepId;
-use ingot_test_support::fixtures::{
+use ingot_domain::test_support::{
     ConvergenceBuilder, FindingBuilder, JobBuilder, nil_item, nil_revision,
 };
 use uuid::Uuid;
@@ -526,7 +526,7 @@ async fn execute_auto_triage_transitions_approval_for_validate_integrated() {
     use ingot_domain::ports::{ActivityRepository, FindingRepository, ItemRepository};
     use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
     use ingot_domain::revision::ApprovalPolicy;
-    use ingot_test_support::fixtures::{ItemBuilder, ProjectBuilder, RevisionBuilder};
+    use ingot_domain::test_support::{ItemBuilder, ProjectBuilder, RevisionBuilder};
     use ingot_test_support::sqlite::migrated_test_db;
 
     let db = migrated_test_db("ingot-usecases-finding-triage").await;
@@ -630,7 +630,7 @@ async fn execute_auto_triage_does_not_transition_approval_for_fix_now_findings()
     use ingot_domain::ports::{FindingRepository, ItemRepository};
     use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
     use ingot_domain::revision::ApprovalPolicy;
-    use ingot_test_support::fixtures::{ItemBuilder, ProjectBuilder, RevisionBuilder};
+    use ingot_domain::test_support::{ItemBuilder, ProjectBuilder, RevisionBuilder};
     use ingot_test_support::sqlite::migrated_test_db;
 
     let db = migrated_test_db("ingot-usecases-finding-fixnow").await;
@@ -721,7 +721,7 @@ async fn execute_auto_triage_skips_approval_for_non_validate_integrated() {
     use ingot_domain::ports::{FindingRepository, ItemRepository};
     use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
     use ingot_domain::revision::ApprovalPolicy;
-    use ingot_test_support::fixtures::{ItemBuilder, ProjectBuilder, RevisionBuilder};
+    use ingot_domain::test_support::{ItemBuilder, ProjectBuilder, RevisionBuilder};
     use ingot_test_support::sqlite::migrated_test_db;
 
     let db = migrated_test_db("ingot-usecases-finding-guard").await;

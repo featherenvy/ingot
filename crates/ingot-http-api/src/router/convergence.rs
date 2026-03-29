@@ -1,4 +1,4 @@
-use super::convergence_port::HttpConvergencePort;
+use super::convergence_route_adapter::HttpConvergenceRouteAdapter;
 use super::deps::*;
 use super::item_projection::load_item_detail;
 use super::items::build_superseding_revision;
@@ -36,10 +36,9 @@ pub(super) async fn prepare_item_convergence(
         .project_locks
         .acquire_project_mutation(project_id)
         .await;
-    ConvergenceService::new(HttpConvergencePort::new(&state))
+    HttpConvergenceRouteAdapter::new(&state)
         .queue_prepare(project_id, item_id)
-        .await
-        .map_err(ApiError::from)?;
+        .await?;
     let detail = load_item_detail(&state, project_id, item_id).await?;
     Ok(Json(detail))
 }
@@ -55,10 +54,9 @@ pub(super) async fn approve_item(
         .project_locks
         .acquire_project_mutation(project_id)
         .await;
-    ConvergenceService::new(HttpConvergencePort::new(&state))
+    HttpConvergenceRouteAdapter::new(&state)
         .approve_item(project_id, item_id)
-        .await
-        .map_err(ApiError::from)?;
+        .await?;
     let detail = load_item_detail(&state, project_id, item_id).await?;
     Ok(Json(detail))
 }
@@ -103,10 +101,9 @@ pub(super) async fn reject_item_approval(
         build_superseding_revision(&state, &project, &item, &current_revision, &jobs, request)
             .await?;
     let cleared_escalation = item.escalation.is_escalated();
-    let teardown = ConvergenceService::new(HttpConvergencePort::new(&state))
+    let teardown = HttpConvergenceRouteAdapter::new(&state)
         .reject_item_approval(project_id, item.id, &next_revision)
-        .await
-        .map_err(ApiError::from)?;
+        .await?;
     append_activity(
         &state,
         project_id,

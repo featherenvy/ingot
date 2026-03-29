@@ -11,10 +11,10 @@ use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
     PhaseKind,
 };
-use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind, WorkspaceStatus};
-use ingot_test_support::fixtures::{
+use ingot_domain::test_support::{
     ConvergenceBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
 };
+use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind, WorkspaceStatus};
 use ingot_test_support::reports::clean_review_report;
 use tower::ServiceExt;
 use uuid::Uuid;

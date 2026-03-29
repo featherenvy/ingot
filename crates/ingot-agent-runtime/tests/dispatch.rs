@@ -7,6 +7,7 @@ use std::time::Duration;
 use ingot_agent_runtime::{AgentRunner, DispatcherConfig, JobDispatcher};
 use ingot_domain::agent::{Agent, AgentCapability};
 use ingot_domain::job::{JobStatus, OutcomeClass};
+use ingot_domain::step_id::StepId;
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
 use ingot_test_support::git::unique_temp_path;
@@ -20,7 +21,6 @@ use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
 use ingot_usecases::job_lifecycle;
-use ingot_workflow::step;
 
 #[tokio::test]
 async fn tick_executes_a_queued_authoring_job_and_creates_a_commit() {
@@ -318,12 +318,12 @@ async fn tick_runs_healthy_queued_job_even_when_another_project_is_broken() {
             .expect("healthy jobs");
     let completed_author = healthy_jobs
         .iter()
-        .find(|job| job.step_id == step::AUTHOR_INITIAL)
+        .find(|job| job.step_id == StepId::AuthorInitial)
         .expect("completed healthy author job");
     assert_eq!(completed_author.state.status(), JobStatus::Completed);
     let review_job = healthy_jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
+        .find(|job| job.step_id == StepId::ReviewIncrementalInitial)
         .expect("queued healthy review job");
     assert_eq!(review_job.state.status(), JobStatus::Queued);
 }

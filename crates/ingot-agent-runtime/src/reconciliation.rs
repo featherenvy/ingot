@@ -14,6 +14,7 @@ use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::GitOperationId;
 use ingot_domain::item::{ApprovalState, DoneReason, Escalation, Lifecycle, ResolutionSource};
 use ingot_domain::job::{Job, JobState, JobStatus, OutcomeClass};
+use ingot_domain::ports::FinishJobNonSuccessParams;
 use ingot_domain::ports::ProjectMutationLockPort;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
@@ -22,7 +23,6 @@ use ingot_git::commands::{delete_ref, head_oid, resolve_ref_oid};
 use ingot_git::project_repo::{
     CheckoutFinalizationStatus, checkout_finalization_status, sync_checkout_to_commit,
 };
-use ingot_store_sqlite::FinishJobNonSuccessParams;
 use ingot_workspace::remove_workspace;
 
 use crate::{JobDispatcher, RuntimeError, is_inert_assigned_authoring_dispatch_residue};

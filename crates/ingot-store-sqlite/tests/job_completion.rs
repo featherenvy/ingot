@@ -13,13 +13,14 @@ use ingot_domain::ports::{
 };
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
-use ingot_domain::workspace::{RetentionPolicy, Workspace, WorkspaceKind};
-use ingot_store_sqlite::{Database, PersistFixture};
-use ingot_test_support::fixtures::{
+use ingot_domain::test_support::{
     ConvergenceBuilder, FindingBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
     WorkspaceBuilder, default_timestamp, parse_timestamp,
 };
+use ingot_domain::workspace::{RetentionPolicy, Workspace, WorkspaceKind};
+use ingot_store_sqlite::Database;
 use ingot_test_support::reports::clean_validation_report;
+use ingot_test_support::sqlite::PersistFixture;
 
 async fn persist_project(db: &Database) -> Project {
     ProjectBuilder::new("/tmp/test")

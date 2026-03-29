@@ -641,8 +641,8 @@ mod tests {
         PhaseKind,
     };
     use ingot_domain::project::Project;
+    use ingot_domain::test_support::{ConvergenceBuilder, JobBuilder, nil_item, nil_revision};
     use ingot_domain::workspace::WorkspaceKind;
-    use ingot_test_support::fixtures::{ConvergenceBuilder, JobBuilder, nil_item, nil_revision};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -1195,7 +1195,7 @@ mod tests {
     }
 
     fn test_project() -> Project {
-        use ingot_test_support::fixtures::ProjectBuilder;
+        use ingot_domain::test_support::ProjectBuilder;
         use ingot_test_support::git::unique_temp_path;
         ProjectBuilder::new(unique_temp_path("ingot-usecases"))
             .id(ProjectId::from_uuid(Uuid::nil()))

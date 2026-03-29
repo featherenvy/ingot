@@ -1,8 +1,6 @@
 use ingot_domain::job::OutcomeClass;
 use ingot_domain::step_id::StepId;
 
-use crate::step::*;
-
 /// Represents a transition edge in the workflow graph.
 #[derive(Debug, Clone)]
 pub struct Transition {
@@ -11,10 +9,30 @@ pub struct Transition {
     pub to: TransitionTarget,
 }
 
+impl Transition {
+    const fn step(from_step: StepId, outcome: TransitionOutcome, to_step: StepId) -> Self {
+        Self {
+            from_step,
+            outcome,
+            to: TransitionTarget::Step(to_step),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransitionOutcome {
     Clean,
     Findings,
+}
+
+impl TransitionOutcome {
+    fn from_job_outcome(outcome: &OutcomeClass) -> Option<Self> {
+        match outcome {
+            OutcomeClass::Clean => Some(Self::Clean),
+            OutcomeClass::Findings => Some(Self::Findings),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,126 +52,126 @@ impl WorkflowGraph {
         Self {
             transitions: vec![
                 // author_initial -> review_incremental_initial
-                Transition {
-                    from_step: AUTHOR_INITIAL,
-                    outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(REVIEW_INCREMENTAL_INITIAL),
-                },
+                Transition::step(
+                    StepId::AuthorInitial,
+                    TransitionOutcome::Clean,
+                    StepId::ReviewIncrementalInitial,
+                ),
                 // review_incremental_initial
-                Transition {
-                    from_step: REVIEW_INCREMENTAL_INITIAL,
-                    outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(REVIEW_CANDIDATE_INITIAL),
-                },
-                Transition {
-                    from_step: REVIEW_INCREMENTAL_INITIAL,
-                    outcome: TransitionOutcome::Findings,
-                    to: TransitionTarget::Step(REPAIR_CANDIDATE),
-                },
+                Transition::step(
+                    StepId::ReviewIncrementalInitial,
+                    TransitionOutcome::Clean,
+                    StepId::ReviewCandidateInitial,
+                ),
+                Transition::step(
+                    StepId::ReviewIncrementalInitial,
+                    TransitionOutcome::Findings,
+                    StepId::RepairCandidate,
+                ),
                 // review_candidate_initial
-                Transition {
-                    from_step: REVIEW_CANDIDATE_INITIAL,
-                    outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(VALIDATE_CANDIDATE_INITIAL),
-                },
-                Transition {
-                    from_step: REVIEW_CANDIDATE_INITIAL,
-                    outcome: TransitionOutcome::Findings,
-                    to: TransitionTarget::Step(REPAIR_CANDIDATE),
-                },
+                Transition::step(
+                    StepId::ReviewCandidateInitial,
+                    TransitionOutcome::Clean,
+                    StepId::ValidateCandidateInitial,
+                ),
+                Transition::step(
+                    StepId::ReviewCandidateInitial,
+                    TransitionOutcome::Findings,
+                    StepId::RepairCandidate,
+                ),
                 // validate_candidate_initial
-                Transition {
-                    from_step: VALIDATE_CANDIDATE_INITIAL,
-                    outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(PREPARE_CONVERGENCE),
-                },
-                Transition {
-                    from_step: VALIDATE_CANDIDATE_INITIAL,
-                    outcome: TransitionOutcome::Findings,
-                    to: TransitionTarget::Step(REPAIR_CANDIDATE),
-                },
+                Transition::step(
+                    StepId::ValidateCandidateInitial,
+                    TransitionOutcome::Clean,
+                    StepId::PrepareConvergence,
+                ),
+                Transition::step(
+                    StepId::ValidateCandidateInitial,
+                    TransitionOutcome::Findings,
+                    StepId::RepairCandidate,
+                ),
                 // repair_candidate -> review_incremental_repair
-                Transition {
-                    from_step: REPAIR_CANDIDATE,
-                    outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(REVIEW_INCREMENTAL_REPAIR),
-                },
-                Transition {
-                    from_step: REVIEW_INCREMENTAL_REPAIR,
-                    outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(REVIEW_CANDIDATE_REPAIR),
-                },
-                Transition {
-                    from_step: REVIEW_INCREMENTAL_REPAIR,
-                    outcome: TransitionOutcome::Findings,
-                    to: TransitionTarget::Step(REPAIR_CANDIDATE),
-                },
+                Transition::step(
+                    StepId::RepairCandidate,
+                    TransitionOutcome::Clean,
+                    StepId::ReviewIncrementalRepair,
+                ),
+                Transition::step(
+                    StepId::ReviewIncrementalRepair,
+                    TransitionOutcome::Clean,
+                    StepId::ReviewCandidateRepair,
+                ),
+                Transition::step(
+                    StepId::ReviewIncrementalRepair,
+                    TransitionOutcome::Findings,
+                    StepId::RepairCandidate,
+                ),
                 // review_candidate_repair
-                Transition {
-                    from_step: REVIEW_CANDIDATE_REPAIR,
-                    outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(VALIDATE_CANDIDATE_REPAIR),
-                },
-                Transition {
-                    from_step: REVIEW_CANDIDATE_REPAIR,
-                    outcome: TransitionOutcome::Findings,
-                    to: TransitionTarget::Step(REPAIR_CANDIDATE),
-                },
+                Transition::step(
+                    StepId::ReviewCandidateRepair,
+                    TransitionOutcome::Clean,
+                    StepId::ValidateCandidateRepair,
+                ),
+                Transition::step(
+                    StepId::ReviewCandidateRepair,
+                    TransitionOutcome::Findings,
+                    StepId::RepairCandidate,
+                ),
                 // validate_candidate_repair
-                Transition {
-                    from_step: VALIDATE_CANDIDATE_REPAIR,
-                    outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(PREPARE_CONVERGENCE),
-                },
-                Transition {
-                    from_step: VALIDATE_CANDIDATE_REPAIR,
-                    outcome: TransitionOutcome::Findings,
-                    to: TransitionTarget::Step(REPAIR_CANDIDATE),
-                },
+                Transition::step(
+                    StepId::ValidateCandidateRepair,
+                    TransitionOutcome::Clean,
+                    StepId::PrepareConvergence,
+                ),
+                Transition::step(
+                    StepId::ValidateCandidateRepair,
+                    TransitionOutcome::Findings,
+                    StepId::RepairCandidate,
+                ),
                 // validate_integrated - clean goes to approval gate (handled by evaluator)
-                Transition {
-                    from_step: VALIDATE_INTEGRATED,
-                    outcome: TransitionOutcome::Findings,
-                    to: TransitionTarget::Step(REPAIR_AFTER_INTEGRATION),
-                },
+                Transition::step(
+                    StepId::ValidateIntegrated,
+                    TransitionOutcome::Findings,
+                    StepId::RepairAfterIntegration,
+                ),
                 // repair_after_integration
-                Transition {
-                    from_step: REPAIR_AFTER_INTEGRATION,
-                    outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(REVIEW_INCREMENTAL_AFTER_INTEGRATION_REPAIR),
-                },
-                Transition {
-                    from_step: REVIEW_INCREMENTAL_AFTER_INTEGRATION_REPAIR,
-                    outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(REVIEW_AFTER_INTEGRATION_REPAIR),
-                },
-                Transition {
-                    from_step: REVIEW_INCREMENTAL_AFTER_INTEGRATION_REPAIR,
-                    outcome: TransitionOutcome::Findings,
-                    to: TransitionTarget::Step(REPAIR_AFTER_INTEGRATION),
-                },
+                Transition::step(
+                    StepId::RepairAfterIntegration,
+                    TransitionOutcome::Clean,
+                    StepId::ReviewIncrementalAfterIntegrationRepair,
+                ),
+                Transition::step(
+                    StepId::ReviewIncrementalAfterIntegrationRepair,
+                    TransitionOutcome::Clean,
+                    StepId::ReviewAfterIntegrationRepair,
+                ),
+                Transition::step(
+                    StepId::ReviewIncrementalAfterIntegrationRepair,
+                    TransitionOutcome::Findings,
+                    StepId::RepairAfterIntegration,
+                ),
                 // review_after_integration_repair
-                Transition {
-                    from_step: REVIEW_AFTER_INTEGRATION_REPAIR,
-                    outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(VALIDATE_AFTER_INTEGRATION_REPAIR),
-                },
-                Transition {
-                    from_step: REVIEW_AFTER_INTEGRATION_REPAIR,
-                    outcome: TransitionOutcome::Findings,
-                    to: TransitionTarget::Step(REPAIR_AFTER_INTEGRATION),
-                },
+                Transition::step(
+                    StepId::ReviewAfterIntegrationRepair,
+                    TransitionOutcome::Clean,
+                    StepId::ValidateAfterIntegrationRepair,
+                ),
+                Transition::step(
+                    StepId::ReviewAfterIntegrationRepair,
+                    TransitionOutcome::Findings,
+                    StepId::RepairAfterIntegration,
+                ),
                 // validate_after_integration_repair
-                Transition {
-                    from_step: VALIDATE_AFTER_INTEGRATION_REPAIR,
-                    outcome: TransitionOutcome::Clean,
-                    to: TransitionTarget::Step(PREPARE_CONVERGENCE),
-                },
-                Transition {
-                    from_step: VALIDATE_AFTER_INTEGRATION_REPAIR,
-                    outcome: TransitionOutcome::Findings,
-                    to: TransitionTarget::Step(REPAIR_AFTER_INTEGRATION),
-                },
+                Transition::step(
+                    StepId::ValidateAfterIntegrationRepair,
+                    TransitionOutcome::Clean,
+                    StepId::PrepareConvergence,
+                ),
+                Transition::step(
+                    StepId::ValidateAfterIntegrationRepair,
+                    TransitionOutcome::Findings,
+                    StepId::RepairAfterIntegration,
+                ),
             ],
         }
     }
@@ -164,11 +182,7 @@ impl WorkflowGraph {
         from_step: StepId,
         outcome: &OutcomeClass,
     ) -> Option<&TransitionTarget> {
-        let transition_outcome = match outcome {
-            OutcomeClass::Clean => TransitionOutcome::Clean,
-            OutcomeClass::Findings => TransitionOutcome::Findings,
-            _ => return None,
-        };
+        let transition_outcome = TransitionOutcome::from_job_outcome(outcome)?;
 
         self.transitions
             .iter()

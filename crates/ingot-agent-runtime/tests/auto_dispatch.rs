@@ -12,6 +12,7 @@ use ingot_domain::job::{
 };
 use ingot_domain::project::ExecutionMode;
 use ingot_domain::revision::ApprovalPolicy;
+use ingot_domain::step_id::StepId;
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
 use ingot_test_support::git::unique_temp_path;
@@ -25,7 +26,6 @@ use ingot_domain::finding::{FindingSeverity, FindingTriageState};
 use ingot_git::commands::git;
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
 use ingot_usecases::job_lifecycle;
-use ingot_workflow::step;
 
 fn write_harness_toml(repo_path: &Path, contents: &str) {
     let ingot_dir = repo_path.join(".ingot");
@@ -130,7 +130,7 @@ async fn authoring_success_auto_dispatches_incremental_review() {
 
     let completed_author = jobs
         .iter()
-        .find(|job| job.step_id == step::AUTHOR_INITIAL)
+        .find(|job| job.step_id == StepId::AuthorInitial)
         .expect("completed author job");
     assert_eq!(completed_author.state.status(), JobStatus::Completed);
     assert_eq!(
@@ -140,7 +140,7 @@ async fn authoring_success_auto_dispatches_incremental_review() {
 
     let review_job = jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
+        .find(|job| job.step_id == StepId::ReviewIncrementalInitial)
         .expect("auto-dispatched incremental review job");
     assert_eq!(review_job.state.status(), JobStatus::Queued);
     assert_eq!(
@@ -201,7 +201,7 @@ async fn implicit_revision_auto_dispatches_incremental_review_from_bound_workspa
         .await
         .expect("create workspace");
 
-    let author_job = JobBuilder::new(h.project.id, item_id, revision_id, step::AUTHOR_INITIAL)
+    let author_job = JobBuilder::new(h.project.id, item_id, revision_id, StepId::AuthorInitial)
         .status(JobStatus::Completed)
         .outcome_class(OutcomeClass::Clean)
         .workspace_id(authoring_workspace.id)
@@ -234,7 +234,7 @@ async fn implicit_revision_auto_dispatches_incremental_review_from_bound_workspa
 
     let review_job = jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
+        .find(|job| job.step_id == StepId::ReviewIncrementalInitial)
         .expect("auto-dispatched incremental review job");
     assert_eq!(review_job.state.status(), JobStatus::Queued);
     assert_eq!(
@@ -275,7 +275,7 @@ async fn auto_dispatch_projected_review_rejects_missing_candidate_subject() {
         h.project.id,
         item_id,
         revision_id,
-        step::REVIEW_INCREMENTAL_INITIAL,
+        StepId::ReviewIncrementalInitial,
     )
     .status(JobStatus::Completed)
     .outcome_class(OutcomeClass::Clean)
@@ -355,7 +355,7 @@ async fn autopilot_author_initial_binds_current_target_ref_head_after_branch_adv
     let jobs = h.db.list_jobs_by_item(item.id).await.expect("list jobs");
     assert_eq!(jobs.len(), 1, "autopilot should queue one authoring job");
     let author_job = &jobs[0];
-    assert_eq!(author_job.step_id, step::AUTHOR_INITIAL);
+    assert_eq!(author_job.step_id, StepId::AuthorInitial);
     assert_eq!(author_job.state.status(), JobStatus::Queued);
     assert_eq!(
         author_job.job_input,
@@ -429,7 +429,7 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
             h.project.id,
             idle_item_id,
             idle_revision_id,
-            step::AUTHOR_INITIAL,
+            StepId::AuthorInitial,
         )
         .status(JobStatus::Completed)
         .outcome_class(OutcomeClass::Clean)
@@ -470,7 +470,7 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
         h.project.id,
         idle_item_id,
         idle_revision_id,
-        step::REVIEW_INCREMENTAL_INITIAL,
+        StepId::ReviewIncrementalInitial,
     )
     .status(JobStatus::Completed)
     .outcome_class(OutcomeClass::Findings)
@@ -499,7 +499,7 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
             idle_revision_id,
             idle_review_job.id,
         )
-        .source_step_id(step::REVIEW_INCREMENTAL_INITIAL)
+        .source_step_id(StepId::ReviewIncrementalInitial)
         .source_finding_key("note")
         .source_subject_base_commit_oid(
             idle_review_job
@@ -541,13 +541,13 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
             .expect("busy jobs");
     let busy_completed_author = busy_jobs
         .iter()
-        .find(|job| job.step_id == step::AUTHOR_INITIAL)
+        .find(|job| job.step_id == StepId::AuthorInitial)
         .expect("completed busy author");
     assert_eq!(busy_completed_author.state.status(), JobStatus::Completed);
     assert!(
         busy_jobs
             .iter()
-            .any(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL
+            .any(|job| job.step_id == StepId::ReviewIncrementalInitial
                 && job.state.status() == JobStatus::Queued)
     );
 
@@ -557,7 +557,7 @@ async fn tick_recovers_idle_review_work_even_when_processing_other_queued_jobs()
             .expect("idle jobs");
     let idle_candidate_review = idle_jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_CANDIDATE_INITIAL)
+        .find(|job| job.step_id == StepId::ReviewCandidateInitial)
         .expect("recovered idle candidate review");
     assert_eq!(idle_candidate_review.state.status(), JobStatus::Queued);
 }
@@ -612,7 +612,7 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
 
     // Completed author job
     db.create_job(
-        &JobBuilder::new(project.id, item_id, revision_id, step::AUTHOR_INITIAL)
+        &JobBuilder::new(project.id, item_id, revision_id, StepId::AuthorInitial)
             .status(JobStatus::Completed)
             .outcome_class(OutcomeClass::Clean)
             .phase_template_slug("author-initial")
@@ -635,7 +635,7 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
             project.id,
             item_id,
             revision_id,
-            step::REVIEW_INCREMENTAL_INITIAL,
+            StepId::ReviewIncrementalInitial,
         )
         .phase_kind(PhaseKind::Review)
         .workspace_kind(WorkspaceKind::Review)
@@ -657,7 +657,7 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
     let jobs = db.list_jobs_by_item(item.id).await.expect("jobs");
     let completed_review = jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
+        .find(|job| job.step_id == StepId::ReviewIncrementalInitial)
         .expect("completed incremental review");
     assert_eq!(completed_review.state.status(), JobStatus::Completed);
     assert_eq!(
@@ -667,7 +667,7 @@ async fn clean_incremental_review_auto_dispatches_candidate_review() {
 
     let candidate_review = jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_CANDIDATE_INITIAL)
+        .find(|job| job.step_id == StepId::ReviewCandidateInitial)
         .expect("auto-dispatched candidate review");
     assert_eq!(candidate_review.state.status(), JobStatus::Queued);
     assert_eq!(
@@ -735,7 +735,7 @@ async fn clean_candidate_review_auto_dispatches_candidate_validation() {
         .expect("create item");
 
     db.create_job(
-        &JobBuilder::new(project.id, item_id, revision_id, step::AUTHOR_INITIAL)
+        &JobBuilder::new(project.id, item_id, revision_id, StepId::AuthorInitial)
             .status(JobStatus::Completed)
             .outcome_class(OutcomeClass::Clean)
             .phase_template_slug("author-initial")
@@ -757,7 +757,7 @@ async fn clean_candidate_review_auto_dispatches_candidate_validation() {
             project.id,
             item_id,
             revision_id,
-            step::REVIEW_CANDIDATE_INITIAL,
+            StepId::ReviewCandidateInitial,
         )
         .phase_kind(PhaseKind::Review)
         .workspace_kind(WorkspaceKind::Review)
@@ -779,7 +779,7 @@ async fn clean_candidate_review_auto_dispatches_candidate_validation() {
     let jobs = db.list_jobs_by_item(item.id).await.expect("jobs");
     let completed_review = jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_CANDIDATE_INITIAL)
+        .find(|job| job.step_id == StepId::ReviewCandidateInitial)
         .expect("completed candidate review");
     assert_eq!(completed_review.state.status(), JobStatus::Completed);
     assert_eq!(
@@ -789,7 +789,7 @@ async fn clean_candidate_review_auto_dispatches_candidate_validation() {
 
     let validation_job = jobs
         .iter()
-        .find(|job| job.step_id == step::VALIDATE_CANDIDATE_INITIAL)
+        .find(|job| job.step_id == StepId::ValidateCandidateInitial)
         .expect("auto-dispatched candidate validation");
     assert_eq!(validation_job.state.status(), JobStatus::Queued);
     assert_eq!(
@@ -859,7 +859,7 @@ async fn daemon_only_validation_job_executes_on_tick() {
         h.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .phase_kind(PhaseKind::Validate)
     .workspace_kind(WorkspaceKind::Authoring)
@@ -932,7 +932,7 @@ async fn run_forever_executes_daemon_only_validation_job() {
         h.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .phase_kind(PhaseKind::Validate)
     .workspace_kind(WorkspaceKind::Authoring)
@@ -1037,7 +1037,7 @@ timeout = "30s"
         h.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .phase_kind(PhaseKind::Validate)
     .workspace_kind(WorkspaceKind::Authoring)
@@ -1159,7 +1159,7 @@ timeout = "30s"
         h.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .phase_kind(PhaseKind::Validate)
     .workspace_kind(WorkspaceKind::Authoring)
@@ -1289,7 +1289,7 @@ timeout = "1s"
         h.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .phase_kind(PhaseKind::Validate)
     .workspace_kind(WorkspaceKind::Authoring)
@@ -1383,7 +1383,7 @@ timeout = "30s"
         h.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .phase_kind(PhaseKind::Validate)
     .workspace_kind(WorkspaceKind::Authoring)
@@ -1480,7 +1480,7 @@ timeout = "bogus"
         h.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .phase_kind(PhaseKind::Validate)
     .workspace_kind(WorkspaceKind::Authoring)
@@ -1853,7 +1853,7 @@ timeout = "1s"
         h.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .phase_kind(PhaseKind::Validate)
     .workspace_kind(WorkspaceKind::Authoring)
@@ -1941,7 +1941,7 @@ timeout = "30s"
         h.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .phase_kind(PhaseKind::Validate)
     .workspace_kind(WorkspaceKind::Authoring)
@@ -2059,7 +2059,7 @@ timeout = "30s"
         h.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_INTEGRATED,
+        StepId::ValidateIntegrated,
     )
     .phase_kind(PhaseKind::Validate)
     .workspace_kind(WorkspaceKind::Integration)
@@ -2124,7 +2124,7 @@ async fn idle_item_auto_dispatches_candidate_review_after_nonblocking_incrementa
         .expect("create item");
 
     let created_at = default_timestamp();
-    let author_job = JobBuilder::new(h.project.id, item_id, revision_id, step::AUTHOR_INITIAL)
+    let author_job = JobBuilder::new(h.project.id, item_id, revision_id, StepId::AuthorInitial)
         .status(JobStatus::Completed)
         .outcome_class(OutcomeClass::Clean)
         .phase_template_slug("author-initial")
@@ -2164,7 +2164,7 @@ async fn idle_item_auto_dispatches_candidate_review_after_nonblocking_incrementa
         h.project.id,
         item_id,
         revision_id,
-        step::REVIEW_INCREMENTAL_INITIAL,
+        StepId::ReviewIncrementalInitial,
     )
     .status(JobStatus::Completed)
     .outcome_class(OutcomeClass::Findings)
@@ -2189,7 +2189,7 @@ async fn idle_item_auto_dispatches_candidate_review_after_nonblocking_incrementa
 
     h.db.create_finding(
         &FindingBuilder::new(h.project.id, item_id, revision_id, review_job.id)
-            .source_step_id(step::REVIEW_INCREMENTAL_INITIAL)
+            .source_step_id(StepId::ReviewIncrementalInitial)
             .source_finding_key("note")
             .source_subject_base_commit_oid(
                 review_job
@@ -2228,7 +2228,7 @@ async fn idle_item_auto_dispatches_candidate_review_after_nonblocking_incrementa
     let jobs = h.db.list_jobs_by_item(item.id).await.expect("jobs");
     let candidate_review = jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_CANDIDATE_INITIAL)
+        .find(|job| job.step_id == StepId::ReviewCandidateInitial)
         .expect("auto-dispatched candidate review");
     assert_eq!(candidate_review.state.status(), JobStatus::Queued);
     assert_eq!(

@@ -3,7 +3,7 @@ mod common;
 use ingot_domain::git_operation::{GitOperationEntityRef, GitOperationStatus, OperationKind};
 use ingot_domain::ids::ConvergenceId;
 use ingot_domain::ports::RepositoryError;
-use ingot_test_support::fixtures::{GitOperationBuilder, ProjectBuilder};
+use ingot_domain::test_support::{GitOperationBuilder, ProjectBuilder};
 use ingot_test_support::git::unique_temp_path;
 
 #[tokio::test]

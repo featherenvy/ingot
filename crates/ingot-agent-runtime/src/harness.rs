@@ -15,10 +15,10 @@ use ingot_domain::job::{
     ExecutionPermission, Job, JobAssignment, JobStatus, OutcomeClass, PhaseKind,
 };
 use ingot_domain::ports::ProjectMutationLockPort;
+use ingot_domain::ports::{FinishJobNonSuccessParams, StartJobExecutionParams};
 use ingot_domain::step_id::StepId;
 use ingot_domain::workspace::WorkspaceKind;
 use ingot_git::diff::changed_paths_between;
-use ingot_store_sqlite::{FinishJobNonSuccessParams, StartJobExecutionParams};
 use ingot_usecases::{CompleteJobCommand, rebuild_revision_context};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::OwnedSemaphorePermit;

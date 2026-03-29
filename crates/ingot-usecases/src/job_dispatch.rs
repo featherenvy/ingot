@@ -6,8 +6,7 @@ use ingot_domain::item::{Item, ParkingState};
 use ingot_domain::job::{Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind};
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::step_id::StepId;
-use ingot_workflow::step;
-use ingot_workflow::{Evaluation, Evaluator};
+use ingot_workflow::{Evaluation, Evaluator, step};
 
 use crate::UseCaseError;
 
@@ -201,28 +200,28 @@ fn job_input_for_step(
     let prepared_convergence = selected_prepared_convergence(revision.id, convergences);
 
     match step_id {
-        step::AUTHOR_INITIAL => seed_head
+        StepId::AuthorInitial => seed_head
             .map(JobInput::authoring_head)
             .unwrap_or(JobInput::None),
-        step::REPAIR_CANDIDATE | step::REPAIR_AFTER_INTEGRATION => current_head
+        StepId::RepairCandidate | StepId::RepairAfterIntegration => current_head
             .map(JobInput::authoring_head)
             .unwrap_or(JobInput::None),
-        step::REVIEW_INCREMENTAL_INITIAL => job_input_from_range(seed_head, current_head, false),
-        step::REVIEW_INCREMENTAL_REPAIR | step::REVIEW_INCREMENTAL_AFTER_INTEGRATION_REPAIR => {
+        StepId::ReviewIncrementalInitial => job_input_from_range(seed_head, current_head, false),
+        StepId::ReviewIncrementalRepair | StepId::ReviewIncrementalAfterIntegrationRepair => {
             job_input_from_range(previous_head, current_head, false)
         }
-        step::REVIEW_CANDIDATE_INITIAL
-        | step::REVIEW_CANDIDATE_REPAIR
-        | step::VALIDATE_CANDIDATE_INITIAL
-        | step::VALIDATE_CANDIDATE_REPAIR
-        | step::REVIEW_AFTER_INTEGRATION_REPAIR
-        | step::VALIDATE_AFTER_INTEGRATION_REPAIR => {
+        StepId::ReviewCandidateInitial
+        | StepId::ReviewCandidateRepair
+        | StepId::ValidateCandidateInitial
+        | StepId::ValidateCandidateRepair
+        | StepId::ReviewAfterIntegrationRepair
+        | StepId::ValidateAfterIntegrationRepair => {
             job_input_from_range(seed_head, current_head, false)
         }
-        step::INVESTIGATE_ITEM => prepared_convergence
+        StepId::InvestigateItem => prepared_convergence
             .map(|convergence| job_input_from_prepared_convergence(convergence, false))
             .unwrap_or_else(|| job_input_from_range(seed_head, current_head, false)),
-        step::VALIDATE_INTEGRATED => prepared_convergence
+        StepId::ValidateIntegrated => prepared_convergence
             .map(|convergence| job_input_from_prepared_convergence(convergence, true))
             .unwrap_or(JobInput::None),
         _ => JobInput::None,
@@ -369,8 +368,8 @@ mod tests {
         ContextPolicy, ExecutionPermission, JobInput, JobState, JobStatus, OutcomeClass,
         OutputArtifactKind, PhaseKind,
     };
+    use ingot_domain::test_support::{JobBuilder, nil_item, nil_revision};
     use ingot_domain::workspace::WorkspaceKind;
-    use ingot_test_support::fixtures::{JobBuilder, nil_item, nil_revision};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -478,7 +477,7 @@ mod tests {
         )
         .expect("dispatch after repair");
 
-        assert_eq!(job.step_id, step::REVIEW_INCREMENTAL_REPAIR);
+        assert_eq!(job.step_id, StepId::ReviewIncrementalRepair);
         assert_eq!(
             job.job_input.base_commit_oid().map(CommitOid::as_str),
             Some("commit-1")
@@ -544,7 +543,7 @@ mod tests {
             DispatchJobCommand { step_id: None },
         )
         .expect("dispatch candidate review");
-        assert_eq!(candidate_review_job.step_id, step::REVIEW_CANDIDATE_REPAIR);
+        assert_eq!(candidate_review_job.step_id, StepId::ReviewCandidateRepair);
 
         let mut review_candidate_repair =
             test_job("review_candidate_repair", OutputArtifactKind::ReviewReport);
@@ -584,7 +583,7 @@ mod tests {
             DispatchJobCommand { step_id: None },
         )
         .expect("dispatch validation");
-        assert_eq!(validation_job.step_id, step::VALIDATE_CANDIDATE_REPAIR);
+        assert_eq!(validation_job.step_id, StepId::ValidateCandidateRepair);
         assert_eq!(
             validation_job
                 .job_input

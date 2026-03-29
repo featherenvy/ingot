@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use ingot_agent_runtime::{DispatcherConfig, JobDispatcher};
-use ingot_config::paths::{default_state_root, logs_root};
+use ingot_config::paths::{database_path_for_state_root, default_state_root, logs_root};
 use ingot_usecases::{DispatchNotify, ProjectLocks};
 use tokio::net::TcpListener;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     tracing::info!("starting ingotd");
 
     // Database
-    let db_path = state_root.join("ingot.db");
+    let db_path = database_path_for_state_root(&state_root);
     let db = ingot_store_sqlite::Database::connect(&db_path).await?;
     db.migrate().await?;
     tracing::info!("database ready at {}", db_path.display());

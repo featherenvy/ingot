@@ -10,6 +10,7 @@ use ingot_domain::job::{
     PhaseKind,
 };
 use ingot_domain::revision::ApprovalPolicy;
+use ingot_domain::step_id::StepId;
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::{head_oid, resolve_ref_oid};
 use ingot_usecases::{DispatchNotify, ProjectLocks};
@@ -20,12 +21,12 @@ use ingot_domain::activity::ActivityEventType;
 use ingot_domain::convergence::ConvergenceStatus;
 use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
 use ingot_domain::git_operation::{GitOperationEntityRef, GitOperationStatus, OperationKind};
-use ingot_test_support::fixtures::{
+use ingot_domain::test_support::{
     GitOperationBuilder, JobBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
 };
 use ingot_test_support::git::unique_temp_path;
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
-use ingot_workflow::{Evaluator, NamedRecommendedAction, RecommendedAction, step};
+use ingot_workflow::{Evaluator, NamedRecommendedAction, RecommendedAction};
 use tokio::time::timeout;
 
 struct BlockedAutoFinalizeFixture {
@@ -498,31 +499,32 @@ async fn tick_auto_finalizes_not_required_prepared_convergence_even_when_commit_
         .await
         .expect("create source workspace");
 
-    let validate_job = JobBuilder::new(project.id, item_id, revision_id, step::VALIDATE_INTEGRATED)
-        .status(JobStatus::Completed)
-        .outcome_class(OutcomeClass::Clean)
-        .phase_kind(PhaseKind::Validate)
-        .workspace_id(integration_workspace.id)
-        .workspace_kind(WorkspaceKind::Integration)
-        .execution_permission(ExecutionPermission::MustNotMutate)
-        .context_policy(ContextPolicy::ResumeContext)
-        .phase_template_slug("validate-integrated")
-        .job_input(JobInput::integrated_subject(
-            CommitOid::new(base_commit.clone()),
-            CommitOid::new(prepared_commit.clone()),
-        ))
-        .output_artifact_kind(OutputArtifactKind::ValidationReport)
-        .result_schema_version("validation_report:v1")
-        .result_payload(serde_json::json!({
-            "outcome": "clean",
-            "summary": "integrated clean",
-            "checks": [],
-            "findings": []
-        }))
-        .created_at(created_at)
-        .started_at(created_at)
-        .ended_at(created_at)
-        .build();
+    let validate_job =
+        JobBuilder::new(project.id, item_id, revision_id, StepId::ValidateIntegrated)
+            .status(JobStatus::Completed)
+            .outcome_class(OutcomeClass::Clean)
+            .phase_kind(PhaseKind::Validate)
+            .workspace_id(integration_workspace.id)
+            .workspace_kind(WorkspaceKind::Integration)
+            .execution_permission(ExecutionPermission::MustNotMutate)
+            .context_policy(ContextPolicy::ResumeContext)
+            .phase_template_slug("validate-integrated")
+            .job_input(JobInput::integrated_subject(
+                CommitOid::new(base_commit.clone()),
+                CommitOid::new(prepared_commit.clone()),
+            ))
+            .output_artifact_kind(OutputArtifactKind::ValidationReport)
+            .result_schema_version("validation_report:v1")
+            .result_payload(serde_json::json!({
+                "outcome": "clean",
+                "summary": "integrated clean",
+                "checks": [],
+                "findings": []
+            }))
+            .created_at(created_at)
+            .started_at(created_at)
+            .ended_at(created_at)
+            .build();
     db.create_job(&validate_job)
         .await
         .expect("create validation");
@@ -1001,7 +1003,7 @@ async fn candidate_repair_loop_advances_to_prepare_convergence() {
     let mut jobs = h.db.list_jobs_by_item(item.id).await.expect("jobs");
     let review_initial = jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
+        .find(|job| job.step_id == StepId::ReviewIncrementalInitial)
         .cloned()
         .expect("auto-dispatched review initial");
     assert_eq!(review_initial.state.status(), JobStatus::Queued);
@@ -1023,7 +1025,7 @@ async fn candidate_repair_loop_advances_to_prepare_convergence() {
     jobs = h.db.list_jobs_by_item(item.id).await.expect("jobs");
     let review_incremental_repair = jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_INCREMENTAL_REPAIR)
+        .find(|job| job.step_id == StepId::ReviewIncrementalRepair)
         .cloned()
         .expect("auto-dispatched review incremental repair");
     assert_eq!(review_incremental_repair.state.status(), JobStatus::Queued);
@@ -1035,7 +1037,7 @@ async fn candidate_repair_loop_advances_to_prepare_convergence() {
     jobs = h.db.list_jobs_by_item(item.id).await.expect("jobs");
     let review_candidate_repair = jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_CANDIDATE_REPAIR)
+        .find(|job| job.step_id == StepId::ReviewCandidateRepair)
         .cloned()
         .expect("auto-dispatched review candidate repair");
     assert_eq!(review_candidate_repair.state.status(), JobStatus::Queued);
@@ -1047,7 +1049,7 @@ async fn candidate_repair_loop_advances_to_prepare_convergence() {
     jobs = h.db.list_jobs_by_item(item.id).await.expect("jobs");
     let validate_candidate_repair = jobs
         .iter()
-        .find(|job| job.step_id == step::VALIDATE_CANDIDATE_REPAIR)
+        .find(|job| job.step_id == StepId::ValidateCandidateRepair)
         .cloned()
         .expect("auto-dispatched validate candidate repair");
     assert_eq!(validate_candidate_repair.state.status(), JobStatus::Queued);

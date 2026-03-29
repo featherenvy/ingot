@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ingot-config = { workspace = true }
 ingot-domain = { workspace = true }
 ingot-git = { workspace = true }
 ingot-store-sqlite = { workspace = true }

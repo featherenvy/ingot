@@ -1,9 +1,9 @@
 mod common;
 
 use ingot_domain::job::JobStatus;
+use ingot_domain::test_support::{ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder};
 use ingot_domain::workspace::WorkspaceStatus;
-use ingot_store_sqlite::PersistFixture;
-use ingot_test_support::fixtures::{ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder};
+use ingot_test_support::sqlite::PersistFixture;
 
 #[tokio::test]
 async fn persisting_terminal_job_does_not_create_busy_current_workspace() {

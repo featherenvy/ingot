@@ -14,6 +14,7 @@ use ingot_domain::git_operation::{
 use ingot_domain::ids::{GitOperationId, JobId};
 use ingot_domain::item::ApprovalState;
 use ingot_domain::job::{ExecutionPermission, Job, JobStatus, OutcomeClass, OutputArtifactKind};
+use ingot_domain::ports::FinishJobNonSuccessParams;
 use ingot_domain::ports::{
     ConflictKind, JobCompletionMutation, ProjectMutationLockPort, RepositoryError,
 };
@@ -24,7 +25,7 @@ use ingot_domain::workspace::{Workspace, WorkspaceStatus};
 use ingot_git::commands::{git, head_oid, resolve_ref_oid};
 use ingot_git::commit::{JobCommitTrailers, create_daemon_job_commit, working_tree_has_changes};
 use ingot_git::diff::changed_paths_between;
-use ingot_store_sqlite::{ClaimQueuedAgentJobExecutionParams, FinishJobNonSuccessParams};
+use ingot_store_sqlite::ClaimQueuedAgentJobExecutionParams;
 use ingot_usecases::{CompleteJobCommand, rebuild_revision_context};
 use ingot_workspace::remove_workspace;
 use tokio::sync::OwnedSemaphorePermit;

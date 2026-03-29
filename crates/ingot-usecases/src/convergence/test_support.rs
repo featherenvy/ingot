@@ -12,7 +12,7 @@ use ingot_domain::item::ApprovalState;
 use ingot_domain::job::Job;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
-use ingot_test_support::fixtures::{
+use ingot_domain::test_support::{
     ConvergenceBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
 };
 use ingot_test_support::git::unique_temp_path;

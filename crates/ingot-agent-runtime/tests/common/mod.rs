@@ -19,15 +19,15 @@ use ingot_domain::job::{
     ExecutionPermission, Job, JobInput, JobStatus, OutputArtifactKind, PhaseKind,
 };
 use ingot_domain::project::Project;
-use ingot_domain::workspace::WorkspaceKind;
-use ingot_git::commands::head_oid;
-use ingot_git::project_repo::{ProjectRepoPaths, ensure_mirror, project_repo_paths};
-use ingot_store_sqlite::Database;
-pub use ingot_test_support::fixtures::{
+pub use ingot_domain::test_support::{
     AgentBuilder, ConvergenceBuilder, ConvergenceQueueEntryBuilder, FindingBuilder,
     GitOperationBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
     WorkspaceBuilder, default_timestamp, parse_timestamp,
 };
+use ingot_domain::workspace::WorkspaceKind;
+use ingot_git::commands::head_oid;
+use ingot_git::project_repo::{ProjectRepoPaths, ensure_mirror, project_repo_paths};
+use ingot_store_sqlite::Database;
 use ingot_test_support::git::unique_temp_path;
 use ingot_test_support::reports::{
     clean_review_report, clean_validation_report, findings_review_report,

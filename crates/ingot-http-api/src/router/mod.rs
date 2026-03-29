@@ -2,6 +2,7 @@ mod agents;
 mod app;
 mod convergence;
 mod convergence_port;
+mod convergence_route_adapter;
 mod core;
 mod deps;
 mod dispatch;

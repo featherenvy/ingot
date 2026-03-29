@@ -15,12 +15,12 @@ use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
     PhaseKind,
 };
+use ingot_domain::step_id::StepId;
+use ingot_domain::test_support::GitOperationBuilder;
 use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::{compare_and_swap_ref, delete_ref, head_oid};
-use ingot_test_support::fixtures::GitOperationBuilder;
 use ingot_test_support::git::unique_temp_path;
 use ingot_usecases::{DispatchNotify, ProjectLocks};
-use ingot_workflow::step;
 
 mod common;
 use common::*;
@@ -373,7 +373,7 @@ async fn reconcile_active_jobs_does_not_repair_daemon_validation_assigned_handof
         h.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .id(job_id)
     .status(JobStatus::Assigned)
@@ -1314,7 +1314,7 @@ async fn reconcile_startup_adopts_create_job_commit_into_completed_job() {
     let jobs = db.list_jobs_by_item(item.id).await.expect("jobs");
     let review_job = jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
+        .find(|job| job.step_id == StepId::ReviewIncrementalInitial)
         .expect("auto-dispatched review job after startup adoption");
     assert_eq!(review_job.state.status(), JobStatus::Queued);
     assert_eq!(
@@ -1459,7 +1459,7 @@ async fn reconcile_startup_continues_review_recovery_past_broken_project() {
         .expect("healthy jobs");
     let review_job = healthy_jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
+        .find(|job| job.step_id == StepId::ReviewIncrementalInitial)
         .expect("startup queued review for healthy project");
     assert_eq!(review_job.state.status(), JobStatus::Queued);
     assert_eq!(

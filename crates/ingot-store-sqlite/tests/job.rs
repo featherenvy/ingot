@@ -10,15 +10,14 @@ use ingot_domain::job::{
 };
 use ingot_domain::lease_owner_id::LeaseOwnerId;
 use ingot_domain::ports::{ConflictKind, RepositoryError};
-use ingot_domain::workspace::WorkspaceKind;
-use ingot_store_sqlite::{
-    ClaimQueuedAgentJobExecutionParams, FinishJobNonSuccessParams, PersistFixture,
-    StartJobExecutionParams,
-};
-use ingot_test_support::fixtures::{
+use ingot_domain::ports::{FinishJobNonSuccessParams, StartJobExecutionParams};
+use ingot_domain::test_support::{
     AgentBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
     parse_timestamp,
 };
+use ingot_domain::workspace::WorkspaceKind;
+use ingot_store_sqlite::ClaimQueuedAgentJobExecutionParams;
+use ingot_test_support::sqlite::PersistFixture;
 
 #[tokio::test]
 async fn finish_job_non_success_rolls_back_when_item_revision_changes_before_commit() {

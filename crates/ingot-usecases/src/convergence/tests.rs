@@ -1,6 +1,6 @@
 use chrono::Utc;
 use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId};
-use ingot_test_support::fixtures::{ItemBuilder, ProjectBuilder, RevisionBuilder};
+use ingot_domain::test_support::{ItemBuilder, ProjectBuilder, RevisionBuilder};
 use ingot_test_support::git::unique_temp_path;
 use uuid::Uuid;
 

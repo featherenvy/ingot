@@ -27,17 +27,17 @@ use ingot_domain::job::{
 use ingot_domain::ports::ProjectMutationLockPort;
 use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
 use ingot_domain::revision::ApprovalPolicy;
-use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
-use ingot_git::commands::head_oid;
-use ingot_test_support::fixtures::{
+use ingot_domain::step_id::StepId;
+use ingot_domain::test_support::{
     AgentBuilder, ConvergenceQueueEntryBuilder, FindingBuilder, ItemBuilder, JobBuilder,
     ProjectBuilder, RevisionBuilder, default_timestamp,
 };
+use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
+use ingot_git::commands::head_oid;
 use ingot_test_support::git::{run_git as git_sync, temp_git_repo, unique_temp_path};
 use ingot_test_support::sqlite::migrated_test_db;
 use ingot_usecases::convergence::ConvergenceSystemActionPort;
 use ingot_usecases::job_lifecycle;
-use ingot_workflow::step;
 use sqlx::query;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use tokio::sync::Notify;
@@ -822,7 +822,7 @@ timeout = "30s"
         harness.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .phase_kind(PhaseKind::Validate)
     .workspace_kind(WorkspaceKind::Authoring)
@@ -948,7 +948,7 @@ timeout = "30s"
         harness.project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .phase_kind(PhaseKind::Validate)
     .workspace_kind(WorkspaceKind::Authoring)
@@ -1045,7 +1045,7 @@ async fn auto_queue_convergence_treats_conflicting_insert_as_noop() {
         project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .status(JobStatus::Completed)
     .outcome_class(OutcomeClass::Clean)
@@ -1158,7 +1158,7 @@ async fn auto_triage_job_findings_treats_missing_policy_as_disabled() {
         .await
         .expect("create item");
 
-    let job = JobBuilder::new(project.id, item_id, revision_id, step::INVESTIGATE_ITEM)
+    let job = JobBuilder::new(project.id, item_id, revision_id, StepId::InvestigateItem)
         .phase_kind(PhaseKind::Investigate)
         .workspace_kind(WorkspaceKind::Review)
         .execution_permission(ExecutionPermission::MustNotMutate)
@@ -1168,7 +1168,7 @@ async fn auto_triage_job_findings_treats_missing_policy_as_disabled() {
     harness.db.create_job(&job).await.expect("create job");
 
     let finding = FindingBuilder::new(project.id, item_id, revision_id, job.id)
-        .source_step_id(step::INVESTIGATE_ITEM)
+        .source_step_id(StepId::InvestigateItem)
         .severity(FindingSeverity::Low)
         .build();
     harness
@@ -1254,7 +1254,7 @@ async fn auto_triage_job_findings_only_requests_approval_for_validate_integrated
         .await
         .expect("create item");
 
-    let job = JobBuilder::new(project.id, item_id, revision_id, step::INVESTIGATE_ITEM)
+    let job = JobBuilder::new(project.id, item_id, revision_id, StepId::InvestigateItem)
         .phase_kind(PhaseKind::Investigate)
         .workspace_kind(WorkspaceKind::Review)
         .execution_permission(ExecutionPermission::MustNotMutate)
@@ -1264,7 +1264,7 @@ async fn auto_triage_job_findings_only_requests_approval_for_validate_integrated
     harness.db.create_job(&job).await.expect("create job");
 
     let finding = FindingBuilder::new(project.id, item_id, revision_id, job.id)
-        .source_step_id(step::INVESTIGATE_ITEM)
+        .source_step_id(StepId::InvestigateItem)
         .severity(FindingSeverity::High)
         .build();
     harness
@@ -1368,7 +1368,7 @@ async fn finish_report_run_reloads_project_before_auto_triage() {
         .await
         .expect("create item");
 
-    let job = JobBuilder::new(project.id, item_id, revision_id, step::INVESTIGATE_ITEM)
+    let job = JobBuilder::new(project.id, item_id, revision_id, StepId::InvestigateItem)
         .phase_kind(PhaseKind::Investigate)
         .workspace_kind(WorkspaceKind::Review)
         .execution_permission(ExecutionPermission::MustNotMutate)
@@ -1467,7 +1467,7 @@ async fn tick_system_action_does_not_queue_stale_autopilot_prepare_decision() {
         project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .status(JobStatus::Completed)
     .outcome_class(OutcomeClass::Clean)
@@ -1506,7 +1506,7 @@ async fn tick_system_action_does_not_queue_stale_autopilot_prepare_decision() {
             .project_locks
             .acquire_project_mutation(project.id)
             .await;
-        let active_job = JobBuilder::new(project.id, item_id, revision_id, step::AUTHOR_INITIAL)
+        let active_job = JobBuilder::new(project.id, item_id, revision_id, StepId::AuthorInitial)
             .status(JobStatus::Queued)
             .phase_kind(PhaseKind::Author)
             .workspace_kind(WorkspaceKind::Authoring)
@@ -1586,7 +1586,7 @@ async fn tick_system_action_does_not_queue_after_execution_mode_switches_to_manu
         project.id,
         item_id,
         revision_id,
-        step::VALIDATE_CANDIDATE_INITIAL,
+        StepId::ValidateCandidateInitial,
     )
     .status(JobStatus::Completed)
     .outcome_class(OutcomeClass::Clean)
@@ -1795,7 +1795,7 @@ async fn recover_projected_jobs_only_queues_one_autopilot_item_while_another_is_
         .await
         .expect("list first item jobs");
     assert_eq!(first_jobs.len(), 1, "first item should have one queued job");
-    assert_eq!(first_jobs[0].step_id, step::AUTHOR_INITIAL);
+    assert_eq!(first_jobs[0].step_id, StepId::AuthorInitial);
     assert_eq!(first_jobs[0].state.status(), JobStatus::Queued);
 
     let second_jobs = harness

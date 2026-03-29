@@ -18,7 +18,8 @@ use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
 use ingot_domain::activity::ActivityEventType;
 use ingot_domain::item::EscalationReason;
-use ingot_workflow::{Evaluator, step};
+use ingot_domain::step_id::StepId;
+use ingot_workflow::Evaluator;
 
 #[tokio::test]
 async fn runtime_terminal_failure_escalates_closure_relevant_item() {
@@ -139,7 +140,7 @@ async fn successful_authoring_retry_clears_escalation_and_reopens_review_dispatc
     assert_eq!(evaluation.dispatchable_step_id, None);
     let review_job = jobs
         .iter()
-        .find(|job| job.step_id == step::REVIEW_INCREMENTAL_INITIAL)
+        .find(|job| job.step_id == StepId::ReviewIncrementalInitial)
         .expect("auto-dispatched review job");
     assert_eq!(review_job.state.status(), JobStatus::Queued);
 

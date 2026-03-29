@@ -1,11 +1,10 @@
 mod common;
 
 use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId, WorkspaceId};
+use ingot_domain::test_support::{ItemBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder};
 use ingot_domain::workspace::WorkspaceKind;
-use ingot_store_sqlite::{Database, PersistFixture};
-use ingot_test_support::fixtures::{
-    ItemBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
-};
+use ingot_store_sqlite::Database;
+use ingot_test_support::sqlite::PersistFixture;
 use sqlx::SqlitePool;
 
 struct ConvergenceTestContext {

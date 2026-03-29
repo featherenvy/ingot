@@ -45,7 +45,6 @@ impl PersistFixture for (Item, ItemRevision) {
 
 impl PersistFixture for Job {
     async fn persist(self, db: &Database) -> Result<Self, RepositoryError> {
-        // Auto-create workspace if the job state references one that may not exist
         if let Some(workspace_id) = self.state.workspace_id() {
             if db.get_workspace(workspace_id).await.is_err() {
                 let workspace_is_active = self.state.is_active();

@@ -28,10 +28,7 @@ use ingot_workspace::{
 };
 
 use super::AppState;
-use super::support::{
-    errors::{git_to_internal, workspace_to_api_error},
-    project_repo::refresh_project_mirror,
-};
+use super::support::errors::{git_to_internal, repo_to_internal, workspace_to_api_error};
 use crate::error::ApiError;
 
 fn api_to_uc(err: crate::error::ApiError) -> UseCaseError {
@@ -51,6 +48,25 @@ impl HttpInfraAdapter {
         }
     }
 
+    pub(super) async fn refresh_project_mirror(
+        &self,
+        project: &Project,
+    ) -> Result<ProjectRepoPaths, ApiError> {
+        ingot_git::project_repo::refresh_project_mirror(
+            &self.state.db,
+            self.state.state_root.as_path(),
+            project.id,
+            &project.path,
+        )
+        .await
+        .map_err(|error| match error {
+            ingot_git::project_repo::RefreshMirrorError::Repository(error) => {
+                repo_to_internal(error)
+            }
+            ingot_git::project_repo::RefreshMirrorError::Git(error) => git_to_internal(error),
+        })
+    }
+
     pub(super) async fn mirror_paths(
         &self,
         project_id: ProjectId,
@@ -62,7 +78,7 @@ impl HttpInfraAdapter {
             .await
             .map_err(UseCaseError::Repository)
             .map_err(ApiError::from)?;
-        refresh_project_mirror(&self.state, &project).await
+        self.refresh_project_mirror(&project).await
     }
 
     pub(super) async fn resolve_project_ref_oid(
@@ -111,7 +127,7 @@ impl HttpInfraAdapter {
         project: &Project,
         commit_oid: &CommitOid,
     ) -> Result<bool, ApiError> {
-        let paths = refresh_project_mirror(&self.state, project).await?;
+        let paths = self.refresh_project_mirror(project).await?;
         ingot_git::commands::is_commit_reachable_from_any_ref(
             paths.mirror_git_dir.as_path(),
             commit_oid,

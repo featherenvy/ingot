@@ -9,9 +9,9 @@ use super::support::{
     errors::{complete_job_error_to_api_error, repo_to_internal, repo_to_item, repo_to_project},
     io::{read_optional_json, read_optional_text},
     path::ApiPath,
-    project_repo::{logs_root, refresh_project_mirror},
 };
 use super::types::*;
+use ingot_config::paths::job_logs_dir;
 use ingot_usecases::dispatch::failure_status;
 use ingot_usecases::job_lifecycle;
 
@@ -83,7 +83,7 @@ pub(super) async fn get_job_logs(
     ApiPath(JobPathParams { job_id }): ApiPath<JobPathParams>,
 ) -> Result<Json<JobLogsResponse>, ApiError> {
     state.db.get_job(job_id).await.map_err(repo_to_internal)?;
-    let logs_dir = logs_root(state.state_root.as_path()).join(job_id.to_string());
+    let logs_dir = job_logs_dir(state.state_root.as_path(), job_id);
 
     let prompt = read_optional_text(logs_dir.join("prompt.txt")).await?;
     let stdout = read_optional_text(logs_dir.join("stdout.log")).await?;
@@ -114,7 +114,9 @@ pub(super) async fn complete_job(
         .get_project(prior_job.project_id)
         .await
         .map_err(repo_to_project)?;
-    refresh_project_mirror(&state, &project).await?;
+    HttpInfraAdapter::new(&state)
+        .refresh_project_mirror(&project)
+        .await?;
     let result = state
         .complete_job_service
         .execute(CompleteJobCommand {
@@ -254,7 +256,9 @@ pub(super) async fn refresh_revision_context_for_job(
         .get_project(job.project_id)
         .await
         .map_err(repo_to_project)?;
-    refresh_project_mirror(state, &project).await?;
+    HttpInfraAdapter::new(state)
+        .refresh_project_mirror(&project)
+        .await?;
     refresh_revision_context_for_job_like(state, &item, &revision).await
 }
 

@@ -255,8 +255,8 @@ mod tests {
     use ingot_domain::ports::{
         ConflictKind, RepositoryError, RevisionLaneTeardownMutation, StartJobExecutionParams,
     };
+    use ingot_domain::test_support::{JobBuilder, RevisionBuilder, WorkspaceBuilder};
     use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
-    use ingot_test_support::fixtures::{JobBuilder, RevisionBuilder, WorkspaceBuilder};
     use uuid::Uuid;
 
     use super::*;

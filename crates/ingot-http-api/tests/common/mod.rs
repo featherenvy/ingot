@@ -21,15 +21,15 @@ use ingot_domain::job::{
 use ingot_domain::ports::RepositoryError;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
+use ingot_domain::test_support::{
+    ConvergenceBuilder, FindingBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
+    WorkspaceBuilder, default_timestamp,
+};
+pub use ingot_domain::test_support::{DEFAULT_TEST_TIMESTAMP, parse_timestamp};
 use ingot_domain::workspace::{
     RetentionPolicy, Workspace, WorkspaceKind, WorkspaceState, WorkspaceStatus, WorkspaceStrategy,
 };
 use ingot_store_sqlite::Database;
-use ingot_test_support::fixtures::{
-    ConvergenceBuilder, FindingBuilder, ItemBuilder, JobBuilder, ProjectBuilder, RevisionBuilder,
-    WorkspaceBuilder, default_timestamp,
-};
-pub use ingot_test_support::fixtures::{DEFAULT_TEST_TIMESTAMP, parse_timestamp};
 pub use ingot_test_support::git::{git_output, run_git as git, temp_git_repo, write_file};
 pub use ingot_test_support::reports::clean_validation_report;
 pub use ingot_test_support::sqlite::migrated_test_db;

@@ -6,8 +6,7 @@ use axum::extract::{Request, State};
 use axum::http::Method;
 use axum::middleware;
 use axum::response::Response;
-#[cfg(not(test))]
-use ingot_config::paths::default_state_root as shared_default_state_root;
+use ingot_config::paths::default_state_root;
 use ingot_domain::ids::ItemId;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
@@ -179,14 +178,4 @@ pub(crate) async fn teardown_revision_lane_state(
             .map(ToString::to_string)
             .collect(),
     })
-}
-
-#[cfg(not(test))]
-fn default_state_root() -> PathBuf {
-    shared_default_state_root()
-}
-
-#[cfg(test)]
-fn default_state_root() -> PathBuf {
-    std::env::temp_dir().join(format!("ingot-http-api-state-{}", uuid::Uuid::now_v7()))
 }

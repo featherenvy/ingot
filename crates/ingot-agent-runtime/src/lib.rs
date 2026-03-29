@@ -25,6 +25,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
+use ingot_config::paths::job_logs_dir;
 use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::agent::Agent;
 use ingot_domain::convergence::Convergence;
@@ -285,7 +286,7 @@ impl JobDispatcher {
     }
 
     fn artifact_dir(&self, job_id: ingot_domain::ids::JobId) -> PathBuf {
-        self.config.state_root.join("logs").join(job_id.to_string())
+        job_logs_dir(self.config.state_root.as_path(), job_id)
     }
 
     fn lease_ttl(&self) -> ChronoDuration {
