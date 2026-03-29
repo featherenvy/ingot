@@ -26,7 +26,9 @@ impl ClaudeCodeCliAdapter {
         let mut args = vec![
             "--print".into(),
             "--output-format".into(),
-            "json".into(),
+            "stream-json".into(),
+            "--include-partial-messages".into(),
+            "--verbose".into(),
             "--model".into(),
             self.command.model().to_string(),
             "--no-session-persistence".into(),
@@ -61,7 +63,7 @@ impl ClaudeCodeCliAdapter {
             },
             |output: &subprocess::SubprocessOutput| {
                 let stdout = output.stdout.clone();
-                async move { Ok(parse_print_output(&stdout)) }
+                async move { Ok(parse_stream_json_output(&stdout)) }
             },
         )
         .await
@@ -82,21 +84,25 @@ impl AgentAdapter for ClaudeCodeCliAdapter {
     }
 }
 
-/// Parse Claude's `--print --output-format json` envelope.
-///
-/// Envelope shape:
-/// ```json
-/// { "type": "result", "subtype": "success", "is_error": false, "result": "...",
-///   "structured_output": { ... }, ... }
-/// ```
-///
-/// If `is_error` is true, returns `None`. Prefers `structured_output` (populated
-/// when `--json-schema` is used) over `result`. Falls back to parsing `result`
-/// as JSON or wrapping it as `{"summary": "<text>"}`.
-fn parse_print_output(stdout: &str) -> Option<serde_json::Value> {
-    let envelope: serde_json::Value = serde_json::from_str(stdout).ok()?;
+/// Parse Claude's `--print --output-format stream-json` transcript and extract
+/// the final `type:"result"` envelope. Falls back to parsing a single JSON
+/// envelope to keep compatibility with non-streaming fixtures.
+fn parse_stream_json_output(stdout: &str) -> Option<serde_json::Value> {
+    let envelope = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .rev()
+        .find(|value| value.get("type").and_then(|v| v.as_str()) == Some("result"))
+        .or_else(|| serde_json::from_str::<serde_json::Value>(stdout).ok())?;
+    extract_result_from_envelope(&envelope)
+}
 
+fn extract_result_from_envelope(envelope: &serde_json::Value) -> Option<serde_json::Value> {
     if envelope.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
+        return None;
+    }
+
+    if envelope.get("type").and_then(|v| v.as_str()) != Some("result") {
         return None;
     }
 
@@ -143,6 +149,8 @@ mod tests {
             .expect("build args");
 
         assert!(args.contains(&"--print".into()));
+        assert!(args.contains(&"--include-partial-messages".into()));
+        assert!(args.contains(&"--verbose".into()));
         assert!(args.contains(&"--dangerously-skip-permissions".into()));
         assert!(args.contains(&"--no-session-persistence".into()));
         assert!(!args.contains(&"--bare".into()));
@@ -184,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_print_output_prefers_structured_output_over_result() {
+    fn parse_stream_json_output_prefers_structured_output_over_result() {
         let envelope = serde_json::json!({
             "type": "result",
             "subtype": "success",
@@ -192,7 +200,7 @@ mod tests {
             "result": "",
             "structured_output": {"outcome": "findings", "summary": "All good", "findings": []}
         });
-        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        let result = parse_stream_json_output(&serde_json::to_string(&envelope).unwrap());
         assert_eq!(
             result,
             Some(serde_json::json!({"outcome": "findings", "summary": "All good", "findings": []}))
@@ -200,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_print_output_falls_back_to_result_when_no_structured_output() {
+    fn parse_stream_json_output_falls_back_to_result_when_no_structured_output() {
         let envelope = serde_json::json!({
             "type": "result",
             "subtype": "success",
@@ -208,7 +216,7 @@ mod tests {
             "result": r#"{"summary":"done","validation":null}"#,
             "duration_ms": 1000
         });
-        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        let result = parse_stream_json_output(&serde_json::to_string(&envelope).unwrap());
         assert_eq!(
             result,
             Some(serde_json::json!({"summary": "done", "validation": null}))
@@ -216,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_print_output_ignores_null_structured_output() {
+    fn parse_stream_json_output_ignores_null_structured_output() {
         let envelope = serde_json::json!({
             "type": "result",
             "subtype": "success",
@@ -224,7 +232,7 @@ mod tests {
             "result": {"summary": "done", "validation": null},
             "structured_output": null
         });
-        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        let result = parse_stream_json_output(&serde_json::to_string(&envelope).unwrap());
         assert_eq!(
             result,
             Some(serde_json::json!({"summary": "done", "validation": null}))
@@ -232,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_print_output_extracts_structured_json_result() {
+    fn parse_stream_json_output_extracts_structured_json_result() {
         let envelope = serde_json::json!({
             "type": "result",
             "subtype": "success",
@@ -240,7 +248,7 @@ mod tests {
             "result": r#"{"summary":"done","validation":null}"#,
             "duration_ms": 1000
         });
-        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        let result = parse_stream_json_output(&serde_json::to_string(&envelope).unwrap());
         assert_eq!(
             result,
             Some(serde_json::json!({"summary": "done", "validation": null}))
@@ -248,14 +256,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_print_output_extracts_object_result() {
+    fn parse_stream_json_output_extracts_object_result() {
         let envelope = serde_json::json!({
             "type": "result",
             "subtype": "success",
             "is_error": false,
             "result": {"summary": "done", "validation": null}
         });
-        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        let result = parse_stream_json_output(&serde_json::to_string(&envelope).unwrap());
         assert_eq!(
             result,
             Some(serde_json::json!({"summary": "done", "validation": null}))
@@ -263,26 +271,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_print_output_returns_none_when_is_error() {
+    fn parse_stream_json_output_returns_none_when_is_error() {
         let envelope = serde_json::json!({
             "type": "result",
             "subtype": "error",
             "is_error": true,
             "result": "something went wrong"
         });
-        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        let result = parse_stream_json_output(&serde_json::to_string(&envelope).unwrap());
         assert_eq!(result, None);
     }
 
     #[test]
-    fn parse_print_output_handles_non_json_gracefully() {
+    fn parse_stream_json_output_handles_non_json_gracefully() {
         let envelope = serde_json::json!({
             "type": "result",
             "subtype": "success",
             "is_error": false,
             "result": "I completed the task successfully."
         });
-        let result = parse_print_output(&serde_json::to_string(&envelope).unwrap());
+        let result = parse_stream_json_output(&serde_json::to_string(&envelope).unwrap());
         assert_eq!(
             result,
             Some(serde_json::json!({
@@ -293,8 +301,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_print_output_returns_none_for_non_json_stdout() {
-        let result = parse_print_output("not json at all");
+    fn parse_stream_json_output_extracts_final_result_from_transcript() {
+        let transcript = [
+            serde_json::json!({"type": "system", "subtype": "init"}),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "hello"}]}
+            }),
+            serde_json::json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "result": "",
+                "structured_output": {"summary": "hello", "validation": null}
+            }),
+        ]
+        .into_iter()
+        .map(|value| serde_json::to_string(&value).expect("json line"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+        let result = parse_stream_json_output(&transcript);
+        assert_eq!(
+            result,
+            Some(serde_json::json!({"summary": "hello", "validation": null}))
+        );
+    }
+
+    #[test]
+    fn parse_stream_json_output_returns_none_for_non_json_stdout() {
+        let result = parse_stream_json_output("not json at all");
         assert_eq!(result, None);
     }
 }

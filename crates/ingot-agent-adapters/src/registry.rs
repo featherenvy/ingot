@@ -7,10 +7,11 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_AGENT_CAPABILITIES: [AgentCapability; 3] = [
+const DEFAULT_AGENT_CAPABILITIES: [AgentCapability; 4] = [
     AgentCapability::ReadOnlyJobs,
     AgentCapability::MutatingJobs,
     AgentCapability::StructuredOutput,
+    AgentCapability::StreamingProgress,
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -286,6 +287,11 @@ mod tests {
             agent.capabilities,
             default_agent_capabilities(AdapterKind::Codex)
         );
+        assert!(
+            agent
+                .capabilities
+                .contains(&AgentCapability::StreamingProgress)
+        );
     }
 
     #[test]
@@ -302,5 +308,10 @@ mod tests {
             default_agent_capabilities(AdapterKind::ClaudeCode)
         );
         assert!(agent.capabilities.contains(&AgentCapability::MutatingJobs));
+        assert!(
+            agent
+                .capabilities
+                .contains(&AgentCapability::StreamingProgress)
+        );
     }
 }
