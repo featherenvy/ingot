@@ -50,14 +50,16 @@ impl ClaudeCodeCliAdapter {
         output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
     ) -> Result<AgentResponse, AgentError> {
         subprocess::launch_adapter(
-            self.command.cli_path(),
-            self.command.model(),
-            request,
-            working_dir,
-            self.build_print_args(request)?,
-            "claude",
-            output_tx,
-            |output| {
+            subprocess::AdapterLaunch {
+                cli_path: self.command.cli_path(),
+                model: self.command.model(),
+                request,
+                working_dir,
+                args: self.build_print_args(request)?,
+                adapter_name: "claude",
+                output_tx,
+            },
+            |output: &subprocess::SubprocessOutput| {
                 let stdout = output.stdout.clone();
                 async move { Ok(parse_print_output(&stdout)) }
             },

@@ -116,6 +116,16 @@ pub(crate) struct SchemaResultFiles<'a> {
     pub result_file_extension: &'a str,
 }
 
+pub(crate) struct AdapterLaunch<'a, Model: ?Sized> {
+    pub cli_path: &'a Path,
+    pub model: &'a Model,
+    pub request: &'a AgentRequest,
+    pub working_dir: &'a Path,
+    pub args: Vec<String>,
+    pub adapter_name: &'static str,
+    pub output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
+}
+
 /// Spawn a CLI subprocess, pipe the prompt to stdin, collect stdout/stderr,
 /// and wait for exit. The child is spawned in its own process group so
 /// `cancel_process_group` can tear down the entire tree.
@@ -193,13 +203,7 @@ pub(crate) async fn run_cli_subprocess(
 }
 
 pub(crate) async fn launch_adapter<Model, Parse, ParseFuture>(
-    cli_path: &Path,
-    model: &Model,
-    request: &AgentRequest,
-    working_dir: &Path,
-    args: Vec<String>,
-    adapter_name: &'static str,
-    output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
+    launch: AdapterLaunch<'_, Model>,
     parse_result: Parse,
 ) -> Result<AgentResponse, AgentError>
 where
@@ -207,6 +211,16 @@ where
     Parse: FnOnce(&SubprocessOutput) -> ParseFuture,
     ParseFuture: Future<Output = Result<Option<serde_json::Value>, AgentError>>,
 {
+    let AdapterLaunch {
+        cli_path,
+        model,
+        request,
+        working_dir,
+        args,
+        adapter_name,
+        output_tx,
+    } = launch;
+
     info!(
         adapter = adapter_name,
         cli_path = %cli_path.display(),
@@ -265,13 +279,15 @@ where
     let parse_file = result_file.clone();
 
     let launch_result = launch_adapter(
-        command.cli_path(),
-        command.model(),
-        request,
-        working_dir,
-        build_args(&schema_file, &result_file)?,
-        files.adapter_name,
-        output_tx,
+        AdapterLaunch {
+            cli_path: command.cli_path(),
+            model: command.model(),
+            request,
+            working_dir,
+            args: build_args(&schema_file, &result_file)?,
+            adapter_name: files.adapter_name,
+            output_tx,
+        },
         move |output| parse_result(output, parse_file),
     )
     .await;
