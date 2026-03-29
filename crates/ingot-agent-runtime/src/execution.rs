@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::request::AgentRequest;
-use ingot_agent_protocol::response::AgentResponse;
+use ingot_agent_protocol::response::{AgentOutputChunk, AgentResponse, OutputStream};
 use ingot_domain::activity::{ActivityEventType, ActivitySubject};
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::git_operation::{
@@ -28,7 +28,9 @@ use ingot_git::diff::changed_paths_between;
 use ingot_store_sqlite::ClaimQueuedAgentJobExecutionParams;
 use ingot_usecases::{CompleteJobCommand, rebuild_revision_context};
 use ingot_workspace::remove_workspace;
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::time::interval;
 use tracing::{Instrument, debug, info, info_span, warn};
 
@@ -53,7 +55,75 @@ enum RunningJobState {
     OwnershipLost(JobStatus),
 }
 
+struct JobLogPump {
+    rx: mpsc::Receiver<AgentOutputChunk>,
+    stdout_file: tokio::fs::File,
+    stderr_file: tokio::fs::File,
+    ui_events: ingot_usecases::UiEventBus,
+    project_id: ingot_domain::ids::ProjectId,
+    job_id: JobId,
+}
+
+impl JobLogPump {
+    async fn open(
+        artifact_dir: &Path,
+        rx: mpsc::Receiver<AgentOutputChunk>,
+        ui_events: ingot_usecases::UiEventBus,
+        project_id: ingot_domain::ids::ProjectId,
+        job_id: JobId,
+    ) -> Result<Self, RuntimeError> {
+        tokio::fs::create_dir_all(artifact_dir).await?;
+        let stdout_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(artifact_dir.join("stdout.log"))
+            .await?;
+        let stderr_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(artifact_dir.join("stderr.log"))
+            .await?;
+
+        Ok(Self {
+            rx,
+            stdout_file,
+            stderr_file,
+            ui_events,
+            project_id,
+            job_id,
+        })
+    }
+
+    async fn run(mut self) -> Result<(), RuntimeError> {
+        while let Some(chunk) = self.rx.recv().await {
+            let file = match chunk.stream {
+                OutputStream::Stdout => &mut self.stdout_file,
+                OutputStream::Stderr => &mut self.stderr_file,
+            };
+            file.write_all(chunk.chunk.as_bytes()).await?;
+            file.flush().await?;
+            self.ui_events.publish_job_log_chunk(
+                self.project_id,
+                self.job_id,
+                chunk.stream,
+                chunk.chunk,
+            );
+        }
+
+        Ok(())
+    }
+}
+
 impl JobDispatcher {
+    async fn await_log_pump(
+        log_pump: tokio::task::JoinHandle<Result<(), RuntimeError>>,
+    ) -> Result<(), AgentError> {
+        log_pump
+            .await
+            .map_err(|error| AgentError::ProcessError(error.to_string()))?
+            .map_err(|error| AgentError::ProcessError(error.to_string()))
+    }
+
     pub(crate) async fn run_with_heartbeats(
         &self,
         prepared: &PreparedRun,
@@ -110,6 +180,26 @@ impl JobDispatcher {
         let runner = self.runner.clone();
         let agent = prepared.agent.clone();
         let working_dir = PathBuf::from(&prepared.workspace.path);
+        let artifact_dir = self.artifact_dir(prepared.job.id);
+        let (output_tx, output_rx) = mpsc::channel::<AgentOutputChunk>(128);
+        let mut log_pump = Some(
+            match JobLogPump::open(
+                artifact_dir.as_path(),
+                output_rx,
+                self.ui_events.clone(),
+                prepared.job.project_id,
+                prepared.job.id,
+            )
+            .await
+            {
+                Ok(log_pump) => tokio::spawn(log_pump.run()),
+                Err(error) => {
+                    return AgentRunOutcome::LaunchFailed(AgentError::ProcessError(
+                        error.to_string(),
+                    ));
+                }
+            },
+        );
         let span = info_span!(
             "job_execution",
             job_id = %prepared.job.id,
@@ -120,7 +210,7 @@ impl JobDispatcher {
         );
         let mut handle = tokio::spawn(async move {
             runner
-                .launch(&agent, &request, &working_dir)
+                .launch_with_output(&agent, &request, &working_dir, Some(output_tx))
                 .instrument(span)
                 .await
         });
@@ -134,9 +224,13 @@ impl JobDispatcher {
                     let result = match result {
                         Ok(result) => result,
                         Err(error) => {
+                            let _ = Self::await_log_pump(log_pump.take().expect("log pump handle")).await;
                             return AgentRunOutcome::LaunchFailed(AgentError::ProcessError(error.to_string()));
                         }
                     };
+                    if let Err(error) = Self::await_log_pump(log_pump.take().expect("log pump handle")).await {
+                        return AgentRunOutcome::LaunchFailed(error);
+                    }
                     debug!(job_id = %prepared.job.id, "job execution future resolved");
                     return match result {
                         Ok(response) => AgentRunOutcome::Completed(response),
@@ -145,6 +239,7 @@ impl JobDispatcher {
                 }
                 _ = &mut timeout => {
                     handle.abort();
+                    let _ = Self::await_log_pump(log_pump.take().expect("log pump handle")).await;
                     warn!(job_id = %prepared.job.id, timeout_seconds = timeout_duration.as_secs(), "job execution timed out");
                     return AgentRunOutcome::TimedOut;
                 }
@@ -152,11 +247,13 @@ impl JobDispatcher {
                     match self.load_running_job_state(prepared.job.id).await {
                         Ok(RunningJobState::Cancelled) => {
                             handle.abort();
+                            let _ = Self::await_log_pump(log_pump.take().expect("log pump handle")).await;
                             info!(job_id = %prepared.job.id, "cancelling running job after operator request");
                             return AgentRunOutcome::Cancelled;
                         }
                         Ok(RunningJobState::OwnershipLost(status)) => {
                             handle.abort();
+                            let _ = Self::await_log_pump(log_pump.take().expect("log pump handle")).await;
                             info!(job_id = %prepared.job.id, status = ?status, "stopping runner after job lost ownership");
                             return AgentRunOutcome::OwnershipLostDuringRun;
                         }
@@ -183,11 +280,13 @@ impl JobDispatcher {
                     match self.load_running_job_state(prepared.job.id).await {
                         Ok(RunningJobState::Cancelled) => {
                             handle.abort();
+                            let _ = Self::await_log_pump(log_pump.take().expect("log pump handle")).await;
                             info!(job_id = %prepared.job.id, "cancelling running job after operator request");
                             return AgentRunOutcome::Cancelled;
                         }
                         Ok(RunningJobState::OwnershipLost(status)) => {
                             handle.abort();
+                            let _ = Self::await_log_pump(log_pump.take().expect("log pump handle")).await;
                             info!(job_id = %prepared.job.id, status = ?status, "stopping runner after job lost ownership");
                             return AgentRunOutcome::OwnershipLostDuringRun;
                         }
@@ -206,6 +305,7 @@ impl JobDispatcher {
                     ).await {
                         if matches!(&error, RepositoryError::Conflict(ConflictKind::JobNotActive)) {
                             handle.abort();
+                            let _ = Self::await_log_pump(log_pump.take().expect("log pump handle")).await;
                             info!(job_id = %prepared.job.id, "stopping runner after heartbeat lost job ownership");
                             return AgentRunOutcome::OwnershipLostDuringRun;
                         }

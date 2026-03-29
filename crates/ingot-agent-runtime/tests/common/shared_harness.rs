@@ -14,7 +14,7 @@ use ingot_domain::project::Project;
 use ingot_domain::test_support::{AgentBuilder, ProjectBuilder, default_timestamp};
 use ingot_store_sqlite::Database;
 use ingot_test_support::env::temp_state_root;
-use ingot_usecases::{DispatchNotify, ProjectLocks};
+use ingot_usecases::{DispatchNotify, ProjectLocks, UiEventBus};
 use runtime_crate::{AgentRunner, DispatcherConfig, JobDispatcher};
 use tokio::sync::Notify;
 use tokio::time::{sleep, timeout};
@@ -61,24 +61,33 @@ pub struct TestHarness {
 
 impl TestHarness {
     pub async fn new(runner: Arc<dyn AgentRunner>) -> Self {
-        Self::with_config(runner, None).await
+        Self::with_config_and_events(runner, None, UiEventBus::default()).await
     }
 
     pub async fn with_config(
         runner: Arc<dyn AgentRunner>,
         config: Option<DispatcherConfig>,
     ) -> Self {
+        Self::with_config_and_events(runner, config, UiEventBus::default()).await
+    }
+
+    pub async fn with_config_and_events(
+        runner: Arc<dyn AgentRunner>,
+        config: Option<DispatcherConfig>,
+        ui_events: UiEventBus,
+    ) -> Self {
         let repo_path = ingot_test_support::git::temp_git_repo("ingot-runtime-repo");
         let db = ingot_test_support::sqlite::migrated_test_db("ingot-runtime").await;
         let state_root = temp_state_root("ingot-runtime-state");
         let config = config.unwrap_or_else(|| DispatcherConfig::new(state_root.clone()));
         let dispatch_notify = DispatchNotify::default();
-        let dispatcher = JobDispatcher::with_runner(
+        let dispatcher = JobDispatcher::with_runner_and_events(
             db.clone(),
             ProjectLocks::default(),
             config.clone(),
             runner,
             dispatch_notify.clone(),
+            ui_events,
         );
 
         let project = ProjectBuilder::new(&repo_path)

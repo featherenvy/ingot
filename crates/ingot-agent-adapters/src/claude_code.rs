@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
+use ingot_agent_protocol::response::{AgentOutputChunk, AgentResponse};
+use tokio::sync::mpsc;
 
 use crate::{result_from_text, subprocess};
 
@@ -40,14 +42,13 @@ impl ClaudeCodeCliAdapter {
 
         Ok(args)
     }
-}
 
-impl AgentAdapter for ClaudeCodeCliAdapter {
-    async fn launch(
+    pub async fn launch_with_output(
         &self,
         request: &AgentRequest,
         working_dir: &Path,
-    ) -> Result<ingot_agent_protocol::response::AgentResponse, AgentError> {
+        output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
+    ) -> Result<AgentResponse, AgentError> {
         subprocess::launch_adapter(
             self.command.cli_path(),
             self.command.model(),
@@ -55,12 +56,23 @@ impl AgentAdapter for ClaudeCodeCliAdapter {
             working_dir,
             self.build_print_args(request)?,
             "claude",
+            output_tx,
             |output| {
                 let stdout = output.stdout.clone();
                 async move { Ok(parse_print_output(&stdout)) }
             },
         )
         .await
+    }
+}
+
+impl AgentAdapter for ClaudeCodeCliAdapter {
+    async fn launch(
+        &self,
+        request: &AgentRequest,
+        working_dir: &Path,
+    ) -> Result<AgentResponse, AgentError> {
+        self.launch_with_output(request, working_dir, None).await
     }
 
     async fn cancel(&self, pid: u32) -> Result<(), AgentError> {

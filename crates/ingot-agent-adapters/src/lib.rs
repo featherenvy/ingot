@@ -5,27 +5,29 @@ mod subprocess;
 
 use std::path::Path;
 
-use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
+use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::report;
 use ingot_agent_protocol::request::AgentRequest;
-use ingot_agent_protocol::response::AgentResponse;
+use ingot_agent_protocol::response::{AgentOutputChunk, AgentResponse};
 use ingot_domain::agent::{AdapterKind, Agent};
+use tokio::sync::mpsc;
 
 /// Launch an agent job by dispatching to the correct CLI adapter based on `AdapterKind`.
 pub async fn launch_agent(
     agent: &Agent,
     request: &AgentRequest,
     working_dir: &Path,
+    output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
 ) -> Result<AgentResponse, AgentError> {
     match agent.adapter_kind {
         AdapterKind::Codex => {
             codex::CodexCliAdapter::new(agent.cli_path.clone(), agent.model.clone())
-                .launch(request, working_dir)
+                .launch_with_output(request, working_dir, output_tx)
                 .await
         }
         AdapterKind::ClaudeCode => {
             claude_code::ClaudeCodeCliAdapter::new(agent.cli_path.clone(), agent.model.clone())
-                .launch(request, working_dir)
+                .launch_with_output(request, working_dir, output_tx)
                 .await
         }
     }

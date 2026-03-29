@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
+use ingot_agent_protocol::response::{AgentOutputChunk, AgentResponse};
+use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::{result_from_text, subprocess};
@@ -49,14 +51,13 @@ impl CodexCliAdapter {
             "-".into(),
         ])
     }
-}
 
-impl AgentAdapter for CodexCliAdapter {
-    async fn launch(
+    pub async fn launch_with_output(
         &self,
         request: &AgentRequest,
         working_dir: &Path,
-    ) -> Result<ingot_agent_protocol::response::AgentResponse, AgentError> {
+        output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
+    ) -> Result<AgentResponse, AgentError> {
         subprocess::launch_adapter_with_schema_and_result_files(
             &self.command,
             request,
@@ -67,6 +68,7 @@ impl AgentAdapter for CodexCliAdapter {
                 result_file_extension: "txt",
             },
             |schema_file, response_file| self.build_exec_args(request, schema_file, response_file),
+            output_tx,
             |_output, response_file| async move {
                 let final_message = response_file.read_to_string().await.ok();
                 if final_message
@@ -84,6 +86,16 @@ impl AgentAdapter for CodexCliAdapter {
             },
         )
         .await
+    }
+}
+
+impl AgentAdapter for CodexCliAdapter {
+    async fn launch(
+        &self,
+        request: &AgentRequest,
+        working_dir: &Path,
+    ) -> Result<AgentResponse, AgentError> {
+        self.launch_with_output(request, working_dir, None).await
     }
 
     async fn cancel(&self, pid: u32) -> Result<(), AgentError> {

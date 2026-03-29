@@ -14,6 +14,8 @@ pub(crate) async fn append_activity(
     subject: ActivitySubject,
     payload: serde_json::Value,
 ) -> Result<(), ApiError> {
+    let payload_for_event = payload.clone();
+    let subject_for_event = subject.clone();
     state
         .db
         .append_activity(&Activity {
@@ -25,5 +27,12 @@ pub(crate) async fn append_activity(
             created_at: Utc::now(),
         })
         .await
-        .map_err(repo_to_internal)
+        .map_err(repo_to_internal)?;
+    state.ui_events.publish_entity_changed(
+        project_id,
+        event_type,
+        subject_for_event,
+        payload_for_event,
+    );
+    Ok(())
 }

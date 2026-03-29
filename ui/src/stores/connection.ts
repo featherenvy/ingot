@@ -1,7 +1,7 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { create } from 'zustand'
 import { queryKeys } from '../api/queries'
-import type { WsEvent } from '../types/domain'
+import type { JobLogs, WsEvent } from '../types/domain'
 import { useProjectsStore } from './projects'
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected'
@@ -72,6 +72,35 @@ function handleEvent(event: WsEvent, lastSeq: number, qc: QueryClient) {
       qc.invalidateQueries({ queryKey: queryKeys.jobs(projectId) })
       qc.invalidateQueries({ queryKey: queryKeys.workspaces(projectId) })
       qc.invalidateQueries({ queryKey: queryKeys.convergences(projectId) })
+    }
+    qc.invalidateQueries({ queryKey: ['job-logs'] })
+    return
+  }
+
+  if (event.event === 'job_log_chunk') {
+    const stream = event.payload?.stream
+    const chunk = event.payload?.chunk
+    if ((stream === 'stdout' || stream === 'stderr') && typeof chunk === 'string') {
+      qc.setQueryData<JobLogs>(queryKeys.jobLogs(event.entity_id), (current) => {
+        const next: JobLogs = current ?? {
+          prompt: null,
+          stdout: null,
+          stderr: null,
+          result: null,
+        }
+
+        if (stream === 'stdout') {
+          return {
+            ...next,
+            stdout: `${next.stdout ?? ''}${chunk}`,
+          }
+        }
+
+        return {
+          ...next,
+          stderr: `${next.stderr ?? ''}${chunk}`,
+        }
+      })
     }
     return
   }

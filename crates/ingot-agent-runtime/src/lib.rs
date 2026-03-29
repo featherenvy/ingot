@@ -24,7 +24,7 @@ use std::time::Duration;
 use chrono::{Duration as ChronoDuration, Utc};
 use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::request::AgentRequest;
-use ingot_agent_protocol::response::AgentResponse;
+use ingot_agent_protocol::response::{AgentOutputChunk, AgentResponse};
 use ingot_config::paths::job_logs_dir;
 use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
 use ingot_domain::agent::Agent;
@@ -37,8 +37,9 @@ use ingot_git::GitJobCompletionPort;
 use ingot_git::commands::{GitCommandError, resolve_ref_oid};
 use ingot_git::project_repo::{project_repo_paths_for_project, refresh_project_mirror_for_project};
 use ingot_store_sqlite::Database;
-use ingot_usecases::{CompleteJobService, DispatchNotify, ProjectLocks};
+use ingot_usecases::{CompleteJobService, DispatchNotify, ProjectLocks, UiEventBus};
 use ingot_workspace::WorkspaceError;
+use tokio::sync::mpsc;
 use tracing::warn;
 
 pub(crate) use job_support::{
@@ -85,6 +86,16 @@ pub trait AgentRunner: Send + Sync {
         request: &'a AgentRequest,
         working_dir: &'a Path,
     ) -> AgentLaunchFuture<'a>;
+
+    fn launch_with_output<'a>(
+        &'a self,
+        agent: &'a Agent,
+        request: &'a AgentRequest,
+        working_dir: &'a Path,
+        _output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
+    ) -> AgentLaunchFuture<'a> {
+        self.launch(agent, request, working_dir)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,6 +112,22 @@ impl AgentRunner for CliAgentRunner {
             agent,
             request,
             working_dir,
+            None,
+        ))
+    }
+
+    fn launch_with_output<'a>(
+        &'a self,
+        agent: &'a Agent,
+        request: &'a AgentRequest,
+        working_dir: &'a Path,
+        output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
+    ) -> AgentLaunchFuture<'a> {
+        Box::pin(ingot_agent_adapters::launch_agent(
+            agent,
+            request,
+            working_dir,
+            output_tx,
         ))
     }
 }
@@ -113,6 +140,7 @@ pub struct JobDispatcher {
     lease_owner_id: LeaseOwnerId,
     runner: Arc<dyn AgentRunner>,
     dispatch_notify: DispatchNotify,
+    ui_events: UiEventBus,
     #[cfg(test)]
     test_hooks: test_support::DispatcherTestHooks,
 }
@@ -140,12 +168,29 @@ impl JobDispatcher {
         config: DispatcherConfig,
         dispatch_notify: DispatchNotify,
     ) -> Self {
-        Self::with_runner(
+        Self::new_with_events(
+            db,
+            project_locks,
+            config,
+            dispatch_notify,
+            UiEventBus::default(),
+        )
+    }
+
+    pub fn new_with_events(
+        db: Database,
+        project_locks: ProjectLocks,
+        config: DispatcherConfig,
+        dispatch_notify: DispatchNotify,
+        ui_events: UiEventBus,
+    ) -> Self {
+        Self::with_runner_and_events(
             db,
             project_locks,
             config,
             Arc::new(CliAgentRunner),
             dispatch_notify,
+            ui_events,
         )
     }
 
@@ -156,6 +201,24 @@ impl JobDispatcher {
         runner: Arc<dyn AgentRunner>,
         dispatch_notify: DispatchNotify,
     ) -> Self {
+        Self::with_runner_and_events(
+            db,
+            project_locks,
+            config,
+            runner,
+            dispatch_notify,
+            UiEventBus::default(),
+        )
+    }
+
+    pub fn with_runner_and_events(
+        db: Database,
+        project_locks: ProjectLocks,
+        config: DispatcherConfig,
+        runner: Arc<dyn AgentRunner>,
+        dispatch_notify: DispatchNotify,
+        ui_events: UiEventBus,
+    ) -> Self {
         Self {
             db,
             project_locks,
@@ -163,6 +226,7 @@ impl JobDispatcher {
             lease_owner_id: LeaseOwnerId::new(format!("ingotd:{}", std::process::id())),
             runner,
             dispatch_notify,
+            ui_events,
             #[cfg(test)]
             test_hooks: test_support::DispatcherTestHooks::default(),
         }
@@ -242,6 +306,8 @@ impl JobDispatcher {
         subject: ActivitySubject,
         payload: serde_json::Value,
     ) -> Result<(), RuntimeError> {
+        let payload_for_event = payload.clone();
+        let subject_for_event = subject.clone();
         self.db
             .append_activity(&Activity {
                 id: ingot_domain::ids::ActivityId::new(),
@@ -252,6 +318,12 @@ impl JobDispatcher {
                 created_at: Utc::now(),
             })
             .await?;
+        self.ui_events.publish_entity_changed(
+            project_id,
+            event_type,
+            subject_for_event,
+            payload_for_event,
+        );
         Ok(())
     }
 

@@ -14,6 +14,7 @@ pub mod notify;
 pub mod reconciliation;
 pub mod revision_context;
 pub mod teardown;
+pub mod ui_events;
 pub mod workspace;
 
 pub use convergence::ConvergenceService;
@@ -23,3 +24,4 @@ pub use locking::ProjectLocks;
 pub use notify::DispatchNotify;
 pub use reconciliation::ReconciliationService;
 pub use revision_context::rebuild_revision_context;
+pub use ui_events::{EntityChangedEvent, JobLogChunkEvent, UiEvent, UiEventBus, UiEventEnvelope};

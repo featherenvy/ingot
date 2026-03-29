@@ -1,9 +1,10 @@
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ingot_agent_protocol::{AgentOutputChunk, OutputStream};
 use ingot_agent_runtime::{AgentRunner, DispatcherConfig, JobDispatcher};
 use ingot_domain::agent::Agent;
 use ingot_domain::job::{JobStatus, OutcomeClass};
@@ -12,7 +13,10 @@ use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
 use ingot_test_support::env::temp_state_root;
 use ingot_test_support::git::unique_temp_path;
-use ingot_usecases::{DispatchNotify, ProjectLocks};
+use ingot_test_support::reports::clean_review_report;
+use ingot_usecases::{DispatchNotify, ProjectLocks, UiEvent, UiEventBus};
+use tokio::sync::{Notify, mpsc};
+use tokio::time::timeout;
 
 mod common;
 use common::*;
@@ -88,6 +92,176 @@ async fn tick_executes_a_queued_authoring_job_and_creates_a_commit() {
         artifact_dir.join("result.json").exists(),
         "result artifact should exist"
     );
+}
+
+#[tokio::test]
+async fn running_job_streams_stdout_to_disk_and_ui_before_completion() {
+    #[derive(Clone, Default)]
+    struct StreamingRunner {
+        release: Arc<Notify>,
+        base_commit: Arc<Mutex<Option<String>>>,
+        head_commit: Arc<Mutex<Option<String>>>,
+    }
+
+    impl AgentRunner for StreamingRunner {
+        fn launch<'a>(
+            &'a self,
+            _agent: &'a Agent,
+            _request: &'a AgentRequest,
+            _working_dir: &'a Path,
+        ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
+            Box::pin(async move {
+                let base_commit = self
+                    .base_commit
+                    .lock()
+                    .expect("base commit lock")
+                    .clone()
+                    .expect("base commit configured");
+                let head_commit = self
+                    .head_commit
+                    .lock()
+                    .expect("head commit lock")
+                    .clone()
+                    .expect("head commit configured");
+                Ok(AgentResponse {
+                    exit_code: 0,
+                    stdout: "first line\nsecond line".into(),
+                    stderr: String::new(),
+                    result: Some(clean_review_report(&base_commit, &head_commit)),
+                })
+            })
+        }
+
+        fn launch_with_output<'a>(
+            &'a self,
+            _agent: &'a Agent,
+            _request: &'a AgentRequest,
+            _working_dir: &'a Path,
+            output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
+        ) -> Pin<Box<dyn Future<Output = Result<AgentResponse, AgentError>> + Send + 'a>> {
+            Box::pin(async move {
+                let tx = output_tx.expect("streaming runner output sender");
+                tx.send(AgentOutputChunk {
+                    stream: OutputStream::Stdout,
+                    chunk: "first line\n".into(),
+                })
+                .await
+                .expect("send first chunk");
+                self.release.notified().await;
+                tx.send(AgentOutputChunk {
+                    stream: OutputStream::Stdout,
+                    chunk: "second line\n".into(),
+                })
+                .await
+                .expect("send second chunk");
+                let base_commit = self
+                    .base_commit
+                    .lock()
+                    .expect("base commit lock")
+                    .clone()
+                    .expect("base commit configured");
+                let head_commit = self
+                    .head_commit
+                    .lock()
+                    .expect("head commit lock")
+                    .clone()
+                    .expect("head commit configured");
+                Ok(AgentResponse {
+                    exit_code: 0,
+                    stdout: "first line\nsecond line".into(),
+                    stderr: String::new(),
+                    result: Some(clean_review_report(&base_commit, &head_commit)),
+                })
+            })
+        }
+    }
+
+    let ui_events = UiEventBus::default();
+    let mut ui_rx = ui_events.subscribe();
+    let runner = Arc::new(StreamingRunner::default());
+    let h = TestHarness::with_config_and_events(runner.clone(), None, ui_events).await;
+    h.register_review_agent().await;
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let base_commit = head_oid(&h.repo_path)
+        .await
+        .expect("seed head")
+        .into_inner();
+    std::fs::write(h.repo_path.join("tracked.txt"), "next").expect("update tracked file");
+    git_sync(&h.repo_path, &["add", "tracked.txt"]);
+    git_sync(&h.repo_path, &["commit", "-m", "next"]);
+    let head_commit = head_oid(&h.repo_path).await.expect("head oid").into_inner();
+    *runner.base_commit.lock().expect("base commit set") = Some(base_commit.clone());
+    *runner.head_commit.lock().expect("head commit set") = Some(head_commit.clone());
+
+    let item = ItemBuilder::new(h.project.id, revision_id)
+        .id(item_id)
+        .build();
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .explicit_seed(base_commit.as_str())
+        .template_map_snapshot(
+            serde_json::json!({ "review_candidate_initial": "review-candidate" }),
+        )
+        .build();
+    h.db.create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let job = test_review_job(
+        h.project.id,
+        item_id,
+        revision_id,
+        base_commit.as_str(),
+        head_commit.as_str(),
+    );
+    h.db.create_job(&job).await.expect("create job");
+
+    let dispatcher = h.dispatcher.clone();
+    let tick_task = tokio::spawn(async move { dispatcher.tick().await.expect("tick should run") });
+    h.wait_for_job_status(job.id, JobStatus::Running, Duration::from_secs(2))
+        .await;
+
+    let artifact_path = h
+        .state_root
+        .join("logs")
+        .join(job.id.to_string())
+        .join("stdout.log");
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let contents = tokio::fs::read_to_string(&artifact_path)
+                .await
+                .unwrap_or_default();
+            if contents.contains("first line") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("stdout chunk persisted before completion");
+
+    let streamed = timeout(Duration::from_secs(2), async {
+        loop {
+            let event = ui_rx.recv().await.expect("ui event");
+            if let UiEvent::JobLogChunk(event) = event.event {
+                if event.job_id == job.id {
+                    return event;
+                }
+            }
+        }
+    })
+    .await
+    .expect("job log chunk event");
+    assert_eq!(streamed.stream, OutputStream::Stdout);
+    assert_eq!(streamed.chunk, "first line\n");
+
+    runner.release.notify_waiters();
+    assert!(tick_task.await.expect("tick join"));
+
+    let updated_job = h.db.get_job(job.id).await.expect("updated job");
+    assert_eq!(updated_job.state.status(), JobStatus::Completed);
 }
 
 #[tokio::test]

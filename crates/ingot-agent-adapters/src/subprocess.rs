@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 
 use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::request::AgentRequest;
-use ingot_agent_protocol::response::AgentResponse;
+use ingot_agent_protocol::response::{AgentOutputChunk, AgentResponse, OutputStream};
 use ingot_domain::agent_model::AgentModel;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::output_schema;
@@ -124,6 +125,7 @@ pub(crate) async fn run_cli_subprocess(
     working_dir: &Path,
     prompt: &str,
     adapter_name: &'static str,
+    output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
 ) -> Result<SubprocessOutput, AgentError> {
     let mut command = Command::new(cli_path);
     command
@@ -163,8 +165,13 @@ pub(crate) async fn run_cli_subprocess(
         .stderr
         .take()
         .ok_or_else(|| AgentError::ProcessError(format!("missing {adapter_name} stderr pipe")))?;
-    let stdout_task = tokio::spawn(collect_stream(stdout, "stdout", adapter_name));
-    let stderr_task = tokio::spawn(collect_stream(stderr, "stderr", adapter_name));
+    let stdout_task = tokio::spawn(collect_stream(
+        stdout,
+        "stdout",
+        adapter_name,
+        output_tx.clone(),
+    ));
+    let stderr_task = tokio::spawn(collect_stream(stderr, "stderr", adapter_name, output_tx));
 
     let status = child
         .wait()
@@ -192,6 +199,7 @@ pub(crate) async fn launch_adapter<Model, Parse, ParseFuture>(
     working_dir: &Path,
     args: Vec<String>,
     adapter_name: &'static str,
+    output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
     parse_result: Parse,
 ) -> Result<AgentResponse, AgentError>
 where
@@ -209,8 +217,15 @@ where
         "launching adapter subprocess"
     );
 
-    let output =
-        run_cli_subprocess(cli_path, &args, working_dir, &request.prompt, adapter_name).await?;
+    let output = run_cli_subprocess(
+        cli_path,
+        &args,
+        working_dir,
+        &request.prompt,
+        adapter_name,
+        output_tx,
+    )
+    .await?;
     info!(
         adapter = adapter_name,
         exit_code = output.exit_code,
@@ -233,6 +248,7 @@ pub(crate) async fn launch_adapter_with_schema_and_result_files<BuildArgs, Parse
     working_dir: &Path,
     files: SchemaResultFiles<'_>,
     build_args: BuildArgs,
+    output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
     parse_result: Parse,
 ) -> Result<AgentResponse, AgentError>
 where
@@ -255,6 +271,7 @@ where
         working_dir,
         build_args(&schema_file, &result_file)?,
         files.adapter_name,
+        output_tx,
         move |output| parse_result(output, parse_file),
     )
     .await;
@@ -268,6 +285,7 @@ async fn collect_stream(
     reader: impl tokio::io::AsyncRead + Unpin,
     stream_name: &'static str,
     adapter_name: &'static str,
+    mut output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
 ) -> Result<String, AgentError> {
     let mut reader = BufReader::new(reader).lines();
     let mut lines = Vec::new();
@@ -280,6 +298,16 @@ async fn collect_stream(
         match stream_name {
             "stderr" => warn!(adapter = adapter_name, stream = stream_name, line, "stderr"),
             _ => debug!(adapter = adapter_name, stream = stream_name, line, "event"),
+        }
+        if let Some(tx) = output_tx.as_mut() {
+            let stream = match stream_name {
+                "stderr" => OutputStream::Stderr,
+                _ => OutputStream::Stdout,
+            };
+            let chunk = format!("{line}\n");
+            if tx.send(AgentOutputChunk { stream, chunk }).await.is_err() {
+                output_tx = None;
+            }
         }
         lines.push(line);
     }

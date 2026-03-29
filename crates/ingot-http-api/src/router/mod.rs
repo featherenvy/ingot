@@ -18,8 +18,10 @@ pub(crate) mod support;
 mod test_helpers;
 pub(super) mod types;
 mod workspaces;
+mod ws;
 
 pub(crate) use app::AppState;
 pub use app::{
     build_router, build_router_with_project_locks, build_router_with_project_locks_and_state_root,
+    build_router_with_project_locks_and_state_root_and_events,
 };

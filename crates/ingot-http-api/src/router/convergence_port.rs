@@ -268,12 +268,21 @@ impl ConvergenceCommandPort for HttpConvergencePort {
         &self,
         activity: &Activity,
     ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
-        let db = self.state.db.clone();
+        let state = self.state.clone();
         let activity = activity.clone();
         async move {
-            db.append_activity(&activity)
+            state
+                .db
+                .append_activity(&activity)
                 .await
-                .map_err(UseCaseError::Repository)
+                .map_err(UseCaseError::Repository)?;
+            state.ui_events.publish_entity_changed(
+                activity.project_id,
+                activity.event_type,
+                activity.subject.clone(),
+                activity.payload.clone(),
+            );
+            Ok(())
         }
     }
 

@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::Result;
 use ingot_agent_runtime::{DispatcherConfig, JobDispatcher};
 use ingot_config::paths::{database_path_for_state_root, default_state_root, logs_root};
-use ingot_usecases::{DispatchNotify, ProjectLocks};
+use ingot_usecases::{DispatchNotify, ProjectLocks, UiEventBus};
 use tokio::net::TcpListener;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -25,11 +25,13 @@ async fn main() -> Result<()> {
 
     let project_locks = ProjectLocks::default();
     let dispatch_notify = DispatchNotify::default();
-    let dispatcher = JobDispatcher::new(
+    let ui_events = UiEventBus::default();
+    let dispatcher = JobDispatcher::new_with_events(
         db.clone(),
         project_locks.clone(),
         DispatcherConfig::new(state_root.clone()),
         dispatch_notify.clone(),
+        ui_events.clone(),
     );
     dispatcher.reconcile_startup().await?;
     tokio::spawn(async move {
@@ -38,11 +40,12 @@ async fn main() -> Result<()> {
     tracing::info!("background dispatcher started");
 
     // HTTP server
-    let app = ingot_http_api::build_router_with_project_locks_and_state_root(
+    let app = ingot_http_api::build_router_with_project_locks_and_state_root_and_events(
         db.clone(),
         project_locks,
         state_root.clone(),
         dispatch_notify,
+        ui_events,
     );
     let addr = SocketAddr::from(([127, 0, 0, 1], 4190));
     let listener = TcpListener::bind(addr).await?;

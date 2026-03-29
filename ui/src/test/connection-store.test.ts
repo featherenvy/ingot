@@ -87,4 +87,58 @@ describe('connection store', () => {
       expect(queryClient.getQueryState(queryKeys.item('prj_1', 'itm_1'))?.isInvalidated).toBe(true)
     })
   })
+
+  it('appends streamed job log chunks into the cached job logs entry', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+        },
+      },
+    })
+
+    useConnectionStore.getState().connect(queryClient)
+    const ws = MockWebSocket.instances[0]
+
+    ws.onmessage?.(
+      new MessageEvent('message', {
+        data: JSON.stringify({
+          seq: 1,
+          event: 'job_log_chunk',
+          project_id: 'prj_1',
+          entity_type: 'job',
+          entity_id: 'job_1',
+          payload: {
+            stream: 'stdout',
+            chunk: 'hello\n',
+          },
+        }),
+      }),
+    )
+
+    ws.onmessage?.(
+      new MessageEvent('message', {
+        data: JSON.stringify({
+          seq: 2,
+          event: 'job_log_chunk',
+          project_id: 'prj_1',
+          entity_type: 'job',
+          entity_id: 'job_1',
+          payload: {
+            stream: 'stderr',
+            chunk: 'warn\n',
+          },
+        }),
+      }),
+    )
+
+    await waitFor(() => {
+      expect(queryClient.getQueryData(queryKeys.jobLogs('job_1'))).toEqual({
+        prompt: null,
+        stdout: 'hello\n',
+        stderr: 'warn\n',
+        result: null,
+      })
+    })
+  })
 })

@@ -14,7 +14,7 @@ use ingot_domain::revision::ItemRevision;
 use ingot_git::GitJobCompletionPort;
 use ingot_git::project_repo::project_repo_paths_for_project;
 use ingot_store_sqlite::Database;
-use ingot_usecases::{CompleteJobService, DispatchNotify, ProjectLocks};
+use ingot_usecases::{CompleteJobService, DispatchNotify, ProjectLocks, UiEventBus};
 
 use crate::error::ApiError;
 
@@ -31,6 +31,7 @@ pub(crate) struct AppState {
         CompleteJobService<Database, GitJobCompletionPort, ProjectLocks>,
     pub(crate) project_locks: ProjectLocks,
     pub(crate) dispatch_notify: DispatchNotify,
+    pub(crate) ui_events: UiEventBus,
     pub(crate) state_root: PathBuf,
 }
 
@@ -46,20 +47,22 @@ impl AppState {
 
 /// Build the Axum router with all API routes.
 pub fn build_router(db: Database) -> Router {
-    build_router_with_project_locks_and_state_root(
+    build_router_with_project_locks_and_state_root_and_events(
         db,
         ProjectLocks::default(),
         default_state_root(),
         DispatchNotify::default(),
+        UiEventBus::default(),
     )
 }
 
 pub fn build_router_with_project_locks(db: Database, project_locks: ProjectLocks) -> Router {
-    build_router_with_project_locks_and_state_root(
+    build_router_with_project_locks_and_state_root_and_events(
         db,
         project_locks,
         default_state_root(),
         DispatchNotify::default(),
+        UiEventBus::default(),
     )
 }
 
@@ -68,6 +71,22 @@ pub fn build_router_with_project_locks_and_state_root(
     project_locks: ProjectLocks,
     state_root: PathBuf,
     dispatch_notify: DispatchNotify,
+) -> Router {
+    build_router_with_project_locks_and_state_root_and_events(
+        db,
+        project_locks,
+        state_root,
+        dispatch_notify,
+        UiEventBus::default(),
+    )
+}
+
+pub fn build_router_with_project_locks_and_state_root_and_events(
+    db: Database,
+    project_locks: ProjectLocks,
+    state_root: PathBuf,
+    dispatch_notify: DispatchNotify,
+    ui_events: UiEventBus,
 ) -> Router {
     let repo_path_resolver_root = state_root.clone();
     let state = AppState {
@@ -83,6 +102,7 @@ pub fn build_router_with_project_locks_and_state_root(
         ),
         project_locks,
         dispatch_notify,
+        ui_events,
         state_root,
     };
 
@@ -97,6 +117,7 @@ pub fn build_router_with_project_locks_and_state_root(
         .merge(jobs::routes())
         .merge(findings::routes())
         .merge(convergence::routes())
+        .merge(super::ws::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             dispatch_notify_layer,

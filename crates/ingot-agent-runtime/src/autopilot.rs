@@ -204,24 +204,18 @@ impl JobDispatcher {
             self.pause_before_auto_queue_insert().await;
             match self.db.create_queue_entry(&queue_entry).await {
                 Ok(()) => {
-                    self.db
-                        .append_activity(&ingot_domain::activity::Activity {
-                            id: ingot_domain::ids::ActivityId::new(),
-                            project_id,
-                            event_type:
-                                ingot_domain::activity::ActivityEventType::ConvergenceQueued,
-                            subject: ingot_domain::activity::ActivitySubject::QueueEntry(
-                                queue_entry.id,
-                            ),
-                            payload: serde_json::json!({
-                                "item_id": item_id,
-                                "target_ref": revision.target_ref,
-                                "dispatch_origin": "autopilot",
-                            }),
-                            created_at: now,
-                        })
-                        .await
-                        .map_err(ingot_usecases::UseCaseError::Repository)?;
+                    self.append_activity(
+                        project_id,
+                        ingot_domain::activity::ActivityEventType::ConvergenceQueued,
+                        ingot_domain::activity::ActivitySubject::QueueEntry(queue_entry.id),
+                        serde_json::json!({
+                            "item_id": item_id,
+                            "target_ref": revision.target_ref,
+                            "dispatch_origin": "autopilot",
+                        }),
+                    )
+                    .await
+                    .map_err(crate::usecase_from_runtime_error)?;
                     info!(
                         project_id = %project_id,
                         item_id = %item_id,

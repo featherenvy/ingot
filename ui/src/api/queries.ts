@@ -10,6 +10,7 @@ export const queryKeys = {
   items: (projectId: string) => ['items', projectId] as const,
   item: (projectId: string, itemId: string) => ['items', projectId, itemId] as const,
   jobs: (projectId: string) => ['jobs', projectId] as const,
+  jobLogs: (jobId: string) => ['job-logs', jobId] as const,
   workspaces: (projectId: string) => ['workspaces', projectId] as const,
   convergences: (projectId: string) => ['convergences', projectId] as const,
   activity: (projectId: string, limit: number, offset: number) => ['activity', projectId, limit, offset] as const,
@@ -87,7 +88,7 @@ export const projectActivityQuery = (projectId: string, params: { limit: number;
 
 export const jobLogsQuery = (jobId: string) =>
   queryOptions<JobLogs>({
-    queryKey: ['job-logs', jobId],
+    queryKey: queryKeys.jobLogs(jobId),
     queryFn: () => api.getJobLogs(jobId),
     enabled: !!jobId,
     staleTime: 5_000,
