@@ -1,3 +1,4 @@
+mod authoring_history;
 pub mod convergence;
 pub mod dispatch;
 pub mod error;

@@ -1,14 +1,17 @@
-use ingot_domain::commit_oid::CommitOid;
-use ingot_domain::convergence::{Convergence, ConvergenceStatus};
+use ingot_domain::convergence::Convergence;
 use ingot_domain::finding::Finding;
 use ingot_domain::ids::JobId;
 use ingot_domain::item::{Item, ParkingState};
-use ingot_domain::job::{Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind};
+use ingot_domain::job::{Job, JobInput, OutcomeClass};
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::step_id::StepId;
 use ingot_workflow::{Evaluation, Evaluator, step};
 
 use crate::UseCaseError;
+use crate::authoring_history::{
+    current_authoring_head_for_revision, job_input_from_prepared_convergence,
+    previous_authoring_head_for_revision, selected_prepared_convergence, subject_input_from_range,
+};
 
 #[derive(Debug, Clone)]
 pub struct DispatchJobCommand {
@@ -195,8 +198,8 @@ fn job_input_for_step(
     convergences: &[Convergence],
 ) -> JobInput {
     let seed_head = revision.seed.seed_commit_oid().map(ToOwned::to_owned);
-    let current_head = current_authoring_head(jobs, revision);
-    let previous_head = previous_authoring_head(jobs, revision);
+    let current_head = current_authoring_head_for_revision(jobs, revision);
+    let previous_head = previous_authoring_head_for_revision(jobs, revision);
     let prepared_convergence = selected_prepared_convergence(revision.id, convergences);
 
     match step_id {
@@ -206,9 +209,11 @@ fn job_input_for_step(
         StepId::RepairCandidate | StepId::RepairAfterIntegration => current_head
             .map(JobInput::authoring_head)
             .unwrap_or(JobInput::None),
-        StepId::ReviewIncrementalInitial => job_input_from_range(seed_head, current_head, false),
+        StepId::ReviewIncrementalInitial => {
+            subject_input_from_range(seed_head, current_head, false)
+        }
         StepId::ReviewIncrementalRepair | StepId::ReviewIncrementalAfterIntegrationRepair => {
-            job_input_from_range(previous_head, current_head, false)
+            subject_input_from_range(previous_head, current_head, false)
         }
         StepId::ReviewCandidateInitial
         | StepId::ReviewCandidateRepair
@@ -216,48 +221,17 @@ fn job_input_for_step(
         | StepId::ValidateCandidateRepair
         | StepId::ReviewAfterIntegrationRepair
         | StepId::ValidateAfterIntegrationRepair => {
-            job_input_from_range(seed_head, current_head, false)
+            subject_input_from_range(seed_head, current_head, false)
         }
         StepId::InvestigateItem => prepared_convergence
             .map(|convergence| job_input_from_prepared_convergence(convergence, false))
-            .unwrap_or_else(|| job_input_from_range(seed_head, current_head, false)),
+            .unwrap_or_else(|| subject_input_from_range(seed_head, current_head, false)),
         StepId::InvestigateProject | StepId::ReinvestigateProject => seed_head
             .map(JobInput::authoring_head)
             .unwrap_or(JobInput::None),
         StepId::ValidateIntegrated => prepared_convergence
             .map(|convergence| job_input_from_prepared_convergence(convergence, true))
             .unwrap_or(JobInput::None),
-        _ => JobInput::None,
-    }
-}
-
-fn job_input_from_prepared_convergence(convergence: &Convergence, integrated: bool) -> JobInput {
-    job_input_from_range(
-        convergence
-            .state
-            .input_target_commit_oid()
-            .map(ToOwned::to_owned),
-        convergence
-            .state
-            .prepared_commit_oid()
-            .map(ToOwned::to_owned),
-        integrated,
-    )
-}
-
-fn job_input_from_range(
-    base_commit_oid: Option<CommitOid>,
-    head_commit_oid: Option<CommitOid>,
-    integrated: bool,
-) -> JobInput {
-    match (base_commit_oid, head_commit_oid) {
-        (Some(base_commit_oid), Some(head_commit_oid)) => {
-            if integrated {
-                JobInput::integrated_subject(base_commit_oid, head_commit_oid)
-            } else {
-                JobInput::candidate_subject(base_commit_oid, head_commit_oid)
-            }
-        }
         _ => JobInput::None,
     }
 }
@@ -287,56 +261,12 @@ fn ensure_no_active_execution(
     }
 
     if convergences.iter().any(|convergence| {
-        convergence.item_revision_id == revision_id
-            && matches!(
-                convergence.state.status(),
-                ConvergenceStatus::Queued | ConvergenceStatus::Running
-            )
+        convergence.item_revision_id == revision_id && convergence.state.is_active()
     }) {
         return Err(UseCaseError::ActiveConvergenceExists);
     }
 
     Ok(())
-}
-
-fn current_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<CommitOid> {
-    successful_commit_oids(jobs, revision)
-        .last()
-        .cloned()
-        .or_else(|| revision.seed.seed_commit_oid().map(ToOwned::to_owned))
-}
-
-fn previous_authoring_head(jobs: &[Job], revision: &ItemRevision) -> Option<CommitOid> {
-    let commit_oids = successful_commit_oids(jobs, revision);
-    commit_oids
-        .iter()
-        .rev()
-        .nth(1)
-        .cloned()
-        .or_else(|| revision.seed.seed_commit_oid().map(ToOwned::to_owned))
-}
-
-fn successful_commit_oids(jobs: &[Job], revision: &ItemRevision) -> Vec<CommitOid> {
-    let mut commit_jobs = jobs
-        .iter()
-        .filter(|job| job.item_revision_id == revision.id)
-        .filter(|job| job.state.status() == JobStatus::Completed)
-        .filter(|job| job.output_artifact_kind == OutputArtifactKind::Commit)
-        .filter_map(|job| {
-            job.state.output_commit_oid().map(|commit_oid| {
-                (
-                    (job.state.ended_at(), job.created_at),
-                    commit_oid.to_owned(),
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-
-    commit_jobs.sort_by_key(|(sort_key, _)| *sort_key);
-    commit_jobs
-        .into_iter()
-        .map(|(_, commit_oid)| commit_oid)
-        .collect()
 }
 
 fn next_semantic_attempt_no(
@@ -350,16 +280,6 @@ fn next_semantic_attempt_no(
         .max()
         .unwrap_or(0)
         + 1
-}
-
-pub(crate) fn selected_prepared_convergence(
-    revision_id: ingot_domain::ids::ItemRevisionId,
-    convergences: &[Convergence],
-) -> Option<&Convergence> {
-    convergences.iter().find(|convergence| {
-        convergence.item_revision_id == revision_id
-            && convergence.state.status() == ConvergenceStatus::Prepared
-    })
 }
 
 #[cfg(test)]

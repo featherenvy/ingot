@@ -11,9 +11,7 @@ use ingot_domain::git_operation::{
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::{ActivityId, GitOperationId, ItemRevisionId, JobId, ProjectId};
 use ingot_domain::item::{EscalationReason, Item};
-use ingot_domain::job::{
-    ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
-};
+use ingot_domain::job::{ExecutionPermission, Job, JobInput, JobStatus, OutcomeClass};
 use ingot_domain::ports::{
     ActivityRepository, FindingRepository, GitOperationRepository, JobRepository,
     WorkspaceRepository,
@@ -25,6 +23,7 @@ use ingot_domain::workspace::{Workspace, WorkspaceKind};
 use ingot_workflow::{ClosureRelevance, Evaluator, step};
 
 use crate::UseCaseError;
+use crate::authoring_history::build_candidate_subject_input;
 use crate::git_operation_journal::{create_planned, mark_applied};
 use crate::job::{DispatchJobCommand, dispatch_job};
 
@@ -265,14 +264,7 @@ pub fn current_authoring_head_for_revision(
     jobs: &[Job],
     revision: &ItemRevision,
 ) -> Option<CommitOid> {
-    jobs.iter()
-        .filter(|job| job.item_revision_id == revision.id)
-        .filter(|job| job.state.status() == JobStatus::Completed)
-        .filter(|job| job.output_artifact_kind == OutputArtifactKind::Commit)
-        .filter(|job| job.state.output_commit_oid().is_some())
-        .max_by_key(|job| (job.state.ended_at(), job.created_at))
-        .and_then(|job| job.state.output_commit_oid().cloned())
-        .or_else(|| revision.seed.seed_commit_oid().map(ToOwned::to_owned))
+    crate::authoring_history::current_authoring_head_for_revision(jobs, revision)
 }
 
 #[must_use]
@@ -294,11 +286,9 @@ pub fn current_authoring_head_for_revision_with_workspace(
     jobs: &[Job],
     workspace: Option<&Workspace>,
 ) -> Option<CommitOid> {
-    if let Some(commit_oid) = current_authoring_head_for_revision(jobs, revision) {
-        return Some(commit_oid);
-    }
-
-    workspace.and_then(|ws| ws.state.head_commit_oid().map(ToOwned::to_owned))
+    crate::authoring_history::current_authoring_head_for_revision_with_workspace(
+        revision, jobs, workspace,
+    )
 }
 
 #[must_use]
@@ -306,11 +296,7 @@ pub fn effective_authoring_base_commit_oid(
     revision: &ItemRevision,
     workspace: Option<&Workspace>,
 ) -> Option<CommitOid> {
-    if let Some(seed_commit_oid) = revision.seed.seed_commit_oid() {
-        return Some(seed_commit_oid.to_owned());
-    }
-
-    workspace.and_then(|ws| ws.state.base_commit_oid().map(ToOwned::to_owned))
+    crate::authoring_history::effective_authoring_base_commit_oid(revision, workspace)
 }
 
 fn needs_mutable_authoring_head(job: &Job) -> bool {
@@ -346,31 +332,6 @@ fn bind_autopilot_authoring_head_if_needed(
 
     job.job_input = JobInput::authoring_head(head_commit_oid);
     Ok(())
-}
-
-fn build_candidate_subject_input(
-    step_id: StepId,
-    input: &JobInput,
-    revision: &ItemRevision,
-    jobs: &[Job],
-    workspace: Option<&Workspace>,
-    context: &str,
-) -> Result<JobInput, UseCaseError> {
-    let base = input
-        .base_commit_oid()
-        .map(ToOwned::to_owned)
-        .or_else(|| effective_authoring_base_commit_oid(revision, workspace));
-    let head = input
-        .head_commit_oid()
-        .map(ToOwned::to_owned)
-        .or_else(|| current_authoring_head_for_revision_with_workspace(revision, jobs, workspace));
-
-    match (base, head) {
-        (Some(base), Some(head)) => Ok(JobInput::candidate_subject(base, head)),
-        _ => Err(UseCaseError::Internal(format!(
-            "incomplete candidate subject for {context} {step_id}"
-        ))),
-    }
 }
 
 async fn append_job_dispatched_activity<A>(

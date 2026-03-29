@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::UseCaseError;
+use crate::authoring_history::selected_prepared_convergence;
 use crate::finding::extract_findings;
-use crate::job_dispatch::selected_prepared_convergence;
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::ids::JobId;
 use ingot_domain::item::{ApprovalState, Item};
