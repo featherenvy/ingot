@@ -6,7 +6,7 @@ use ingot_domain::ids::ProjectId;
 use ingot_domain::project::Project;
 use ingot_domain::test_support::ProjectBuilder;
 use ingot_git::GitJobCompletionPort;
-use ingot_git::project_repo::project_repo_paths;
+use ingot_git::project_repo::project_repo_paths_for_project;
 use ingot_test_support::sqlite::migrated_test_db;
 use ingot_usecases::{CompleteJobService, DispatchNotify, ProjectLocks};
 use uuid::Uuid;
@@ -24,7 +24,7 @@ pub(super) async fn test_app_state() -> AppState {
             GitJobCompletionPort,
             ProjectLocks::default(),
             Arc::new(move |project: &Project| {
-                project_repo_paths(resolver_state_root.as_path(), project.id, &project.path)
+                project_repo_paths_for_project(resolver_state_root.as_path(), project)
                     .mirror_git_dir
             }),
         ),

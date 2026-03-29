@@ -35,7 +35,7 @@ use ingot_domain::ports::RepositoryError;
 use ingot_domain::project::Project;
 use ingot_git::GitJobCompletionPort;
 use ingot_git::commands::{GitCommandError, resolve_ref_oid};
-use ingot_git::project_repo::project_repo_paths;
+use ingot_git::project_repo::{project_repo_paths_for_project, refresh_project_mirror_for_project};
 use ingot_store_sqlite::Database;
 use ingot_usecases::{CompleteJobService, DispatchNotify, ProjectLocks};
 use ingot_workspace::WorkspaceError;
@@ -179,26 +179,21 @@ impl JobDispatcher {
     }
 
     fn project_paths(&self, project: &Project) -> ingot_git::project_repo::ProjectRepoPaths {
-        project_repo_paths(self.config.state_root.as_path(), project.id, &project.path)
+        project_repo_paths_for_project(self.config.state_root.as_path(), project)
     }
 
     pub async fn refresh_project_mirror(
         &self,
         project: &Project,
     ) -> Result<ingot_git::project_repo::ProjectRepoPaths, RuntimeError> {
-        ingot_git::project_repo::refresh_project_mirror(
-            &self.db,
-            self.config.state_root.as_path(),
-            project.id,
-            &project.path,
-        )
-        .await
-        .map_err(|error| match error {
-            ingot_git::project_repo::RefreshMirrorError::Repository(error) => {
-                RuntimeError::Repository(error)
-            }
-            ingot_git::project_repo::RefreshMirrorError::Git(error) => RuntimeError::Git(error),
-        })
+        refresh_project_mirror_for_project(&self.db, self.config.state_root.as_path(), project)
+            .await
+            .map_err(|error| match error {
+                ingot_git::project_repo::RefreshMirrorError::Repository(error) => {
+                    RuntimeError::Repository(error)
+                }
+                ingot_git::project_repo::RefreshMirrorError::Git(error) => RuntimeError::Git(error),
+            })
     }
 
     async fn hydrate_convergences(

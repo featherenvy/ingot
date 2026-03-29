@@ -1,5 +1,4 @@
 use super::deps::*;
-use super::infra_ports::HttpInfraAdapter;
 use super::support::{
     errors::{ensure_workspace_not_busy, repo_to_internal, repo_to_project},
     path::ApiPath,
@@ -39,7 +38,7 @@ pub(super) async fn reset_workspace_route(
         .acquire_project_mutation(project_id)
         .await;
     let workspace = load_available_workspace(&state, project_id, workspace_id).await?;
-    let infra = HttpInfraAdapter::new(&state);
+    let infra = state.infra();
     let workspace = ingot_usecases::workspace::reset_workspace(
         &state.db, &state.db, &state.db, &infra, project_id, &workspace,
     )
@@ -86,7 +85,7 @@ pub(super) async fn remove_workspace_route(
         .acquire_project_mutation(project_id)
         .await;
     let workspace = load_available_workspace(&state, project_id, workspace_id).await?;
-    let infra = HttpInfraAdapter::new(&state);
+    let infra = state.infra();
     let workspace = ingot_usecases::workspace::remove_workspace_full(
         &state.db, &state.db, &state.db, &infra, project_id, &workspace,
     )

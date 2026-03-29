@@ -2,22 +2,22 @@ use std::path::{Path, PathBuf};
 
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
-use ingot_domain::agent_model::AgentModel;
 use tracing::warn;
 
 use crate::{result_from_text, subprocess};
 
 #[derive(Debug, Clone)]
 pub struct CodexCliAdapter {
-    cli_path: PathBuf,
-    model: AgentModel,
+    command: subprocess::AdapterCommandConfig,
 }
 
 impl CodexCliAdapter {
-    pub fn new(cli_path: impl Into<PathBuf>, model: impl Into<AgentModel>) -> Self {
+    pub fn new(
+        cli_path: impl Into<PathBuf>,
+        model: impl Into<ingot_domain::agent_model::AgentModel>,
+    ) -> Self {
         Self {
-            cli_path: cli_path.into(),
-            model: model.into(),
+            command: subprocess::AdapterCommandConfig::new(cli_path, model),
         }
     }
 
@@ -40,7 +40,7 @@ impl CodexCliAdapter {
             "-C".into(),
             request.working_dir.to_string_lossy().into_owned(),
             "-m".into(),
-            self.model.to_string(),
+            self.command.model().to_string(),
             "--json".into(),
             "--output-schema".into(),
             schema_file.cli_arg("schema")?,
@@ -57,17 +57,17 @@ impl AgentAdapter for CodexCliAdapter {
         request: &AgentRequest,
         working_dir: &Path,
     ) -> Result<ingot_agent_protocol::response::AgentResponse, AgentError> {
-        let response_file =
-            subprocess::TempFile::new(working_dir, ".ingot-codex-last-message", "txt");
-        let schema_file = subprocess::output_schema_file(request, working_dir, "codex").await?;
-        let launch_result = subprocess::launch_adapter(
-            &self.cli_path,
-            &self.model,
+        subprocess::launch_adapter_with_schema_and_result_files(
+            &self.command,
             request,
             working_dir,
-            self.build_exec_args(request, &schema_file, &response_file)?,
-            "codex",
-            |_output| async {
+            subprocess::SchemaResultFiles {
+                adapter_name: "codex",
+                result_file_stem: ".ingot-codex-last-message",
+                result_file_extension: "txt",
+            },
+            |schema_file, response_file| self.build_exec_args(request, schema_file, response_file),
+            |_output, response_file| async move {
                 let final_message = response_file.read_to_string().await.ok();
                 if final_message
                     .as_deref()
@@ -83,10 +83,7 @@ impl AgentAdapter for CodexCliAdapter {
                 Ok(final_message.as_deref().map(result_from_text))
             },
         )
-        .await;
-        response_file.cleanup().await;
-        schema_file.cleanup().await;
-        launch_result
+        .await
     }
 
     async fn cancel(&self, pid: u32) -> Result<(), AgentError> {

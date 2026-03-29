@@ -19,7 +19,6 @@ use ingot_usecases::UseCaseError;
 
 use crate::error::ApiError;
 use crate::router::AppState;
-use crate::router::infra_ports::HttpInfraAdapter;
 use crate::router::support::{activity::append_activity, errors::repo_to_internal};
 
 use super::effective_authoring_base_commit_oid;
@@ -128,7 +127,7 @@ pub(in crate::router) async fn prepare_convergence_workspace(
     source_workspace: &Workspace,
     source_head_commit_oid: &CommitOid,
 ) -> Result<Convergence, ApiError> {
-    let infra = HttpInfraAdapter::new(state);
+    let infra = state.infra();
     let paths = infra.mirror_paths(project.id).await?;
     let input_target_commit_oid = infra
         .resolve_project_ref_oid(project.id, &revision.target_ref)

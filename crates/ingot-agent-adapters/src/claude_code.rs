@@ -2,21 +2,21 @@ use std::path::{Path, PathBuf};
 
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
-use ingot_domain::agent_model::AgentModel;
 
 use crate::{result_from_text, subprocess};
 
 #[derive(Debug, Clone)]
 pub struct ClaudeCodeCliAdapter {
-    cli_path: PathBuf,
-    model: AgentModel,
+    command: subprocess::AdapterCommandConfig,
 }
 
 impl ClaudeCodeCliAdapter {
-    pub fn new(cli_path: impl Into<PathBuf>, model: impl Into<AgentModel>) -> Self {
+    pub fn new(
+        cli_path: impl Into<PathBuf>,
+        model: impl Into<ingot_domain::agent_model::AgentModel>,
+    ) -> Self {
         Self {
-            cli_path: cli_path.into(),
-            model: model.into(),
+            command: subprocess::AdapterCommandConfig::new(cli_path, model),
         }
     }
 
@@ -26,7 +26,7 @@ impl ClaudeCodeCliAdapter {
             "--output-format".into(),
             "json".into(),
             "--model".into(),
-            self.model.to_string(),
+            self.command.model().to_string(),
             "--no-session-persistence".into(),
             "--dangerously-skip-permissions".into(),
             "--json-schema".into(),
@@ -49,8 +49,8 @@ impl AgentAdapter for ClaudeCodeCliAdapter {
         working_dir: &Path,
     ) -> Result<ingot_agent_protocol::response::AgentResponse, AgentError> {
         subprocess::launch_adapter(
-            &self.cli_path,
-            &self.model,
+            self.command.cli_path(),
+            self.command.model(),
             request,
             working_dir,
             self.build_print_args(request)?,

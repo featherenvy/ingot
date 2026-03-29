@@ -1,5 +1,4 @@
 use super::deps::*;
-use super::infra_ports::HttpInfraAdapter;
 use super::item_projection::{
     ItemRuntimeSnapshot, hydrate_convergence_validity, load_item_runtime_snapshot,
 };
@@ -119,7 +118,8 @@ async fn reconcile_checkout_sync_state_http(
         .get_item(item_id)
         .await
         .map_err(UseCaseError::Repository)?;
-    let status = HttpInfraAdapter::new(state)
+    let status = state
+        .infra()
         .checkout_sync_status(project, &revision.target_ref)
         .await
         .map_err(api_to_usecase_error)?;
@@ -328,7 +328,8 @@ impl ConvergenceCommandPort for HttpConvergencePort {
             let revision_id = revision.id;
             let prepared_convergence =
                 prepared_convergence_for_revision(&convergences, revision_id);
-            let resolved_target_oid = HttpInfraAdapter::new(&state)
+            let resolved_target_oid = state
+                .infra()
                 .resolve_project_ref_oid(project.id, &revision.target_ref)
                 .await
                 .map_err(api_to_usecase_error)?;
@@ -497,7 +498,8 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                 .input_target_commit_oid()
                 .ok_or(UseCaseError::PreparedConvergenceMissing)?;
 
-            match HttpInfraAdapter::new(&state)
+            match state
+                .infra()
                 .finalize_target_ref(
                     project.id,
                     &convergence.target_ref,
@@ -530,7 +532,8 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         let revision = revision.clone();
         let prepared_commit_oid = prepared_commit_oid.clone();
         async move {
-            let readiness = match HttpInfraAdapter::new(&state)
+            let readiness = match state
+                .infra()
                 .checkout_finalization_status(&project, &revision.target_ref, &prepared_commit_oid)
                 .await
                 .map_err(api_to_usecase_error)?
@@ -557,7 +560,8 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         let revision = revision.clone();
         let prepared_commit_oid = prepared_commit_oid.clone();
         async move {
-            HttpInfraAdapter::new(&state)
+            state
+                .infra()
                 .sync_checkout_to_prepared_commit(
                     &project,
                     &revision.target_ref,
@@ -656,7 +660,8 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                     .await
                     .map_err(UseCaseError::Repository)?;
                 if workspace.state.status() != WorkspaceStatus::Abandoned {
-                    HttpInfraAdapter::new(&state)
+                    state
+                        .infra()
                         .remove_workspace_path(project.id, &workspace.path)
                         .await
                         .map_err(api_to_usecase_error)?;

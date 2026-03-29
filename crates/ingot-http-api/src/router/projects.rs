@@ -11,8 +11,6 @@ use super::support::{
     path::ApiPath,
 };
 use super::types::*;
-use crate::router::infra_ports::HttpInfraAdapter;
-
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/projects", get(list_projects).post(create_project))
@@ -103,9 +101,7 @@ pub(super) async fn create_project(
         .create_project(&project)
         .await
         .map_err(repo_to_project_mutation)?;
-    HttpInfraAdapter::new(&state)
-        .refresh_project_mirror(&project)
-        .await?;
+    state.infra().refresh_project_mirror(&project).await?;
 
     Ok((StatusCode::CREATED, Json(project)))
 }
@@ -161,9 +157,7 @@ pub(super) async fn update_project(
         .update_project(&project)
         .await
         .map_err(repo_to_project_mutation)?;
-    HttpInfraAdapter::new(&state)
-        .refresh_project_mirror(&project)
-        .await?;
+    state.infra().refresh_project_mirror(&project).await?;
 
     Ok(Json(project))
 }

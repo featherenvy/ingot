@@ -5,6 +5,7 @@ use ingot_domain::git_operation::OperationKind;
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::ProjectId;
 use ingot_domain::ports::{GitOperationRepository, RepositoryError};
+use ingot_domain::project::Project;
 use tokio::process::Command;
 
 use crate::commands::{GitCommandError, current_head_ref, git, head_oid, resolve_ref_oid};
@@ -40,6 +41,10 @@ pub fn project_repo_paths(
         mirror_git_dir: state_root.join("repos").join(format!("{project_id}.git")),
         worktree_root: state_root.join("worktrees").join(project_id.to_string()),
     }
+}
+
+pub fn project_repo_paths_for_project(state_root: &Path, project: &Project) -> ProjectRepoPaths {
+    project_repo_paths(state_root, project.id, &project.path)
 }
 
 pub async fn ensure_mirror(paths: &ProjectRepoPaths) -> Result<(), GitCommandError> {
@@ -132,6 +137,14 @@ pub async fn refresh_project_mirror(
             .map_err(RefreshMirrorError::Git)?;
     }
     Ok(paths)
+}
+
+pub async fn refresh_project_mirror_for_project(
+    git_ops: &impl GitOperationRepository,
+    state_root: &Path,
+    project: &Project,
+) -> Result<ProjectRepoPaths, RefreshMirrorError> {
+    refresh_project_mirror(git_ops, state_root, project.id, &project.path).await
 }
 
 pub async fn checkout_sync_status(

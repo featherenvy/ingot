@@ -28,7 +28,7 @@ pub(in crate::router) async fn build_superseding_revision(
     jobs: &[Job],
     request: ReviseItemRequest,
 ) -> Result<ItemRevision, ApiError> {
-    let infra = HttpInfraAdapter::new(state);
+    let infra = state.infra();
     let target_ref = normalize_target_ref(
         request
             .target_ref

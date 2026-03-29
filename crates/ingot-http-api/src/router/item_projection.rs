@@ -1,7 +1,6 @@
 use super::deps::*;
 use super::support::errors::{repo_to_internal, repo_to_item, repo_to_project};
 use super::types::*;
-use crate::router::infra_ports::HttpInfraAdapter;
 
 pub(super) struct ItemRuntimeSnapshot {
     pub current_revision: ItemRevision,
@@ -227,7 +226,8 @@ pub(super) async fn load_queue_status(
         && evaluation.next_recommended_action
             == RecommendedAction::named(NamedRecommendedAction::FinalizePreparedConvergence);
     if should_check_checkout {
-        if let CheckoutSyncStatus::Blocked { message, .. } = HttpInfraAdapter::new(state)
+        if let CheckoutSyncStatus::Blocked { message, .. } = state
+            .infra()
             .checkout_sync_status(project, &revision.target_ref)
             .await?
         {
@@ -244,7 +244,7 @@ pub(super) async fn hydrate_convergence_validity(
     project_id: ProjectId,
     mut convergences: Vec<Convergence>,
 ) -> Result<Vec<Convergence>, ApiError> {
-    let infra = HttpInfraAdapter::new(state);
+    let infra = state.infra();
     for convergence in &mut convergences {
         convergence.target_head_valid = infra
             .compute_target_head_valid(project_id, convergence)

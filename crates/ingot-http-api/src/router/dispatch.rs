@@ -78,7 +78,7 @@ pub(super) async fn dispatch_item_job(
     )
     .await?;
 
-    let infra = HttpInfraAdapter::new(&state);
+    let infra = state.infra();
     persist_dispatched_job(
         &state,
         &infra,
@@ -118,7 +118,7 @@ pub(super) async fn bind_dispatch_subjects_if_needed(
     job: &mut Job,
     precreated_authoring_workspace: &mut Option<Workspace>,
 ) -> Result<Option<PendingInvestigationRef>, ApiError> {
-    let infra = HttpInfraAdapter::new(state);
+    let infra = state.infra();
     let fills_candidate_subject = should_fill_candidate_subject_from_workspace(job.step_id);
 
     if job.workspace_kind == WorkspaceKind::Authoring
@@ -290,7 +290,7 @@ pub(super) async fn retry_item_job(
         &mut precreated_authoring_workspace,
     )
     .await?;
-    let infra = HttpInfraAdapter::new(&state);
+    let infra = state.infra();
     persist_dispatched_job(
         &state,
         &infra,

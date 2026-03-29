@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use ingot_domain::ids::ItemId;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_git::GitJobCompletionPort;
-use ingot_git::project_repo::project_repo_paths;
+use ingot_git::project_repo::project_repo_paths_for_project;
 use ingot_store_sqlite::Database;
 use ingot_usecases::{CompleteJobService, DispatchNotify, ProjectLocks};
 
@@ -31,6 +32,16 @@ pub(crate) struct AppState {
     pub(crate) project_locks: ProjectLocks,
     pub(crate) dispatch_notify: DispatchNotify,
     pub(crate) state_root: PathBuf,
+}
+
+impl AppState {
+    pub(super) fn infra(&self) -> HttpInfraAdapter {
+        HttpInfraAdapter::new(self)
+    }
+
+    pub(super) fn job_logs_dir(&self, job_id: impl Display) -> PathBuf {
+        ingot_config::paths::job_logs_dir(self.state_root.as_path(), job_id)
+    }
 }
 
 /// Build the Axum router with all API routes.
@@ -66,7 +77,7 @@ pub fn build_router_with_project_locks_and_state_root(
             GitJobCompletionPort,
             project_locks.clone(),
             Arc::new(move |project: &Project| {
-                project_repo_paths(repo_path_resolver_root.as_path(), project.id, &project.path)
+                project_repo_paths_for_project(repo_path_resolver_root.as_path(), project)
                     .mirror_git_dir
             }),
         ),
@@ -137,7 +148,7 @@ pub(crate) async fn teardown_revision_lane_state(
     let item = state.db.get_item(item_id).await.map_err(repo_to_item)?;
     jobs::refresh_revision_context_for_job_like(state, &item, revision).await?;
 
-    let infra = HttpInfraAdapter::new(state);
+    let infra = state.infra();
     for workspace_id in &uc_result.integration_workspace_ids {
         let workspace = state
             .db

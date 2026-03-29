@@ -7,12 +7,36 @@ use std::path::{Path, PathBuf};
 use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::request::AgentRequest;
 use ingot_agent_protocol::response::AgentResponse;
+use ingot_domain::agent_model::AgentModel;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 use crate::output_schema;
+
+#[derive(Debug, Clone)]
+pub(crate) struct AdapterCommandConfig {
+    cli_path: PathBuf,
+    model: AgentModel,
+}
+
+impl AdapterCommandConfig {
+    pub(crate) fn new(cli_path: impl Into<PathBuf>, model: impl Into<AgentModel>) -> Self {
+        Self {
+            cli_path: cli_path.into(),
+            model: model.into(),
+        }
+    }
+
+    pub(crate) fn cli_path(&self) -> &Path {
+        &self.cli_path
+    }
+
+    pub(crate) fn model(&self) -> &AgentModel {
+        &self.model
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct TempFile {
@@ -83,6 +107,12 @@ pub(crate) struct SubprocessOutput {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+pub(crate) struct SchemaResultFiles<'a> {
+    pub adapter_name: &'static str,
+    pub result_file_stem: &'a str,
+    pub result_file_extension: &'a str,
 }
 
 /// Spawn a CLI subprocess, pipe the prompt to stdin, collect stdout/stderr,
@@ -195,6 +225,43 @@ where
         stderr: output.stderr,
         result,
     })
+}
+
+pub(crate) async fn launch_adapter_with_schema_and_result_files<BuildArgs, Parse, ParseFuture>(
+    command: &AdapterCommandConfig,
+    request: &AgentRequest,
+    working_dir: &Path,
+    files: SchemaResultFiles<'_>,
+    build_args: BuildArgs,
+    parse_result: Parse,
+) -> Result<AgentResponse, AgentError>
+where
+    BuildArgs: FnOnce(&TempFile, &TempFile) -> Result<Vec<String>, AgentError>,
+    Parse: FnOnce(&SubprocessOutput, TempFile) -> ParseFuture,
+    ParseFuture: Future<Output = Result<Option<serde_json::Value>, AgentError>>,
+{
+    let result_file = TempFile::new(
+        working_dir,
+        files.result_file_stem,
+        files.result_file_extension,
+    );
+    let schema_file = output_schema_file(request, working_dir, files.adapter_name).await?;
+    let parse_file = result_file.clone();
+
+    let launch_result = launch_adapter(
+        command.cli_path(),
+        command.model(),
+        request,
+        working_dir,
+        build_args(&schema_file, &result_file)?,
+        files.adapter_name,
+        move |output| parse_result(output, parse_file),
+    )
+    .await;
+
+    result_file.cleanup().await;
+    schema_file.cleanup().await;
+    launch_result
 }
 
 async fn collect_stream(

@@ -17,7 +17,7 @@ use ingot_git::diff::changed_paths_between;
 use ingot_git::project_repo::ProjectRepoPaths;
 use ingot_git::project_repo::{
     CheckoutFinalizationStatus, CheckoutSyncStatus, checkout_finalization_status,
-    checkout_sync_status, sync_checkout_to_commit,
+    checkout_sync_status, refresh_project_mirror_for_project, sync_checkout_to_commit,
 };
 use ingot_usecases::UseCaseError;
 use ingot_usecases::dispatch::DispatchInfraPort;
@@ -52,19 +52,14 @@ impl HttpInfraAdapter {
         &self,
         project: &Project,
     ) -> Result<ProjectRepoPaths, ApiError> {
-        ingot_git::project_repo::refresh_project_mirror(
-            &self.state.db,
-            self.state.state_root.as_path(),
-            project.id,
-            &project.path,
-        )
-        .await
-        .map_err(|error| match error {
-            ingot_git::project_repo::RefreshMirrorError::Repository(error) => {
-                repo_to_internal(error)
-            }
-            ingot_git::project_repo::RefreshMirrorError::Git(error) => git_to_internal(error),
-        })
+        refresh_project_mirror_for_project(&self.state.db, self.state.state_root.as_path(), project)
+            .await
+            .map_err(|error| match error {
+                ingot_git::project_repo::RefreshMirrorError::Repository(error) => {
+                    repo_to_internal(error)
+                }
+                ingot_git::project_repo::RefreshMirrorError::Git(error) => git_to_internal(error),
+            })
     }
 
     pub(super) async fn mirror_paths(

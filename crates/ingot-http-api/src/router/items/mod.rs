@@ -9,7 +9,6 @@ pub(super) use revisions::{
 
 use super::deps::*;
 use super::dispatch::auto_dispatch_projected_review_job_locked;
-use super::infra_ports::HttpInfraAdapter;
 use super::item_projection::{
     evaluate_item_snapshot, load_item_detail, load_item_runtime_snapshot,
 };
@@ -18,7 +17,7 @@ use super::support::{
     config::load_effective_config,
     errors::{ensure_git_valid_target_ref, repo_to_internal, repo_to_item, repo_to_project},
     path::ApiPath,
-    project_repo::next_project_sort_key,
+    sort_key::next_project_sort_key,
 };
 use super::types::*;
 
@@ -87,7 +86,7 @@ pub(super) async fn create_item(
             .unwrap_or(project.default_branch.as_str()),
     )?;
     ensure_git_valid_target_ref(target_ref.as_str()).await?;
-    let infra = HttpInfraAdapter::new(&state);
+    let infra = state.infra();
     let resolved_target_head = infra
         .resolve_project_ref_oid(project.id, &target_ref)
         .await?
@@ -678,7 +677,7 @@ pub(super) async fn ensure_authoring_workspace(
     revision: &ItemRevision,
     job: &Job,
 ) -> Result<Workspace, ApiError> {
-    let infra = HttpInfraAdapter::new(state);
+    let infra = state.infra();
     let existing = state
         .db
         .find_authoring_workspace_for_revision(revision.id)

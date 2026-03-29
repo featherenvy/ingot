@@ -1,11 +1,10 @@
 use super::deps::*;
 use super::dispatch::auto_dispatch_projected_review_job_locked;
-use super::infra_ports::HttpInfraAdapter;
 use super::support::{
     activity::append_activity,
     errors::{repo_to_finding, repo_to_internal, repo_to_item, repo_to_project},
     path::ApiPath,
-    project_repo::next_project_sort_key,
+    sort_key::next_project_sort_key,
 };
 use super::types::*;
 
@@ -264,7 +263,7 @@ pub(super) async fn apply_finding_triage(
         &applied.finding,
     )
     .await?;
-    let infra = HttpInfraAdapter::new(state);
+    let infra = state.infra();
     ingot_usecases::dispatch::maybe_cleanup_investigation_ref(
         &state.db,
         &state.db,
@@ -437,7 +436,7 @@ pub(super) async fn ensure_finding_subject_reachable(
     project: &Project,
     finding: &Finding,
 ) -> Result<(), ApiError> {
-    let infra = HttpInfraAdapter::new(state);
+    let infra = state.infra();
     let head_reachable = infra
         .is_commit_reachable_from_project(project, &finding.source_subject_head_commit_oid)
         .await?;

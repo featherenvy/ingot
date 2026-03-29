@@ -1,6 +1,5 @@
 use super::deps::*;
 use super::dispatch::auto_dispatch_projected_review_job;
-use super::infra_ports::HttpInfraAdapter;
 use super::items::{
     current_authoring_head_for_revision_with_workspace, effective_authoring_base_commit_oid,
 };
@@ -11,7 +10,6 @@ use super::support::{
     path::ApiPath,
 };
 use super::types::*;
-use ingot_config::paths::job_logs_dir;
 use ingot_usecases::dispatch::failure_status;
 use ingot_usecases::job_lifecycle;
 
@@ -83,7 +81,7 @@ pub(super) async fn get_job_logs(
     ApiPath(JobPathParams { job_id }): ApiPath<JobPathParams>,
 ) -> Result<Json<JobLogsResponse>, ApiError> {
     state.db.get_job(job_id).await.map_err(repo_to_internal)?;
-    let logs_dir = job_logs_dir(state.state_root.as_path(), job_id);
+    let logs_dir = state.job_logs_dir(job_id);
 
     let prompt = read_optional_text(logs_dir.join("prompt.txt")).await?;
     let stdout = read_optional_text(logs_dir.join("stdout.log")).await?;
@@ -114,9 +112,7 @@ pub(super) async fn complete_job(
         .get_project(prior_job.project_id)
         .await
         .map_err(repo_to_project)?;
-    HttpInfraAdapter::new(&state)
-        .refresh_project_mirror(&project)
-        .await?;
+    state.infra().refresh_project_mirror(&project).await?;
     let result = state
         .complete_job_service
         .execute(CompleteJobCommand {
@@ -256,9 +252,7 @@ pub(super) async fn refresh_revision_context_for_job(
         .get_project(job.project_id)
         .await
         .map_err(repo_to_project)?;
-    HttpInfraAdapter::new(state)
-        .refresh_project_mirror(&project)
-        .await?;
+    state.infra().refresh_project_mirror(&project).await?;
     refresh_revision_context_for_job_like(state, &item, &revision).await
 }
 
@@ -279,7 +273,8 @@ pub(super) async fn refresh_revision_context_for_job_like(
         authoring_base_commit_oid.as_ref(),
         authoring_head_commit_oid.as_ref(),
     ) {
-        HttpInfraAdapter::new(state)
+        state
+            .infra()
             .changed_paths_between(item.project_id, base_commit_oid, head_commit_oid)
             .await?
     } else {
