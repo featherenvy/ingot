@@ -15,10 +15,9 @@ use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::job::{ExecutionPermission, JobInput, JobStatus, OutputArtifactKind, PhaseKind};
 use ingot_domain::test_support::{AgentBuilder, JobBuilder};
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
-use ingot_test_support::git::unique_temp_path;
+use ingot_test_support::env::{temp_dir, temp_state_root};
 use ingot_usecases::{DispatchNotify, ProjectLocks};
 use tower::ServiceExt;
-use uuid::Uuid;
 
 mod common;
 use common::*;
@@ -85,7 +84,7 @@ impl AgentRunner for DemoRunner {
 
 #[tokio::test(flavor = "current_thread")]
 async fn create_demo_project_route_creates_implicit_initial_revisions_under_temp_home() {
-    let home = std::env::temp_dir().join(format!("ingot-demo-home-{}", Uuid::now_v7()));
+    let home = temp_dir("ingot-demo-home");
     let home_documents = home.join("Documents");
     std::fs::create_dir_all(&home_documents).expect("create temp Documents");
     let _home = HomeEnvGuard::set(&home);
@@ -149,7 +148,7 @@ async fn create_demo_project_route_creates_implicit_initial_revisions_under_temp
 
 #[tokio::test(flavor = "current_thread")]
 async fn demo_project_runtime_rebinds_stale_author_initial_job_to_advanced_head() {
-    let home = std::env::temp_dir().join(format!("ingot-demo-home-{}", Uuid::now_v7()));
+    let home = temp_dir("ingot-demo-home");
     std::fs::create_dir_all(home.join("Documents")).expect("create temp Documents");
     let _home = HomeEnvGuard::set(&home);
 
@@ -231,7 +230,7 @@ async fn demo_project_runtime_rebinds_stale_author_initial_job_to_advanced_head(
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
-        DispatcherConfig::new(unique_temp_path("ingot-http-api-demo-runtime-state")),
+        DispatcherConfig::new(temp_state_root("ingot-http-api-demo-runtime-state")),
         Arc::new(DemoRunner),
         DispatchNotify::default(),
     );

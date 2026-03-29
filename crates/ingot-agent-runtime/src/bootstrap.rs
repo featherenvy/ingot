@@ -58,7 +58,7 @@ mod tests {
         bootstrap_claude_code_agent_with, bootstrap_codex_agent_with,
     };
     use ingot_domain::agent::AgentStatus;
-    use ingot_test_support::git::unique_temp_path;
+    use ingot_test_support::env::temp_dir;
     use ingot_test_support::sqlite::migrated_test_db;
 
     #[cfg(unix)]
@@ -66,7 +66,7 @@ mod tests {
 
     #[tokio::test]
     async fn creates_all_available_agents_when_registry_is_empty() {
-        let root = unique_temp_path("runtime-bootstrap-both");
+        let root = temp_dir("runtime-bootstrap-both");
         let db = migrated_test_db("runtime-bootstrap-both").await;
         let fake_codex = write_fake_codex_cli(&root);
         let fake_claude = write_fake_claude_cli(&root);
@@ -92,7 +92,7 @@ mod tests {
 
     #[tokio::test]
     async fn skips_agents_whose_slug_already_exists() {
-        let root = unique_temp_path("runtime-bootstrap-idempotent");
+        let root = temp_dir("runtime-bootstrap-idempotent");
         let db = migrated_test_db("runtime-bootstrap-idempotent").await;
         let fake_codex = write_fake_codex_cli(&root);
         let fake_claude = write_fake_claude_cli(&root);
@@ -128,7 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn creates_unavailable_agent_when_probe_fails() {
-        let root = unique_temp_path("runtime-bootstrap-unavailable");
+        let root = temp_dir("runtime-bootstrap-unavailable");
         let db = migrated_test_db("runtime-bootstrap-unavailable").await;
         let fake_codex = write_bad_codex_cli(&root);
 
@@ -151,7 +151,7 @@ mod tests {
 
     #[tokio::test]
     async fn creates_both_agents_with_mixed_availability_when_one_probe_fails() {
-        let root = unique_temp_path("runtime-bootstrap-mixed");
+        let root = temp_dir("runtime-bootstrap-mixed");
         let db = migrated_test_db("runtime-bootstrap-mixed").await;
         let bad_codex = write_bad_codex_cli(&root);
         let good_claude = write_fake_claude_cli(&root);

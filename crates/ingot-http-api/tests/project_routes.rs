@@ -6,6 +6,7 @@ use axum::http::{Request, StatusCode, header};
 use chrono::Utc;
 use ingot_domain::project::{AgentRouting, AutoTriageDecision, AutoTriagePolicy, ExecutionMode};
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
+use ingot_test_support::env::temp_state_root;
 use tower::ServiceExt;
 
 mod common;
@@ -265,8 +266,7 @@ async fn update_project_route_waits_for_project_mutation_lock() {
         .await
         .expect("persist project");
 
-    let state_root =
-        std::env::temp_dir().join(format!("ingot-http-api-state-{}", uuid::Uuid::now_v7()));
+    let state_root = temp_state_root("ingot-http-api-state");
     let paths = project_repo_paths(state_root.as_path(), project.id, &repo);
     ensure_mirror(&paths).await.expect("ensure mirror");
 
@@ -428,8 +428,7 @@ async fn update_project_route_does_not_overwrite_fields_changed_while_waiting_fo
         .await
         .expect("persist project");
 
-    let state_root =
-        std::env::temp_dir().join(format!("ingot-http-api-state-{}", uuid::Uuid::now_v7()));
+    let state_root = temp_state_root("ingot-http-api-state");
     let paths = project_repo_paths(state_root.as_path(), project.id, &repo);
     ensure_mirror(&paths).await.expect("ensure mirror");
 

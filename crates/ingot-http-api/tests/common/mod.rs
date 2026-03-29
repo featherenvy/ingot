@@ -29,17 +29,17 @@ use ingot_domain::workspace::{
     RetentionPolicy, Workspace, WorkspaceKind, WorkspaceState, WorkspaceStatus, WorkspaceStrategy,
 };
 use ingot_store_sqlite::Database;
+use ingot_test_support::env::{temp_dir, temp_state_root};
 pub use ingot_test_support::git::{git_output, run_git as git, temp_git_repo, write_file};
 pub use ingot_test_support::reports::clean_validation_report;
 pub use ingot_test_support::sqlite::{PersistFixture, migrated_test_db};
 use ingot_usecases::{DispatchNotify, ProjectLocks};
-use uuid::Uuid;
 
 pub const TS: &str = DEFAULT_TEST_TIMESTAMP;
 
 /// Build a router with an isolated temp state root (avoids production `$HOME/.ingot`).
 pub fn test_router(db: Database) -> axum::Router {
-    let state_root = std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
+    let state_root = temp_state_root("ingot-http-api-state");
     ingot_http_api::build_router_with_project_locks_and_state_root(
         db,
         ProjectLocks::default(),
@@ -55,7 +55,7 @@ pub fn parse_id<T: FromStr>(value: &str) -> T {
 }
 
 pub fn fake_codex_probe_script() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("ingot-fake-codex-{}.sh", Uuid::now_v7()));
+    let path = temp_dir("ingot-fake-codex").join("codex.sh");
     fs::write(
         &path,
         r#"#!/bin/sh

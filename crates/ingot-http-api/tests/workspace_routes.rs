@@ -6,6 +6,7 @@ use ingot_domain::ids::ProjectId;
 use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind, WorkspaceStatus};
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
 use ingot_http_api::build_router_with_project_locks_and_state_root;
+use ingot_test_support::env::temp_state_root;
 use ingot_usecases::{DispatchNotify, ProjectLocks};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -100,8 +101,7 @@ async fn remove_workspace_route_deletes_abandoned_workspace_ref_and_path() {
     let project_id = "prj_00000000000000000000000000000043".to_string();
     let workspace_id = "wrk_00000000000000000000000000000043".to_string();
     let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
-    let state_root =
-        std::env::temp_dir().join(format!("ingot-http-api-remove-state-{}", Uuid::now_v7()));
+    let state_root = temp_state_root("ingot-http-api-remove-state");
     let paths = project_repo_paths(state_root.as_path(), project_uuid, &repo);
     ensure_mirror(&paths).await.expect("ensure mirror");
     git(

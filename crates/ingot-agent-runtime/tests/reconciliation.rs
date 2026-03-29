@@ -19,6 +19,7 @@ use ingot_domain::step_id::StepId;
 use ingot_domain::test_support::GitOperationBuilder;
 use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::{compare_and_swap_ref, delete_ref, head_oid};
+use ingot_test_support::env::temp_state_root;
 use ingot_test_support::git::unique_temp_path;
 use ingot_usecases::{DispatchNotify, ProjectLocks};
 
@@ -1529,7 +1530,7 @@ async fn reconcile_startup_adopts_remove_workspace_ref_operation() {
     let workspace_path = unique_temp_path("ingot-runtime-remove-adopt");
 
     let db = migrated_test_db("ingot-runtime").await;
-    let state_root = unique_temp_path("ingot-runtime-remove-adopt-state");
+    let state_root = temp_state_root("ingot-runtime-remove-adopt-state");
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
@@ -1613,7 +1614,7 @@ async fn reconcile_startup_removes_abandoned_review_workspace_when_safe() {
     let workspace_path = unique_temp_path("ingot-runtime-review-cleanup");
 
     let db = migrated_test_db("ingot-runtime").await;
-    let state_root = unique_temp_path("ingot-runtime-cleanup-state");
+    let state_root = temp_state_root("ingot-runtime-cleanup-state");
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
@@ -1684,7 +1685,7 @@ async fn reconcile_startup_removes_abandoned_authoring_workspace_when_item_is_do
     let workspace_path = unique_temp_path("ingot-runtime-author-cleanup");
 
     let db = migrated_test_db("ingot-runtime").await;
-    let state_root = unique_temp_path("ingot-runtime-author-cleanup-state");
+    let state_root = temp_state_root("ingot-runtime-author-cleanup-state");
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),

@@ -1,19 +1,8 @@
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ingot_config::loader::{ConfigError, load_config};
 use ingot_domain::revision::ApprovalPolicy;
-
-fn temp_dir(name: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("current time")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("ingot-config-{name}-{unique}"));
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
-}
+use ingot_test_support::env::temp_dir;
 
 #[test]
 fn load_config_parses_typed_approval_policy() {

@@ -17,7 +17,6 @@ use ingot_domain::test_support::{
 use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind, WorkspaceStatus};
 use ingot_test_support::reports::clean_review_report;
 use tower::ServiceExt;
-use uuid::Uuid;
 
 mod common;
 use common::*;
@@ -1164,8 +1163,7 @@ async fn complete_route_recovers_projected_review_after_warning_only_dispatch_fa
         .await
         .expect("create convergence");
 
-    let state_root =
-        std::env::temp_dir().join(format!("ingot-http-api-recovery-state-{}", Uuid::now_v7()));
+    let state_root = ingot_test_support::env::temp_state_root("ingot-http-api-recovery-state");
     let dispatcher = JobDispatcher::new(
         db.clone(),
         ingot_usecases::ProjectLocks::default(),

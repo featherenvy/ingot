@@ -10,6 +10,7 @@ use ingot_domain::job::{JobStatus, OutcomeClass};
 use ingot_domain::step_id::StepId;
 use ingot_domain::workspace::{WorkspaceKind, WorkspaceStatus};
 use ingot_git::commands::head_oid;
+use ingot_test_support::env::temp_state_root;
 use ingot_test_support::git::unique_temp_path;
 use ingot_usecases::{DispatchNotify, ProjectLocks};
 
@@ -99,7 +100,7 @@ async fn tick_executes_a_review_job_and_persists_structured_report() {
     let head_commit = head_oid(&repo).await.expect("head oid").into_inner();
 
     let db = migrated_test_db("ingot-runtime-review").await;
-    let state_root = unique_temp_path("ingot-runtime-review-state");
+    let state_root = temp_state_root("ingot-runtime-review-state");
 
     let project = ProjectBuilder::new(&repo).build();
     db.create_project(&project).await.expect("create project");
@@ -195,7 +196,7 @@ async fn tick_times_out_long_running_job_and_marks_it_failed() {
         }
     }
 
-    let mut config = DispatcherConfig::new(unique_temp_path("ingot-runtime-timeout-state"));
+    let mut config = DispatcherConfig::new(temp_state_root("ingot-runtime-timeout-state"));
     config.job_timeout = Duration::from_millis(50);
     config.heartbeat_interval = Duration::from_millis(10);
     let h = TestHarness::with_config(Arc::new(SlowRunner), Some(config)).await;

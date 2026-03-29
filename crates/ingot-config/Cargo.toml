@@ -12,3 +12,4 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 ingot-domain = { workspace = true }
+ingot-test-support = { workspace = true }

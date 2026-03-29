@@ -13,6 +13,7 @@ use ingot_domain::job::{Job, JobStatus};
 use ingot_domain::project::Project;
 use ingot_domain::test_support::{AgentBuilder, ProjectBuilder, default_timestamp};
 use ingot_store_sqlite::Database;
+use ingot_test_support::env::temp_state_root;
 use ingot_usecases::{DispatchNotify, ProjectLocks};
 use runtime_crate::{AgentRunner, DispatcherConfig, JobDispatcher};
 use tokio::sync::Notify;
@@ -69,7 +70,7 @@ impl TestHarness {
     ) -> Self {
         let repo_path = ingot_test_support::git::temp_git_repo("ingot-runtime-repo");
         let db = ingot_test_support::sqlite::migrated_test_db("ingot-runtime").await;
-        let state_root = ingot_test_support::git::unique_temp_path("ingot-runtime-state");
+        let state_root = temp_state_root("ingot-runtime-state");
         let config = config.unwrap_or_else(|| DispatcherConfig::new(state_root.clone()));
         let dispatch_notify = DispatchNotify::default();
         let dispatcher = JobDispatcher::with_runner(

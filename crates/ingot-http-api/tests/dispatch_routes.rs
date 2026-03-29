@@ -14,6 +14,7 @@ use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind};
 use ingot_git::commands::resolve_ref_oid;
 use ingot_git::project_repo::{ensure_mirror, project_repo_paths};
 use ingot_http_api::build_router_with_project_locks_and_state_root;
+use ingot_test_support::env::temp_state_root;
 use ingot_usecases::{DispatchNotify, ProjectLocks};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -142,7 +143,7 @@ async fn dispatch_item_job_route_binds_implicit_author_initial_from_target_head(
     let item_id = "itm_00000000000000000000000000000091".to_string();
     let revision_id = "rev_00000000000000000000000000000091".to_string();
     let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
-    let state_root = std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
+    let state_root = temp_state_root("ingot-http-api-state");
 
     persist_test_change(
         &db,
@@ -337,7 +338,7 @@ async fn investigate_item_dispatch_creates_and_triage_removes_anchor_ref() {
     let revision_id = "rev_00000000000000000000000000000092".to_string();
     let finding_id = "fnd_00000000000000000000000000000092".to_string();
     let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
-    let state_root = std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
+    let state_root = temp_state_root("ingot-http-api-state");
 
     persist_test_change(
         &db,
@@ -469,7 +470,7 @@ async fn investigate_item_dispatch_uses_existing_authoring_workspace_subject() {
     let revision_id = "rev_00000000000000000000000000000093".to_string();
     let workspace_id = "wrk_00000000000000000000000000000093".to_string();
     let project_uuid = project_id.parse::<ProjectId>().expect("parse project id");
-    let state_root = std::env::temp_dir().join(format!("ingot-http-api-state-{}", Uuid::now_v7()));
+    let state_root = temp_state_root("ingot-http-api-state");
     let paths = project_repo_paths(state_root.as_path(), project_uuid, &repo);
     ensure_mirror(&paths).await.expect("ensure mirror");
     git(

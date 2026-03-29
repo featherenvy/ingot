@@ -14,6 +14,7 @@ use ingot_domain::workspace::{
 };
 use ingot_store_sqlite::Database;
 
+use crate::env::migrated_test_db_with_path;
 use crate::git::unique_temp_path;
 
 pub fn temp_db_path(prefix: &str) -> PathBuf {
@@ -21,10 +22,7 @@ pub fn temp_db_path(prefix: &str) -> PathBuf {
 }
 
 pub async fn migrated_test_db(prefix: &str) -> Database {
-    let path = temp_db_path(prefix);
-    let db = Database::connect(&path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
-    db
+    migrated_test_db_with_path(prefix).await.0
 }
 
 #[allow(async_fn_in_trait)]

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use ingot_store_sqlite::Database;
 use ingot_store_sqlite::db::sqlite_connect_options;
-use ingot_test_support::sqlite::temp_db_path;
+use ingot_test_support::env::migrated_test_db_with_path as shared_migrated_test_db_with_path;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -14,10 +14,7 @@ pub async fn migrated_test_db(prefix: &str) -> Database {
 
 #[allow(dead_code)]
 pub async fn migrated_test_db_with_path(prefix: &str) -> (Database, PathBuf) {
-    let path = temp_db_path(prefix);
-    let db = Database::connect(&path).await.expect("connect db");
-    db.migrate().await.expect("migrate db");
-    (db, path)
+    shared_migrated_test_db_with_path(prefix).await
 }
 
 #[allow(dead_code)]

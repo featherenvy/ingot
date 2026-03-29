@@ -24,6 +24,7 @@ use ingot_domain::git_operation::{GitOperationEntityRef, GitOperationStatus, Ope
 use ingot_domain::test_support::{
     GitOperationBuilder, JobBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
 };
+use ingot_test_support::env::temp_state_root;
 use ingot_test_support::git::unique_temp_path;
 use ingot_usecases::job::{DispatchJobCommand, dispatch_job};
 use ingot_workflow::{Evaluator, NamedRecommendedAction, RecommendedAction};
@@ -49,7 +50,7 @@ async fn blocked_auto_finalize_fixture() -> BlockedAutoFinalizeFixture {
     let integration_workspace_path = unique_temp_path("ingot-runtime-integration-blocked");
 
     let db = migrated_test_db("ingot-runtime-finalize-blocked-auto").await;
-    let state_root = unique_temp_path("ingot-runtime-finalize-blocked-auto-state");
+    let state_root = temp_state_root("ingot-runtime-finalize-blocked-auto-state");
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
@@ -226,7 +227,7 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
     let integration_workspace_path = unique_temp_path("ingot-runtime-integration");
 
     let db = migrated_test_db("ingot-runtime-finalize").await;
-    let state_root = unique_temp_path("ingot-runtime-finalize-state");
+    let state_root = temp_state_root("ingot-runtime-finalize-state");
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
@@ -431,7 +432,7 @@ async fn tick_auto_finalizes_not_required_prepared_convergence_even_when_commit_
     let repo = temp_git_repo("ingot-runtime-repo");
     let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     let db = migrated_test_db("ingot-runtime-finalize-mirror-only").await;
-    let state_root = unique_temp_path("ingot-runtime-finalize-mirror-only-state");
+    let state_root = temp_state_root("ingot-runtime-finalize-mirror-only-state");
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
@@ -709,7 +710,7 @@ async fn tick_reconciles_applied_finalize_operation_instead_of_invalidating_prep
     let prepared_commit = head_oid(&repo).await.expect("prepared head").into_inner();
 
     let db = migrated_test_db("ingot-runtime-finalize-reconcile").await;
-    let state_root = unique_temp_path("ingot-runtime-finalize-reconcile-state");
+    let state_root = temp_state_root("ingot-runtime-finalize-reconcile-state");
     let dispatcher = JobDispatcher::with_runner(
         db.clone(),
         ProjectLocks::default(),
