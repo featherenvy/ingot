@@ -1,6 +1,7 @@
 use crate::commit_oid::CommitOid;
 use crate::finding::{
     Finding, FindingSeverity, FindingSubjectKind, FindingTriage, FindingTriageState,
+    InvestigationFindingMetadata,
 };
 use crate::ids;
 use crate::step_id::StepId;
@@ -26,6 +27,7 @@ pub struct FindingBuilder {
     summary: String,
     paths: Vec<String>,
     evidence: serde_json::Value,
+    investigation: Option<InvestigationFindingMetadata>,
     triage_state: FindingTriageState,
     linked_item_id: Option<ids::ItemId>,
     triage_note: Option<String>,
@@ -57,6 +59,7 @@ impl FindingBuilder {
             summary: "summary".into(),
             paths: vec!["src/lib.rs".into()],
             evidence: json!(["evidence"]),
+            investigation: None,
             triage_state: FindingTriageState::Untriaged,
             linked_item_id: None,
             triage_note: None,
@@ -131,6 +134,11 @@ impl FindingBuilder {
         self
     }
 
+    pub fn investigation(mut self, investigation: InvestigationFindingMetadata) -> Self {
+        self.investigation = Some(investigation);
+        self
+    }
+
     pub fn triage_state(mut self, triage_state: FindingTriageState) -> Self {
         self.triage_state = triage_state;
         self
@@ -175,6 +183,7 @@ impl FindingBuilder {
             summary: self.summary,
             paths: self.paths,
             evidence: self.evidence,
+            investigation: self.investigation,
             created_at: self.created_at,
             triage,
         }

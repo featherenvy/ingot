@@ -1,6 +1,10 @@
 use chrono::Utc;
-use ingot_domain::finding::{FindingSubjectKind, FindingTriage, FindingTriageState};
+use ingot_domain::finding::{
+    EstimatedScope, FindingSubjectKind, FindingTriage, FindingTriageState,
+    InvestigationFindingMetadata, InvestigationPromotion, InvestigationScope,
+};
 use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId};
+use ingot_domain::item::Classification;
 use ingot_domain::job::{Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind};
 use ingot_domain::step_id::StepId;
 use ingot_domain::test_support::{
@@ -12,7 +16,8 @@ use crate::UseCaseError;
 
 use super::{
     BacklogFindingOverrides, TriageFindingInput, auto_triage_findings, backlog_finding,
-    execute_auto_triage, extract_findings, parse_revision_context_summary, triage_finding,
+    execute_auto_triage, extract_findings, parse_revision_context_summary,
+    promotion_overrides_for_finding, triage_finding,
 };
 
 #[test]
@@ -52,6 +57,105 @@ fn extraction_marks_integrated_validation_findings_as_integrated() {
         extracted.findings[0].source_subject_kind,
         FindingSubjectKind::Integrated
     );
+}
+
+#[test]
+fn extraction_preserves_investigation_metadata_on_findings() {
+    let item = nil_item();
+    let mut job = test_job();
+    job.state = ingot_domain::job::JobState::Completed {
+        assignment: None,
+        started_at: None,
+        outcome_class: OutcomeClass::Findings,
+        ended_at: chrono::Utc::now(),
+        output_commit_oid: None,
+        result_schema_version: Some("investigation_report:v1".into()),
+        result_payload: Some(serde_json::json!({
+            "outcome": "findings",
+            "summary": "Found duplicate helpers across crates",
+            "scope": {
+                "description": "Scanned all crates for duplicate test helpers",
+                "paths_examined": ["crates/"],
+                "methodology": "AST comparison"
+            },
+            "findings": [{
+                "finding_key": "dup-helper-1",
+                "code": "DUP001",
+                "severity": "high",
+                "summary": "temp_git_repo duplicated in 3 crates",
+                "paths": ["crates/a/src/test.rs", "crates/b/src/test.rs"],
+                "evidence": ["identical function body"],
+                "promotion": {
+                    "title": "Extract shared temp_git_repo helper",
+                    "description": "Move the duplicated temp_git_repo helper into a shared crate",
+                    "acceptance_criteria": "Single definition used by all three crates",
+                    "classification": "change",
+                    "estimated_scope": "small"
+                },
+                "group_key": "helper-dedup"
+            }]
+        })),
+    };
+
+    let extracted = extract_findings(&item, &job, &[]).expect("extract findings");
+    let metadata = extracted.findings[0]
+        .investigation
+        .as_ref()
+        .expect("investigation metadata");
+
+    assert_eq!(metadata.scope.methodology, "AST comparison");
+    assert_eq!(metadata.scope.paths_examined, vec!["crates/".to_string()]);
+    assert_eq!(metadata.group_key.as_deref(), Some("helper-dedup"));
+    assert_eq!(
+        metadata.promotion.title,
+        "Extract shared temp_git_repo helper"
+    );
+    assert_eq!(metadata.promotion.classification, Classification::Change);
+    assert_eq!(metadata.promotion.estimated_scope, EstimatedScope::Small);
+}
+
+#[test]
+fn promotion_overrides_use_persisted_investigation_metadata() {
+    let finding = FindingBuilder::new(
+        ProjectId::from_uuid(Uuid::nil()),
+        ItemId::from_uuid(Uuid::nil()),
+        ItemRevisionId::from_uuid(Uuid::nil()),
+        JobId::from_uuid(Uuid::nil()),
+    )
+    .source_step_id("investigate_item")
+    .source_report_schema_version("investigation_report:v1")
+    .investigation(InvestigationFindingMetadata {
+        scope: InvestigationScope {
+            description: "Scanned all crates for duplicate helpers".into(),
+            paths_examined: vec!["crates/".into()],
+            methodology: "AST comparison".into(),
+        },
+        promotion: InvestigationPromotion {
+            title: "Extract shared temp_git_repo helper".into(),
+            description: "Move the helper into shared test support".into(),
+            acceptance_criteria: "Only one helper remains".into(),
+            classification: Classification::Change,
+            estimated_scope: EstimatedScope::Small,
+        },
+        group_key: Some("helper-dedup".into()),
+    })
+    .build();
+
+    let overrides = promotion_overrides_for_finding(&finding, &[]).expect("promotion overrides");
+
+    assert_eq!(
+        overrides.title.as_deref(),
+        Some("Extract shared temp_git_repo helper")
+    );
+    assert_eq!(
+        overrides.description.as_deref(),
+        Some("Move the helper into shared test support")
+    );
+    assert_eq!(
+        overrides.acceptance_criteria.as_deref(),
+        Some("Only one helper remains")
+    );
+    assert_eq!(overrides.classification, Some(Classification::Change));
 }
 
 #[test]

@@ -2,6 +2,9 @@ mod common;
 
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
+use ingot_domain::finding::{
+    EstimatedScope, InvestigationFindingMetadata, InvestigationPromotion, InvestigationScope,
+};
 use ingot_domain::ids::{ItemId, ItemRevisionId, ProjectId, WorkspaceId};
 use ingot_domain::item::{ApprovalState, Classification, Item, Origin};
 use ingot_domain::job::{
@@ -221,6 +224,48 @@ async fn migrate_supports_finding_promotion_relationships() {
     );
     assert_eq!(completed.job.state.status(), JobStatus::Completed);
     assert_eq!(completed.finding_count, 1);
+}
+
+#[tokio::test]
+async fn finding_round_trip_preserves_investigation_metadata() {
+    let db = common::migrated_test_db("ingot-store-investigation-finding").await;
+    let project = persist_project(&db).await;
+    let (item, revision) = persist_item_with_revision(&db, project.id, "refs/heads/main").await;
+    let job =
+        persist_investigate_job(&db, project.id, item.id, revision.id, JobStatus::Completed).await;
+
+    let finding = FindingBuilder::new(project.id, item.id, revision.id, job.id)
+        .source_step_id("investigate_item")
+        .source_report_schema_version("investigation_report:v1")
+        .investigation(InvestigationFindingMetadata {
+            scope: InvestigationScope {
+                description: "Scanned all crates for duplicate helpers".into(),
+                paths_examined: vec!["crates/".into()],
+                methodology: "AST comparison".into(),
+            },
+            promotion: InvestigationPromotion {
+                title: "Extract shared temp_git_repo helper".into(),
+                description: "Move the helper into shared test support".into(),
+                acceptance_criteria: "Only one helper remains".into(),
+                classification: Classification::Change,
+                estimated_scope: EstimatedScope::Small,
+            },
+            group_key: Some("helper-dedup".into()),
+        })
+        .build();
+
+    db.create_finding(&finding).await.expect("create finding");
+
+    let reloaded = db.get_finding(finding.id).await.expect("reload finding");
+    let metadata = reloaded
+        .investigation
+        .expect("investigation metadata should persist");
+
+    assert_eq!(metadata.scope.methodology, "AST comparison");
+    assert_eq!(metadata.scope.paths_examined, vec!["crates/".to_string()]);
+    assert_eq!(metadata.group_key.as_deref(), Some("helper-dedup"));
+    assert_eq!(metadata.promotion.classification, Classification::Change);
+    assert_eq!(metadata.promotion.estimated_scope, EstimatedScope::Small);
 }
 
 #[tokio::test]

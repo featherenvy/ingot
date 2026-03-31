@@ -371,6 +371,7 @@ describe('ItemDetailPage', () => {
         summary: 'Missing regression coverage',
         paths: ['src/lib.rs'],
         evidence: null,
+        investigation: null,
         triage_state: 'untriaged',
         linked_item_id: null,
         triage_note: null,
@@ -485,6 +486,7 @@ describe('ItemDetailPage', () => {
         summary: 'Need a decision',
         paths: ['src/lib.rs'],
         evidence: null,
+        investigation: null,
         triage_state: 'wont_fix',
         linked_item_id: null,
         triage_note: 'accepted',
@@ -511,6 +513,94 @@ describe('ItemDetailPage', () => {
     expect(screen.getByText("Won't fix")).toBeInTheDocument()
     expect(screen.getByText('Note: accepted')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Change triage' })).toBeInTheDocument()
+  })
+
+  it('renders investigation scope and promotion preview in the findings section', async () => {
+    const detail = makeItemDetail()
+    detail.jobs = [
+      {
+        id: 'job_1',
+        project_id: 'prj_1',
+        item_id: 'itm_1',
+        item_revision_id: 'rev_1',
+        step_id: 'investigate_item',
+        status: 'completed',
+        outcome_class: 'findings',
+        phase_kind: 'investigate',
+        workspace_id: null,
+        job_input: {
+          kind: 'candidate_subject',
+          base_commit_oid: '0123456789abcdef',
+          head_commit_oid: 'fedcba9876543210',
+        },
+        created_at: '2026-03-11T00:00:00Z',
+        started_at: '2026-03-11T00:01:00Z',
+        ended_at: '2026-03-11T00:02:00Z',
+      },
+    ]
+    detail.findings = [
+      {
+        id: 'fnd_1',
+        project_id: 'prj_1',
+        source_item_id: 'itm_1',
+        source_item_revision_id: 'rev_1',
+        source_job_id: 'job_1',
+        source_step_id: 'investigate_item',
+        source_report_schema_version: 'investigation_report:v1',
+        source_finding_key: 'dup-helper-1',
+        source_subject_kind: 'candidate',
+        source_subject_base_commit_oid: '0123456789abcdef',
+        source_subject_head_commit_oid: 'fedcba9876543210',
+        code: 'DUP001',
+        severity: 'high',
+        summary: 'temp_git_repo duplicated in 3 crates',
+        paths: ['crates/a/src/test.rs', 'crates/b/src/test.rs'],
+        evidence: ['identical function body'],
+        investigation: {
+          scope: {
+            description: 'Scanned all crates for duplicate helpers',
+            paths_examined: ['crates/'],
+            methodology: 'AST comparison',
+          },
+          promotion: {
+            title: 'Extract shared temp_git_repo helper',
+            description: 'Move the helper into shared test support',
+            acceptance_criteria: 'Only one helper remains',
+            classification: 'change',
+            estimated_scope: 'small',
+          },
+          group_key: 'helper-dedup',
+        },
+        triage_state: 'untriaged',
+        linked_item_id: null,
+        triage_note: null,
+        created_at: '2026-03-11T00:00:00Z',
+        triaged_at: null,
+      },
+    ]
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/projects/prj_1/items/itm_1')) {
+        return Promise.resolve(jsonResponse(detail))
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Investigation scope')).toBeInTheDocument()
+    expect(screen.getByText('Methodology:')).toBeInTheDocument()
+    expect(screen.getByText('AST comparison')).toBeInTheDocument()
+    expect(screen.getByText('Paths examined:')).toBeInTheDocument()
+    expect(screen.getByText('crates/')).toBeInTheDocument()
+    expect(screen.getByText('Promotion preview')).toBeInTheDocument()
+    expect(screen.getByText('Extract shared temp_git_repo helper')).toBeInTheDocument()
+    expect(screen.getByText('Acceptance criteria: Only one helper remains')).toBeInTheDocument()
+    expect(screen.getByText('Group helper-dedup')).toBeInTheDocument()
   })
 
   it('throws before fetching when a required route param is missing', () => {

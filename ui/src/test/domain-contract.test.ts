@@ -146,6 +146,21 @@ describe('domain contract typing', () => {
           summary: 'Refactor repeated logic',
           paths: ['src/lib.rs'],
           evidence: { message: 'Duplicate branch logic', line: 42 },
+          investigation: {
+            scope: {
+              description: 'Scanned all crates for duplicate helpers',
+              paths_examined: ['crates/'],
+              methodology: 'AST comparison',
+            },
+            promotion: {
+              title: 'Extract shared helper',
+              description: 'Move the helper into shared test support',
+              acceptance_criteria: 'One helper remains',
+              classification: 'change',
+              estimated_scope: 'small',
+            },
+            group_key: 'helper-dedup',
+          },
           triage_state: 'untriaged',
           linked_item_id: null,
           triage_note: null,
@@ -199,6 +214,7 @@ describe('domain contract typing', () => {
     }
 
     expect(detail.findings[0]?.evidence).toEqual({ message: 'Duplicate branch logic', line: 42 })
+    expect(detail.findings[0]?.investigation?.promotion.title).toBe('Extract shared helper')
     expect(detail.revision_context_summary?.accepted_result_refs).toHaveLength(1)
     expect(detail.convergences[0]?.final_target_commit_oid).toBeNull()
   })

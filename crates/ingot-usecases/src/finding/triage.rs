@@ -256,6 +256,16 @@ pub fn promotion_overrides_for_finding(
     finding: &Finding,
     source_jobs: &[Job],
 ) -> Option<PromotionOverrides> {
+    if let Some(investigation) = finding.investigation.as_ref() {
+        return Some(PromotionOverrides {
+            title: Some(investigation.promotion.title.clone()),
+            description: Some(investigation.promotion.description.clone()),
+            acceptance_criteria: Some(investigation.promotion.acceptance_criteria.clone()),
+            classification: Some(investigation.promotion.classification),
+            workflow_version: Some(WorkflowVersion::DeliveryV1),
+        });
+    }
+
     let source_job = source_jobs
         .iter()
         .find(|job| job.id == finding.source_job_id)?;

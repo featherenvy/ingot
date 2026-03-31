@@ -13,7 +13,7 @@ import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import { formatRelativeTime, formatStepLabel } from '../../lib/format'
 import { shortId } from '../../lib/git'
-import type { Finding, FindingSeverity, FindingTriageState, Job } from '../../types/domain'
+import type { Finding, FindingSeverity, FindingTriageState, InvestigationScope, Job } from '../../types/domain'
 import { TooltipValue } from '../TooltipValue'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
@@ -85,6 +85,12 @@ const TRIAGE_STATE_LABELS: Record<FindingTriageState, string> = {
 const NEEDS_NOTE: Set<FindingTriageState> = new Set(['wont_fix', 'dismissed_invalid', 'needs_investigation'])
 const NEEDS_LINK: Set<FindingTriageState> = new Set(['backlog', 'duplicate'])
 
+const ESTIMATED_SCOPE_LABELS = {
+  small: 'Small',
+  medium: 'Medium',
+  large: 'Large',
+} as const
+
 // ── Utilities ──────────────────────────────────────────────────
 
 function groupFindingsByJob(findings: Finding[], jobs: Job[]): FindingGroup[] {
@@ -122,6 +128,29 @@ function groupFindingsByJob(findings: Finding[], jobs: Job[]): FindingGroup[] {
   }
 
   return groups
+}
+
+function InvestigationScopePanel({ scope }: { scope: InvestigationScope }) {
+  return (
+    <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant="outline" className="h-5 border-blue-500/30 text-[11px] text-blue-700 dark:text-blue-300">
+          Investigation scope
+        </Badge>
+        <span className="text-xs text-muted-foreground">{scope.description}</span>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+        <span>
+          Methodology: <span className="text-foreground">{scope.methodology}</span>
+        </span>
+        {scope.paths_examined.length > 0 && (
+          <span>
+            Paths examined: <span className="font-mono text-foreground">{scope.paths_examined.join(', ')}</span>
+          </span>
+        )}
+      </div>
+    </div>
+  )
 }
 
 // ── Agent Scope Summary ────────────────────────────────────────
@@ -264,6 +293,7 @@ function FindingCard({
   const showNote = NEEDS_NOTE.has(triageState)
   const showLink = NEEDS_LINK.has(triageState)
   const alreadyTriaged = finding.triage_state !== 'untriaged' && finding.triage_state !== 'needs_investigation'
+  const investigation = finding.investigation
 
   return (
     <div
@@ -315,6 +345,29 @@ function FindingCard({
           <p className="text-xs text-muted-foreground">
             Linked: <code>{shortId(finding.linked_item_id)}</code>
           </p>
+        )}
+        {investigation && (
+          <div className="space-y-2 rounded-lg border border-dashed border-border/70 bg-muted/20 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium text-foreground">Promotion preview</span>
+              <Badge variant="secondary" className="h-5 text-[11px]">
+                {investigation.promotion.classification}
+              </Badge>
+              <Badge variant="outline" className="h-5 text-[11px]">
+                {ESTIMATED_SCOPE_LABELS[investigation.promotion.estimated_scope]}
+              </Badge>
+              {investigation.group_key && (
+                <Badge variant="outline" className="h-5 text-[11px]">
+                  Group {investigation.group_key}
+                </Badge>
+              )}
+            </div>
+            <p className="text-sm text-foreground">{investigation.promotion.title}</p>
+            <p className="text-xs text-muted-foreground">{investigation.promotion.description}</p>
+            <p className="text-xs text-muted-foreground">
+              Acceptance criteria: {investigation.promotion.acceptance_criteria}
+            </p>
+          </div>
         )}
 
         {/* Triage controls — only for actionable findings */}
@@ -503,6 +556,9 @@ export function FindingsTable({
               <span className="text-xs text-muted-foreground">\u2014 agent acts on these findings only</span>
             </div>
             <JobGroupHeader group={latestGroup} />
+            {latestGroup.findings[0]?.investigation && (
+              <InvestigationScopePanel scope={latestGroup.findings[0].investigation.scope} />
+            )}
             <div className="grid gap-3">
               {latestGroup.findings.map((finding) => (
                 <FindingCard
@@ -533,6 +589,9 @@ export function FindingsTable({
                 {historicalGroups.map((group) => (
                   <section key={group.jobId} className="space-y-3">
                     <JobGroupHeader group={group} />
+                    {group.findings[0]?.investigation && (
+                      <InvestigationScopePanel scope={group.findings[0].investigation.scope} />
+                    )}
                     <div className="grid gap-2">
                       {group.findings.map((finding) => (
                         <FindingCard

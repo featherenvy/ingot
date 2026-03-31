@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit_oid::CommitOid;
 use crate::ids::{FindingId, ItemId, ItemRevisionId, JobId, ProjectId};
+use crate::item::Classification;
 use crate::step_id::StepId;
 
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
@@ -33,6 +34,29 @@ pub enum EstimatedScope {
     Small,
     Medium,
     Large,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvestigationScope {
+    pub description: String,
+    pub paths_examined: Vec<String>,
+    pub methodology: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvestigationPromotion {
+    pub title: String,
+    pub description: String,
+    pub acceptance_criteria: String,
+    pub classification: Classification,
+    pub estimated_scope: EstimatedScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvestigationFindingMetadata {
+    pub scope: InvestigationScope,
+    pub promotion: InvestigationPromotion,
+    pub group_key: Option<String>,
 }
 
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
@@ -305,6 +329,7 @@ struct FindingWire {
     pub summary: String,
     pub paths: Vec<String>,
     pub evidence: serde_json::Value,
+    pub investigation: Option<InvestigationFindingMetadata>,
     pub triage_state: FindingTriageState,
     pub linked_item_id: Option<ItemId>,
     pub triage_note: Option<String>,
@@ -341,6 +366,7 @@ impl TryFrom<FindingWire> for Finding {
             summary: w.summary,
             paths: w.paths,
             evidence: w.evidence,
+            investigation: w.investigation,
             created_at: w.created_at,
             triage,
         })
@@ -371,6 +397,7 @@ impl From<Finding> for FindingWire {
             summary: f.summary,
             paths: f.paths,
             evidence: f.evidence,
+            investigation: f.investigation,
             triage_state,
             linked_item_id,
             triage_note,
@@ -399,6 +426,7 @@ pub struct Finding {
     pub summary: String,
     pub paths: Vec<String>,
     pub evidence: serde_json::Value,
+    pub investigation: Option<InvestigationFindingMetadata>,
     pub created_at: DateTime<Utc>,
     pub triage: FindingTriage,
 }

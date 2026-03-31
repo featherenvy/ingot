@@ -2,12 +2,16 @@ use std::collections::HashSet;
 
 use chrono::Utc;
 use ingot_agent_protocol::report::{
-    self, FindingReportV1, FindingV1, InvestigationReportV1, ReviewReportV1, ValidationCheckV1,
-    ValidationReportV1,
+    self, FindingReportV1, FindingV1, InvestigationFindingV1, InvestigationReportV1,
+    InvestigationScopeV1, ReviewReportV1, ValidationCheckV1, ValidationReportV1,
 };
 use ingot_domain::convergence::{Convergence, ConvergenceStatus};
-use ingot_domain::finding::{Finding, FindingSubjectKind, FindingTriage};
+use ingot_domain::finding::{
+    EstimatedScope, Finding, FindingSubjectKind, FindingTriage, InvestigationFindingMetadata,
+    InvestigationPromotion, InvestigationScope,
+};
 use ingot_domain::ids::FindingId;
+use ingot_domain::item::Classification;
 use ingot_domain::item::Item;
 use ingot_domain::job::{Job, OutcomeClass, PhaseKind};
 use ingot_domain::step_id::StepId;
@@ -18,6 +22,12 @@ use crate::UseCaseError;
 pub struct ExtractedFindings {
     pub outcome_class: OutcomeClass,
     pub findings: Vec<Finding>,
+}
+
+#[derive(Debug)]
+struct ExtractedFindingRecord {
+    finding: FindingV1,
+    investigation: Option<InvestigationFindingMetadata>,
 }
 
 pub fn extract_findings(
@@ -48,7 +58,17 @@ pub fn extract_findings(
                 &report.checks,
                 &report.summary,
             )?;
-            (outcome_class, report.findings)
+            (
+                outcome_class,
+                report
+                    .findings
+                    .into_iter()
+                    .map(|finding| ExtractedFindingRecord {
+                        finding,
+                        investigation: None,
+                    })
+                    .collect(),
+            )
         }
         report::REVIEW_REPORT_V1 => {
             let report: ReviewReportV1 = serde_json::from_value(result_payload.clone())
@@ -65,32 +85,48 @@ pub fn extract_findings(
             }
 
             let _ = report.overall_risk;
-            (outcome_class, report.findings)
+            (
+                outcome_class,
+                report
+                    .findings
+                    .into_iter()
+                    .map(|finding| ExtractedFindingRecord {
+                        finding,
+                        investigation: None,
+                    })
+                    .collect(),
+            )
         }
         report::FINDING_REPORT_V1 => {
             let report: FindingReportV1 = serde_json::from_value(result_payload.clone())
                 .map_err(|err| UseCaseError::ProtocolViolation(err.to_string()))?;
             let outcome_class =
                 validate_finding_report(&report.outcome, &report.findings, &report.summary)?;
-            (outcome_class, report.findings)
+            (
+                outcome_class,
+                report
+                    .findings
+                    .into_iter()
+                    .map(|finding| ExtractedFindingRecord {
+                        finding,
+                        investigation: None,
+                    })
+                    .collect(),
+            )
         }
         report::INVESTIGATION_REPORT_V1 => {
             let report: InvestigationReportV1 = serde_json::from_value(result_payload.clone())
                 .map_err(|err| UseCaseError::ProtocolViolation(err.to_string()))?;
-            let standard_findings: Vec<FindingV1> = report
+            let standard_findings: Vec<ExtractedFindingRecord> = report
                 .findings
                 .into_iter()
-                .map(|f| FindingV1 {
-                    finding_key: f.finding_key,
-                    code: f.code,
-                    severity: f.severity,
-                    summary: f.summary,
-                    paths: f.paths,
-                    evidence: f.evidence,
-                })
+                .map(|finding| extracted_investigation_finding(&report.scope, finding))
                 .collect();
-            let outcome_class =
-                validate_finding_report(&report.outcome, &standard_findings, &report.summary)?;
+            let outcome_class = validate_extracted_finding_report(
+                &report.outcome,
+                &standard_findings,
+                &report.summary,
+            )?;
             (outcome_class, standard_findings)
         }
         _ => {
@@ -120,7 +156,8 @@ pub fn extract_findings(
 
     let findings = report_findings
         .into_iter()
-        .map(|finding| {
+        .map(|record| {
+            let finding = record.finding;
             Ok(Finding {
                 id: FindingId::new(),
                 project_id: item.project_id,
@@ -138,6 +175,7 @@ pub fn extract_findings(
                 summary: finding.summary,
                 paths: finding.paths,
                 evidence: serde_json::json!(finding.evidence),
+                investigation: record.investigation,
                 created_at,
                 triage: FindingTriage::Untriaged,
             })
@@ -150,19 +188,82 @@ pub fn extract_findings(
     })
 }
 
-fn ensure_unique_finding_keys(findings: &[FindingV1]) -> Result<(), UseCaseError> {
+fn extracted_investigation_finding(
+    scope: &InvestigationScopeV1,
+    finding: InvestigationFindingV1,
+) -> ExtractedFindingRecord {
+    let promotion = finding.promotion;
+    let classification = match promotion.classification {
+        report::InvestigationClassification::Change => Classification::Change,
+        report::InvestigationClassification::Bug => Classification::Bug,
+    };
+    let estimated_scope = match promotion.estimated_scope {
+        report::InvestigationEstimatedScope::Small => EstimatedScope::Small,
+        report::InvestigationEstimatedScope::Medium => EstimatedScope::Medium,
+        report::InvestigationEstimatedScope::Large => EstimatedScope::Large,
+    };
+
+    let investigation = InvestigationFindingMetadata {
+        scope: InvestigationScope {
+            description: scope.description.clone(),
+            paths_examined: scope.paths_examined.clone(),
+            methodology: scope.methodology.clone(),
+        },
+        promotion: InvestigationPromotion {
+            title: promotion.title,
+            description: promotion.description,
+            acceptance_criteria: promotion.acceptance_criteria,
+            classification,
+            estimated_scope,
+        },
+        group_key: finding.group_key.clone(),
+    };
+
+    ExtractedFindingRecord {
+        finding: FindingV1 {
+            finding_key: finding.finding_key,
+            code: finding.code,
+            severity: finding.severity,
+            summary: finding.summary,
+            paths: finding.paths,
+            evidence: finding.evidence,
+        },
+        investigation: Some(investigation),
+    }
+}
+
+fn ensure_unique_finding_keys(findings: &[ExtractedFindingRecord]) -> Result<(), UseCaseError> {
     let mut seen_keys = HashSet::with_capacity(findings.len());
 
     for finding in findings {
-        if !seen_keys.insert(finding.finding_key.as_str()) {
+        if !seen_keys.insert(finding.finding.finding_key.as_str()) {
             return Err(UseCaseError::ProtocolViolation(format!(
                 "duplicate finding_key in report: {}",
-                finding.finding_key
+                finding.finding.finding_key
             )));
         }
     }
 
     Ok(())
+}
+
+fn validate_extracted_finding_report(
+    outcome: &str,
+    findings: &[ExtractedFindingRecord],
+    summary: &str,
+) -> Result<OutcomeClass, UseCaseError> {
+    let plain_findings = findings
+        .iter()
+        .map(|record| FindingV1 {
+            finding_key: record.finding.finding_key.clone(),
+            code: record.finding.code.clone(),
+            severity: record.finding.severity,
+            summary: record.finding.summary.clone(),
+            paths: record.finding.paths.clone(),
+            evidence: record.finding.evidence.clone(),
+        })
+        .collect::<Vec<_>>();
+    validate_finding_report(outcome, &plain_findings, summary)
 }
 
 fn validate_validation_report(

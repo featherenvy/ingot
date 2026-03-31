@@ -46,8 +46,8 @@ impl Database {
                 id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
                 source_report_schema_version, source_finding_key, source_subject_kind,
                 source_subject_base_commit_oid, source_subject_head_commit_oid, code, severity, summary,
-                paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                paths, evidence, investigation, triage_state, linked_item_id, triage_note, created_at, triaged_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(finding.id)
         .bind(finding.project_id)
@@ -65,6 +65,14 @@ impl Database {
         .bind(&finding.summary)
         .bind(serde_json::to_string(&finding.paths).map_err(json_err)?)
         .bind(serde_json::to_string(&finding.evidence).map_err(json_err)?)
+        .bind(
+            finding
+                .investigation
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(json_err)?,
+        )
         .bind(finding.triage.state())
         .bind(finding.triage.linked_item_id())
         .bind(finding.triage.triage_note())
@@ -211,7 +219,7 @@ impl Database {
             "UPDATE findings
              SET source_step_id = ?, source_report_schema_version = ?, source_subject_kind = ?,
                  source_subject_base_commit_oid = ?, source_subject_head_commit_oid = ?,
-                 code = ?, severity = ?, summary = ?, paths = ?, evidence = ?,
+                 code = ?, severity = ?, summary = ?, paths = ?, evidence = ?, investigation = ?,
                  triage_state = ?, linked_item_id = ?, triage_note = ?, triaged_at = ?
              WHERE id = ?",
         )
@@ -225,6 +233,14 @@ impl Database {
         .bind(&finding.summary)
         .bind(serde_json::to_string(&finding.paths).map_err(json_err)?)
         .bind(serde_json::to_string(&finding.evidence).map_err(json_err)?)
+        .bind(
+            finding
+                .investigation
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(json_err)?,
+        )
         .bind(finding.triage.state())
         .bind(finding.triage.linked_item_id())
         .bind(finding.triage.triage_note())
@@ -295,8 +311,8 @@ pub(super) async fn upsert_finding(
             id, project_id, source_item_id, source_item_revision_id, source_job_id, source_step_id,
             source_report_schema_version, source_finding_key, source_subject_kind,
             source_subject_base_commit_oid, source_subject_head_commit_oid, code, severity, summary,
-            paths, evidence, triage_state, linked_item_id, triage_note, created_at, triaged_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            paths, evidence, investigation, triage_state, linked_item_id, triage_note, created_at, triaged_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(source_job_id, source_finding_key) DO UPDATE SET
             source_step_id = excluded.source_step_id,
             source_report_schema_version = excluded.source_report_schema_version,
@@ -307,7 +323,8 @@ pub(super) async fn upsert_finding(
             severity = excluded.severity,
             summary = excluded.summary,
             paths = excluded.paths,
-            evidence = excluded.evidence",
+            evidence = excluded.evidence,
+            investigation = excluded.investigation",
     )
     .bind(finding.id)
     .bind(finding.project_id)
@@ -325,6 +342,14 @@ pub(super) async fn upsert_finding(
     .bind(&finding.summary)
     .bind(serde_json::to_string(&finding.paths).map_err(json_err)?)
     .bind(serde_json::to_string(&finding.evidence).map_err(json_err)?)
+    .bind(
+        finding
+            .investigation
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(json_err)?,
+    )
     .bind(finding.triage.state())
     .bind(finding.triage.linked_item_id())
     .bind(finding.triage.triage_note())
@@ -379,6 +404,11 @@ fn map_finding(row: &SqliteRow) -> Result<Finding, RepositoryError> {
         summary: row.try_get("summary").map_err(db_err)?,
         paths: parse_json(row.try_get("paths").map_err(db_err)?)?,
         evidence: parse_json(row.try_get("evidence").map_err(db_err)?)?,
+        investigation: row
+            .try_get::<Option<String>, _>("investigation")
+            .map_err(db_err)?
+            .map(parse_json)
+            .transpose()?,
         created_at: row.try_get("created_at").map_err(db_err)?,
         triage,
     })

@@ -77,6 +77,7 @@ export type WorkspaceStatus =
 export type ConvergenceStatus = 'queued' | 'running' | 'conflicted' | 'prepared' | 'finalized' | 'failed' | 'cancelled'
 export type FindingSubjectKind = 'candidate' | 'integrated'
 export type FindingSeverity = 'low' | 'medium' | 'high' | 'critical'
+export type EstimatedScope = 'small' | 'medium' | 'large'
 export type FindingTriageState =
   | 'untriaged'
   | 'fix_now'
@@ -328,11 +329,32 @@ export interface Finding {
   summary: string
   paths: string[]
   evidence: JsonValue
+  investigation: InvestigationFindingMetadata | null
   triage_state: FindingTriageState
   linked_item_id: string | null
   triage_note: string | null
   created_at: string
   triaged_at: string | null
+}
+
+export interface InvestigationScope {
+  description: string
+  paths_examined: string[]
+  methodology: string
+}
+
+export interface InvestigationPromotion {
+  title: string
+  description: string
+  acceptance_criteria: string
+  classification: Exclude<Classification, 'investigation'>
+  estimated_scope: EstimatedScope
+}
+
+export interface InvestigationFindingMetadata {
+  scope: InvestigationScope
+  promotion: InvestigationPromotion
+  group_key: string | null
 }
 
 export interface RevisionContextResultSummary {
