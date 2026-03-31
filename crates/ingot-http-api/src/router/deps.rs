@@ -29,8 +29,8 @@ pub(crate) use ingot_usecases::convergence::{
     ConvergenceCommandPort, ConvergenceService, ConvergenceSystemActionPort,
 };
 pub(crate) use ingot_usecases::finding::{
-    BacklogFindingOverrides, TriageFindingInput, backlog_finding, parse_revision_context_summary,
-    triage_finding,
+    BacklogFindingOverrides, TriageFindingInput, backlog_finding_with_promotion,
+    parse_revision_context_summary, promotion_overrides_for_finding, triage_finding,
 };
 pub(crate) use ingot_usecases::item::{
     CreateInvestigationInput, CreateItemInput, approval_state_for_policy,

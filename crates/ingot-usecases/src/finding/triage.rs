@@ -1,4 +1,5 @@
 use chrono::Utc;
+use ingot_agent_protocol::report::{self, InvestigationReportV1};
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::finding::{Finding, FindingSubjectKind, FindingTriageState};
 use ingot_domain::git_ref::GitRef;
@@ -6,6 +7,7 @@ use ingot_domain::ids::{ItemId, ItemRevisionId};
 use ingot_domain::item::{
     Classification, Escalation, Item, Lifecycle, Origin, ParkingState, WorkflowVersion,
 };
+use ingot_domain::job::Job;
 use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
 
 use crate::UseCaseError;
@@ -246,6 +248,43 @@ pub fn backlog_finding_with_promotion(
     )?;
 
     Ok((linked_item, linked_revision, triaged_finding))
+}
+
+/// Extract promotion overrides from the source job's result payload when it is
+/// an investigation report and contains a matching finding entry.
+pub fn promotion_overrides_for_finding(
+    finding: &Finding,
+    source_jobs: &[Job],
+) -> Option<PromotionOverrides> {
+    let source_job = source_jobs
+        .iter()
+        .find(|job| job.id == finding.source_job_id)?;
+    let schema_version = source_job.state.result_schema_version()?;
+
+    if schema_version != report::INVESTIGATION_REPORT_V1 {
+        return None;
+    }
+
+    let result_payload = source_job.state.result_payload()?;
+    let report: InvestigationReportV1 = serde_json::from_value(result_payload.clone()).ok()?;
+
+    let investigation_finding = report
+        .findings
+        .into_iter()
+        .find(|candidate| candidate.finding_key == finding.source_finding_key)?;
+
+    let classification = match investigation_finding.promotion.classification {
+        report::InvestigationClassification::Change => Classification::Change,
+        report::InvestigationClassification::Bug => Classification::Bug,
+    };
+
+    Some(PromotionOverrides {
+        title: Some(investigation_finding.promotion.title),
+        description: Some(investigation_finding.promotion.description),
+        acceptance_criteria: Some(investigation_finding.promotion.acceptance_criteria),
+        classification: Some(classification),
+        workflow_version: Some(WorkflowVersion::DeliveryV1),
+    })
 }
 
 fn normalize_note(note: Option<String>) -> Option<String> {

@@ -307,14 +307,21 @@ pub(super) async fn apply_finding_triage(
                     target_ref: request.target_ref,
                     approval_policy: request.approval_policy,
                 };
+                let source_jobs = state
+                    .db
+                    .list_jobs_by_item(source_item.id)
+                    .await
+                    .map_err(repo_to_internal)?;
+                let promotion_overrides = promotion_overrides_for_finding(&finding, &source_jobs);
                 let sort_key = next_project_sort_key(state, source_item.project_id).await?;
-                let (linked_item, linked_revision, triaged) = backlog_finding(
+                let (linked_item, linked_revision, triaged) = backlog_finding_with_promotion(
                     &finding,
                     &source_item,
                     &source_revision,
                     overrides,
                     sort_key,
                     request.triage_note,
+                    promotion_overrides,
                 )?;
                 state
                     .db

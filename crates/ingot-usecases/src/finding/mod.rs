@@ -12,5 +12,5 @@ pub use context::parse_revision_context_summary;
 pub use report::{ExtractedFindings, extract_findings};
 pub use triage::{
     BacklogFindingOverrides, PromotionOverrides, TriageFindingInput, backlog_finding,
-    backlog_finding_with_promotion, triage_finding,
+    backlog_finding_with_promotion, promotion_overrides_for_finding, triage_finding,
 };

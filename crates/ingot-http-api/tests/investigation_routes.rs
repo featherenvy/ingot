@@ -309,3 +309,174 @@ async fn batch_promote_findings() {
         "second promoted item title should come from promotion metadata"
     );
 }
+
+#[tokio::test]
+async fn generic_backlog_triage_preserves_investigation_promotion_metadata() {
+    let repo = temp_git_repo("investigation");
+    let head = git_output(&repo, &["rev-parse", "HEAD"]);
+    let db = migrated_test_db("investigation-single-promote").await;
+
+    let project_id = "prj_aa000000000000000000000000000021";
+    let item_id = "itm_aa000000000000000000000000000021";
+    let revision_id = "rev_aa000000000000000000000000000021";
+    let job_id = "job_aa000000000000000000000000000021";
+    let finding_id = "fnd_aa000000000000000000000000000021";
+
+    persist_test_project(&db, &repo, project_id).await;
+
+    let mut item = test_item_builder(project_id, revision_id, item_id).build();
+    item.classification = Classification::Investigation;
+    item.workflow_version = WorkflowVersion::InvestigationV1;
+    let revision = test_revision_builder(item_id, revision_id)
+        .seed(AuthoringBaseSeed::Explicit {
+            seed_commit_oid: head.clone().into(),
+            seed_target_commit_oid: head.clone().into(),
+        })
+        .build();
+    (item, revision)
+        .persist(&db)
+        .await
+        .expect("persist investigation item");
+
+    let investigation_report = serde_json::json!({
+        "outcome": "findings",
+        "summary": "Found duplicate helpers across crates",
+        "scope": {
+            "description": "Scanned all crates for duplicate test helpers",
+            "paths_examined": ["crates/"],
+            "methodology": "AST comparison"
+        },
+        "findings": [
+            {
+                "finding_key": "dup-helper-1",
+                "code": "DUP001",
+                "severity": "high",
+                "summary": "temp_git_repo duplicated in 3 crates",
+                "paths": ["crates/a/src/test.rs", "crates/b/src/test.rs"],
+                "evidence": ["identical function body"],
+                "promotion": {
+                    "title": "Extract shared temp_git_repo helper",
+                    "description": "Move the duplicated temp_git_repo helper into a shared crate",
+                    "acceptance_criteria": "Single definition used by all three crates",
+                    "classification": "change",
+                    "estimated_scope": "small"
+                },
+                "group_key": "helper-dedup"
+            }
+        ]
+    });
+
+    insert_test_job_row(
+        &db,
+        TestJobInsert {
+            id: job_id,
+            project_id,
+            item_id,
+            item_revision_id: revision_id,
+            step_id: "investigate_project",
+            status: JobStatus::Completed,
+            outcome_class: Some(OutcomeClass::Findings),
+            phase_kind: PhaseKind::Investigate,
+            workspace_kind: WorkspaceKind::Review,
+            execution_permission: ExecutionPermission::MustNotMutate,
+            context_policy: ContextPolicy::Fresh,
+            phase_template_slug: "investigate-project",
+            output_artifact_kind: OutputArtifactKind::InvestigationReport,
+            job_input: TestJobInput::AuthoringHead(&head),
+            result_schema_version: Some("investigation_report:v1"),
+            result_payload: Some(investigation_report),
+            created_at: "2026-03-12T00:00:00Z",
+            ended_at: Some("2026-03-12T00:01:00Z"),
+            ..TestJobInsert::new(
+                job_id,
+                project_id,
+                item_id,
+                revision_id,
+                "investigate_project",
+            )
+        },
+    )
+    .await;
+
+    persist_test_finding(
+        &db,
+        project_id,
+        item_id,
+        revision_id,
+        job_id,
+        finding_id,
+        |f| {
+            f.source_step_id("investigate_project")
+                .source_report_schema_version("investigation_report:v1")
+                .source_finding_key("dup-helper-1")
+                .source_subject_kind(FindingSubjectKind::Candidate)
+                .source_subject_base_commit_oid(Option::<&str>::None)
+                .source_subject_head_commit_oid(&head)
+                .code("DUP001")
+                .summary("temp_git_repo duplicated in 3 crates")
+                .paths(vec![
+                    "crates/a/src/test.rs".into(),
+                    "crates/b/src/test.rs".into(),
+                ])
+                .evidence(serde_json::json!(["identical function body"]))
+        },
+    )
+    .await;
+
+    let response = test_router(db.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/findings/{finding_id}/triage"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "triage_state": "backlog"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("triage response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let promoted_item: (String, String, String) = sqlx::query_as(
+        "SELECT classification, workflow_version, current_revision_id FROM items WHERE origin_finding_id = ?",
+    )
+    .bind(finding_id)
+    .fetch_one(db.raw_pool())
+    .await
+    .expect("load promoted item");
+
+    assert_eq!(
+        promoted_item.0, "change",
+        "generic triage should preserve promotion classification"
+    );
+    assert_eq!(
+        promoted_item.1, "delivery:v1",
+        "generic triage should promote into the delivery workflow"
+    );
+
+    let promoted_revision: (String, String, String) = sqlx::query_as(
+        "SELECT title, description, acceptance_criteria FROM item_revisions WHERE id = ?",
+    )
+    .bind(&promoted_item.2)
+    .fetch_one(db.raw_pool())
+    .await
+    .expect("load promoted revision");
+
+    assert_eq!(
+        promoted_revision.0, "Extract shared temp_git_repo helper",
+        "generic triage should preserve the promoted title"
+    );
+    assert_eq!(
+        promoted_revision.1, "Move the duplicated temp_git_repo helper into a shared crate",
+        "generic triage should preserve the promoted description"
+    );
+    assert_eq!(
+        promoted_revision.2, "Single definition used by all three crates",
+        "generic triage should preserve the promoted acceptance criteria"
+    );
+}

@@ -1,13 +1,14 @@
-use ingot_agent_protocol::report::{self, InvestigationReportV1};
 use ingot_domain::finding::Finding;
 use ingot_domain::ids::FindingId;
-use ingot_domain::item::{Classification, Item, WorkflowVersion};
+use ingot_domain::item::Item;
 use ingot_domain::job::Job;
 use ingot_domain::revision::ItemRevision;
 
 use crate::UseCaseError;
 
-use super::triage::{BacklogFindingOverrides, PromotionOverrides, backlog_finding_with_promotion};
+use super::triage::{
+    BacklogFindingOverrides, backlog_finding_with_promotion, promotion_overrides_for_finding,
+};
 
 #[derive(Debug, Clone)]
 pub struct BatchPromoteInput {
@@ -72,7 +73,7 @@ pub fn batch_promote_findings(
             continue;
         }
 
-        let promotion_overrides = extract_promotion_overrides(finding, source_jobs);
+        let promotion_overrides = promotion_overrides_for_finding(finding, source_jobs);
         let sort_key = sort_key_fn();
 
         match backlog_finding_with_promotion(
@@ -102,41 +103,4 @@ pub fn batch_promote_findings(
     }
 
     Ok(BatchPromoteOutput { promoted, skipped })
-}
-
-/// Extract promotion overrides from the source job's result_payload when it
-/// is an investigation report. Returns `Some(overrides)` if the source job
-/// produced an `investigation_report:v1` and contains a matching finding by
-/// `source_finding_key`.
-fn extract_promotion_overrides(
-    finding: &Finding,
-    source_jobs: &[Job],
-) -> Option<PromotionOverrides> {
-    let source_job = source_jobs.iter().find(|j| j.id == finding.source_job_id)?;
-    let schema_version = source_job.state.result_schema_version()?;
-
-    if schema_version != report::INVESTIGATION_REPORT_V1 {
-        return None;
-    }
-
-    let result_payload = source_job.state.result_payload()?;
-    let report: InvestigationReportV1 = serde_json::from_value(result_payload.clone()).ok()?;
-
-    let inv_finding = report
-        .findings
-        .into_iter()
-        .find(|f| f.finding_key == finding.source_finding_key)?;
-
-    let classification = match inv_finding.promotion.classification {
-        report::InvestigationClassification::Change => Classification::Change,
-        report::InvestigationClassification::Bug => Classification::Bug,
-    };
-
-    Some(PromotionOverrides {
-        title: Some(inv_finding.promotion.title),
-        description: Some(inv_finding.promotion.description),
-        acceptance_criteria: Some(inv_finding.promotion.acceptance_criteria),
-        classification: Some(classification),
-        workflow_version: Some(WorkflowVersion::DeliveryV1),
-    })
 }
