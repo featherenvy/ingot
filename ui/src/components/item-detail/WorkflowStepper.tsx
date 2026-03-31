@@ -1,48 +1,8 @@
 import { CheckIcon, CircleDotIcon, CircleIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { PhaseKind } from '../../types/domain'
+import type { Item, PhaseKind } from '../../types/domain'
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip'
-
-// ── Phase & step definitions ───────────────────────────────────
-
-type StepDef = { id: string; label: string; phase: PhaseKind }
-type PhaseDef = { id: string; label: string; steps: StepDef[] }
-
-const WORKFLOW_PHASES: PhaseDef[] = [
-  {
-    id: 'candidate',
-    label: 'Candidate',
-    steps: [
-      { id: 'author_initial', label: 'Author', phase: 'author' },
-      { id: 'review_incremental_initial', label: 'Incr. Review', phase: 'review' },
-      { id: 'review_candidate_initial', label: 'Cand. Review', phase: 'review' },
-      { id: 'validate_candidate_initial', label: 'Validate', phase: 'validate' },
-      { id: 'repair_candidate', label: 'Repair', phase: 'author' },
-      { id: 'review_incremental_repair', label: 'Re-review', phase: 'review' },
-      { id: 'review_candidate_repair', label: 'Cand. Re-review', phase: 'review' },
-      { id: 'validate_candidate_repair', label: 'Re-validate', phase: 'validate' },
-      { id: 'investigate_item', label: 'Investigate', phase: 'investigate' },
-    ],
-  },
-  {
-    id: 'converge',
-    label: 'Converge',
-    steps: [{ id: 'prepare_convergence', label: 'Prepare', phase: 'system' }],
-  },
-  {
-    id: 'integration',
-    label: 'Integration',
-    steps: [
-      { id: 'validate_integrated', label: 'Validate', phase: 'validate' },
-      { id: 'repair_after_integration', label: 'Repair', phase: 'author' },
-      { id: 'review_incremental_after_integration_repair', label: 'Incr. Review', phase: 'review' },
-      { id: 'review_after_integration_repair', label: 'Cand. Review', phase: 'review' },
-      { id: 'validate_after_integration_repair', label: 'Re-validate', phase: 'validate' },
-    ],
-  },
-]
-
-const ALL_STEP_IDS = WORKFLOW_PHASES.flatMap((p) => p.steps.map((s) => s.id))
+import { WORKFLOW_PHASES_BY_VERSION, type WorkflowPhaseDef } from './workflowPresentation'
 
 const PHASE_DOT_COLORS: Record<PhaseKind, string> = {
   author: 'bg-blue-500',
@@ -65,22 +25,22 @@ const PHASE_TEXT_COLORS: Record<PhaseKind, string> = {
 type StepState = 'completed' | 'current' | 'future'
 type PhaseState = 'completed' | 'active' | 'future'
 
-function stepIndex(stepId: string | null): number {
+function stepIndex(stepId: string | null, allStepIds: string[]): number {
   if (!stepId) return -1
-  return ALL_STEP_IDS.indexOf(stepId)
+  return allStepIds.indexOf(stepId)
 }
 
-function getStepState(id: string, currentId: string | null): StepState {
-  const cur = stepIndex(currentId)
-  const idx = stepIndex(id)
+function getStepState(id: string, currentId: string | null, allStepIds: string[]): StepState {
+  const cur = stepIndex(currentId, allStepIds)
+  const idx = stepIndex(id, allStepIds)
   if (cur === -1 || idx === -1) return 'future'
   if (idx < cur) return 'completed'
   if (idx === cur) return 'current'
   return 'future'
 }
 
-function getPhaseState(phase: PhaseDef, currentId: string | null): PhaseState {
-  const states = phase.steps.map((s) => getStepState(s.id, currentId))
+function getPhaseState(phase: WorkflowPhaseDef, currentId: string | null, allStepIds: string[]): PhaseState {
+  const states = phase.steps.map((s) => getStepState(s.id, currentId, allStepIds))
   if (states.includes('current')) return 'active'
   if (states.every((s) => s === 'completed')) return 'completed'
   if (states.every((s) => s === 'future')) return 'future'
@@ -90,15 +50,26 @@ function getPhaseState(phase: PhaseDef, currentId: string | null): PhaseState {
 
 // ── Component ──────────────────────────────────────────────────
 
-export function WorkflowStepper({ currentStepId }: { currentStepId: string | null }) {
-  const currentStep = WORKFLOW_PHASES.flatMap((p) => p.steps).find((s) => s.id === currentStepId)
+export function WorkflowStepper({
+  workflowVersion,
+  currentStepId,
+  dispatchableStepId,
+}: {
+  workflowVersion: Item['workflow_version']
+  currentStepId: string | null
+  dispatchableStepId: string | null
+}) {
+  const workflowPhases = WORKFLOW_PHASES_BY_VERSION[workflowVersion]
+  const allStepIds = workflowPhases.flatMap((phase) => phase.steps.map((step) => step.id))
+  const visualCurrentStepId = currentStepId ?? dispatchableStepId
+  const currentStep = workflowPhases.flatMap((phase) => phase.steps).find((step) => step.id === visualCurrentStepId)
 
   return (
     <div className="space-y-2">
       {/* Phase segments */}
       <div className="flex items-center">
-        {WORKFLOW_PHASES.map((phase, i) => {
-          const state = getPhaseState(phase, currentStepId)
+        {workflowPhases.map((phase, i) => {
+          const state = getPhaseState(phase, visualCurrentStepId, allStepIds)
 
           return (
             <div key={phase.id} className="flex items-center">
@@ -109,6 +80,8 @@ export function WorkflowStepper({ currentStepId }: { currentStepId: string | nul
 
               {/* Phase block */}
               <div
+                data-phase-id={phase.id}
+                data-phase-state={state}
                 className={cn(
                   'flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors',
                   state === 'active' && 'bg-foreground/[0.04] ring-1 ring-foreground/[0.08]',
@@ -142,11 +115,13 @@ export function WorkflowStepper({ currentStepId }: { currentStepId: string | nul
                 {state === 'active' && phase.steps.length > 1 && (
                   <div className="ml-0.5 flex items-center gap-1">
                     {phase.steps.map((step) => {
-                      const ss = getStepState(step.id, currentStepId)
+                      const ss = getStepState(step.id, visualCurrentStepId, allStepIds)
                       return (
                         <Tooltip key={step.id}>
                           <TooltipTrigger asChild>
                             <div
+                              data-step-id={step.id}
+                              data-step-state={ss}
                               className={cn(
                                 'rounded-full transition-all',
                                 ss === 'completed' && cn('size-1.5', PHASE_DOT_COLORS[step.phase]),

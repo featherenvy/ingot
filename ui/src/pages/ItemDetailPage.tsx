@@ -243,7 +243,11 @@ export default function ItemDetailPage(): React.JSX.Element {
         </CollapsibleContent>
       </Collapsible>
 
-      <WorkflowStepper currentStepId={evaluation.current_step_id} />
+      <WorkflowStepper
+        workflowVersion={item.workflow_version}
+        currentStepId={evaluation.current_step_id}
+        dispatchableStepId={evaluation.dispatchable_step_id}
+      />
 
       <OperatorActions
         projectId={projectId}
@@ -309,6 +313,7 @@ export default function ItemDetailPage(): React.JSX.Element {
           <FindingsTable
             findings={findings}
             jobs={detail.jobs}
+            workflowVersion={item.workflow_version}
             pendingFindingId={triageMutation.isPending ? (triageMutation.variables?.findingId ?? null) : null}
             onTriage={(findingId, payload) =>
               triageMutation.mutate({

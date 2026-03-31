@@ -21,6 +21,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible'
 import { Input } from '../ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
+import { WORKFLOW_FINDINGS_COPY, type WorkflowVersion } from './workflowPresentation'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -155,7 +156,7 @@ function InvestigationScopePanel({ scope }: { scope: InvestigationScope }) {
 
 // ── Agent Scope Summary ────────────────────────────────────────
 
-function AgentScopeSummary({ findings }: { findings: Finding[] }) {
+function AgentScopeSummary({ findings, workflowVersion }: { findings: Finding[]; workflowVersion: WorkflowVersion }) {
   const fixNow = findings.filter((f) => f.triage_state === 'fix_now')
   const nonBlocking = findings.filter(
     (f) =>
@@ -165,12 +166,13 @@ function AgentScopeSummary({ findings }: { findings: Finding[] }) {
       f.triage_state === 'dismissed_invalid',
   )
   const untriaged = findings.filter((f) => f.triage_state === 'untriaged' || f.triage_state === 'needs_investigation')
+  const copy = WORKFLOW_FINDINGS_COPY[workflowVersion]
 
   return (
     <div className="flex items-start gap-3 rounded-lg border border-dashed border-border/80 bg-muted/30 px-4 py-3">
       <BotIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
       <div className="min-w-0 space-y-1.5 text-sm">
-        <p className="font-medium text-foreground">Agent scope for next repair job</p>
+        <p className="font-medium text-foreground">{copy.agentScopeTitle}</p>
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
           {fixNow.length > 0 && (
             <span className="flex items-center gap-1.5">
@@ -194,11 +196,7 @@ function AgentScopeSummary({ findings }: { findings: Finding[] }) {
             <span>No findings in scope</span>
           )}
         </div>
-        {untriaged.length > 0 && (
-          <p className="text-xs text-amber-600 dark:text-amber-500">
-            Triage all findings before the agent can proceed.
-          </p>
-        )}
+        {untriaged.length > 0 && <p className="text-xs text-amber-600 dark:text-amber-500">{copy.triageWarning}</p>}
       </div>
     </div>
   )
@@ -524,17 +522,20 @@ function JobGroupHeader({ group }: { group: FindingGroup }) {
 export function FindingsTable({
   findings,
   jobs,
+  workflowVersion,
   onTriage,
   pendingFindingId,
 }: {
   findings: Finding[]
   jobs: Job[]
+  workflowVersion: WorkflowVersion
   onTriage: (findingId: string, payload: TriagePayload) => void
   pendingFindingId: string | null
 }) {
   const groups = groupFindingsByJob(findings, jobs)
   const latestGroup = groups.find((g) => g.isLatest)
   const historicalGroups = groups.filter((g) => !g.isLatest)
+  const copy = WORKFLOW_FINDINGS_COPY[workflowVersion]
 
   if (findings.length === 0) return null
 
@@ -545,15 +546,15 @@ export function FindingsTable({
       </CardHeader>
       <CardContent className="space-y-6 p-5">
         {/* Agent scope summary for the latest review */}
-        {latestGroup && <AgentScopeSummary findings={latestGroup.findings} />}
+        {latestGroup && <AgentScopeSummary findings={latestGroup.findings} workflowVersion={workflowVersion} />}
 
         {/* Latest (actionable) group */}
         {latestGroup && (
           <section className="space-y-3">
             <div className="flex items-center gap-2">
               <div className="h-5 w-1 rounded-full bg-foreground" />
-              <h3 className="text-sm font-semibold tracking-tight">Current Review</h3>
-              <span className="text-xs text-muted-foreground">\u2014 agent acts on these findings only</span>
+              <h3 className="text-sm font-semibold tracking-tight">{copy.currentSectionTitle}</h3>
+              <span className="text-xs text-muted-foreground">\u2014 {copy.currentSectionHint}</span>
             </div>
             <JobGroupHeader group={latestGroup} />
             {latestGroup.findings[0]?.investigation && (
@@ -578,10 +579,11 @@ export function FindingsTable({
           <Collapsible>
             <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground">
               <ChevronDownIcon className="size-4 shrink-0 transition-transform duration-200 group-data-[state=closed]:-rotate-90" />
-              <span className="font-medium">Previous Reviews</span>
+              <span className="font-medium">{copy.previousSectionTitle}</span>
               <span className="text-xs">
                 ({historicalGroups.reduce((sum, g) => sum + g.findings.length, 0)} findings from{' '}
-                {historicalGroups.length} earlier job{historicalGroups.length !== 1 ? 's' : ''})
+                {historicalGroups.length} {copy.previousSectionSummaryNoun}
+                {historicalGroups.length !== 1 ? 's' : ''})
               </span>
             </CollapsibleTrigger>
             <CollapsibleContent>
