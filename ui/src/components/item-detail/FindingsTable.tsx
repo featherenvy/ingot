@@ -21,7 +21,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible'
 import { Input } from '../ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
-import { WORKFLOW_FINDINGS_COPY, type WorkflowVersion } from './workflowPresentation'
+import { WORKFLOW_FINDINGS_COPY, type WorkflowFindingsCopy, type WorkflowVersion } from './workflowPresentation'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -154,9 +154,27 @@ function InvestigationScopePanel({ scope }: { scope: InvestigationScope }) {
   )
 }
 
+function isInvestigationGroup(group: FindingGroup): boolean {
+  return (
+    group.job?.phase_kind === 'investigate' ||
+    group.stepId === 'investigate_item' ||
+    group.stepId === 'investigate_project' ||
+    group.stepId === 'reinvestigate_project' ||
+    group.findings.some((finding) => finding.investigation !== null)
+  )
+}
+
+function findingsCopyForGroup(group: FindingGroup | undefined, workflowVersion: WorkflowVersion): WorkflowFindingsCopy {
+  if (group && isInvestigationGroup(group)) {
+    return WORKFLOW_FINDINGS_COPY['investigation:v1']
+  }
+
+  return WORKFLOW_FINDINGS_COPY[workflowVersion]
+}
+
 // ── Agent Scope Summary ────────────────────────────────────────
 
-function AgentScopeSummary({ findings, workflowVersion }: { findings: Finding[]; workflowVersion: WorkflowVersion }) {
+function AgentScopeSummary({ findings, copy }: { findings: Finding[]; copy: WorkflowFindingsCopy }) {
   const fixNow = findings.filter((f) => f.triage_state === 'fix_now')
   const nonBlocking = findings.filter(
     (f) =>
@@ -166,7 +184,6 @@ function AgentScopeSummary({ findings, workflowVersion }: { findings: Finding[];
       f.triage_state === 'dismissed_invalid',
   )
   const untriaged = findings.filter((f) => f.triage_state === 'untriaged' || f.triage_state === 'needs_investigation')
-  const copy = WORKFLOW_FINDINGS_COPY[workflowVersion]
 
   return (
     <div className="flex items-start gap-3 rounded-lg border border-dashed border-border/80 bg-muted/30 px-4 py-3">
@@ -536,6 +553,7 @@ export function FindingsTable({
   const latestGroup = groups.find((g) => g.isLatest)
   const historicalGroups = groups.filter((g) => !g.isLatest)
   const copy = WORKFLOW_FINDINGS_COPY[workflowVersion]
+  const latestGroupCopy = findingsCopyForGroup(latestGroup, workflowVersion)
 
   if (findings.length === 0) return null
 
@@ -546,15 +564,15 @@ export function FindingsTable({
       </CardHeader>
       <CardContent className="space-y-6 p-5">
         {/* Agent scope summary for the latest review */}
-        {latestGroup && <AgentScopeSummary findings={latestGroup.findings} workflowVersion={workflowVersion} />}
+        {latestGroup && <AgentScopeSummary findings={latestGroup.findings} copy={latestGroupCopy} />}
 
         {/* Latest (actionable) group */}
         {latestGroup && (
           <section className="space-y-3">
             <div className="flex items-center gap-2">
               <div className="h-5 w-1 rounded-full bg-foreground" />
-              <h3 className="text-sm font-semibold tracking-tight">{copy.currentSectionTitle}</h3>
-              <span className="text-xs text-muted-foreground">\u2014 {copy.currentSectionHint}</span>
+              <h3 className="text-sm font-semibold tracking-tight">{latestGroupCopy.currentSectionTitle}</h3>
+              <span className="text-xs text-muted-foreground">\u2014 {latestGroupCopy.currentSectionHint}</span>
             </div>
             <JobGroupHeader group={latestGroup} />
             {latestGroup.findings[0]?.investigation && (

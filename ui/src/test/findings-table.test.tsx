@@ -140,4 +140,48 @@ describe('FindingsTable', () => {
     expect(screen.getByText('Current Review')).toBeInTheDocument()
     expect(screen.getByText('Triage all findings before the agent can proceed.')).toBeInTheDocument()
   })
+
+  it('uses investigation copy when a delivery item latest findings come from investigation', () => {
+    const historicalJob = makeJob({
+      id: 'job_1',
+      stepId: 'review_candidate_initial',
+      endedAt: '2026-03-11T00:02:00Z',
+      phaseKind: 'review',
+    })
+    const latestJob = makeJob({
+      id: 'job_2',
+      stepId: 'investigate_item',
+      endedAt: '2026-03-12T00:02:00Z',
+      phaseKind: 'investigate',
+    })
+
+    renderFindingsTable({
+      workflowVersion: 'delivery:v1',
+      jobs: [historicalJob, latestJob],
+      findings: [
+        makeFinding({
+          id: 'fnd_1',
+          sourceJobId: historicalJob.id,
+          sourceStepId: historicalJob.step_id,
+          createdAt: '2026-03-11T00:02:00Z',
+          triageState: 'wont_fix',
+        }),
+        makeFinding({
+          id: 'fnd_2',
+          sourceJobId: latestJob.id,
+          sourceStepId: latestJob.step_id,
+          createdAt: '2026-03-12T00:02:00Z',
+          triageState: 'untriaged',
+        }),
+      ],
+    })
+
+    expect(screen.getByText('Agent scope for next investigation run')).toBeInTheDocument()
+    expect(screen.getByText('Current Investigation')).toBeInTheDocument()
+    expect(
+      screen.getByText('Triage all findings before the next investigation run can be dispatched.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Agent scope for next repair job')).not.toBeInTheDocument()
+    expect(screen.queryByText('Current Review')).not.toBeInTheDocument()
+  })
 })

@@ -250,8 +250,9 @@ pub fn backlog_finding_with_promotion(
     Ok((linked_item, linked_revision, triaged_finding))
 }
 
-/// Extract promotion overrides from the source job's result payload when it is
-/// an investigation report and contains a matching finding entry.
+/// Extract promotion overrides from persisted investigation metadata when
+/// available, falling back to the source job's result payload for older
+/// investigation findings that do not yet carry `finding.investigation`.
 pub fn promotion_overrides_for_finding(
     finding: &Finding,
     source_jobs: &[Job],
