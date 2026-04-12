@@ -1,4 +1,4 @@
-import { getStatusPresentation } from '../lib/status'
+import { formatStatusLabel, getStatusPresentation } from '../lib/status'
 import { cn } from '../lib/utils'
 import { Badge } from './ui/badge'
 
@@ -18,7 +18,7 @@ export function StatusBadge({ status, label, className }: StatusBadgeProps): Rea
       className={cn('inline-flex items-center gap-1.5 rounded-full px-3 [&_svg]:size-3.5', className)}
     >
       {Icon ? <Icon className={presentation.animateIcon ? 'animate-spin' : undefined} aria-hidden="true" /> : null}
-      <span>{label ?? status}</span>
+      <span>{label ?? formatStatusLabel(status)}</span>
     </Badge>
   )
 }

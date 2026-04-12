@@ -1,7 +1,9 @@
 mod common;
 
 use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId, WorkspaceId};
-use ingot_domain::test_support::{ItemBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder};
+use ingot_domain::test_support::{
+    ConvergenceBuilder, ItemBuilder, ProjectBuilder, RevisionBuilder, WorkspaceBuilder,
+};
 use ingot_domain::workspace::WorkspaceKind;
 use ingot_store_sqlite::Database;
 use ingot_test_support::sqlite::PersistFixture;
@@ -129,4 +131,51 @@ async fn queued_convergence_allows_missing_integration_workspace_in_schema() {
         .await
         .expect("load queued convergence");
     assert_eq!(convergence.state.integration_workspace_id(), None);
+}
+
+#[tokio::test]
+async fn finalized_convergence_round_trips_checkout_adoption_state() {
+    let ConvergenceTestContext {
+        db,
+        project_id,
+        item_id,
+        revision_id,
+        source_workspace_id,
+        ..
+    } = prepare_test_context("ingot-store-convergence").await;
+
+    let convergence = ConvergenceBuilder::new(project_id, item_id, revision_id)
+        .id(ConvergenceId::new())
+        .source_workspace_id(source_workspace_id)
+        .integration_workspace_id(source_workspace_id)
+        .status(ingot_domain::convergence::ConvergenceStatus::Finalized)
+        .final_target_commit_oid("final")
+        .checkout_adoption_blocked_at(
+            "registered checkout has tracked changes",
+            chrono::Utc::now(),
+        )
+        .build();
+    db.create_convergence(&convergence)
+        .await
+        .expect("persist finalized convergence");
+
+    let loaded = db
+        .get_convergence(convergence.id)
+        .await
+        .expect("load finalized convergence");
+    assert_eq!(
+        loaded.state.checkout_adoption_state(),
+        Some(ingot_domain::convergence::CheckoutAdoptionState::Blocked)
+    );
+    assert_eq!(
+        loaded.state.checkout_adoption_message(),
+        Some("registered checkout has tracked changes")
+    );
+    assert_eq!(
+        loaded
+            .state
+            .final_target_commit_oid()
+            .map(ToString::to_string),
+        Some("final".into())
+    );
 }

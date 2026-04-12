@@ -46,6 +46,7 @@ export type PhaseStatus =
   | 'deferred'
   | 'pending_approval'
   | 'finalization_ready'
+  | 'awaiting_checkout_sync'
   | 'awaiting_convergence'
   | 'new'
   | 'unknown'
@@ -75,6 +76,8 @@ export type WorkspaceStatus =
   | 'removing'
 
 export type ConvergenceStatus = 'queued' | 'running' | 'conflicted' | 'prepared' | 'finalized' | 'failed' | 'cancelled'
+export type CheckoutAdoptionState = 'pending' | 'blocked' | 'synced'
+export type FinalizationPhase = 'none' | 'ready_to_finalize' | 'target_ref_advanced'
 export type FindingSubjectKind = 'candidate' | 'integrated'
 export type FindingSeverity = 'low' | 'medium' | 'high' | 'critical'
 export type EstimatedScope = 'small' | 'medium' | 'large'
@@ -272,14 +275,21 @@ export interface QueueStatus {
   position: number | null
   lane_owner_item_id: string | null
   lane_target_ref: string | null
-  checkout_sync_blocked: boolean
-  checkout_sync_message: string | null
+}
+
+export interface FinalizationStatus {
+  phase: FinalizationPhase
+  checkout_adoption_state: CheckoutAdoptionState | null
+  checkout_adoption_message: string | null
+  final_target_commit_oid: string | null
+  finalize_operation_unresolved: boolean
 }
 
 export interface ItemSummary {
   item: Item
   title: string
   evaluation: Evaluation
+  finalization: FinalizationStatus
   queue: QueueStatus
 }
 
@@ -409,6 +419,7 @@ export interface ItemDetail {
   execution_mode: ExecutionMode
   current_revision: ItemRevision
   evaluation: Evaluation
+  finalization: FinalizationStatus
   queue: QueueStatus
   revision_history: ItemRevision[]
   jobs: Job[]

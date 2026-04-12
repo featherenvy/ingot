@@ -1,6 +1,6 @@
 use chrono::Utc;
 use ingot_domain::activity::{Activity, ActivityEventType, ActivitySubject};
-use ingot_domain::convergence::Convergence;
+use ingot_domain::convergence::{Convergence, FinalizedCheckoutAdoption};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::finding::Finding;
 use ingot_domain::git_operation::{
@@ -178,35 +178,70 @@ where
         port.update_git_operation(&operation).await?;
     }
 
-    port.apply_successful_finalization(
+    let target = FinalizationTarget {
+        convergence,
+        queue_entry,
+    };
+    let readiness = port
+        .checkout_finalization_readiness(project, item, revision, &prepared_commit_oid)
+        .await;
+    let initial_checkout_adoption = match &readiness {
+        Ok(CheckoutFinalizationReadiness::Blocked { message }) => {
+            FinalizedCheckoutAdoption::blocked(message.clone(), Utc::now())
+        }
+        Ok(CheckoutFinalizationReadiness::NeedsSync) => {
+            FinalizedCheckoutAdoption::pending(Utc::now())
+        }
+        Ok(CheckoutFinalizationReadiness::Synced) => FinalizedCheckoutAdoption::synced(Utc::now()),
+        Err(_) => FinalizedCheckoutAdoption::pending(Utc::now()),
+    };
+
+    port.persist_target_ref_advance(
         trigger,
         project,
         item,
         revision,
-        FinalizationTarget {
-            convergence,
-            queue_entry,
-        },
+        target,
         &operation,
+        &initial_checkout_adoption,
     )
     .await?;
 
-    let sync_completed = match port
-        .checkout_finalization_readiness(project, item, revision, &prepared_commit_oid)
-        .await?
-    {
+    let readiness = readiness?;
+    let checkout_adopted = match readiness {
         CheckoutFinalizationReadiness::Blocked { .. } => false,
-        CheckoutFinalizationReadiness::NeedsSync => port
-            .sync_checkout_to_prepared_commit(project, revision, &prepared_commit_oid)
-            .await
-            .is_ok(),
+        CheckoutFinalizationReadiness::NeedsSync => {
+            if port
+                .sync_checkout_to_prepared_commit(project, revision, &prepared_commit_oid)
+                .await
+                .is_ok()
+            {
+                true
+            } else {
+                if let Ok(CheckoutFinalizationReadiness::Blocked { message }) = port
+                    .checkout_finalization_readiness(project, item, revision, &prepared_commit_oid)
+                    .await
+                {
+                    let blocked = FinalizedCheckoutAdoption::blocked(message, Utc::now());
+                    port.persist_target_ref_advance(
+                        trigger, project, item, revision, target, &operation, &blocked,
+                    )
+                    .await?;
+                }
+                false
+            }
+        }
         CheckoutFinalizationReadiness::Synced => true,
     };
 
-    if sync_completed {
+    if checkout_adopted {
         operation.status = GitOperationStatus::Reconciled;
         operation.completed_at = Some(Utc::now());
         port.update_git_operation(&operation).await?;
+        port.persist_checkout_adoption_success(
+            trigger, project, item, revision, target, &operation,
+        )
+        .await?;
     }
 
     Ok(())

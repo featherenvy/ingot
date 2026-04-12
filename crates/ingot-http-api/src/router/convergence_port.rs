@@ -7,7 +7,8 @@ use super::support::{
     errors::{api_to_usecase_error, repo_to_item, repo_to_project},
 };
 use chrono::Utc;
-use ingot_domain::convergence::ConvergenceStatus;
+use ingot_domain::convergence::{ConvergenceStatus, FinalizedCheckoutAdoption};
+use ingot_domain::git_operation::GitOperationStatus;
 use ingot_domain::ids::ItemRevisionId;
 use ingot_git::commands::FinalizeTargetRefOutcome;
 use ingot_git::project_repo::{CheckoutFinalizationStatus, CheckoutSyncStatus};
@@ -618,21 +619,22 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         }
     }
 
-    fn apply_successful_finalization(
+    fn persist_target_ref_advance(
         &self,
-        trigger: FinalizePreparedTrigger,
+        _trigger: FinalizePreparedTrigger,
         project: &Project,
         item: &Item,
         _revision: &ItemRevision,
         target: FinalizationTarget<'_>,
         operation: &GitOperation,
+        checkout_adoption: &FinalizedCheckoutAdoption,
     ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
         let state = self.state.clone();
         let project = project.clone();
-        let mut item = item.clone();
         let mut convergence = target.convergence.clone();
         let mut queue_entry = target.queue_entry.clone();
         let operation = operation.clone();
+        let checkout_adoption = checkout_adoption.clone();
         async move {
             let now = Utc::now();
             let final_commit_oid = operation
@@ -645,9 +647,16 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                     )
                 })?;
 
-            convergence
-                .transition_to_finalized(final_commit_oid, now)
-                .map_err(|error| UseCaseError::Internal(error.to_string()))?;
+            let was_finalized = convergence.state.status() == ConvergenceStatus::Finalized;
+            if was_finalized {
+                convergence
+                    .transition_finalized_checkout_adoption(checkout_adoption)
+                    .map_err(|error| UseCaseError::Internal(error.to_string()))?;
+            } else {
+                convergence
+                    .transition_to_finalized(final_commit_oid, checkout_adoption, now)
+                    .map_err(|error| UseCaseError::Internal(error.to_string()))?;
+            }
             state
                 .db
                 .update_convergence(&convergence)
@@ -660,28 +669,6 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
             state
                 .db
                 .update_queue_entry(&queue_entry)
-                .await
-                .map_err(UseCaseError::Repository)?;
-
-            let (resolution_source, approval_state) = match trigger {
-                FinalizePreparedTrigger::ApprovalCommand => {
-                    (ResolutionSource::ApprovalCommand, ApprovalState::Approved)
-                }
-                FinalizePreparedTrigger::SystemCommand => {
-                    (ResolutionSource::SystemCommand, ApprovalState::NotRequired)
-                }
-            };
-            item.lifecycle = Lifecycle::Done {
-                reason: DoneReason::Completed,
-                source: resolution_source,
-                closed_at: now,
-            };
-            item.approval_state = approval_state;
-            item.escalation = Escalation::None;
-            item.updated_at = now;
-            state
-                .db
-                .update_item(&item)
                 .await
                 .map_err(UseCaseError::Repository)?;
 
@@ -706,16 +693,96 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                 }
             }
 
-            append_activity(
-                &state,
-                project.id,
-                ActivityEventType::ConvergenceFinalized,
-                ActivitySubject::Convergence(convergence.id),
-                serde_json::json!({ "item_id": item.id }),
-            )
-            .await
-            .map_err(api_to_usecase_error)?;
+            if !was_finalized {
+                append_activity(
+                    &state,
+                    project.id,
+                    ActivityEventType::ConvergenceFinalized,
+                    ActivitySubject::Convergence(convergence.id),
+                    serde_json::json!({ "item_id": item.id }),
+                )
+                .await
+                .map_err(api_to_usecase_error)?;
+            }
 
+            Ok(())
+        }
+    }
+
+    fn persist_checkout_adoption_success(
+        &self,
+        trigger: FinalizePreparedTrigger,
+        _project: &Project,
+        item: &Item,
+        _revision: &ItemRevision,
+        target: FinalizationTarget<'_>,
+        operation: &GitOperation,
+    ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
+        let state = self.state.clone();
+        let item_id = item.id;
+        let convergence_id = target.convergence.id;
+        let operation = operation.clone();
+        async move {
+            if operation.status != GitOperationStatus::Reconciled {
+                return Err(UseCaseError::Internal(
+                    "cannot close finalized item before finalize operation reconciles".into(),
+                ));
+            }
+            if state
+                .db
+                .find_unresolved_finalize_for_convergence(convergence_id)
+                .await
+                .map_err(UseCaseError::Repository)?
+                .is_some()
+            {
+                return Err(UseCaseError::Internal(
+                    "cannot close finalized item while finalize operation remains unresolved"
+                        .into(),
+                ));
+            }
+
+            let mut convergence = state
+                .db
+                .get_convergence(convergence_id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            convergence
+                .transition_finalized_checkout_adoption(FinalizedCheckoutAdoption::synced(
+                    Utc::now(),
+                ))
+                .map_err(|error| UseCaseError::Internal(error.to_string()))?;
+            state
+                .db
+                .update_convergence(&convergence)
+                .await
+                .map_err(UseCaseError::Repository)?;
+
+            let mut item = state
+                .db
+                .get_item(item_id)
+                .await
+                .map_err(UseCaseError::Repository)?;
+            let (resolution_source, approval_state) = match trigger {
+                FinalizePreparedTrigger::ApprovalCommand => {
+                    (ResolutionSource::ApprovalCommand, ApprovalState::Approved)
+                }
+                FinalizePreparedTrigger::SystemCommand => {
+                    (ResolutionSource::SystemCommand, ApprovalState::NotRequired)
+                }
+            };
+            item.lifecycle = Lifecycle::Done {
+                reason: DoneReason::Completed,
+                source: resolution_source,
+                closed_at: Utc::now(),
+            };
+            item.approval_state = approval_state;
+            item.escalation = Escalation::None;
+            item.updated_at = Utc::now();
+            state
+                .db
+                .update_item(&item)
+                .await
+                .map_err(UseCaseError::Repository)?;
             Ok(())
         }
     }

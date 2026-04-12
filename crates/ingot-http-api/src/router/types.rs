@@ -4,7 +4,7 @@ use ingot_agent_protocol::{AgentOutputDocument, JobStructuredResult};
 use ingot_domain::agent::{AdapterKind, AgentCapability, AgentProvider};
 use ingot_domain::agent_model::AgentModel;
 use ingot_domain::commit_oid::CommitOid;
-use ingot_domain::convergence::ConvergenceStatus;
+use ingot_domain::convergence::{CheckoutAdoptionState, ConvergenceStatus};
 use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
 use ingot_domain::finding::{Finding, FindingTriageState};
 use ingot_domain::git_ref::GitRef;
@@ -29,7 +29,25 @@ pub struct ItemSummaryResponse {
     pub item: Item,
     pub title: String,
     pub evaluation: Evaluation,
+    pub finalization: FinalizationStatusResponse,
     pub queue: QueueStatusResponse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinalizationPhaseResponse {
+    None,
+    ReadyToFinalize,
+    TargetRefAdvanced,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FinalizationStatusResponse {
+    pub phase: FinalizationPhaseResponse,
+    pub checkout_adoption_state: Option<CheckoutAdoptionState>,
+    pub checkout_adoption_message: Option<String>,
+    pub final_target_commit_oid: Option<CommitOid>,
+    pub finalize_operation_unresolved: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,8 +66,6 @@ pub struct QueueStatusResponse {
     pub position: Option<u32>,
     pub lane_owner_item_id: Option<ItemId>,
     pub lane_target_ref: Option<GitRef>,
-    pub checkout_sync_blocked: bool,
-    pub checkout_sync_message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,6 +74,7 @@ pub struct ItemDetailResponse {
     pub execution_mode: ExecutionMode,
     pub current_revision: ItemRevision,
     pub evaluation: Evaluation,
+    pub finalization: FinalizationStatusResponse,
     pub queue: QueueStatusResponse,
     pub revision_history: Vec<ItemRevision>,
     pub jobs: Vec<Job>,

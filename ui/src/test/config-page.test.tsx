@@ -79,7 +79,7 @@ describe('ConfigPage', () => {
     expect(await screen.findByRole('button', { name: 'Copy project defaults' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Register Codex agent' })).toBeInTheDocument()
     expect(await screen.findByRole('button', { name: 'Reprobe' })).toBeInTheDocument()
-    expect(screen.getByText('available')).toBeInTheDocument()
+    expect(screen.getByText('Available')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Register Codex agent' }))
 

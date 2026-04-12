@@ -45,13 +45,18 @@ function makeItemSummary(item: Item, evaluation: Evaluation, title = 'Test item'
     item,
     title,
     evaluation,
+    finalization: {
+      phase: 'none',
+      checkout_adoption_state: null,
+      checkout_adoption_message: null,
+      final_target_commit_oid: null,
+      finalize_operation_unresolved: false,
+    },
     queue: {
       state: null,
       position: null,
       lane_owner_item_id: null,
       lane_target_ref: null,
-      checkout_sync_blocked: false,
-      checkout_sync_message: null,
     },
   }
 }

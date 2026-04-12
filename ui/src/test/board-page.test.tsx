@@ -107,4 +107,70 @@ describe('BoardPage', () => {
     expect(screen.getByText('Error: network down')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
   })
+
+  it('renders awaiting checkout sync items in the working lane', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/projects/prj_1/items')) {
+        return Promise.resolve(
+          jsonResponse([
+            {
+              title: 'Blocked finalization',
+              item: {
+                id: 'itm_1',
+                sort_key: '2026-03-11T00:00:00Z#itm_1',
+                project_id: 'prj_1',
+                classification: 'change',
+                workflow_version: 'delivery:v1',
+                lifecycle_state: 'open',
+                parking_state: 'active',
+                approval_state: 'not_required',
+                escalation_state: 'operator_required',
+                escalation_reason: 'checkout_sync_blocked',
+                current_revision_id: 'rev_1',
+                origin_kind: 'manual',
+                priority: 'major',
+                labels: [],
+                operator_notes: null,
+                created_at: '2026-03-11T00:00:00Z',
+                updated_at: '2026-03-11T00:10:00Z',
+              },
+              evaluation: {
+                board_status: 'WORKING',
+                attention_badges: ['escalated'],
+                current_step_id: 'prepare_convergence',
+                current_phase_kind: null,
+                phase_status: 'awaiting_checkout_sync',
+                next_recommended_action: 'resolve_checkout_sync',
+                dispatchable_step_id: null,
+                auxiliary_dispatchable_step_ids: [],
+                allowed_actions: [],
+                terminal_readiness: false,
+                diagnostics: [],
+              },
+              finalization: {
+                phase: 'target_ref_advanced',
+                checkout_adoption_state: 'blocked',
+                checkout_adoption_message: 'Registered checkout is blocked',
+                final_target_commit_oid: 'abcdef1234567890',
+                finalize_operation_unresolved: true,
+              },
+              queue: {
+                state: 'released',
+                position: null,
+                lane_owner_item_id: null,
+                lane_target_ref: 'refs/heads/main',
+              },
+            },
+          ]),
+        )
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Blocked finalization')).toBeInTheDocument()
+    expect(screen.getByText('Awaiting Checkout Sync')).toBeInTheDocument()
+  })
 })

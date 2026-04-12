@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use ingot_domain::commit_oid::CommitOid;
-use ingot_domain::convergence::Convergence;
+use ingot_domain::convergence::{Convergence, FinalizedCheckoutAdoption};
 use ingot_domain::convergence_queue::ConvergenceQueueEntry;
 use ingot_domain::finding::Finding;
 use ingot_domain::git_operation::GitOperation;
@@ -70,6 +70,7 @@ pub enum FinalizePreparedTrigger {
     SystemCommand,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct FinalizationTarget<'a> {
     pub convergence: &'a Convergence,
     pub queue_entry: &'a ConvergenceQueueEntry,
@@ -224,7 +225,19 @@ pub trait PreparedConvergenceFinalizePort: Send + Sync {
         operation: &GitOperation,
     ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
 
-    fn apply_successful_finalization(
+    #[allow(clippy::too_many_arguments)]
+    fn persist_target_ref_advance(
+        &self,
+        trigger: FinalizePreparedTrigger,
+        project: &Project,
+        item: &ingot_domain::item::Item,
+        revision: &ItemRevision,
+        target: FinalizationTarget<'_>,
+        operation: &GitOperation,
+        checkout_adoption: &FinalizedCheckoutAdoption,
+    ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
+
+    fn persist_checkout_adoption_success(
         &self,
         trigger: FinalizePreparedTrigger,
         project: &Project,

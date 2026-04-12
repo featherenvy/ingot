@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 use ingot_domain::activity::Activity;
 use ingot_domain::commit_oid::CommitOid;
-use ingot_domain::convergence::{Convergence, ConvergenceStatus};
+use ingot_domain::convergence::{Convergence, ConvergenceStatus, FinalizedCheckoutAdoption};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::git_operation::GitOperation;
 use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId};
@@ -38,7 +38,8 @@ pub(super) struct FakePort {
     pub(super) checkout_finalization_readiness: CheckoutFinalizationReadiness,
     pub(super) checkout_finalization_readiness_error: Option<String>,
     pub(super) finalize_target_ref_result: FinalizeTargetRefResult,
-    pub(super) apply_successful_finalization_should_fail: bool,
+    pub(super) persist_target_ref_advance_should_fail: bool,
+    pub(super) persist_checkout_adoption_success_should_fail: bool,
     pub(super) sync_checkout_should_fail: bool,
 }
 
@@ -98,7 +99,8 @@ impl FakePort {
             checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
             checkout_finalization_readiness_error: None,
             finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
-            apply_successful_finalization_should_fail: false,
+            persist_target_ref_advance_should_fail: false,
+            persist_checkout_adoption_success_should_fail: false,
             sync_checkout_should_fail: false,
         }
     }
@@ -113,7 +115,8 @@ impl FakePort {
             checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
             checkout_finalization_readiness_error: None,
             finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
-            apply_successful_finalization_should_fail: false,
+            persist_target_ref_advance_should_fail: false,
+            persist_checkout_adoption_success_should_fail: false,
             sync_checkout_should_fail: false,
         }
     }
@@ -128,7 +131,8 @@ impl FakePort {
             checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
             checkout_finalization_readiness_error: None,
             finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
-            apply_successful_finalization_should_fail: false,
+            persist_target_ref_advance_should_fail: false,
+            persist_checkout_adoption_success_should_fail: false,
             sync_checkout_should_fail: false,
         }
     }
@@ -396,7 +400,28 @@ impl PreparedConvergenceFinalizePort for FakePort {
         ready(Ok(()))
     }
 
-    fn apply_successful_finalization(
+    fn persist_target_ref_advance(
+        &self,
+        trigger: FinalizePreparedTrigger,
+        _project: &Project,
+        item: &ingot_domain::item::Item,
+        _revision: &ItemRevision,
+        target: FinalizationTarget<'_>,
+        _operation: &GitOperation,
+        checkout_adoption: &FinalizedCheckoutAdoption,
+    ) -> impl Future<Output = Result<(), UseCaseError>> + Send {
+        self.calls.lock().expect("calls lock").push(format!(
+            "persist_target_ref_advance:{trigger:?}:{}:{}:{:?}",
+            item.id, target.convergence.id, checkout_adoption.state
+        ));
+        ready(if self.persist_target_ref_advance_should_fail {
+            Err(UseCaseError::Internal("boom".into()))
+        } else {
+            Ok(())
+        })
+    }
+
+    fn persist_checkout_adoption_success(
         &self,
         trigger: FinalizePreparedTrigger,
         _project: &Project,
@@ -406,10 +431,10 @@ impl PreparedConvergenceFinalizePort for FakePort {
         _operation: &GitOperation,
     ) -> impl Future<Output = Result<(), UseCaseError>> + Send {
         self.calls.lock().expect("calls lock").push(format!(
-            "apply_successful_finalization:{trigger:?}:{}:{}",
+            "persist_checkout_adoption_success:{trigger:?}:{}:{}",
             item.id, target.convergence.id
         ));
-        ready(if self.apply_successful_finalization_should_fail {
+        ready(if self.persist_checkout_adoption_success_should_fail {
             Err(UseCaseError::Internal("boom".into()))
         } else {
             Ok(())

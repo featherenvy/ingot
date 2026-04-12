@@ -52,13 +52,18 @@ function makeItemDetail(): ItemDetail {
       terminal_readiness: false,
       diagnostics: [],
     },
+    finalization: {
+      phase: 'none',
+      checkout_adoption_state: null,
+      checkout_adoption_message: null,
+      final_target_commit_oid: null,
+      finalize_operation_unresolved: false,
+    },
     queue: {
       state: null,
       position: null,
       lane_owner_item_id: null,
       lane_target_ref: null,
-      checkout_sync_blocked: false,
-      checkout_sync_message: null,
     },
     revision_history: [],
     jobs: [],
@@ -150,6 +155,37 @@ describe('ItemDetailPage', () => {
     expect(await screen.findByText('Autopilot')).toBeInTheDocument()
     expect(fetchSpy).toHaveBeenCalledTimes(2)
     expect(fetchSpy.mock.calls.map(([input]) => String(input))).not.toContain('/api/projects')
+  })
+
+  it('shows awaiting checkout sync status and blocker message when finalization is blocked', async () => {
+    const detail = makeItemDetail()
+    detail.finalization = {
+      phase: 'target_ref_advanced',
+      checkout_adoption_state: 'blocked',
+      checkout_adoption_message: 'Registered checkout has tracked or staged changes; clean it before finalizing',
+      final_target_commit_oid: 'abcdef1234567890',
+      finalize_operation_unresolved: true,
+    }
+    detail.evaluation.phase_status = 'awaiting_checkout_sync'
+    detail.evaluation.next_recommended_action = 'resolve_checkout_sync'
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/projects/prj_1/items/itm_1')) {
+        return Promise.resolve(jsonResponse(detail))
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('Awaiting checkout sync')).toBeInTheDocument()
+    expect(
+      screen.getByText('Registered checkout has tracked or staged changes; clean it before finalizing'),
+    ).toBeInTheDocument()
   })
 
   it('renders query failures in a destructive alert', async () => {

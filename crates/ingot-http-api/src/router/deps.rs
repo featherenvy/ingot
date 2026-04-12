@@ -22,9 +22,8 @@ pub(crate) use ingot_domain::item::{
 pub(crate) use ingot_domain::job::{Job, JobStatus, OutcomeClass};
 pub(crate) use ingot_domain::ports::{ProjectMutationLockPort, RepositoryError};
 pub(crate) use ingot_domain::project::Project;
-pub(crate) use ingot_domain::revision::{ApprovalPolicy, AuthoringBaseSeed, ItemRevision};
+pub(crate) use ingot_domain::revision::{AuthoringBaseSeed, ItemRevision};
 pub(crate) use ingot_domain::workspace::{Workspace, WorkspaceKind, WorkspaceStatus};
-pub(crate) use ingot_git::project_repo::CheckoutSyncStatus;
 pub(crate) use ingot_usecases::convergence::{
     ConvergenceCommandPort, ConvergenceService, ConvergenceSystemActionPort,
 };

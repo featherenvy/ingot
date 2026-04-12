@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use ingot_domain::activity::{ActivityEventType, ActivitySubject};
-use ingot_domain::convergence::Convergence;
+use ingot_domain::convergence::{Convergence, FinalizedCheckoutAdoption};
 use ingot_domain::convergence_queue::ConvergenceQueueEntry;
 use ingot_domain::git_operation::GitOperation;
 use ingot_domain::ports::ProjectMutationLockPort;
@@ -389,7 +389,7 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
         }
     }
 
-    fn apply_successful_finalization(
+    fn persist_target_ref_advance(
         &self,
         _trigger: FinalizePreparedTrigger,
         project: &Project,
@@ -397,22 +397,51 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
         _revision: &ItemRevision,
         target: FinalizationTarget<'_>,
         operation: &GitOperation,
+        checkout_adoption: &FinalizedCheckoutAdoption,
     ) -> impl Future<Output = Result<(), ingot_usecases::UseCaseError>> + Send {
         let dispatcher = self.dispatcher.clone();
         let convergence = target.convergence.clone();
         let operation = operation.clone();
+        let checkout_adoption = checkout_adoption.clone();
         async move {
-            dispatcher
-                .adopt_finalized_target_ref(&operation)
+            if dispatcher
+                .persist_target_ref_advance(&operation, checkout_adoption)
                 .await
-                .map_err(usecase_from_runtime_error)?;
+                .map_err(usecase_from_runtime_error)?
+            {
+                dispatcher
+                    .append_activity(
+                        project.id,
+                        ActivityEventType::ConvergenceFinalized,
+                        ActivitySubject::Convergence(convergence.id),
+                        serde_json::json!({ "item_id": item.id }),
+                    )
+                    .await
+                    .map_err(usecase_from_runtime_error)?;
+            }
+            Ok(())
+        }
+    }
+
+    fn persist_checkout_adoption_success(
+        &self,
+        _trigger: FinalizePreparedTrigger,
+        _project: &Project,
+        _item: &ingot_domain::item::Item,
+        _revision: &ItemRevision,
+        _target: FinalizationTarget<'_>,
+        operation: &GitOperation,
+    ) -> impl Future<Output = Result<(), ingot_usecases::UseCaseError>> + Send {
+        let dispatcher = self.dispatcher.clone();
+        let operation = operation.clone();
+        async move {
+            if operation.status != ingot_domain::git_operation::GitOperationStatus::Reconciled {
+                return Err(ingot_usecases::UseCaseError::Internal(
+                    "cannot close finalized item before reconcile".into(),
+                ));
+            }
             dispatcher
-                .append_activity(
-                    project.id,
-                    ActivityEventType::ConvergenceFinalized,
-                    ActivitySubject::Convergence(convergence.id),
-                    serde_json::json!({ "item_id": item.id }),
-                )
+                .persist_checkout_adoption_success(&operation)
                 .await
                 .map_err(usecase_from_runtime_error)?;
             Ok(())

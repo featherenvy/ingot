@@ -154,7 +154,7 @@ export default function ItemDetailPage(): React.JSX.Element {
   const retryableJobs = detail?.jobs.filter((job) => ['failed', 'cancelled', 'expired'].includes(job.status)) ?? []
   const isAgentAvailabilityLoading = isAgentsLoading && !!activeJob
   const queueBlocker = isAgentAvailabilityLoading ? null : getQueuedJobBlocker(activeJob ? [activeJob] : [], agents)
-  const operatorBlocker = detail?.queue.checkout_sync_message ?? queueBlocker
+  const operatorBlocker = detail?.finalization.checkout_adoption_message ?? queueBlocker
 
   const retryableJobIds = new Set(retryableJobs.map((job) => job.id))
 
@@ -234,6 +234,9 @@ export default function ItemDetailPage(): React.JSX.Element {
         )}
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={evaluation.board_status} />
+          {detail.finalization.checkout_adoption_state && detail.finalization.checkout_adoption_state !== 'synced' && (
+            <StatusBadge status="awaiting_checkout_sync" label="Awaiting checkout sync" />
+          )}
           <Badge variant="secondary">{item.priority}</Badge>
           {item.approval_state !== 'not_required' && item.approval_state !== 'not_requested' && (
             <StatusBadge status={item.approval_state} />

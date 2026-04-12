@@ -635,6 +635,10 @@ async fn approve_route_reuses_existing_finalize_op_when_checkout_is_blocked() {
         .await
         .expect("route response");
     assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
 
     let repeat_response = app
         .clone()
@@ -658,10 +662,10 @@ async fn approve_route_reuses_existing_finalize_op_when_checkout_is_blocked() {
     .fetch_one(db.raw_pool())
     .await
     .expect("item state");
-    assert_eq!(item_state.0, "done");
-    assert_eq!(item_state.1, "approved");
-    assert_eq!(item_state.2, "none");
-    assert_eq!(item_state.3, None);
+    assert_eq!(item_state.0, "open");
+    assert_eq!(item_state.1, "pending");
+    assert_eq!(item_state.2, "operator_required");
+    assert_eq!(item_state.3.as_deref(), Some("checkout_sync_blocked"));
 
     let convergence_status: (String,) =
         sqlx::query_as("SELECT status FROM convergences WHERE id = ?")
@@ -690,6 +694,21 @@ async fn approve_route_reuses_existing_finalize_op_when_checkout_is_blocked() {
     .expect("git operations");
     assert_eq!(git_ops.len(), 1);
     assert_eq!(git_ops[0].1, "applied");
+    assert_eq!(json["item"]["lifecycle_state"].as_str(), Some("open"));
+    assert_eq!(json["evaluation"]["board_status"].as_str(), Some("WORKING"));
+    assert_eq!(
+        json["finalization"]["phase"].as_str(),
+        Some("target_ref_advanced")
+    );
+    assert_eq!(
+        json["finalization"]["checkout_adoption_state"].as_str(),
+        Some("blocked")
+    );
+    assert_eq!(
+        json["finalization"]["finalize_operation_unresolved"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(json["queue"]["state"].as_str(), None);
 
     assert_eq!(
         git_output(&repo, &["rev-parse", "refs/heads/main"]),

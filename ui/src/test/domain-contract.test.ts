@@ -36,13 +36,18 @@ describe('domain contract typing', () => {
         terminal_readiness: false,
         diagnostics: ['active investigation job'],
       },
+      finalization: {
+        phase: 'none',
+        checkout_adoption_state: null,
+        checkout_adoption_message: null,
+        final_target_commit_oid: null,
+        finalize_operation_unresolved: false,
+      },
       queue: {
         state: null,
         position: null,
         lane_owner_item_id: null,
         lane_target_ref: null,
-        checkout_sync_blocked: false,
-        checkout_sync_message: null,
       },
     }
 
@@ -98,13 +103,18 @@ describe('domain contract typing', () => {
         terminal_readiness: false,
         diagnostics: [],
       },
+      finalization: {
+        phase: 'ready_to_finalize',
+        checkout_adoption_state: null,
+        checkout_adoption_message: null,
+        final_target_commit_oid: 'abc123456789',
+        finalize_operation_unresolved: false,
+      },
       queue: {
         state: 'head',
         position: 1,
         lane_owner_item_id: 'itm_1',
         lane_target_ref: 'refs/heads/main',
-        checkout_sync_blocked: false,
-        checkout_sync_message: null,
       },
       revision_history: [],
       jobs: [

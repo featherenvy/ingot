@@ -1,5 +1,8 @@
 use crate::commit_oid::CommitOid;
-use crate::convergence::{Convergence, ConvergenceState, ConvergenceStatus, ConvergenceStrategy};
+use crate::convergence::{
+    CheckoutAdoptionState, Convergence, ConvergenceState, ConvergenceStatus, ConvergenceStrategy,
+    FinalizedCheckoutAdoption,
+};
 use crate::git_ref::GitRef;
 use crate::ids;
 use chrono::{DateTime, Utc};
@@ -20,6 +23,10 @@ pub struct ConvergenceBuilder {
     input_target_commit_oid: Option<CommitOid>,
     prepared_commit_oid: Option<CommitOid>,
     final_target_commit_oid: Option<CommitOid>,
+    checkout_adoption_state: Option<CheckoutAdoptionState>,
+    checkout_adoption_message: Option<String>,
+    checkout_adoption_updated_at: Option<DateTime<Utc>>,
+    checkout_adoption_synced_at: Option<DateTime<Utc>>,
     target_head_valid: Option<bool>,
     conflict_summary: Option<String>,
     created_at: DateTime<Utc>,
@@ -46,6 +53,10 @@ impl ConvergenceBuilder {
             input_target_commit_oid: Some(CommitOid::new("base")),
             prepared_commit_oid: Some(CommitOid::new("prepared")),
             final_target_commit_oid: None,
+            checkout_adoption_state: Some(CheckoutAdoptionState::Pending),
+            checkout_adoption_message: None,
+            checkout_adoption_updated_at: Some(default_timestamp()),
+            checkout_adoption_synced_at: None,
             target_head_valid: None,
             conflict_summary: None,
             created_at: default_timestamp(),
@@ -88,6 +99,11 @@ impl ConvergenceBuilder {
         self
     }
 
+    pub fn final_target_commit_oid(mut self, oid: impl Into<String>) -> Self {
+        self.final_target_commit_oid = Some(CommitOid::new(oid.into()));
+        self
+    }
+
     pub fn no_integration_workspace_id(mut self) -> Self {
         self.integration_workspace_id = None;
         self
@@ -105,6 +121,34 @@ impl ConvergenceBuilder {
 
     pub fn completed_at(mut self, completed_at: DateTime<Utc>) -> Self {
         self.completed_at = Some(completed_at);
+        self
+    }
+
+    pub fn checkout_adoption_pending_at(mut self, updated_at: DateTime<Utc>) -> Self {
+        self.checkout_adoption_state = Some(CheckoutAdoptionState::Pending);
+        self.checkout_adoption_message = None;
+        self.checkout_adoption_updated_at = Some(updated_at);
+        self.checkout_adoption_synced_at = None;
+        self
+    }
+
+    pub fn checkout_adoption_blocked_at(
+        mut self,
+        message: impl Into<String>,
+        updated_at: DateTime<Utc>,
+    ) -> Self {
+        self.checkout_adoption_state = Some(CheckoutAdoptionState::Blocked);
+        self.checkout_adoption_message = Some(message.into());
+        self.checkout_adoption_updated_at = Some(updated_at);
+        self.checkout_adoption_synced_at = None;
+        self
+    }
+
+    pub fn checkout_adoption_synced_at(mut self, synced_at: DateTime<Utc>) -> Self {
+        self.checkout_adoption_state = Some(CheckoutAdoptionState::Synced);
+        self.checkout_adoption_message = None;
+        self.checkout_adoption_updated_at = Some(synced_at);
+        self.checkout_adoption_synced_at = Some(synced_at);
         self
     }
 
@@ -157,6 +201,25 @@ impl ConvergenceBuilder {
                 final_target_commit_oid: self
                     .final_target_commit_oid
                     .expect("Finalized convergence requires final_target_commit_oid"),
+                checkout_adoption: match self
+                    .checkout_adoption_state
+                    .expect("Finalized convergence requires checkout_adoption_state")
+                {
+                    CheckoutAdoptionState::Pending => FinalizedCheckoutAdoption::pending(
+                        self.checkout_adoption_updated_at
+                            .expect("Finalized convergence requires checkout adoption timestamp"),
+                    ),
+                    CheckoutAdoptionState::Blocked => FinalizedCheckoutAdoption::blocked(
+                        self.checkout_adoption_message
+                            .expect("Blocked finalized convergence requires blocker message"),
+                        self.checkout_adoption_updated_at
+                            .expect("Finalized convergence requires checkout adoption timestamp"),
+                    ),
+                    CheckoutAdoptionState::Synced => FinalizedCheckoutAdoption::synced(
+                        self.checkout_adoption_synced_at
+                            .expect("Synced finalized convergence requires synced_at"),
+                    ),
+                },
                 completed_at: self.completed_at.unwrap_or_else(Utc::now),
             },
             ConvergenceStatus::Failed => ConvergenceState::Failed {

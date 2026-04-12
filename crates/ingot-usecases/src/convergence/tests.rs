@@ -185,12 +185,17 @@ async fn approve_item_uses_shared_finalizer_for_already_finalized_target() {
     assert!(
         calls
             .iter()
-            .any(|call| call.starts_with("apply_successful_finalization:ApprovalCommand:"))
+            .any(|call| call.starts_with("persist_target_ref_advance:ApprovalCommand:"))
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.starts_with("persist_checkout_adoption_success:ApprovalCommand:"))
     );
 }
 
 #[tokio::test]
-async fn approve_item_closes_item_even_when_checkout_sync_stays_blocked() {
+async fn approve_item_leaves_finalize_unresolved_when_checkout_sync_stays_blocked() {
     let port = FakePort {
         checkout_finalization_readiness: super::CheckoutFinalizationReadiness::Blocked {
             message: "registered checkout blocked".into(),
@@ -213,13 +218,18 @@ async fn approve_item_closes_item_even_when_checkout_sync_stays_blocked() {
     assert!(
         calls
             .iter()
-            .any(|call| call.starts_with("apply_successful_finalization:ApprovalCommand:"))
+            .any(|call| call.starts_with("persist_target_ref_advance:ApprovalCommand:"))
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.starts_with("persist_checkout_adoption_success:"))
     );
     assert!(!calls.iter().any(|call| call.starts_with("sync_checkout:")));
 }
 
 #[tokio::test]
-async fn approve_item_keeps_finalize_operation_unresolved_when_sync_retry_fails_after_closure() {
+async fn approve_item_keeps_finalize_operation_unresolved_when_sync_retry_fails() {
     let port = FakePort {
         checkout_finalization_readiness: super::CheckoutFinalizationReadiness::NeedsSync,
         sync_checkout_should_fail: true,
@@ -241,7 +251,12 @@ async fn approve_item_keeps_finalize_operation_unresolved_when_sync_retry_fails_
     assert!(
         calls
             .iter()
-            .any(|call| call.starts_with("apply_successful_finalization:ApprovalCommand:"))
+            .any(|call| call.starts_with("persist_target_ref_advance:ApprovalCommand:"))
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.starts_with("persist_checkout_adoption_success:"))
     );
     assert!(calls.iter().any(|call| call.starts_with("sync_checkout:")));
 }
@@ -269,15 +284,21 @@ async fn approve_item_surfaces_checkout_readiness_failures_after_finalize() {
     assert!(
         calls
             .iter()
-            .any(|call| call.starts_with("apply_successful_finalization:ApprovalCommand:"))
+            .any(|call| call.starts_with("persist_target_ref_advance:ApprovalCommand:"))
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.starts_with("persist_checkout_adoption_success:"))
     );
     assert!(!calls.iter().any(|call| call.starts_with("sync_checkout:")));
 }
 
 #[tokio::test]
-async fn approve_item_keeps_finalize_operation_unresolved_when_success_persistence_fails() {
+async fn approve_item_keeps_finalize_operation_unresolved_when_target_ref_advance_persistence_fails()
+ {
     let port = FakePort {
-        apply_successful_finalization_should_fail: true,
+        persist_target_ref_advance_should_fail: true,
         ..FakePort::with_approval_context(FakePort::default_approval_context())
     };
     let service = ConvergenceService::new(port.clone());

@@ -927,8 +927,13 @@ async fn reconcile_startup_finalizes_item_even_when_checkout_sync_is_blocked() {
         "blocked finalize should stay unresolved"
     );
     let updated_item = db.get_item(item.id).await.expect("item");
-    assert!(updated_item.lifecycle.is_done());
-    assert!(matches!(updated_item.escalation, Escalation::None));
+    assert!(updated_item.lifecycle.is_open());
+    assert!(matches!(
+        updated_item.escalation,
+        Escalation::OperatorRequired {
+            reason: ingot_domain::item::EscalationReason::CheckoutSyncBlocked
+        }
+    ));
     let updated_convergence = db
         .get_convergence(convergence.id)
         .await
@@ -936,6 +941,10 @@ async fn reconcile_startup_finalizes_item_even_when_checkout_sync_is_blocked() {
     assert_eq!(
         updated_convergence.state.status(),
         ConvergenceStatus::Finalized
+    );
+    assert_eq!(
+        updated_convergence.state.checkout_adoption_state(),
+        Some(ingot_domain::convergence::CheckoutAdoptionState::Blocked)
     );
     let queue_entries = db
         .list_queue_entries_by_item(item.id)

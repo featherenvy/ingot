@@ -3,7 +3,7 @@ mod projection;
 #[cfg(test)]
 mod tests;
 
-use ingot_domain::convergence::{Convergence, ConvergenceStatus};
+use ingot_domain::convergence::{CheckoutAdoptionState, Convergence, ConvergenceStatus};
 use ingot_domain::finding::Finding;
 use ingot_domain::item::{ApprovalState, Item, ParkingState, WorkflowVersion};
 use ingot_domain::job::{Job, PhaseKind};
@@ -29,6 +29,7 @@ pub enum PhaseStatus {
     Deferred,
     PendingApproval,
     AwaitingConvergence,
+    AwaitingCheckoutSync,
     Triaging,
     FinalizationReady,
     Unknown,
@@ -177,9 +178,39 @@ impl Evaluator {
             .iter()
             .copied()
             .find(|conv| conv.state.status() == ConvergenceStatus::Prepared);
+        let awaiting_checkout_sync = current_revision_convergences.iter().copied().find(|conv| {
+            conv.state.status() == ConvergenceStatus::Finalized
+                && matches!(
+                    conv.state.checkout_adoption_state(),
+                    Some(CheckoutAdoptionState::Pending | CheckoutAdoptionState::Blocked)
+                )
+        });
 
         let latest_closure_job = latest_closure_terminal_job(&current_revision_jobs);
         let has_terminal_closure_job = latest_closure_job.is_some();
+
+        if awaiting_checkout_sync.is_some() {
+            return self.finish_evaluation(
+                item,
+                has_terminal_closure_job,
+                attention_badges,
+                Evaluation {
+                    board_status: BoardStatus::Working,
+                    attention_badges: vec![],
+                    current_step_id: Some(StepId::PrepareConvergence),
+                    current_phase_kind: None,
+                    phase_status: Some(PhaseStatus::AwaitingCheckoutSync),
+                    next_recommended_action: RecommendedAction::named(
+                        NamedRecommendedAction::ResolveCheckoutSync,
+                    ),
+                    dispatchable_step_id: None,
+                    auxiliary_dispatchable_step_ids: vec![],
+                    allowed_actions: vec![],
+                    terminal_readiness: false,
+                    diagnostics,
+                },
+            );
+        }
 
         if let Some(job) = active_job {
             let contract = step::find_step(job.step_id);

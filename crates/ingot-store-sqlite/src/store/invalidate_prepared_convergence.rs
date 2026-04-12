@@ -20,6 +20,8 @@ impl Database {
              SET integration_workspace_id = ?, source_head_commit_oid = ?, target_ref = ?,
                  strategy = ?, status = ?, input_target_commit_oid = ?,
                  prepared_commit_oid = ?, final_target_commit_oid = ?,
+                 checkout_adoption_state = ?, checkout_adoption_message = ?,
+                 checkout_adoption_updated_at = ?, checkout_adoption_synced_at = ?,
                  conflict_summary = ?, completed_at = ?
              WHERE id = ?",
         )
@@ -31,6 +33,10 @@ impl Database {
         .bind(state.input_target_commit_oid().cloned())
         .bind(state.prepared_commit_oid().cloned())
         .bind(state.final_target_commit_oid().cloned())
+        .bind(state.checkout_adoption_state())
+        .bind(state.checkout_adoption_message())
+        .bind(state.checkout_adoption_updated_at())
+        .bind(state.checkout_adoption_synced_at())
         .bind(state.conflict_summary())
         .bind(state.completed_at())
         .bind(convergence.id)

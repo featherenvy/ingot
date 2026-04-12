@@ -188,6 +188,33 @@ fn stale_prepared_convergences_project_invalidation() {
 }
 
 #[test]
+fn finalized_convergences_awaiting_checkout_sync_stay_in_working_state() {
+    let evaluator = Evaluator::new();
+    let item = nil_item();
+    let revision = test_revision(ApprovalPolicy::NotRequired);
+    let jobs = vec![test_job(
+        StepId::ValidateIntegrated,
+        PhaseKind::Validate,
+        JobStatus::Completed,
+        Some(OutcomeClass::Clean),
+    )];
+    let convergences = vec![test_blocked_finalized_convergence()];
+
+    let evaluation = evaluator.evaluate(&item, &revision, &jobs, &[], &convergences);
+
+    assert_eq!(evaluation.board_status, BoardStatus::Working);
+    assert_eq!(
+        evaluation.phase_status,
+        Some(PhaseStatus::AwaitingCheckoutSync)
+    );
+    assert_eq!(
+        evaluation.next_recommended_action,
+        RecommendedAction::named(NamedRecommendedAction::ResolveCheckoutSync)
+    );
+    assert_eq!(evaluation.dispatchable_step_id, None);
+}
+
+#[test]
 fn integrated_validation_findings_follow_graph_to_repair() {
     let evaluator = Evaluator::new();
     let item = nil_item();
@@ -406,6 +433,18 @@ fn test_prepared_convergence(target_head_valid: bool) -> ingot_domain::convergen
         ItemRevisionId::from_uuid(Uuid::nil()),
     )
     .target_head_valid(target_head_valid)
+    .build()
+}
+
+fn test_blocked_finalized_convergence() -> ingot_domain::convergence::Convergence {
+    ConvergenceBuilder::new(
+        ProjectId::from_uuid(Uuid::nil()),
+        ItemId::from_uuid(Uuid::nil()),
+        ItemRevisionId::from_uuid(Uuid::nil()),
+    )
+    .status(ingot_domain::convergence::ConvergenceStatus::Finalized)
+    .final_target_commit_oid("final")
+    .checkout_adoption_blocked_at("registered checkout blocked", Utc::now())
     .build()
 }
 

@@ -182,8 +182,13 @@ async fn blocked_auto_finalize_fixture() -> BlockedAutoFinalizeFixture {
 
 async fn assert_blocked_auto_finalize_state(fixture: &BlockedAutoFinalizeFixture) {
     let updated_item = fixture.db.get_item(fixture.item_id).await.expect("item");
-    assert!(updated_item.lifecycle.is_done());
-    assert!(matches!(updated_item.escalation, Escalation::None));
+    assert!(updated_item.lifecycle.is_open());
+    assert!(matches!(
+        updated_item.escalation,
+        Escalation::OperatorRequired {
+            reason: ingot_domain::item::EscalationReason::CheckoutSyncBlocked
+        }
+    ));
     let updated_convergence = fixture
         .db
         .get_convergence(fixture.convergence_id)
@@ -192,6 +197,16 @@ async fn assert_blocked_auto_finalize_state(fixture: &BlockedAutoFinalizeFixture
     assert_eq!(
         updated_convergence.state.status(),
         ConvergenceStatus::Finalized
+    );
+    assert_eq!(
+        updated_convergence.state.checkout_adoption_state(),
+        Some(ingot_domain::convergence::CheckoutAdoptionState::Blocked)
+    );
+    assert!(
+        updated_convergence
+            .state
+            .checkout_adoption_message()
+            .is_some()
     );
     let queue_entries = fixture
         .db
@@ -485,6 +500,17 @@ async fn reconcile_startup_retries_blocked_finalize_after_checkout_becomes_safe(
             .iter()
             .all(|operation| operation.operation_kind() != OperationKind::FinalizeTargetRef),
         "finalize op should reconcile once checkout is safe: {unresolved:?}"
+    );
+    let updated_item = fixture.db.get_item(fixture.item_id).await.expect("item");
+    assert!(updated_item.lifecycle.is_done());
+    let updated_convergence = fixture
+        .db
+        .get_convergence(fixture.convergence_id)
+        .await
+        .expect("convergence");
+    assert_eq!(
+        updated_convergence.state.checkout_adoption_state(),
+        Some(ingot_domain::convergence::CheckoutAdoptionState::Synced)
     );
 }
 

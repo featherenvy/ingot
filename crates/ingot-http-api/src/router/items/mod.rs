@@ -186,7 +186,7 @@ pub(super) async fn list_items(
 
     for item in items {
         let snapshot = load_item_runtime_snapshot(&state, project.id, &item).await?;
-        let (evaluation, queue) =
+        let (evaluation, finalization, queue) =
             evaluate_item_snapshot(&state, &project, &item, &snapshot, &evaluator).await?;
 
         let title = snapshot.current_revision.title.clone();
@@ -194,6 +194,7 @@ pub(super) async fn list_items(
             item,
             title,
             evaluation,
+            finalization,
             queue,
         });
     }

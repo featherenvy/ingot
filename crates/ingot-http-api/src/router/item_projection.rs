@@ -1,7 +1,7 @@
 use super::deps::*;
 use super::support::errors::{repo_to_internal, repo_to_item, repo_to_project};
 use super::types::*;
-use ingot_git::project_repo::CheckoutFinalizationStatus;
+use ingot_workflow::BoardStatus;
 
 pub(super) struct ItemRuntimeSnapshot {
     pub current_revision: ItemRevision,
@@ -71,7 +71,7 @@ pub(super) async fn load_item_detail(
         .map_err(repo_to_internal)?;
     let revision_context_summary = parse_revision_context_summary(revision_context.as_ref());
     let evaluator = Evaluator::new();
-    let (evaluation, queue) =
+    let (evaluation, finalization, queue) =
         evaluate_item_snapshot(state, &project, &item, &snapshot, &evaluator).await?;
     let diagnostics = evaluation.diagnostics.clone();
     let ItemRuntimeSnapshot {
@@ -87,6 +87,7 @@ pub(super) async fn load_item_detail(
         execution_mode: project.execution_mode,
         current_revision,
         evaluation,
+        finalization,
         queue,
         revision_history,
         jobs,
@@ -125,7 +126,7 @@ async fn load_linked_finding_items(
 
         let snapshot = load_item_runtime_snapshot(state, project.id, &item).await?;
         let evaluator = Evaluator::new();
-        let (evaluation, _) =
+        let (evaluation, _, _) =
             evaluate_item_snapshot(state, project, &item, &snapshot, &evaluator).await?;
         let title = snapshot.current_revision.title.clone();
         let job_count = snapshot.jobs.len();
@@ -148,7 +149,7 @@ pub(super) async fn evaluate_item_snapshot(
     item: &Item,
     snapshot: &ItemRuntimeSnapshot,
     evaluator: &Evaluator,
-) -> Result<(Evaluation, QueueStatusResponse), ApiError> {
+) -> Result<(Evaluation, FinalizationStatusResponse, QueueStatusResponse), ApiError> {
     let ItemRuntimeSnapshot {
         current_revision,
         jobs,
@@ -156,12 +157,11 @@ pub(super) async fn evaluate_item_snapshot(
         convergences,
     } = snapshot;
     let evaluation = evaluator.evaluate(item, current_revision, jobs, findings, convergences);
-    let queue =
-        load_queue_status(state, current_revision, convergences, project, &evaluation).await?;
-    let evaluation =
-        overlay_evaluation_with_queue_state(current_revision, convergences, evaluation, &queue);
+    let finalization = load_finalization_status(state, current_revision, convergences).await?;
+    let queue = load_queue_status(state, current_revision, project).await?;
+    let evaluation = overlay_evaluation_with_queue_state(evaluation, &finalization, &queue);
 
-    Ok((evaluation, queue))
+    Ok((evaluation, finalization, queue))
 }
 
 fn convergence_response(convergence: Convergence) -> ConvergenceResponse {
@@ -181,22 +181,65 @@ fn empty_queue_status() -> QueueStatusResponse {
         position: None,
         lane_owner_item_id: None,
         lane_target_ref: None,
-        checkout_sync_blocked: false,
-        checkout_sync_message: None,
     }
 }
 
-pub(super) fn overlay_evaluation_with_queue_state(
+async fn load_finalization_status(
+    state: &AppState,
     revision: &ItemRevision,
     convergences: &[Convergence],
+) -> Result<FinalizationStatusResponse, ApiError> {
+    let mut current_revision_convergences = convergences
+        .iter()
+        .filter(|convergence| convergence.item_revision_id == revision.id);
+
+    if let Some(convergence) = current_revision_convergences.clone().find(|convergence| {
+        convergence.state.status() == ingot_domain::convergence::ConvergenceStatus::Finalized
+    }) {
+        let unresolved = state
+            .db
+            .find_unresolved_finalize_for_convergence(convergence.id)
+            .await
+            .map_err(repo_to_internal)?
+            .is_some();
+        return Ok(FinalizationStatusResponse {
+            phase: FinalizationPhaseResponse::TargetRefAdvanced,
+            checkout_adoption_state: convergence.state.checkout_adoption_state(),
+            checkout_adoption_message: convergence
+                .state
+                .checkout_adoption_message()
+                .map(ToOwned::to_owned),
+            final_target_commit_oid: convergence.state.final_target_commit_oid().cloned(),
+            finalize_operation_unresolved: unresolved,
+        });
+    }
+
+    if let Some(convergence) = current_revision_convergences.find(|convergence| {
+        convergence.state.status() == ingot_domain::convergence::ConvergenceStatus::Prepared
+    }) {
+        return Ok(FinalizationStatusResponse {
+            phase: FinalizationPhaseResponse::ReadyToFinalize,
+            checkout_adoption_state: None,
+            checkout_adoption_message: None,
+            final_target_commit_oid: convergence.state.prepared_commit_oid().cloned(),
+            finalize_operation_unresolved: false,
+        });
+    }
+
+    Ok(FinalizationStatusResponse {
+        phase: FinalizationPhaseResponse::None,
+        checkout_adoption_state: None,
+        checkout_adoption_message: None,
+        final_target_commit_oid: None,
+        finalize_operation_unresolved: false,
+    })
+}
+
+pub(super) fn overlay_evaluation_with_queue_state(
     mut evaluation: Evaluation,
+    finalization: &FinalizationStatusResponse,
     queue: &QueueStatusResponse,
 ) -> Evaluation {
-    let has_prepared_convergence = convergences.iter().any(|convergence| {
-        convergence.item_revision_id == revision.id
-            && convergence.state.status() == ingot_domain::convergence::ConvergenceStatus::Prepared
-    });
-
     let awaiting_lane = (queue.state.is_some()
         && evaluation.next_recommended_action
             == RecommendedAction::named(NamedRecommendedAction::PrepareConvergence))
@@ -205,17 +248,21 @@ pub(super) fn overlay_evaluation_with_queue_state(
         set_awaiting_convergence_lane(&mut evaluation);
     }
 
-    if queue.checkout_sync_blocked
-        && revision.approval_policy == ApprovalPolicy::NotRequired
-        && has_prepared_convergence
-        && evaluation.next_recommended_action
-            == RecommendedAction::named(NamedRecommendedAction::FinalizePreparedConvergence)
-    {
+    let awaiting_checkout_sync = finalization.phase == FinalizationPhaseResponse::TargetRefAdvanced
+        && matches!(
+            finalization.checkout_adoption_state,
+            Some(
+                ingot_domain::convergence::CheckoutAdoptionState::Pending
+                    | ingot_domain::convergence::CheckoutAdoptionState::Blocked
+            )
+        );
+    if awaiting_checkout_sync {
         evaluation.next_recommended_action =
             RecommendedAction::named(NamedRecommendedAction::ResolveCheckoutSync);
         evaluation.dispatchable_step_id = None;
         evaluation.allowed_actions.clear();
-        evaluation.phase_status = Some(PhaseStatus::AwaitingConvergence);
+        evaluation.phase_status = Some(PhaseStatus::AwaitingCheckoutSync);
+        evaluation.board_status = BoardStatus::Working;
     }
 
     evaluation
@@ -234,9 +281,7 @@ fn set_awaiting_convergence_lane(evaluation: &mut Evaluation) {
 pub(super) async fn load_queue_status(
     state: &AppState,
     revision: &ItemRevision,
-    convergences: &[Convergence],
     project: &Project,
-    evaluation: &Evaluation,
 ) -> Result<QueueStatusResponse, ApiError> {
     let db = &state.db;
 
@@ -261,50 +306,12 @@ pub(super) async fn load_queue_status(
         .position(|entry| entry.id == active_entry.id)
         .map(|index| index as u32 + 1);
 
-    let mut queue = QueueStatusResponse {
+    let queue = QueueStatusResponse {
         state: Some(active_entry.status),
         position,
         lane_owner_item_id,
         lane_target_ref: Some(active_entry.target_ref.clone()),
-        checkout_sync_blocked: false,
-        checkout_sync_message: None,
     };
-
-    let should_check_checkout = active_entry.status == ConvergenceQueueEntryStatus::Head
-        && evaluation.next_recommended_action
-            == RecommendedAction::named(NamedRecommendedAction::FinalizePreparedConvergence);
-    if should_check_checkout {
-        let prepared_commit_oid = convergences.iter().find_map(|convergence| {
-            (convergence.item_revision_id == revision.id
-                && convergence.state.status()
-                    == ingot_domain::convergence::ConvergenceStatus::Prepared)
-                .then(|| convergence.state.prepared_commit_oid().cloned())
-                .flatten()
-        });
-        let blocked_message = if let Some(prepared_commit_oid) = prepared_commit_oid {
-            match state
-                .infra()
-                .checkout_finalization_status(project, &revision.target_ref, &prepared_commit_oid)
-                .await?
-            {
-                CheckoutFinalizationStatus::Blocked { message, .. } => Some(message),
-                CheckoutFinalizationStatus::NeedsSync | CheckoutFinalizationStatus::Synced => None,
-            }
-        } else {
-            match state
-                .infra()
-                .checkout_sync_status(project, &revision.target_ref)
-                .await?
-            {
-                CheckoutSyncStatus::Blocked { message, .. } => Some(message),
-                CheckoutSyncStatus::Ready => None,
-            }
-        };
-        if let Some(message) = blocked_message {
-            queue.checkout_sync_blocked = true;
-            queue.checkout_sync_message = Some(message);
-        }
-    }
 
     Ok(queue)
 }

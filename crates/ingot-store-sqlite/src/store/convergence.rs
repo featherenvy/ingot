@@ -1,6 +1,6 @@
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::{
-    Convergence, ConvergenceState, ConvergenceStateParts, ConvergenceStatus,
+    CheckoutAdoptionState, Convergence, ConvergenceState, ConvergenceStateParts, ConvergenceStatus,
 };
 use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId};
 use ingot_domain::ports::{ConvergenceRepository, RepositoryError};
@@ -65,8 +65,10 @@ impl Database {
             "INSERT INTO convergences (
                 id, project_id, item_id, item_revision_id, source_workspace_id, integration_workspace_id,
                 source_head_commit_oid, target_ref, strategy, status, input_target_commit_oid,
-                prepared_commit_oid, final_target_commit_oid, conflict_summary, created_at, completed_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                prepared_commit_oid, final_target_commit_oid, checkout_adoption_state,
+                checkout_adoption_message, checkout_adoption_updated_at, checkout_adoption_synced_at,
+                conflict_summary, created_at, completed_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(convergence.id)
         .bind(convergence.project_id)
@@ -81,6 +83,10 @@ impl Database {
         .bind(state.input_target_commit_oid().cloned())
         .bind(state.prepared_commit_oid().cloned())
         .bind(state.final_target_commit_oid().cloned())
+        .bind(state.checkout_adoption_state())
+        .bind(state.checkout_adoption_message())
+        .bind(state.checkout_adoption_updated_at())
+        .bind(state.checkout_adoption_synced_at())
         .bind(state.conflict_summary())
         .bind(convergence.created_at)
         .bind(state.completed_at())
@@ -101,6 +107,8 @@ impl Database {
             "UPDATE convergences
              SET integration_workspace_id = ?, source_head_commit_oid = ?, target_ref = ?, strategy = ?,
                  status = ?, input_target_commit_oid = ?, prepared_commit_oid = ?, final_target_commit_oid = ?,
+                 checkout_adoption_state = ?, checkout_adoption_message = ?,
+                 checkout_adoption_updated_at = ?, checkout_adoption_synced_at = ?,
                  conflict_summary = ?, completed_at = ?
              WHERE id = ?",
         )
@@ -112,6 +120,10 @@ impl Database {
         .bind(state.input_target_commit_oid().cloned())
         .bind(state.prepared_commit_oid().cloned())
         .bind(state.final_target_commit_oid().cloned())
+        .bind(state.checkout_adoption_state())
+        .bind(state.checkout_adoption_message())
+        .bind(state.checkout_adoption_updated_at())
+        .bind(state.checkout_adoption_synced_at())
         .bind(state.conflict_summary())
         .bind(state.completed_at())
         .bind(convergence.id)
@@ -230,6 +242,15 @@ fn map_convergence(row: &SqliteRow) -> Result<Convergence, RepositoryError> {
         row.try_get("prepared_commit_oid").map_err(db_err)?;
     let final_target_commit_oid: Option<CommitOid> =
         row.try_get("final_target_commit_oid").map_err(db_err)?;
+    let checkout_adoption_state: Option<CheckoutAdoptionState> =
+        row.try_get("checkout_adoption_state").map_err(db_err)?;
+    let checkout_adoption_message: Option<String> =
+        row.try_get("checkout_adoption_message").map_err(db_err)?;
+    let checkout_adoption_updated_at: Option<chrono::DateTime<chrono::Utc>> = row
+        .try_get("checkout_adoption_updated_at")
+        .map_err(db_err)?;
+    let checkout_adoption_synced_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get("checkout_adoption_synced_at").map_err(db_err)?;
     let conflict_summary: Option<String> = row.try_get("conflict_summary").map_err(db_err)?;
     let completed_at: Option<chrono::DateTime<chrono::Utc>> =
         row.try_get("completed_at").map_err(db_err)?;
@@ -241,6 +262,10 @@ fn map_convergence(row: &SqliteRow) -> Result<Convergence, RepositoryError> {
             input_target_commit_oid,
             prepared_commit_oid,
             final_target_commit_oid,
+            checkout_adoption_state,
+            checkout_adoption_message,
+            checkout_adoption_updated_at,
+            checkout_adoption_synced_at,
             conflict_summary,
             completed_at,
         },

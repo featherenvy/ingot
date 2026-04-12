@@ -17,11 +17,10 @@ This plan deliberately excludes migration logic, repair jobs, and backwards-comp
 - [x] (2026-04-12T14:47Z) Investigated the live incident in `perdify`, confirmed that the mirror ref advanced to `4d2ccc10126bbc48df92f06bbb1febd71a2217ba` while `/Users/aa/Documents/perdify` remained at `8cb76ba10e60868a5cf4a83fd72f656142bf4052`, and identified the exact runtime and projection paths that make the UI show `done`.
 - [x] (2026-04-12T14:55Z) Authored this ExecPlan in `.agent/finalization-checkout-adoption-hardening.md`.
 - [x] (2026-04-12T16:18Z) Re-read the plan against the current repository and corrected it to cover the actual approval, auto-finalize, reconciliation, workflow, store, and UI paths that participate in the broken state.
-- [ ] Introduce a first-class durable finalization state that records whether the target ref moved, whether checkout adoption is pending, blocked, or synced, and any current blocker message.
-- [ ] Refactor runtime finalization and reconciliation so moving the mirror ref never closes the item by itself.
-- [ ] Refactor item projection and UI response types so checkout-adoption truth is no longer inferred from active queue rows.
-- [ ] Add invariant checks and state-machine coverage that make `done + unresolved finalize_target_ref` impossible.
-- [ ] Validate the full hardening pass with focused runtime, HTTP, usecase, and UI tests plus the broader Rust gate.
+- [x] (2026-04-12T15:09Z) Extended `ConvergenceState::Finalized` with durable checkout-adoption state, message, and timestamps; added SQLite migration `0011_finalized_checkout_adoption.sql`; and covered finalized round-tripping in domain and store tests.
+- [x] (2026-04-12T15:15Z) Split usecase/runtime/HTTP finalization into target-ref advance versus checkout-adoption completion so queue release and workspace abandonment can happen before item closure without ever writing `done + unresolved finalize_target_ref`.
+- [x] (2026-04-12T15:20Z) Added `FinalizationStatusResponse`, projected blocked/pending finalized convergences independently of queue state, and taught workflow/UI to render `awaiting_checkout_sync` as a working-state blocker instead of `DONE`.
+- [x] (2026-04-12T15:25Z) Rewrote the permissive runtime/usecase/HTTP/UI tests around blocked finalization, added workflow and store coverage for the new state, and passed `make ci`.
 
 ## Surprises & Discoveries
 
@@ -48,6 +47,12 @@ This plan deliberately excludes migration logic, repair jobs, and backwards-comp
 
 - Observation: both runtime and HTTP checkout-sync reconciliation helpers stop surfacing checkout blockers once the item is already `done`.
   Evidence: `crates/ingot-agent-runtime/src/convergence.rs` lines ~642-664 and `crates/ingot-http-api/src/router/convergence_port.rs` lines ~178-199 only set `EscalationReason::CheckoutSyncBlocked` when `!item.lifecycle.is_done()`.
+
+- Observation: moving item closure behind git-operation reconciliation forced the usecase layer to mark the finalize operation reconciled before invoking the closure write, otherwise the HTTP path immediately tripped the new invariant on its own prepared `Convergence` snapshot.
+  Evidence: the first `convergence_routes` run after the split returned HTTP 500 for the happy-path approval tests until `persist_checkout_adoption_success(...)` reloaded the stored finalized convergence and required `GitOperationStatus::Reconciled` before closing the item.
+
+- Observation: releasing the queue at target-ref advance means the correct post-finalize queue projection is now `state = null`, not `released`, because `find_active_queue_entry_for_revision(...)` only returns active rows.
+  Evidence: the updated blocked approval route test initially expected `json["queue"]["state"] == "released"` and failed; the durable blocker is now carried by `finalization.*` while queue projection correctly returns no active lane row.
 
 - Observation: the live incident confirms the test expectation is not theoretical.
   Evidence: in `~/.ingot/ingot.db`, git operation `gop_019d817d39687312b102dcbf1d8101b4` is still `applied`, the item is `done/completed`, the queue entry is released, and activity at `2026-04-12T11:39:20Z` records `checkout_sync_blocked` with `Registered checkout has uncommitted changes; clean it before finalizing`.
@@ -94,6 +99,8 @@ This plan deliberately excludes migration logic, repair jobs, and backwards-comp
 This ExecPlan records the intended hardening before implementation. The key outcome target is that the system will stop equating "the mirror moved" with "the project integrated successfully". Instead, convergence state, item lifecycle, unresolved git operations, HTTP projections, and UI labels will all agree on one rule: the item is not integrated until the registered checkout is on the final commit.
 
 The most important lesson from the incident is that a local fix in one layer would not be enough. The current bug is enforced by domain semantics, runtime sequencing, queue projection, and tests at the same time. The implementation therefore needs to change the model, not just one condition.
+
+Implementation completed on 2026-04-12. Finalized convergences now persist checkout-adoption truth directly, item closure only happens after the finalize git operation reconciles, and the API/UI expose an explicit `awaiting_checkout_sync` state even after the queue row is released. The focused commands in this plan plus the full `make ci` gate passed after the hardening landed.
 
 ## Context and Orientation
 
@@ -237,6 +244,8 @@ The runtime and approval paths must remain idempotent when repeatedly touching t
 Because backwards compatibility is explicitly out of scope, do not add fallback parsing branches, compatibility fields, or one-off repair logic for older rows. The schema and domain types may move directly to the hardened design.
 
 ## Artifacts and Notes
+
+Plan revision note (2026-04-12): updated the plan after implementation to record the completed milestones, the reconciliation-before-closure invariant discovered during HTTP integration, the queue/read-model consequence of releasing rows at target-ref advance, and the fact that the full repository gate passed.
 
 Capture these artifacts while implementing:
 

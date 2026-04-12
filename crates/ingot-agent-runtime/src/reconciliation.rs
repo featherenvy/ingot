@@ -5,7 +5,7 @@ use std::path::Path;
 use chrono::Utc;
 use ingot_domain::activity::{ActivityEventType, ActivitySubject};
 use ingot_domain::commit_oid::CommitOid;
-use ingot_domain::convergence::ConvergenceStatus;
+use ingot_domain::convergence::{ConvergenceStatus, FinalizedCheckoutAdoption};
 use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
 use ingot_domain::git_operation::{
     GitOperation, GitOperationEntityRef, GitOperationStatus, OperationKind, OperationPayload,
@@ -175,16 +175,37 @@ impl JobDispatcher {
             self.db.update_git_operation(operation).await?;
         }
 
-        self.adopt_finalized_target_ref(operation).await?;
-
-        match checkout_finalization_status(
+        let checkout_status = checkout_finalization_status(
             Path::new(&context.project.path),
             context.paths.mirror_git_dir.as_path(),
             &context.revision.target_ref,
             context.prepared_commit_oid,
         )
-        .await?
+        .await?;
+        let checkout_adoption = match &checkout_status {
+            CheckoutFinalizationStatus::Blocked { message, .. } => {
+                FinalizedCheckoutAdoption::blocked(message.clone(), Utc::now())
+            }
+            CheckoutFinalizationStatus::NeedsSync => FinalizedCheckoutAdoption::pending(Utc::now()),
+            CheckoutFinalizationStatus::Synced => FinalizedCheckoutAdoption::synced(Utc::now()),
+        };
+        if self
+            .persist_target_ref_advance(operation, checkout_adoption)
+            .await?
         {
+            self.append_activity(
+                operation.project_id,
+                ActivityEventType::ConvergenceFinalized,
+                ActivitySubject::Convergence(*match &operation.entity {
+                    GitOperationEntityRef::Convergence(id) => id,
+                    _ => unreachable!("checked above"),
+                }),
+                serde_json::json!({ "item_id": context.item_id }),
+            )
+            .await?;
+        }
+
+        match checkout_status {
             CheckoutFinalizationStatus::Blocked { .. } => {
                 self.reconcile_checkout_sync_state(
                     context.project,
@@ -212,9 +233,25 @@ impl JobDispatcher {
                 .await
                 .is_err()
                 {
+                    if let CheckoutFinalizationStatus::Blocked { message, .. } =
+                        checkout_finalization_status(
+                            Path::new(&context.project.path),
+                            context.paths.mirror_git_dir.as_path(),
+                            &context.revision.target_ref,
+                            context.prepared_commit_oid,
+                        )
+                        .await?
+                    {
+                        self.persist_target_ref_advance(
+                            operation,
+                            FinalizedCheckoutAdoption::blocked(message, Utc::now()),
+                        )
+                        .await?;
+                    }
                     return Ok(FinalizeCompletionOutcome::Blocked);
                 }
                 self.mark_git_operation_reconciled(operation).await?;
+                self.persist_checkout_adoption_success(operation).await?;
                 Ok(FinalizeCompletionOutcome::Completed)
             }
             CheckoutFinalizationStatus::Synced => {
@@ -226,6 +263,7 @@ impl JobDispatcher {
                 )
                 .await?;
                 self.mark_git_operation_reconciled(operation).await?;
+                self.persist_checkout_adoption_success(operation).await?;
                 Ok(FinalizeCompletionOutcome::Completed)
             }
         }
@@ -237,7 +275,14 @@ impl JobDispatcher {
     ) -> Result<(), RuntimeError> {
         match operation.operation_kind() {
             OperationKind::CreateJobCommit => self.adopt_create_job_commit(operation).await,
-            OperationKind::FinalizeTargetRef => self.adopt_finalized_target_ref(operation).await,
+            OperationKind::FinalizeTargetRef => {
+                self.persist_target_ref_advance(
+                    operation,
+                    FinalizedCheckoutAdoption::synced(Utc::now()),
+                )
+                .await?;
+                self.persist_checkout_adoption_success(operation).await
+            }
             OperationKind::PrepareConvergenceCommit => {
                 self.adopt_prepared_convergence(operation).await
             }
@@ -308,10 +353,11 @@ impl JobDispatcher {
         Ok(())
     }
 
-    pub(crate) async fn adopt_finalized_target_ref(
+    pub(crate) async fn persist_target_ref_advance(
         &self,
         operation: &GitOperation,
-    ) -> Result<(), RuntimeError> {
+        checkout_adoption: FinalizedCheckoutAdoption,
+    ) -> Result<bool, RuntimeError> {
         let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
             return Err(RuntimeError::InvalidState(format!(
                 "expected convergence entity, got {:?}",
@@ -320,6 +366,7 @@ impl JobDispatcher {
         };
         let convergence_id = *convergence_id;
         let mut convergence = self.db.get_convergence(convergence_id).await?;
+        let mut newly_finalized = false;
         if convergence.state.status() != ConvergenceStatus::Finalized {
             let final_oid = operation
                 .new_oid()
@@ -331,10 +378,15 @@ impl JobDispatcher {
                     )
                 })?;
             convergence
-                .transition_to_finalized(final_oid, Utc::now())
+                .transition_to_finalized(final_oid, checkout_adoption, Utc::now())
                 .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
-            self.db.update_convergence(&convergence).await?;
+            newly_finalized = true;
+        } else {
+            convergence
+                .transition_finalized_checkout_adoption(checkout_adoption)
+                .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
         }
+        self.db.update_convergence(&convergence).await?;
 
         let project = self.db.get_project(convergence.project_id).await?;
         if let Some(workspace_id) = convergence.state.integration_workspace_id() {
@@ -354,6 +406,43 @@ impl JobDispatcher {
             queue_entry.released_at.get_or_insert_with(Utc::now);
             queue_entry.updated_at = Utc::now();
             self.db.update_queue_entry(&queue_entry).await?;
+        }
+
+        Ok(newly_finalized)
+    }
+
+    pub(crate) async fn persist_checkout_adoption_success(
+        &self,
+        operation: &GitOperation,
+    ) -> Result<(), RuntimeError> {
+        let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
+            return Err(RuntimeError::InvalidState(format!(
+                "expected convergence entity, got {:?}",
+                operation.entity.entity_type()
+            )));
+        };
+        if operation.status != GitOperationStatus::Reconciled {
+            return Err(RuntimeError::InvalidState(
+                "cannot close finalized item before finalize operation is reconciled".into(),
+            ));
+        }
+
+        let convergence_id = *convergence_id;
+        let mut convergence = self.db.get_convergence(convergence_id).await?;
+        convergence
+            .transition_finalized_checkout_adoption(FinalizedCheckoutAdoption::synced(Utc::now()))
+            .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
+        self.db.update_convergence(&convergence).await?;
+
+        if self
+            .db
+            .find_unresolved_finalize_for_convergence(convergence.id)
+            .await?
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidState(
+                "cannot close finalized item while finalize operation remains unresolved".into(),
+            ));
         }
 
         let mut item = self.db.get_item(convergence.item_id).await?;

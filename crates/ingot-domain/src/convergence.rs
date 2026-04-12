@@ -27,6 +27,117 @@ pub enum ConvergenceStatus {
     Cancelled,
 }
 
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "sqlx", sqlx(rename_all = "snake_case"))]
+pub enum CheckoutAdoptionState {
+    Pending,
+    Blocked,
+    Synced,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalizedCheckoutAdoption {
+    pub state: CheckoutAdoptionState,
+    pub blocker_message: Option<String>,
+    pub updated_at: DateTime<Utc>,
+    pub synced_at: Option<DateTime<Utc>>,
+}
+
+impl FinalizedCheckoutAdoption {
+    #[must_use]
+    pub fn pending(updated_at: DateTime<Utc>) -> Self {
+        Self {
+            state: CheckoutAdoptionState::Pending,
+            blocker_message: None,
+            updated_at,
+            synced_at: None,
+        }
+    }
+
+    #[must_use]
+    pub fn blocked(message: impl Into<String>, updated_at: DateTime<Utc>) -> Self {
+        Self {
+            state: CheckoutAdoptionState::Blocked,
+            blocker_message: Some(message.into()),
+            updated_at,
+            synced_at: None,
+        }
+    }
+
+    #[must_use]
+    pub fn synced(synced_at: DateTime<Utc>) -> Self {
+        Self {
+            state: CheckoutAdoptionState::Synced,
+            blocker_message: None,
+            updated_at: synced_at,
+            synced_at: Some(synced_at),
+        }
+    }
+
+    fn from_parts(
+        state: CheckoutAdoptionState,
+        blocker_message: Option<String>,
+        updated_at: Option<DateTime<Utc>>,
+        synced_at: Option<DateTime<Utc>>,
+    ) -> Result<Self, String> {
+        let updated_at = required_convergence_field("checkout_adoption_updated_at", updated_at)?;
+
+        match state {
+            CheckoutAdoptionState::Pending => {
+                if blocker_message.is_some() {
+                    return Err(
+                        "convergence checkout_adoption_message must be empty for pending adoption"
+                            .into(),
+                    );
+                }
+                if synced_at.is_some() {
+                    return Err(
+                        "convergence checkout_adoption_synced_at must be empty for pending adoption"
+                            .into(),
+                    );
+                }
+            }
+            CheckoutAdoptionState::Blocked => {
+                if blocker_message.is_none() {
+                    return Err(
+                        "convergence checkout_adoption_message is required for blocked adoption"
+                            .into(),
+                    );
+                }
+                if synced_at.is_some() {
+                    return Err(
+                        "convergence checkout_adoption_synced_at must be empty for blocked adoption"
+                            .into(),
+                    );
+                }
+            }
+            CheckoutAdoptionState::Synced => {
+                if blocker_message.is_some() {
+                    return Err(
+                        "convergence checkout_adoption_message must be empty for synced adoption"
+                            .into(),
+                    );
+                }
+                if synced_at.is_none() {
+                    return Err(
+                        "convergence checkout_adoption_synced_at is required for synced adoption"
+                            .into(),
+                    );
+                }
+            }
+        }
+
+        Ok(Self {
+            state,
+            blocker_message,
+            updated_at,
+            synced_at,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ConvergenceTransitionError {
     #[error("queued convergence is missing transition context")]
@@ -41,6 +152,8 @@ pub enum ConvergenceTransitionError {
     CancelledMissingWorkspace,
     #[error("cancelled convergence is missing input target for transition")]
     CancelledMissingInputTarget,
+    #[error("convergence is not finalized")]
+    NotFinalized,
 }
 
 impl ConvergenceStatus {
@@ -79,6 +192,7 @@ pub enum ConvergenceState {
         input_target_commit_oid: CommitOid,
         prepared_commit_oid: CommitOid,
         final_target_commit_oid: CommitOid,
+        checkout_adoption: FinalizedCheckoutAdoption,
         completed_at: DateTime<Utc>,
     },
     Failed {
@@ -100,6 +214,10 @@ pub struct ConvergenceStateParts {
     pub input_target_commit_oid: Option<CommitOid>,
     pub prepared_commit_oid: Option<CommitOid>,
     pub final_target_commit_oid: Option<CommitOid>,
+    pub checkout_adoption_state: Option<CheckoutAdoptionState>,
+    pub checkout_adoption_message: Option<String>,
+    pub checkout_adoption_updated_at: Option<DateTime<Utc>>,
+    pub checkout_adoption_synced_at: Option<DateTime<Utc>>,
     pub conflict_summary: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -241,6 +359,40 @@ impl ConvergenceState {
     }
 
     #[must_use]
+    pub fn finalized_checkout_adoption(&self) -> Option<&FinalizedCheckoutAdoption> {
+        match self {
+            Self::Finalized {
+                checkout_adoption, ..
+            } => Some(checkout_adoption),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn checkout_adoption_state(&self) -> Option<CheckoutAdoptionState> {
+        self.finalized_checkout_adoption()
+            .map(|adoption| adoption.state)
+    }
+
+    #[must_use]
+    pub fn checkout_adoption_message(&self) -> Option<&str> {
+        self.finalized_checkout_adoption()
+            .and_then(|adoption| adoption.blocker_message.as_deref())
+    }
+
+    #[must_use]
+    pub fn checkout_adoption_updated_at(&self) -> Option<DateTime<Utc>> {
+        self.finalized_checkout_adoption()
+            .map(|adoption| adoption.updated_at)
+    }
+
+    #[must_use]
+    pub fn checkout_adoption_synced_at(&self) -> Option<DateTime<Utc>> {
+        self.finalized_checkout_adoption()
+            .and_then(|adoption| adoption.synced_at)
+    }
+
+    #[must_use]
     pub fn conflict_summary(&self) -> Option<&str> {
         match self {
             Self::Conflicted {
@@ -324,6 +476,15 @@ impl ConvergenceState {
                 final_target_commit_oid: required_convergence_field(
                     "final_target_commit_oid",
                     parts.final_target_commit_oid,
+                )?,
+                checkout_adoption: FinalizedCheckoutAdoption::from_parts(
+                    required_convergence_field(
+                        "checkout_adoption_state",
+                        parts.checkout_adoption_state,
+                    )?,
+                    parts.checkout_adoption_message,
+                    parts.checkout_adoption_updated_at,
+                    parts.checkout_adoption_synced_at,
                 )?,
                 completed_at: required_convergence_field("completed_at", parts.completed_at)?,
             }),
@@ -522,6 +683,7 @@ impl Convergence {
     pub fn transition_to_finalized(
         &mut self,
         final_oid: CommitOid,
+        checkout_adoption: FinalizedCheckoutAdoption,
         completed_at: DateTime<Utc>,
     ) -> Result<(), ConvergenceTransitionError> {
         self.state = match self.take_state() {
@@ -529,13 +691,14 @@ impl Convergence {
                 integration_workspace_id,
                 input_target_commit_oid,
                 prepared_commit_oid,
-                completed_at: existing_completed_at,
+                completed_at: _,
             } => ConvergenceState::Finalized {
                 integration_workspace_id: Some(integration_workspace_id),
                 input_target_commit_oid,
                 prepared_commit_oid,
                 final_target_commit_oid: final_oid,
-                completed_at: existing_completed_at.unwrap_or(completed_at),
+                checkout_adoption,
+                completed_at,
             },
             other => {
                 let (integration_workspace_id, input_target_commit_oid) =
@@ -545,11 +708,28 @@ impl Convergence {
                     input_target_commit_oid,
                     prepared_commit_oid: final_oid.clone(),
                     final_target_commit_oid: final_oid,
+                    checkout_adoption,
                     completed_at,
                 }
             }
         };
         Ok(())
+    }
+
+    pub fn transition_finalized_checkout_adoption(
+        &mut self,
+        checkout_adoption: FinalizedCheckoutAdoption,
+    ) -> Result<(), ConvergenceTransitionError> {
+        match &mut self.state {
+            ConvergenceState::Finalized {
+                checkout_adoption: existing,
+                ..
+            } => {
+                *existing = checkout_adoption;
+                Ok(())
+            }
+            _ => Err(ConvergenceTransitionError::NotFinalized),
+        }
     }
 
     pub fn transition_to_failed(&mut self, summary: Option<String>, completed_at: DateTime<Utc>) {
@@ -591,6 +771,10 @@ struct ConvergenceWire {
     pub input_target_commit_oid: Option<CommitOid>,
     pub prepared_commit_oid: Option<CommitOid>,
     pub final_target_commit_oid: Option<CommitOid>,
+    pub checkout_adoption_state: Option<CheckoutAdoptionState>,
+    pub checkout_adoption_message: Option<String>,
+    pub checkout_adoption_updated_at: Option<DateTime<Utc>>,
+    pub checkout_adoption_synced_at: Option<DateTime<Utc>>,
     pub target_head_valid: Option<bool>,
     pub conflict_summary: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -608,6 +792,10 @@ impl TryFrom<ConvergenceWire> for Convergence {
                 input_target_commit_oid: w.input_target_commit_oid,
                 prepared_commit_oid: w.prepared_commit_oid,
                 final_target_commit_oid: w.final_target_commit_oid,
+                checkout_adoption_state: w.checkout_adoption_state,
+                checkout_adoption_message: w.checkout_adoption_message,
+                checkout_adoption_updated_at: w.checkout_adoption_updated_at,
+                checkout_adoption_synced_at: w.checkout_adoption_synced_at,
                 conflict_summary: w.conflict_summary,
                 completed_at: w.completed_at,
             },
@@ -636,6 +824,10 @@ impl From<Convergence> for ConvergenceWire {
         let input_target_commit_oid = c.state.input_target_commit_oid().cloned();
         let prepared_commit_oid = c.state.prepared_commit_oid().cloned();
         let final_target_commit_oid = c.state.final_target_commit_oid().cloned();
+        let checkout_adoption_state = c.state.checkout_adoption_state();
+        let checkout_adoption_message = c.state.checkout_adoption_message().map(ToOwned::to_owned);
+        let checkout_adoption_updated_at = c.state.checkout_adoption_updated_at();
+        let checkout_adoption_synced_at = c.state.checkout_adoption_synced_at();
         let conflict_summary = c.state.conflict_summary().map(ToOwned::to_owned);
         let completed_at = c.state.completed_at();
 
@@ -653,6 +845,10 @@ impl From<Convergence> for ConvergenceWire {
             input_target_commit_oid,
             prepared_commit_oid,
             final_target_commit_oid,
+            checkout_adoption_state,
+            checkout_adoption_message,
+            checkout_adoption_updated_at,
+            checkout_adoption_synced_at,
             target_head_valid: c.target_head_valid,
             conflict_summary,
             created_at: c.created_at,
@@ -732,6 +928,7 @@ mod tests {
             input_target_commit_oid: "base".into(),
             prepared_commit_oid: "prep".into(),
             final_target_commit_oid: "final".into(),
+            checkout_adoption: FinalizedCheckoutAdoption::pending(default_timestamp()),
             completed_at: default_timestamp(),
         });
         let mut value = serde_json::to_value(convergence).expect("serialize");
@@ -809,7 +1006,11 @@ mod tests {
         });
 
         let error = convergence
-            .transition_to_finalized("final".into(), default_timestamp())
+            .transition_to_finalized(
+                "final".into(),
+                FinalizedCheckoutAdoption::pending(default_timestamp()),
+                default_timestamp(),
+            )
             .expect_err("failed convergence without workspace should not finalize");
 
         assert_eq!(error, ConvergenceTransitionError::FailedMissingWorkspace);
@@ -837,6 +1038,7 @@ mod tests {
                 input_target_commit_oid: "base".into(),
                 prepared_commit_oid: "prep".into(),
                 final_target_commit_oid: "final".into(),
+                checkout_adoption: FinalizedCheckoutAdoption::pending(default_timestamp()),
                 completed_at: default_timestamp(),
             }),
             base_convergence(ConvergenceState::Failed {

@@ -44,6 +44,7 @@ const presentationMap: Record<string, StatusPresentation> = {
   retained_for_debug: { variant: 'outline', icon: PauseIcon },
   removing: { variant: 'outline', icon: Clock3Icon },
   superseded: { variant: 'outline', icon: PauseIcon },
+  awaiting_checkout_sync: { variant: 'outline', icon: AlertTriangleIcon },
   transient_failure: { variant: 'outline', icon: AlertTriangleIcon },
   findings: { variant: 'outline', icon: AlertTriangleIcon },
   triaging: { variant: 'outline', icon: AlertTriangleIcon },
@@ -63,6 +64,13 @@ export function getStatusPresentation(status: string): StatusPresentation {
 
 export function statusVariant(status: string): BadgeVariant {
   return getStatusPresentation(status).variant
+}
+
+export function formatStatusLabel(status: string): string {
+  return status
+    .toLowerCase()
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
 const activePhaseStatuses = new Set(['running', 'authoring', 'validating', 'reviewing', 'investigating'])
