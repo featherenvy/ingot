@@ -105,9 +105,13 @@ fn job_output_document(
     stdout: Option<String>,
     stderr: Option<String>,
 ) -> ingot_agent_protocol::AgentOutputDocument {
-    let segments = output
-        .filter(|segments| !segments.is_empty())
-        .unwrap_or_else(|| raw_log_fallback_segments(stdout, stderr));
+    let segments = match output {
+        // An existing but empty output.jsonl means the live transcript artifact has been
+        // initialized, but no normalized segments have been written yet. Falling back to
+        // synthetic raw segments in that state can collide with the first real live updates.
+        Some(segments) => segments,
+        None => raw_log_fallback_segments(stdout, stderr),
+    };
 
     ingot_agent_protocol::AgentOutputDocument {
         schema_version: ingot_agent_protocol::AgentOutputDocument::SCHEMA_VERSION.into(),
