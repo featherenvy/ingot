@@ -17,8 +17,10 @@ use tokio::sync::Semaphore;
 use tokio::task::{Id as TaskId, JoinSet};
 
 use ingot_domain::activity::ActivityEventType;
-use ingot_domain::finding::FindingSeverity;
-use ingot_domain::item::ApprovalState;
+use ingot_domain::finding::{
+    FindingSeverity, InvestigationFindingMetadata, InvestigationPromotion, InvestigationScope,
+};
+use ingot_domain::item::{ApprovalState, Classification, WorkflowVersion};
 use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
     PhaseKind,
@@ -1180,6 +1182,120 @@ async fn auto_triage_job_findings_only_requests_approval_for_validate_integrated
             .any(|entry| entry.event_type == ActivityEventType::ApprovalRequested),
         "non-validate findings must not emit approval_requested"
     );
+}
+
+#[tokio::test]
+async fn auto_triage_job_findings_launches_promoted_items_for_investigation_fix_now() {
+    let harness = TestRuntimeHarness::new(Arc::new(BlockingRunner::new())).await;
+
+    let mut project = harness
+        .db
+        .get_project(harness.project.id)
+        .await
+        .expect("project");
+    project.execution_mode = ExecutionMode::Autopilot;
+    project.auto_triage_policy = Some(AutoTriagePolicy {
+        critical: AutoTriageDecision::FixNow,
+        high: AutoTriageDecision::FixNow,
+        medium: AutoTriageDecision::FixNow,
+        low: AutoTriageDecision::Backlog,
+    });
+    harness
+        .db
+        .update_project(&project)
+        .await
+        .expect("update project");
+
+    let item_id = ingot_domain::ids::ItemId::new();
+    let revision_id = ingot_domain::ids::ItemRevisionId::new();
+    let mut item = ItemBuilder::new(project.id, revision_id)
+        .id(item_id)
+        .build();
+    item.classification = Classification::Investigation;
+    item.workflow_version = WorkflowVersion::InvestigationV1;
+    let revision = RevisionBuilder::new(item_id)
+        .id(revision_id)
+        .approval_policy(ApprovalPolicy::Required)
+        .explicit_seed("seed")
+        .build();
+    harness
+        .db
+        .create_item_with_revision(&item, &revision)
+        .await
+        .expect("create item");
+
+    let job = JobBuilder::new(project.id, item_id, revision_id, StepId::InvestigateProject)
+        .phase_kind(PhaseKind::Investigate)
+        .workspace_kind(WorkspaceKind::Review)
+        .execution_permission(ExecutionPermission::MustNotMutate)
+        .phase_template_slug("investigate-project")
+        .output_artifact_kind(OutputArtifactKind::FindingReport)
+        .build();
+    harness.db.create_job(&job).await.expect("create job");
+
+    let finding = FindingBuilder::new(project.id, item_id, revision_id, job.id)
+        .source_step_id(StepId::InvestigateProject)
+        .source_report_schema_version("investigation_report:v1")
+        .severity(FindingSeverity::High)
+        .summary("temp_git_repo duplicated in 3 crates")
+        .investigation(InvestigationFindingMetadata {
+            scope: InvestigationScope {
+                description: "Scanned all crates for duplicate helpers".into(),
+                paths_examined: vec!["crates/".into()],
+                methodology: "AST comparison".into(),
+            },
+            promotion: InvestigationPromotion {
+                title: "Extract shared temp_git_repo helper".into(),
+                description: "Move the helper into shared test support".into(),
+                acceptance_criteria: "Only one helper remains".into(),
+                classification: Classification::Change,
+                estimated_scope: ingot_domain::finding::EstimatedScope::Small,
+            },
+            group_key: Some("helper-dedup".into()),
+        })
+        .build();
+    harness
+        .db
+        .create_finding(&finding)
+        .await
+        .expect("create finding");
+
+    harness
+        .dispatcher
+        .auto_triage_job_findings(&project, job.id, &item)
+        .await
+        .expect("auto triage findings");
+
+    let findings = harness
+        .db
+        .list_findings_by_item(item_id)
+        .await
+        .expect("list findings");
+    assert_eq!(findings.len(), 1);
+    assert_eq!(
+        findings[0].triage.state(),
+        ingot_domain::finding::FindingTriageState::Backlog
+    );
+
+    let linked_item_id = findings[0]
+        .triage
+        .linked_item_id()
+        .expect("linked promoted item");
+    let linked_item = harness
+        .db
+        .get_item(linked_item_id)
+        .await
+        .expect("linked item");
+    assert_eq!(linked_item.classification, Classification::Change);
+
+    let linked_jobs = harness
+        .db
+        .list_jobs_by_item(linked_item_id)
+        .await
+        .expect("linked jobs");
+    assert_eq!(linked_jobs.len(), 1);
+    assert_eq!(linked_jobs[0].step_id, StepId::AuthorInitial);
+    assert_eq!(linked_jobs[0].state.status(), JobStatus::Queued);
 }
 
 #[tokio::test]

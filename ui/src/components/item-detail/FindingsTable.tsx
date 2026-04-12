@@ -10,10 +10,18 @@ import {
   ZapIcon,
 } from 'lucide-react'
 import { useState } from 'react'
+import { Link } from 'react-router'
 import { cn } from '@/lib/utils'
 import { formatRelativeTime, formatStepLabel } from '../../lib/format'
 import { shortId } from '../../lib/git'
-import type { Finding, FindingSeverity, FindingTriageState, InvestigationScope, Job } from '../../types/domain'
+import type {
+  Finding,
+  FindingSeverity,
+  FindingTriageState,
+  InvestigationScope,
+  Job,
+  LinkedFindingItemSummary,
+} from '../../types/domain'
 import { TooltipValue } from '../TooltipValue'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
@@ -39,16 +47,35 @@ type TriagePayload = {
   linked_item_id?: string
 }
 
+type FindingActionMode = 'delivery' | 'investigation'
+
+type FindingTriageCopy = {
+  mode: FindingActionMode
+  fixNowLabel: string
+  fixNowDescription: string
+  quickFixNowLabel: string
+  backlogDescription: string
+  quickBacklogLabel?: string
+}
+
 // ── Constants ──────────────────────────────────────────────────
 
-const TRIAGE_OPTIONS: { value: FindingTriageState; label: string; description: string }[] = [
-  { value: 'fix_now', label: 'Fix now', description: 'Agent will repair this finding' },
-  { value: 'wont_fix', label: "Won't fix", description: 'Acceptable risk, note required' },
-  { value: 'backlog', label: 'Backlog', description: 'Promote to separate item' },
-  { value: 'duplicate', label: 'Duplicate', description: 'Already tracked elsewhere' },
-  { value: 'dismissed_invalid', label: 'Dismiss', description: 'False positive or invalid' },
-  { value: 'needs_investigation', label: 'Investigate', description: 'Needs human analysis' },
-]
+const DELIVERY_TRIAGE_COPY: FindingTriageCopy = {
+  mode: 'delivery',
+  fixNowLabel: 'Fix now',
+  fixNowDescription: 'Agent will repair this finding',
+  quickFixNowLabel: 'Fix now',
+  backlogDescription: 'Promote to separate item',
+}
+
+const INVESTIGATION_TRIAGE_COPY: FindingTriageCopy = {
+  mode: 'investigation',
+  fixNowLabel: 'Fix now',
+  fixNowDescription: 'Create and launch a linked change item from this finding',
+  quickFixNowLabel: 'Fix now',
+  backlogDescription: 'Create a linked change item without launching it',
+  quickBacklogLabel: 'Backlog',
+}
 
 const SEVERITY_CONFIG: Record<FindingSeverity, { className: string; ringClassName: string; label: string }> = {
   critical: {
@@ -71,16 +98,6 @@ const SEVERITY_CONFIG: Record<FindingSeverity, { className: string; ringClassNam
     ringClassName: 'ring-border',
     label: 'Low',
   },
-}
-
-const TRIAGE_STATE_LABELS: Record<FindingTriageState, string> = {
-  untriaged: 'Untriaged',
-  fix_now: 'Fix now',
-  wont_fix: "Won't fix",
-  backlog: 'Backlog',
-  duplicate: 'Duplicate',
-  dismissed_invalid: 'Dismissed',
-  needs_investigation: 'Investigating',
 }
 
 const NEEDS_NOTE: Set<FindingTriageState> = new Set(['wont_fix', 'dismissed_invalid', 'needs_investigation'])
@@ -172,6 +189,64 @@ function findingsCopyForGroup(group: FindingGroup | undefined, workflowVersion: 
   return WORKFLOW_FINDINGS_COPY[workflowVersion]
 }
 
+function triageCopyForGroup(group: FindingGroup | undefined, workflowVersion: WorkflowVersion): FindingTriageCopy {
+  if (group && isInvestigationGroup(group)) {
+    return INVESTIGATION_TRIAGE_COPY
+  }
+
+  return workflowVersion === 'investigation:v1' ? INVESTIGATION_TRIAGE_COPY : DELIVERY_TRIAGE_COPY
+}
+
+function triageOptions(
+  copy: FindingTriageCopy,
+  hasLinkedItem: boolean,
+  currentState?: FindingTriageState,
+): { value: FindingTriageState; label: string; description: string }[] {
+  const options: { value: FindingTriageState; label: string; description: string }[] = [
+    { value: 'fix_now', label: copy.fixNowLabel, description: copy.fixNowDescription },
+    { value: 'backlog', label: 'Backlog', description: copy.backlogDescription },
+    { value: 'duplicate', label: 'Duplicate', description: 'Already tracked elsewhere' },
+    { value: 'wont_fix', label: "Won't fix", description: 'Acceptable risk, note required' },
+    { value: 'dismissed_invalid', label: 'Dismiss', description: 'False positive or invalid' },
+    { value: 'needs_investigation', label: 'Investigate', description: 'Needs human analysis' },
+  ]
+
+  if (copy.mode === 'investigation' && hasLinkedItem) {
+    return options.filter(
+      (option) => (option.value !== 'fix_now' && option.value !== 'backlog') || option.value === currentState,
+    )
+  }
+
+  return options
+}
+
+function triageStateLabel(
+  state: FindingTriageState,
+  copy: FindingTriageCopy,
+  linkedItemSummary?: LinkedFindingItemSummary,
+): string {
+  switch (state) {
+    case 'untriaged':
+      return 'Untriaged'
+    case 'fix_now':
+      return copy.fixNowLabel
+    case 'wont_fix':
+      return "Won't fix"
+    case 'backlog':
+      return copy.mode === 'investigation' && (linkedItemSummary?.job_count ?? 0) > 0 ? 'Fixing' : 'Backlog'
+    case 'duplicate':
+      return 'Duplicate'
+    case 'dismissed_invalid':
+      return 'Dismissed'
+    case 'needs_investigation':
+      return 'Investigating'
+  }
+}
+
+function formatBoardStatus(status: LinkedFindingItemSummary['board_status']): string {
+  return status.toLowerCase()
+}
+
 // ── Agent Scope Summary ────────────────────────────────────────
 
 function AgentScopeSummary({ findings, copy }: { findings: Finding[]; copy: WorkflowFindingsCopy }) {
@@ -238,8 +313,16 @@ function SeverityBadge({ severity }: { severity: FindingSeverity }) {
 
 // ── Triage State Indicator ─────────────────────────────────────
 
-function TriageIndicator({ state }: { state: FindingTriageState }) {
-  const label = TRIAGE_STATE_LABELS[state]
+function TriageIndicator({
+  state,
+  copy,
+  linkedItemSummary,
+}: {
+  state: FindingTriageState
+  copy: FindingTriageCopy
+  linkedItemSummary?: LinkedFindingItemSummary
+}) {
+  const label = triageStateLabel(state, copy, linkedItemSummary)
 
   if (state === 'untriaged') {
     return (
@@ -251,6 +334,15 @@ function TriageIndicator({ state }: { state: FindingTriageState }) {
   }
 
   if (state === 'fix_now') {
+    return (
+      <span className="inline-flex h-5 items-center gap-1 rounded-full bg-orange-500/10 px-2 text-[11px] font-medium text-orange-700 dark:text-orange-400">
+        <ZapIcon className="size-3" />
+        {label}
+      </span>
+    )
+  }
+
+  if (state === 'backlog' && copy.mode === 'investigation' && (linkedItemSummary?.job_count ?? 0) > 0) {
     return (
       <span className="inline-flex h-5 items-center gap-1 rounded-full bg-orange-500/10 px-2 text-[11px] font-medium text-orange-700 dark:text-orange-400">
         <ZapIcon className="size-3" />
@@ -280,12 +372,18 @@ function TriageIndicator({ state }: { state: FindingTriageState }) {
 function FindingCard({
   finding,
   isActionable,
+  triageCopy,
+  linkedItemSummary,
   onTriage,
+  onPromote,
   pending,
 }: {
   finding: Finding
   isActionable: boolean
+  triageCopy: FindingTriageCopy
+  linkedItemSummary?: LinkedFindingItemSummary
   onTriage: (findingId: string, payload: TriagePayload) => void
+  onPromote?: (findingId: string, dispatchImmediately: boolean) => void
   pending: boolean
 }) {
   const [editing, setEditing] = useState(false)
@@ -297,6 +395,17 @@ function FindingCard({
   const severityConfig = SEVERITY_CONFIG[finding.severity]
 
   function handleSubmit() {
+    if (
+      triageCopy.mode === 'investigation' &&
+      !finding.linked_item_id &&
+      onPromote &&
+      (triageState === 'fix_now' || triageState === 'backlog')
+    ) {
+      onPromote(finding.id, triageState === 'fix_now')
+      setEditing(false)
+      return
+    }
+
     onTriage(finding.id, {
       triage_state: triageState,
       triage_note: triageNote || undefined,
@@ -306,9 +415,10 @@ function FindingCard({
   }
 
   const showNote = NEEDS_NOTE.has(triageState)
-  const showLink = NEEDS_LINK.has(triageState)
+  const showLink = NEEDS_LINK.has(triageState) && !(triageCopy.mode === 'investigation' && triageState === 'backlog')
   const alreadyTriaged = finding.triage_state !== 'untriaged' && finding.triage_state !== 'needs_investigation'
   const investigation = finding.investigation
+  const options = triageOptions(triageCopy, !!finding.linked_item_id, triageState)
 
   return (
     <div
@@ -328,7 +438,7 @@ function FindingCard({
             {finding.source_subject_kind}
           </Badge>
           <div className="ml-auto flex items-center gap-2">
-            <TriageIndicator state={finding.triage_state} />
+            <TriageIndicator state={finding.triage_state} copy={triageCopy} linkedItemSummary={linkedItemSummary} />
           </div>
         </div>
 
@@ -356,7 +466,21 @@ function FindingCard({
         {!editing && finding.triage_note && (
           <p className="text-xs text-muted-foreground italic">Note: {finding.triage_note}</p>
         )}
-        {!editing && finding.linked_item_id && (
+        {!editing && linkedItemSummary && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span>Linked item:</span>
+            <Link
+              to={`/projects/${linkedItemSummary.item.project_id}/items/${linkedItemSummary.item.id}`}
+              className="font-medium text-foreground underline underline-offset-4"
+            >
+              {linkedItemSummary.title}
+            </Link>
+            <Badge variant="outline" className="h-5 text-[11px]">
+              {formatBoardStatus(linkedItemSummary.board_status)}
+            </Badge>
+          </div>
+        )}
+        {!editing && !linkedItemSummary && finding.linked_item_id && (
           <p className="text-xs text-muted-foreground">
             Linked: <code>{shortId(finding.linked_item_id)}</code>
           </p>
@@ -396,12 +520,27 @@ function FindingCard({
                     size="sm"
                     variant="default"
                     className="h-7 gap-1.5 text-xs"
-                    onClick={() => onTriage(finding.id, { triage_state: 'fix_now' })}
+                    onClick={() =>
+                      triageCopy.mode === 'investigation' && onPromote
+                        ? onPromote(finding.id, true)
+                        : onTriage(finding.id, { triage_state: 'fix_now' })
+                    }
                     disabled={pending}
                   >
                     <ZapIcon className="size-3" />
-                    Fix now
+                    {triageCopy.quickFixNowLabel}
                   </Button>
+                  {triageCopy.mode === 'investigation' && onPromote && triageCopy.quickBacklogLabel && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="h-7 text-xs"
+                      onClick={() => onPromote(finding.id, false)}
+                      disabled={pending}
+                    >
+                      {triageCopy.quickBacklogLabel}
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     variant="outline"
@@ -442,7 +581,7 @@ function FindingCard({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {TRIAGE_OPTIONS.map((opt) => (
+                    {options.map((opt) => (
                       <SelectItem key={opt.value} value={opt.value}>
                         {opt.label}
                       </SelectItem>
@@ -450,7 +589,7 @@ function FindingCard({
                   </SelectContent>
                 </Select>
                 <span className="text-xs text-muted-foreground">
-                  {TRIAGE_OPTIONS.find((o) => o.value === triageState)?.description}
+                  {options.find((o) => o.value === triageState)?.description}
                 </span>
               </div>
 
@@ -539,21 +678,27 @@ function JobGroupHeader({ group }: { group: FindingGroup }) {
 export function FindingsTable({
   findings,
   jobs,
+  linkedFindingItems,
   workflowVersion,
   onTriage,
+  onPromote,
   pendingFindingId,
 }: {
   findings: Finding[]
   jobs: Job[]
+  linkedFindingItems: LinkedFindingItemSummary[]
   workflowVersion: WorkflowVersion
   onTriage: (findingId: string, payload: TriagePayload) => void
+  onPromote?: (findingId: string, dispatchImmediately: boolean) => void
   pendingFindingId: string | null
 }) {
   const groups = groupFindingsByJob(findings, jobs)
   const latestGroup = groups.find((g) => g.isLatest)
   const historicalGroups = groups.filter((g) => !g.isLatest)
+  const linkedFindingItemsByFindingId = new Map(linkedFindingItems.map((summary) => [summary.finding_id, summary]))
   const copy = WORKFLOW_FINDINGS_COPY[workflowVersion]
   const latestGroupCopy = findingsCopyForGroup(latestGroup, workflowVersion)
+  const latestGroupTriageCopy = triageCopyForGroup(latestGroup, workflowVersion)
 
   if (findings.length === 0) return null
 
@@ -584,7 +729,10 @@ export function FindingsTable({
                   key={finding.id}
                   finding={finding}
                   isActionable={true}
+                  triageCopy={latestGroupTriageCopy}
+                  linkedItemSummary={linkedFindingItemsByFindingId.get(finding.id)}
                   onTriage={onTriage}
+                  onPromote={onPromote}
                   pending={pendingFindingId === finding.id}
                 />
               ))}
@@ -618,7 +766,10 @@ export function FindingsTable({
                           key={finding.id}
                           finding={finding}
                           isActionable={false}
+                          triageCopy={triageCopyForGroup(group, workflowVersion)}
+                          linkedItemSummary={linkedFindingItemsByFindingId.get(finding.id)}
                           onTriage={onTriage}
+                          onPromote={onPromote}
                           pending={pendingFindingId === finding.id}
                         />
                       ))}

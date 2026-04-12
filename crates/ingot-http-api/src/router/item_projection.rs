@@ -79,6 +79,7 @@ pub(super) async fn load_item_detail(
         findings,
         convergences,
     } = snapshot;
+    let linked_finding_items = load_linked_finding_items(state, &project, &findings).await?;
 
     Ok(ItemDetailResponse {
         item,
@@ -89,11 +90,55 @@ pub(super) async fn load_item_detail(
         revision_history,
         jobs,
         findings,
+        linked_finding_items,
         workspaces,
         convergences: convergences.into_iter().map(convergence_response).collect(),
         revision_context_summary,
         diagnostics,
     })
+}
+
+async fn load_linked_finding_items(
+    state: &AppState,
+    project: &Project,
+    findings: &[Finding],
+) -> Result<Vec<LinkedFindingItemSummary>, ApiError> {
+    let mut linked_items = Vec::new();
+
+    for finding in findings {
+        let Some(linked_item_id) = finding.triage.linked_item_id() else {
+            continue;
+        };
+
+        let item = state
+            .db
+            .get_item(linked_item_id)
+            .await
+            .map_err(repo_to_internal)?;
+        if item.project_id != project.id
+            || !item.origin.is_promoted_finding()
+            || item.origin.finding_id() != Some(finding.id)
+        {
+            continue;
+        }
+
+        let snapshot = load_item_runtime_snapshot(state, project.id, &item).await?;
+        let evaluator = Evaluator::new();
+        let (evaluation, _) =
+            evaluate_item_snapshot(state, project, &item, &snapshot, &evaluator).await?;
+        let title = snapshot.current_revision.title.clone();
+        let job_count = snapshot.jobs.len();
+
+        linked_items.push(LinkedFindingItemSummary {
+            finding_id: finding.id,
+            item,
+            title,
+            board_status: evaluation.board_status,
+            job_count,
+        });
+    }
+
+    Ok(linked_items)
 }
 
 pub(super) async fn evaluate_item_snapshot(

@@ -10,6 +10,7 @@ import type {
   JobLogs,
   JsonObject,
   Project,
+  PromoteFindingResult,
   Workspace,
 } from '../types/domain'
 
@@ -175,6 +176,19 @@ export const triageFinding = (
   request(`/findings/${findingId}/triage`, {
     method: 'POST',
     body: JSON.stringify(payload),
+  })
+
+export const promoteFinding = (
+  findingId: string,
+  payload?: {
+    target_ref?: string
+    approval_policy?: 'required' | 'not_required'
+    dispatch_immediately?: boolean
+  },
+) =>
+  request<PromoteFindingResult>(`/findings/${findingId}/promote`, {
+    method: 'POST',
+    body: JSON.stringify(payload ?? {}),
   })
 
 export const prepareConvergence = (projectId: string, itemId: string) =>

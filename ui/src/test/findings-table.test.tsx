@@ -1,17 +1,27 @@
 import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
 import { FindingsTable } from '../components/item-detail/FindingsTable'
 import { TooltipProvider } from '../components/ui/tooltip'
-import type { Finding, Job } from '../types/domain'
+import type { Finding, Job, LinkedFindingItemSummary } from '../types/domain'
 
 function renderFindingsTable(props: {
   findings: Finding[]
   jobs: Job[]
+  linkedFindingItems?: LinkedFindingItemSummary[]
   workflowVersion: 'delivery:v1' | 'investigation:v1'
 }) {
   return render(
-    <TooltipProvider>
-      <FindingsTable {...props} onTriage={() => {}} pendingFindingId={null} />
-    </TooltipProvider>,
+    <MemoryRouter>
+      <TooltipProvider>
+        <FindingsTable
+          {...props}
+          linkedFindingItems={props.linkedFindingItems ?? []}
+          onPromote={() => {}}
+          onTriage={() => {}}
+          pendingFindingId={null}
+        />
+      </TooltipProvider>
+    </MemoryRouter>,
   )
 }
 
@@ -106,13 +116,69 @@ describe('FindingsTable', () => {
       ],
     })
 
-    expect(screen.getByText('Agent scope for next investigation run')).toBeInTheDocument()
+    expect(screen.getByText('Current investigation findings')).toBeInTheDocument()
     expect(screen.getByText('Current Investigation')).toBeInTheDocument()
     expect(screen.getByText('Previous Investigation Runs')).toBeInTheDocument()
-    expect(
-      screen.getByText('Triage all findings before the next investigation run can be dispatched.'),
-    ).toBeInTheDocument()
+    expect(screen.getByText('Triage all findings before the investigation can close.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Fix now' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Backlog' })).toBeInTheDocument()
     expect(screen.getByText(/1 earlier investigation run/)).toBeInTheDocument()
+  })
+
+  it('renders a fixing badge and linked item for launched investigation findings', () => {
+    const latestJob = makeJob({
+      id: 'job_1',
+      stepId: 'reinvestigate_project',
+      endedAt: '2026-03-12T00:02:00Z',
+      phaseKind: 'investigate',
+    })
+
+    renderFindingsTable({
+      workflowVersion: 'investigation:v1',
+      jobs: [latestJob],
+      findings: [
+        makeFinding({
+          id: 'fnd_1',
+          sourceJobId: latestJob.id,
+          sourceStepId: latestJob.step_id,
+          createdAt: '2026-03-12T00:02:00Z',
+          triageState: 'backlog',
+        }),
+      ],
+      linkedFindingItems: [
+        {
+          finding_id: 'fnd_1',
+          item: {
+            id: 'itm_2',
+            project_id: 'prj_1',
+            classification: 'change',
+            workflow_version: 'delivery:v1',
+            lifecycle_state: 'open',
+            parking_state: 'active',
+            approval_state: 'not_requested',
+            escalation_state: 'none',
+            current_revision_id: 'rev_2',
+            origin_kind: 'promoted_finding',
+            origin_finding_id: 'fnd_1',
+            priority: 'major',
+            labels: [],
+            operator_notes: null,
+            sort_key: '2026-03-12T00:00:00Z#itm_2',
+            created_at: '2026-03-12T00:00:00Z',
+            updated_at: '2026-03-12T00:00:00Z',
+          },
+          title: 'Extract shared helper',
+          board_status: 'WORKING',
+          job_count: 1,
+        },
+      ],
+    })
+
+    expect(screen.getByText('Fixing')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Extract shared helper' })).toHaveAttribute(
+      'href',
+      '/projects/prj_1/items/itm_2',
+    )
   })
 
   it('keeps delivery copy for delivery items', () => {
@@ -176,11 +242,9 @@ describe('FindingsTable', () => {
       ],
     })
 
-    expect(screen.getByText('Agent scope for next investigation run')).toBeInTheDocument()
+    expect(screen.getByText('Current investigation findings')).toBeInTheDocument()
     expect(screen.getByText('Current Investigation')).toBeInTheDocument()
-    expect(
-      screen.getByText('Triage all findings before the next investigation run can be dispatched.'),
-    ).toBeInTheDocument()
+    expect(screen.getByText('Triage all findings before the investigation can close.')).toBeInTheDocument()
     expect(screen.queryByText('Agent scope for next repair job')).not.toBeInTheDocument()
     expect(screen.queryByText('Current Review')).not.toBeInTheDocument()
   })

@@ -14,7 +14,7 @@ use ingot_domain::project::{AgentRouting, AutoTriagePolicy, ExecutionMode};
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
 use ingot_domain::revision_context::RevisionContextSummary;
 use ingot_domain::workspace::Workspace;
-use ingot_workflow::Evaluation;
+use ingot_workflow::{BoardStatus, Evaluation};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -61,6 +61,7 @@ pub struct ItemDetailResponse {
     pub revision_history: Vec<ItemRevision>,
     pub jobs: Vec<Job>,
     pub findings: Vec<Finding>,
+    pub linked_finding_items: Vec<LinkedFindingItemSummary>,
     pub workspaces: Vec<Workspace>,
     pub convergences: Vec<ConvergenceResponse>,
     pub revision_context_summary: Option<RevisionContextSummary>,
@@ -68,10 +69,30 @@ pub struct ItemDetailResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct LinkedFindingItemSummary {
+    pub finding_id: FindingId,
+    pub item: Item,
+    pub title: String,
+    pub board_status: BoardStatus,
+    pub job_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromoteFindingLaunchStatus {
+    NotRequested,
+    Dispatched,
+    DispatchFailed,
+}
+
+#[derive(Debug, Serialize)]
 pub struct PromoteFindingResponse {
     pub item: Item,
     pub current_revision: ItemRevision,
     pub finding: Finding,
+    pub launch_status: PromoteFindingLaunchStatus,
+    pub job: Option<Job>,
+    pub launch_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -293,10 +314,11 @@ pub struct DispatchJobRequest {
     pub step_id: Option<ingot_domain::step_id::StepId>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct PromoteFindingRequest {
     pub target_ref: Option<GitRef>,
     pub approval_policy: Option<ApprovalPolicy>,
+    pub dispatch_immediately: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

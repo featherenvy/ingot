@@ -168,6 +168,7 @@ describe('domain contract typing', () => {
           triaged_at: null,
         },
       ],
+      linked_finding_items: [],
       workspaces: [
         {
           id: 'wrk_1',

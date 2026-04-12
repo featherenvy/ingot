@@ -13,12 +13,16 @@ use tracing::info;
 
 use crate::UseCaseError;
 
-use super::triage::{BacklogFindingOverrides, TriageFindingInput, backlog_finding, triage_finding};
+use super::triage::{
+    BacklogFindingOverrides, TriageFindingInput, backlog_finding_with_promotion,
+    promotion_overrides_for_finding, triage_finding,
+};
 
 #[derive(Debug)]
 pub struct AutoTriagedFinding {
     pub finding: Finding,
     pub backlog: Option<(Item, ItemRevision)>,
+    pub launch_backlog_item: bool,
 }
 
 pub fn auto_triage_findings(
@@ -38,18 +42,45 @@ pub fn auto_triage_findings(
         let decision = policy.decision_for(finding.severity);
         match decision {
             AutoTriageDecision::FixNow => {
-                let triaged = triage_finding(
-                    finding,
-                    TriageFindingInput {
-                        triage_state: FindingTriageState::FixNow,
-                        triage_note: None,
-                        linked_item_id: None,
-                    },
-                )?;
-                results.push(AutoTriagedFinding {
-                    finding: triaged,
-                    backlog: None,
-                });
+                if finding.investigation.is_some() {
+                    let sort_key = crate::item::next_sort_key_after(last_sort_key.as_deref());
+                    let severity_label = match finding.severity {
+                        FindingSeverity::Critical => "critical",
+                        FindingSeverity::High => "high",
+                        FindingSeverity::Medium => "medium",
+                        FindingSeverity::Low => "low",
+                    };
+                    let promotion_overrides = promotion_overrides_for_finding(finding, &[]);
+                    let (linked_item, linked_revision, triaged) = backlog_finding_with_promotion(
+                        finding,
+                        source_item,
+                        source_revision,
+                        BacklogFindingOverrides::default(),
+                        sort_key.clone(),
+                        Some(format!("auto-triaged: {severity_label} severity")),
+                        promotion_overrides,
+                    )?;
+                    last_sort_key = Some(sort_key);
+                    results.push(AutoTriagedFinding {
+                        finding: triaged,
+                        backlog: Some((linked_item, linked_revision)),
+                        launch_backlog_item: true,
+                    });
+                } else {
+                    let triaged = triage_finding(
+                        finding,
+                        TriageFindingInput {
+                            triage_state: FindingTriageState::FixNow,
+                            triage_note: None,
+                            linked_item_id: None,
+                        },
+                    )?;
+                    results.push(AutoTriagedFinding {
+                        finding: triaged,
+                        backlog: None,
+                        launch_backlog_item: false,
+                    });
+                }
             }
             AutoTriageDecision::Backlog => {
                 let sort_key = crate::item::next_sort_key_after(last_sort_key.as_deref());
@@ -59,18 +90,21 @@ pub fn auto_triage_findings(
                     FindingSeverity::Medium => "medium",
                     FindingSeverity::Low => "low",
                 };
-                let (linked_item, linked_revision, triaged) = backlog_finding(
+                let promotion_overrides = promotion_overrides_for_finding(finding, &[]);
+                let (linked_item, linked_revision, triaged) = backlog_finding_with_promotion(
                     finding,
                     source_item,
                     source_revision,
                     BacklogFindingOverrides::default(),
                     sort_key.clone(),
                     Some(format!("auto-triaged: {severity_label} severity")),
+                    promotion_overrides,
                 )?;
                 last_sort_key = Some(sort_key);
                 results.push(AutoTriagedFinding {
                     finding: triaged,
                     backlog: Some((linked_item, linked_revision)),
+                    launch_backlog_item: false,
                 });
             }
             AutoTriageDecision::Skip => {}
@@ -91,7 +125,7 @@ pub async fn execute_auto_triage<F, I, R, A>(
     job_id: JobId,
     step_id: StepId,
     policy: &AutoTriagePolicy,
-) -> Result<(), UseCaseError>
+) -> Result<Vec<AutoTriagedFinding>, UseCaseError>
 where
     F: FindingRepository,
     I: ItemRepository,
@@ -105,7 +139,7 @@ where
         .collect();
 
     if job_findings.is_empty() {
-        return Ok(());
+        return Ok(vec![]);
     }
 
     let revision = revision_repo.get(item.current_revision_id).await?;
@@ -182,5 +216,5 @@ where
         "auto-triaged findings"
     );
 
-    Ok(())
+    Ok(results)
 }

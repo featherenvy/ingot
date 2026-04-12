@@ -108,7 +108,7 @@ impl JobDispatcher {
             return Ok(());
         };
         let job = self.db.get_job(job_id).await?;
-        ingot_usecases::finding::execute_auto_triage(
+        let results = ingot_usecases::finding::execute_auto_triage(
             &self.db,
             &self.db,
             &self.db,
@@ -120,7 +120,19 @@ impl JobDispatcher {
             policy,
         )
         .await
-        .map_err(|e| RuntimeError::InvalidState(format!("auto-triage failed: {e}")))
+        .map_err(|e| RuntimeError::InvalidState(format!("auto-triage failed: {e}")))?;
+
+        for result in results.iter().filter(|result| result.launch_backlog_item) {
+            let Some((linked_item, _)) = result.backlog.as_ref() else {
+                continue;
+            };
+
+            let _ = self
+                .auto_dispatch_autopilot_locked(project, linked_item.id)
+                .await?;
+        }
+
+        Ok(())
     }
 
     pub(crate) async fn auto_queue_convergence_inner(

@@ -70,11 +70,11 @@ export const WORKFLOW_FINDINGS_COPY: Record<WorkflowVersion, WorkflowFindingsCop
     triageWarning: 'Triage all findings before the agent can proceed.',
   },
   'investigation:v1': {
-    agentScopeTitle: 'Agent scope for next investigation run',
+    agentScopeTitle: 'Current investigation findings',
     currentSectionTitle: 'Current Investigation',
-    currentSectionHint: 'reinvestigation is based on these findings only',
+    currentSectionHint: 'triage or promote from this run',
     previousSectionTitle: 'Previous Investigation Runs',
     previousSectionSummaryNoun: 'earlier investigation run',
-    triageWarning: 'Triage all findings before the next investigation run can be dispatched.',
+    triageWarning: 'Triage all findings before the investigation can close.',
   },
 }

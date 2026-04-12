@@ -390,10 +390,30 @@ export interface ItemDetail {
   revision_history: ItemRevision[]
   jobs: Job[]
   findings: Finding[]
+  linked_finding_items: LinkedFindingItemSummary[]
   workspaces: Workspace[]
   convergences: Convergence[]
   revision_context_summary: RevisionContextSummary | null
   diagnostics: string[]
+}
+
+export interface LinkedFindingItemSummary {
+  finding_id: string
+  item: Item
+  title: string
+  board_status: BoardStatus
+  job_count: number
+}
+
+export type PromoteFindingLaunchStatus = 'not_requested' | 'dispatched' | 'dispatch_failed'
+
+export interface PromoteFindingResult {
+  item: Item
+  current_revision: ItemRevision
+  finding: Finding
+  launch_status: PromoteFindingLaunchStatus
+  job: Job | null
+  launch_error: string | null
 }
 
 export interface WsEvent {

@@ -2,7 +2,9 @@ use ingot_usecases::finding::{BatchPromoteInput, batch_promote_findings};
 use ingot_usecases::item::next_sort_key_after;
 
 use super::deps::*;
-use super::dispatch::auto_dispatch_projected_review_job_locked;
+use super::dispatch::{
+    auto_dispatch_projected_review_job_locked, dispatch_projected_item_job_locked,
+};
 use super::support::{
     activity::append_activity,
     errors::{repo_to_finding, repo_to_internal, repo_to_item, repo_to_project},
@@ -85,22 +87,21 @@ pub(super) async fn promote_item_from_finding(
     ApiPath(FindingPathParams { finding_id }): ApiPath<FindingPathParams>,
     maybe_request: Option<Json<PromoteFindingRequest>>,
 ) -> Result<Json<PromoteFindingResponse>, ApiError> {
-    let request = maybe_request
-        .map(|Json(request)| TriageFindingRequest {
-            triage_state: FindingTriageState::Backlog,
-            triage_note: None,
-            linked_item_id: None,
-            target_ref: request.target_ref,
-            approval_policy: request.approval_policy,
-        })
-        .unwrap_or(TriageFindingRequest {
-            triage_state: FindingTriageState::Backlog,
-            triage_note: None,
-            linked_item_id: None,
-            target_ref: None,
-            approval_policy: None,
-        });
-    let applied = apply_finding_triage(&state, finding_id, request).await?;
+    let PromoteFindingRequest {
+        target_ref,
+        approval_policy,
+        dispatch_immediately,
+    } = maybe_request
+        .map(|Json(request)| request)
+        .unwrap_or_default();
+    let triage_request = TriageFindingRequest {
+        triage_state: FindingTriageState::Backlog,
+        triage_note: None,
+        linked_item_id: None,
+        target_ref,
+        approval_policy,
+    };
+    let applied = apply_finding_triage(&state, finding_id, triage_request).await?;
     let item = applied.linked_item.ok_or_else(|| ApiError::Conflict {
         code: "linked_item_missing",
         message: "Backlog promotion did not create a linked item".into(),
@@ -109,12 +110,73 @@ pub(super) async fn promote_item_from_finding(
         code: "linked_revision_missing",
         message: "Backlog promotion did not create a linked revision".into(),
     })?;
+    let mut launch_status = PromoteFindingLaunchStatus::NotRequested;
+    let mut job = None;
+    let mut launch_error = None;
+
+    if dispatch_immediately.unwrap_or(false) {
+        if !supports_promote_and_launch(&applied.finding) {
+            return Err(ApiError::UseCase(UseCaseError::InvalidFindingTriage(
+                "dispatch_immediately is only supported for investigation findings".into(),
+            )));
+        }
+
+        let project = state
+            .db
+            .get_project(item.project_id)
+            .await
+            .map_err(repo_to_project)?;
+        let _guard = state
+            .project_locks
+            .acquire_project_mutation(project.id)
+            .await;
+
+        match dispatch_projected_item_job_locked(&state, &project, item.id, "operator").await {
+            Ok(Some(dispatched_job)) => {
+                launch_status = PromoteFindingLaunchStatus::Dispatched;
+                job = Some(dispatched_job);
+            }
+            Ok(None) => {
+                launch_status = PromoteFindingLaunchStatus::DispatchFailed;
+                launch_error =
+                    Some("No dispatchable step was available on the promoted item".into());
+            }
+            Err(error) => {
+                launch_status = PromoteFindingLaunchStatus::DispatchFailed;
+                launch_error = Some(api_error_message(error));
+            }
+        }
+    }
 
     Ok(Json(PromoteFindingResponse {
         item,
         current_revision,
         finding: applied.finding,
+        launch_status,
+        job,
+        launch_error,
     }))
+}
+
+fn api_error_message(error: ApiError) -> String {
+    match error {
+        ApiError::BadRequest { message, .. }
+        | ApiError::Conflict { message, .. }
+        | ApiError::NotFound { message, .. }
+        | ApiError::Validation { message }
+        | ApiError::Internal { message } => message,
+        ApiError::UseCase(use_case_error) => format!("{use_case_error:?}"),
+    }
+}
+
+fn supports_promote_and_launch(finding: &Finding) -> bool {
+    finding.investigation.is_some()
+        || matches!(
+            finding.source_step_id,
+            ingot_domain::step_id::StepId::InvestigateItem
+                | ingot_domain::step_id::StepId::InvestigateProject
+                | ingot_domain::step_id::StepId::ReinvestigateProject
+        )
 }
 
 pub(super) async fn batch_promote_findings_handler(

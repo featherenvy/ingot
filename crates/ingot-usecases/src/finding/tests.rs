@@ -4,7 +4,7 @@ use ingot_domain::finding::{
     InvestigationFindingMetadata, InvestigationPromotion, InvestigationScope,
 };
 use ingot_domain::ids::{ItemId, ItemRevisionId, JobId, ProjectId};
-use ingot_domain::item::Classification;
+use ingot_domain::item::{Classification, WorkflowVersion};
 use ingot_domain::job::{Job, JobInput, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind};
 use ingot_domain::step_id::StepId;
 use ingot_domain::test_support::{
@@ -524,21 +524,25 @@ fn auto_triage_maps_severity_to_decisions() {
         FindingTriageState::FixNow
     );
     assert!(results[0].backlog.is_none());
+    assert!(!results[0].launch_backlog_item);
     assert_eq!(
         results[1].finding.triage.state(),
         FindingTriageState::FixNow
     );
     assert!(results[1].backlog.is_none());
+    assert!(!results[1].launch_backlog_item);
     assert_eq!(
         results[2].finding.triage.state(),
         FindingTriageState::FixNow
     );
     assert!(results[2].backlog.is_none());
+    assert!(!results[2].launch_backlog_item);
     assert_eq!(
         results[3].finding.triage.state(),
         FindingTriageState::Backlog
     );
     assert!(results[3].backlog.is_some());
+    assert!(!results[3].launch_backlog_item);
 }
 
 #[test]
@@ -606,20 +610,82 @@ fn auto_triage_mix_fix_now_and_backlog() {
         FindingTriageState::FixNow
     );
     assert!(results[0].backlog.is_none());
+    assert!(!results[0].launch_backlog_item);
     assert_eq!(
         results[1].finding.triage.state(),
         FindingTriageState::Backlog
     );
     assert!(results[1].backlog.is_some());
+    assert!(!results[1].launch_backlog_item);
     assert_eq!(
         results[2].finding.triage.state(),
         FindingTriageState::Backlog
     );
     assert!(results[2].backlog.is_some());
+    assert!(!results[2].launch_backlog_item);
 
     let (item1, _) = results[1].backlog.as_ref().unwrap();
     let (item2, _) = results[2].backlog.as_ref().unwrap();
     assert!(item2.sort_key > item1.sort_key);
+}
+
+#[test]
+fn auto_triage_fix_now_promotes_investigation_findings_for_launch() {
+    use ingot_domain::finding::FindingSeverity;
+    use ingot_domain::project::{AutoTriageDecision, AutoTriagePolicy};
+
+    let mut item = nil_item();
+    item.classification = Classification::Investigation;
+    item.workflow_version = WorkflowVersion::InvestigationV1;
+    let revision = nil_revision();
+    let policy = AutoTriagePolicy {
+        critical: AutoTriageDecision::FixNow,
+        high: AutoTriageDecision::FixNow,
+        medium: AutoTriageDecision::FixNow,
+        low: AutoTriageDecision::Backlog,
+    };
+
+    let findings = vec![
+        FindingBuilder::new(
+            ProjectId::from_uuid(Uuid::nil()),
+            item.id,
+            revision.id,
+            JobId::from_uuid(Uuid::nil()),
+        )
+        .source_step_id(StepId::InvestigateProject)
+        .source_report_schema_version("investigation_report:v1")
+        .severity(FindingSeverity::High)
+        .summary("temp_git_repo duplicated in 3 crates")
+        .investigation(InvestigationFindingMetadata {
+            scope: InvestigationScope {
+                description: "Scanned all crates for duplicate helpers".into(),
+                paths_examined: vec!["crates/".into()],
+                methodology: "AST comparison".into(),
+            },
+            promotion: InvestigationPromotion {
+                title: "Extract shared temp_git_repo helper".into(),
+                description: "Move the helper into shared test support".into(),
+                acceptance_criteria: "Only one helper remains".into(),
+                classification: Classification::Change,
+                estimated_scope: EstimatedScope::Small,
+            },
+            group_key: Some("helper-dedup".into()),
+        })
+        .build(),
+    ];
+
+    let results = auto_triage_findings(&findings, &policy, &item, &revision, &[]).unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].finding.triage.state(),
+        FindingTriageState::Backlog
+    );
+    assert!(results[0].launch_backlog_item);
+
+    let (linked_item, linked_revision) = results[0].backlog.as_ref().expect("promoted item");
+    assert_eq!(linked_item.classification, Classification::Change);
+    assert_eq!(linked_revision.title, "Extract shared temp_git_repo helper");
 }
 
 #[tokio::test]

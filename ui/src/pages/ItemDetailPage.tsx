@@ -3,7 +3,14 @@ import { AlertTriangleIcon, ChevronDownIcon } from 'lucide-react'
 import { useMemo } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
-import { approveItem, dispatchItemJob, prepareConvergence, rejectApproval, triageFinding } from '../api/client'
+import {
+  approveItem,
+  dispatchItemJob,
+  prepareConvergence,
+  promoteFinding,
+  rejectApproval,
+  triageFinding,
+} from '../api/client'
 import { agentsQuery, itemDetailQuery, queryKeys } from '../api/queries'
 import {
   ActivityTimeline,
@@ -114,6 +121,32 @@ export default function ItemDetailPage(): React.JSX.Element {
     },
     onError: (error) => {
       showErrorToast('Finding triage failed.', error)
+    },
+  })
+  const promoteMutation = useMutation({
+    mutationFn: (payload: { findingId: string; dispatchImmediately: boolean }) =>
+      promoteFinding(payload.findingId, { dispatch_immediately: payload.dispatchImmediately }),
+    onSuccess: (result, variables) => {
+      refresh()
+      queryClient.invalidateQueries({ queryKey: queryKeys.item(projectId, result.item.id) })
+
+      if (result.launch_status === 'dispatched') {
+        toast.success(`Change item ${result.current_revision.title} created and launched.`)
+        return
+      }
+
+      if (result.launch_status === 'dispatch_failed') {
+        toast.error(
+          result.launch_error ?? `Change item ${result.current_revision.title} was created, but launch failed.`,
+        )
+        return
+      }
+
+      const actionLabel = variables.dispatchImmediately ? 'created' : 'saved to backlog'
+      toast.success(`Change item ${result.current_revision.title} ${actionLabel}.`)
+    },
+    onError: (error) => {
+      showErrorToast('Finding promotion failed.', error)
     },
   })
 
@@ -313,12 +346,25 @@ export default function ItemDetailPage(): React.JSX.Element {
           <FindingsTable
             findings={findings}
             jobs={detail.jobs}
+            linkedFindingItems={detail.linked_finding_items}
             workflowVersion={item.workflow_version}
-            pendingFindingId={triageMutation.isPending ? (triageMutation.variables?.findingId ?? null) : null}
+            pendingFindingId={
+              promoteMutation.isPending
+                ? (promoteMutation.variables?.findingId ?? null)
+                : triageMutation.isPending
+                  ? (triageMutation.variables?.findingId ?? null)
+                  : null
+            }
             onTriage={(findingId, payload) =>
               triageMutation.mutate({
                 findingId,
                 ...payload,
+              })
+            }
+            onPromote={(findingId, dispatchImmediately) =>
+              promoteMutation.mutate({
+                findingId,
+                dispatchImmediately,
               })
             }
           />

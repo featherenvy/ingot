@@ -63,6 +63,7 @@ function makeItemDetail(): ItemDetail {
     revision_history: [],
     jobs: [],
     findings: [],
+    linked_finding_items: [],
     workspaces: [],
     convergences: [],
     revision_context_summary: null,
@@ -601,6 +602,180 @@ describe('ItemDetailPage', () => {
     expect(screen.getByText('Extract shared temp_git_repo helper')).toBeInTheDocument()
     expect(screen.getByText('Acceptance criteria: Only one helper remains')).toBeInTheDocument()
     expect(screen.getByText('Group helper-dedup')).toBeInTheDocument()
+  })
+
+  it('promotes and launches investigation findings from the primary fix action', async () => {
+    const detail = makeItemDetail()
+    detail.item.classification = 'investigation'
+    detail.item.workflow_version = 'investigation:v1'
+    detail.jobs = [
+      {
+        id: 'job_1',
+        project_id: 'prj_1',
+        item_id: 'itm_1',
+        item_revision_id: 'rev_1',
+        step_id: 'investigate_project',
+        status: 'completed',
+        outcome_class: 'findings',
+        phase_kind: 'investigate',
+        workspace_id: null,
+        job_input: {
+          kind: 'candidate_subject',
+          base_commit_oid: '0123456789abcdef',
+          head_commit_oid: 'fedcba9876543210',
+        },
+        created_at: '2026-03-11T00:00:00Z',
+        started_at: '2026-03-11T00:01:00Z',
+        ended_at: '2026-03-11T00:02:00Z',
+      },
+    ]
+    detail.findings = [
+      {
+        id: 'fnd_1',
+        project_id: 'prj_1',
+        source_item_id: 'itm_1',
+        source_item_revision_id: 'rev_1',
+        source_job_id: 'job_1',
+        source_step_id: 'investigate_project',
+        source_report_schema_version: 'investigation_report:v1',
+        source_finding_key: 'dup-helper-1',
+        source_subject_kind: 'candidate',
+        source_subject_base_commit_oid: '0123456789abcdef',
+        source_subject_head_commit_oid: 'fedcba9876543210',
+        code: 'DUP001',
+        severity: 'high',
+        summary: 'temp_git_repo duplicated in 3 crates',
+        paths: ['crates/a/src/test.rs'],
+        evidence: ['identical function body'],
+        investigation: {
+          scope: {
+            description: 'Scanned all crates for duplicate helpers',
+            paths_examined: ['crates/'],
+            methodology: 'AST comparison',
+          },
+          promotion: {
+            title: 'Extract shared temp_git_repo helper',
+            description: 'Move the helper into shared test support',
+            acceptance_criteria: 'Only one helper remains',
+            classification: 'change',
+            estimated_scope: 'small',
+          },
+          group_key: 'helper-dedup',
+        },
+        triage_state: 'untriaged',
+        linked_item_id: null,
+        triage_note: null,
+        created_at: '2026-03-11T00:00:00Z',
+        triaged_at: null,
+      },
+    ]
+
+    const refreshedDetail: ItemDetail = {
+      ...detail,
+      findings: [
+        {
+          ...detail.findings[0]!,
+          triage_state: 'backlog',
+          linked_item_id: 'itm_2',
+          triaged_at: '2026-03-11T00:03:00Z',
+        },
+      ],
+      linked_finding_items: [
+        {
+          finding_id: 'fnd_1',
+          item: {
+            id: 'itm_2',
+            project_id: 'prj_1',
+            classification: 'change',
+            workflow_version: 'delivery:v1',
+            lifecycle_state: 'open',
+            parking_state: 'active',
+            approval_state: 'not_requested',
+            escalation_state: 'none',
+            current_revision_id: 'rev_2',
+            origin_kind: 'promoted_finding',
+            origin_finding_id: 'fnd_1',
+            priority: 'major',
+            labels: [],
+            operator_notes: null,
+            sort_key: '2026-03-11T00:03:00Z#itm_2',
+            created_at: '2026-03-11T00:03:00Z',
+            updated_at: '2026-03-11T00:03:00Z',
+          },
+          title: 'Extract shared temp_git_repo helper',
+          board_status: 'WORKING',
+          job_count: 1,
+        },
+      ],
+    }
+
+    let itemFetchCount = 0
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/projects/prj_1/items/itm_1')) {
+        itemFetchCount += 1
+        return Promise.resolve(jsonResponse(itemFetchCount === 1 ? detail : refreshedDetail))
+      }
+      if (url.endsWith('/api/findings/fnd_1/promote')) {
+        expect(init?.method).toBe('POST')
+        expect(init?.body).toBe(JSON.stringify({ dispatch_immediately: true }))
+        return Promise.resolve(
+          jsonResponse({
+            item: refreshedDetail.linked_finding_items[0]!.item,
+            current_revision: {
+              id: 'rev_2',
+              item_id: 'itm_2',
+              revision_no: 1,
+              title: 'Extract shared temp_git_repo helper',
+              description: 'Move the helper into shared test support',
+              acceptance_criteria: 'Only one helper remains',
+              target_ref: 'main',
+              approval_policy: 'required',
+              seed_commit_oid: 'fedcba9876543210',
+              supersedes_revision_id: null,
+              created_at: '2026-03-11T00:03:00Z',
+            },
+            finding: refreshedDetail.findings[0],
+            launch_status: 'dispatched',
+            job: {
+              id: 'job_2',
+              project_id: 'prj_1',
+              item_id: 'itm_2',
+              item_revision_id: 'rev_2',
+              step_id: 'author_initial',
+              status: 'queued',
+              outcome_class: null,
+              phase_kind: 'author',
+              workspace_id: null,
+              job_input: { kind: 'authoring_head', head_commit_oid: 'fedcba9876543210' },
+              created_at: '2026-03-11T00:03:00Z',
+              started_at: null,
+              ended_at: null,
+            },
+            launch_error: null,
+          }),
+        )
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    expect(await screen.findByText('temp_git_repo duplicated in 3 crates')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Fix now' }))
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith('/api/findings/fnd_1/promote', expect.objectContaining({ method: 'POST' }))
+    })
+
+    expect(await screen.findByText('Fixing')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Extract shared temp_git_repo helper' })).toHaveAttribute(
+      'href',
+      '/projects/prj_1/items/itm_2',
+    )
   })
 
   it('throws before fetching when a required route param is missing', () => {

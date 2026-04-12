@@ -104,6 +104,76 @@ pub(super) async fn dispatch_item_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
+pub(super) async fn dispatch_projected_item_job_locked(
+    state: &AppState,
+    project: &Project,
+    item_id: ItemId,
+    dispatch_origin: &'static str,
+) -> Result<Option<Job>, ApiError> {
+    let item = state.db.get_item(item_id).await.map_err(repo_to_item)?;
+    if item.project_id != project.id {
+        return Err(UseCaseError::ItemNotFound.into());
+    }
+
+    let ItemRuntimeSnapshot {
+        current_revision,
+        jobs,
+        findings,
+        convergences,
+    } = load_item_runtime_snapshot(state, project.id, &item).await?;
+    let evaluation =
+        Evaluator::new().evaluate(&item, &current_revision, &jobs, &findings, &convergences);
+    let Some(step_id) = evaluation.dispatchable_step_id else {
+        return Ok(None);
+    };
+
+    let mut job = dispatch_job(
+        &item,
+        &current_revision,
+        &jobs,
+        &findings,
+        &convergences,
+        DispatchJobCommand {
+            step_id: Some(step_id),
+        },
+    )?;
+    let mut precreated_authoring_workspace = None;
+    let pending_investigation_ref = bind_dispatch_subjects_if_needed(
+        state,
+        project,
+        &current_revision,
+        &jobs,
+        &mut job,
+        &mut precreated_authoring_workspace,
+    )
+    .await?;
+
+    let infra = state.infra();
+    persist_dispatched_job(
+        state,
+        &infra,
+        project.id,
+        &job,
+        pending_investigation_ref.as_ref(),
+        precreated_authoring_workspace.as_ref(),
+    )
+    .await?;
+
+    if precreated_authoring_workspace.is_none() && job.workspace_kind == WorkspaceKind::Authoring {
+        let _ = ensure_authoring_workspace(state, project, &current_revision, &job).await?;
+    }
+    append_activity(
+        state,
+        project.id,
+        ActivityEventType::JobDispatched,
+        ActivitySubject::Job(job.id),
+        serde_json::json!({ "item_id": item.id, "step_id": job.step_id, "dispatch_origin": dispatch_origin }),
+    )
+    .await?;
+
+    Ok(Some(job))
+}
+
 pub(super) fn should_fill_candidate_subject_from_workspace(
     step_id: ingot_domain::step_id::StepId,
 ) -> bool {

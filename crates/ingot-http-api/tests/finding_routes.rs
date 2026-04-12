@@ -1,7 +1,10 @@
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
-use ingot_domain::finding::{FindingSubjectKind, FindingTriageState};
-use ingot_domain::item::{Classification, Origin};
+use ingot_domain::finding::{
+    EstimatedScope, FindingSubjectKind, FindingTriageState, InvestigationFindingMetadata,
+    InvestigationPromotion, InvestigationScope,
+};
+use ingot_domain::item::{Classification, Origin, WorkflowVersion};
 use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobStatus, OutcomeClass, OutputArtifactKind, PhaseKind,
 };
@@ -240,6 +243,133 @@ async fn backlog_triage_rejects_self_linked_item() {
         .expect("triage request");
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn promote_investigation_finding_can_launch_created_item() {
+    let repo = temp_git_repo("ingot-http-api");
+    let head = git_output(&repo, &["rev-parse", "HEAD"]);
+    let db = migrated_test_db("ingot-http-api-promote-investigation").await;
+
+    let project_id = "prj_21212121212121212121212121212121";
+    let item_id = "itm_21212121212121212121212121212121";
+    let revision_id = "rev_21212121212121212121212121212121";
+    let finding_id = "fnd_21212121212121212121212121212121";
+    let job_id = "job_21212121212121212121212121212121";
+
+    persist_test_project(&db, &repo, project_id).await;
+    let mut item = test_item_builder(project_id, revision_id, item_id).build();
+    item.classification = Classification::Investigation;
+    item.workflow_version = WorkflowVersion::InvestigationV1;
+    let revision = test_revision_builder(item_id, revision_id)
+        .seed(AuthoringBaseSeed::Explicit {
+            seed_commit_oid: head.clone().into(),
+            seed_target_commit_oid: head.clone().into(),
+        })
+        .build();
+    (item, revision).persist(&db).await.expect("insert item");
+
+    insert_test_job_row(
+        &db,
+        TestJobInsert {
+            id: job_id,
+            project_id,
+            item_id,
+            item_revision_id: revision_id,
+            step_id: "investigate_project",
+            status: JobStatus::Completed,
+            outcome_class: Some(OutcomeClass::Findings),
+            phase_kind: PhaseKind::Investigate,
+            workspace_kind: WorkspaceKind::Review,
+            execution_permission: ExecutionPermission::MustNotMutate,
+            context_policy: ContextPolicy::Fresh,
+            phase_template_slug: "investigate-project",
+            output_artifact_kind: OutputArtifactKind::FindingReport,
+            job_input: TestJobInput::CandidateSubject(&head, &head),
+            created_at: "2026-03-12T00:00:00Z",
+            ended_at: Some("2026-03-12T00:01:00Z"),
+            ..TestJobInsert::new(
+                job_id,
+                project_id,
+                item_id,
+                revision_id,
+                "investigate_project",
+            )
+        },
+    )
+    .await;
+
+    persist_test_finding(
+        &db,
+        project_id,
+        item_id,
+        revision_id,
+        job_id,
+        finding_id,
+        |finding| {
+            finding
+                .source_step_id("investigate_project")
+                .source_report_schema_version("investigation_report:v1")
+                .source_subject_base_commit_oid(Some(&head))
+                .source_subject_head_commit_oid(&head)
+                .summary("temp_git_repo duplicated in 3 crates")
+                .investigation(InvestigationFindingMetadata {
+                    scope: InvestigationScope {
+                        description: "Scanned all crates for duplicate helpers".into(),
+                        paths_examined: vec!["crates/".into()],
+                        methodology: "AST comparison".into(),
+                    },
+                    promotion: InvestigationPromotion {
+                        title: "Extract shared temp_git_repo helper".into(),
+                        description: "Move the helper into shared test support".into(),
+                        acceptance_criteria: "Only one helper remains".into(),
+                        classification: Classification::Change,
+                        estimated_scope: EstimatedScope::Small,
+                    },
+                    group_key: Some("helper-dedup".into()),
+                })
+        },
+    )
+    .await;
+
+    let response = test_router(db.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/findings/{finding_id}/promote"))
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "dispatch_immediately": true
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("promote request");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read response body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert_eq!(json["launch_status"], "dispatched");
+    assert_eq!(json["finding"]["triage_state"], "backlog");
+    assert_eq!(json["item"]["classification"], "change");
+    assert_eq!(
+        json["current_revision"]["title"],
+        "Extract shared temp_git_repo helper"
+    );
+    assert_eq!(json["job"]["step_id"], "author_initial");
+
+    let linked_item_id = json["item"]["id"].as_str().expect("linked item id");
+    let queued_jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE item_id = ?")
+        .bind(linked_item_id)
+        .fetch_one(db.raw_pool())
+        .await
+        .expect("count linked item jobs");
+    assert_eq!(queued_jobs, 1);
 }
 
 #[tokio::test]
