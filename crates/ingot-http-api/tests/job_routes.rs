@@ -187,7 +187,7 @@ async fn logs_route_falls_back_to_raw_artifacts_when_normalized_output_is_missin
 }
 
 #[tokio::test]
-async fn logs_route_does_not_synthesize_raw_fallback_when_output_artifact_exists_but_is_empty() {
+async fn logs_route_keeps_empty_output_artifact_for_running_jobs() {
     let (_repo, db, _project_id, _item_id, job_id) = seeded_route_test_app().await;
     let state_root =
         ingot_test_support::env::temp_state_root("ingot-http-api-job-logs-empty-output-state");
@@ -230,6 +230,113 @@ async fn logs_route_does_not_synthesize_raw_fallback_when_output_artifact_exists
 
     assert_eq!(json["output"]["schema_version"], "agent_output:v1");
     assert_eq!(json["output"]["segments"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn logs_route_falls_back_to_raw_artifacts_for_terminal_jobs_when_output_artifact_is_empty() {
+    let (_repo, db, project_id, item_id, _running_job_id) = seeded_route_test_app().await;
+    let job_id = "job_00000000000000000000000000000001".to_string();
+    let revision_id = "rev_00000000000000000000000000000000";
+    let state_root = ingot_test_support::env::temp_state_root(
+        "ingot-http-api-job-logs-terminal-empty-output-state",
+    );
+    let logs_dir = PathBuf::from(&state_root).join("logs").join(&job_id);
+    tokio::fs::create_dir_all(&logs_dir)
+        .await
+        .expect("create logs dir");
+    tokio::fs::write(logs_dir.join("stdout.log"), "legacy stdout\n")
+        .await
+        .expect("write stdout");
+    tokio::fs::write(logs_dir.join("stderr.log"), "legacy stderr\n")
+        .await
+        .expect("write stderr");
+    tokio::fs::write(logs_dir.join("output.jsonl"), "")
+        .await
+        .expect("write empty output jsonl");
+
+    insert_test_job_row(
+        &db,
+        TestJobInsert {
+            id: &job_id,
+            project_id: &project_id,
+            item_id: &item_id,
+            item_revision_id: revision_id,
+            step_id: "validate_candidate_initial",
+            status: JobStatus::Completed,
+            phase_kind: PhaseKind::Validate,
+            workspace_kind: WorkspaceKind::Authoring,
+            execution_permission: ExecutionPermission::MustNotMutate,
+            context_policy: ContextPolicy::ResumeContext,
+            phase_template_slug: "validate-candidate",
+            output_artifact_kind: OutputArtifactKind::ValidationReport,
+            job_input: TestJobInput::CandidateSubject("base", "head"),
+            outcome_class: Some(OutcomeClass::Clean),
+            retry_no: 1,
+            created_at: "2026-03-12T00:00:00Z",
+            ended_at: Some("2026-03-12T00:05:00Z"),
+            ..TestJobInsert::new(
+                &job_id,
+                &project_id,
+                &item_id,
+                revision_id,
+                "validate_candidate_initial",
+            )
+        },
+    )
+    .await;
+
+    let app = ingot_http_api::build_router_with_project_locks_and_state_root(
+        db.clone(),
+        ingot_usecases::ProjectLocks::default(),
+        PathBuf::from(&state_root),
+        ingot_usecases::DispatchNotify::default(),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/jobs/{job_id}/logs"))
+                .body(Body::empty())
+                .expect("build logs request"),
+        )
+        .await
+        .expect("logs route response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read logs body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("logs json");
+
+    assert_eq!(json["output"]["segments"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        json["output"]["segments"][0],
+        serde_json::json!({
+            "sequence": 1,
+            "channel": "primary",
+            "kind": "raw_fallback",
+            "status": null,
+            "title": "stdout",
+            "text": "legacy stdout\n",
+            "data": {
+                "source_artifact": "stdout.log"
+            }
+        })
+    );
+    assert_eq!(
+        json["output"]["segments"][1],
+        serde_json::json!({
+            "sequence": 2,
+            "channel": "diagnostic",
+            "kind": "raw_fallback",
+            "status": null,
+            "title": "stderr",
+            "text": "legacy stderr\n",
+            "data": {
+                "source_artifact": "stderr.log"
+            }
+        })
+    );
 }
 
 #[tokio::test]

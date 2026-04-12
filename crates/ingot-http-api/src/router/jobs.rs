@@ -92,7 +92,7 @@ pub(super) async fn get_job_logs(
 
     Ok(Json(JobLogsResponse {
         prompt,
-        output: job_output_document(output, stdout, stderr),
+        output: job_output_document(job.state.status(), output, stdout, stderr),
         result: result.map(|payload| ingot_agent_protocol::JobStructuredResult {
             schema_version: job.state.result_schema_version().map(ToOwned::to_owned),
             payload,
@@ -101,11 +101,15 @@ pub(super) async fn get_job_logs(
 }
 
 fn job_output_document(
+    job_status: ingot_domain::job::JobStatus,
     output: Option<Vec<ingot_agent_protocol::AgentOutputSegment>>,
     stdout: Option<String>,
     stderr: Option<String>,
 ) -> ingot_agent_protocol::AgentOutputDocument {
     let segments = match output {
+        Some(segments) if segments.is_empty() && job_status.is_terminal() => {
+            raw_log_fallback_segments(stdout, stderr)
+        }
         // An existing but empty output.jsonl means the live transcript artifact has been
         // initialized, but no normalized segments have been written yet. Falling back to
         // synthetic raw segments in that state can collide with the first real live updates.
