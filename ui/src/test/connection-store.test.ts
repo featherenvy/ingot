@@ -282,4 +282,97 @@ describe('connection store', () => {
       expect(useConnectionStore.getState().jobLogSyncState).toBe('recovered')
     })
   })
+
+  it('deduplicates streamed job log chunks by segment sequence after a refetch', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+        },
+      },
+    })
+    queryClient.setQueryData(queryKeys.jobLogs('job_1'), {
+      prompt: null,
+      output: {
+        schema_version: 'agent_output:v1',
+        segments: [
+          {
+            sequence: 1,
+            channel: 'primary',
+            kind: 'text',
+            status: null,
+            title: null,
+            text: 'hello',
+            data: null,
+          },
+          {
+            sequence: 2,
+            channel: 'diagnostic',
+            kind: 'text',
+            status: null,
+            title: 'stderr',
+            text: 'warn',
+            data: null,
+          },
+        ],
+      },
+      result: null,
+    })
+
+    useConnectionStore.getState().connect(queryClient)
+    const ws = MockWebSocket.instances[0]
+
+    ws.onmessage?.(
+      new MessageEvent('message', {
+        data: JSON.stringify({
+          seq: 1,
+          event: 'job_output_delta',
+          project_id: 'prj_1',
+          entity_type: 'job',
+          entity_id: 'job_1',
+          payload: {
+            segment: {
+              sequence: 2,
+              channel: 'diagnostic',
+              kind: 'text',
+              status: null,
+              title: 'stderr',
+              text: 'warn',
+              data: null,
+            },
+          },
+        }),
+      }),
+    )
+
+    await waitFor(() => {
+      expect(queryClient.getQueryData(queryKeys.jobLogs('job_1'))).toEqual({
+        prompt: null,
+        output: {
+          schema_version: 'agent_output:v1',
+          segments: [
+            {
+              sequence: 1,
+              channel: 'primary',
+              kind: 'text',
+              status: null,
+              title: null,
+              text: 'hello',
+              data: null,
+            },
+            {
+              sequence: 2,
+              channel: 'diagnostic',
+              kind: 'text',
+              status: null,
+              title: 'stderr',
+              text: 'warn',
+              data: null,
+            },
+          ],
+        },
+        result: null,
+      })
+    })
+  })
 })

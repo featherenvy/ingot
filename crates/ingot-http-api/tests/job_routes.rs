@@ -117,6 +117,76 @@ async fn logs_route_returns_normalized_output_and_raw_route_returns_raw_artifact
 }
 
 #[tokio::test]
+async fn logs_route_falls_back_to_raw_artifacts_when_normalized_output_is_missing() {
+    let (_repo, db, _project_id, _item_id, job_id) = seeded_route_test_app().await;
+    let state_root =
+        ingot_test_support::env::temp_state_root("ingot-http-api-job-logs-raw-fallback-state");
+    let logs_dir = PathBuf::from(&state_root).join("logs").join(&job_id);
+    tokio::fs::create_dir_all(&logs_dir)
+        .await
+        .expect("create logs dir");
+    tokio::fs::write(logs_dir.join("stdout.log"), "legacy stdout\n")
+        .await
+        .expect("write stdout");
+    tokio::fs::write(logs_dir.join("stderr.log"), "legacy stderr\n")
+        .await
+        .expect("write stderr");
+
+    let app = ingot_http_api::build_router_with_project_locks_and_state_root(
+        db.clone(),
+        ingot_usecases::ProjectLocks::default(),
+        PathBuf::from(&state_root),
+        ingot_usecases::DispatchNotify::default(),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/jobs/{job_id}/logs"))
+                .body(Body::empty())
+                .expect("build logs request"),
+        )
+        .await
+        .expect("logs route response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read logs body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("logs json");
+
+    assert_eq!(json["output"]["segments"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        json["output"]["segments"][0],
+        serde_json::json!({
+            "sequence": 1,
+            "channel": "primary",
+            "kind": "raw_fallback",
+            "status": null,
+            "title": "stdout",
+            "text": "legacy stdout\n",
+            "data": {
+                "source_artifact": "stdout.log"
+            }
+        })
+    );
+    assert_eq!(
+        json["output"]["segments"][1],
+        serde_json::json!({
+            "sequence": 2,
+            "channel": "diagnostic",
+            "kind": "raw_fallback",
+            "status": null,
+            "title": "stderr",
+            "text": "legacy stderr\n",
+            "data": {
+                "source_artifact": "stderr.log"
+            }
+        })
+    );
+}
+
+#[tokio::test]
 async fn fail_route_persists_escalation_and_item_detail_projection() {
     let (_repo, db, project_id, item_id, job_id) = seeded_route_test_app().await;
     let app = test_router(db.clone());

@@ -86,19 +86,83 @@ pub(super) async fn get_job_logs(
 
     let prompt = read_optional_text(logs_dir.join("prompt.txt")).await?;
     let output = read_optional_json_lines(logs_dir.join("output.jsonl")).await?;
+    let stdout = read_optional_text(logs_dir.join("stdout.log")).await?;
+    let stderr = read_optional_text(logs_dir.join("stderr.log")).await?;
     let result = read_optional_json(logs_dir.join("result.json")).await?;
 
     Ok(Json(JobLogsResponse {
         prompt,
-        output: ingot_agent_protocol::AgentOutputDocument {
-            schema_version: ingot_agent_protocol::AgentOutputDocument::SCHEMA_VERSION.into(),
-            segments: output.unwrap_or_default(),
-        },
+        output: job_output_document(output, stdout, stderr),
         result: result.map(|payload| ingot_agent_protocol::JobStructuredResult {
             schema_version: job.state.result_schema_version().map(ToOwned::to_owned),
             payload,
         }),
     }))
+}
+
+fn job_output_document(
+    output: Option<Vec<ingot_agent_protocol::AgentOutputSegment>>,
+    stdout: Option<String>,
+    stderr: Option<String>,
+) -> ingot_agent_protocol::AgentOutputDocument {
+    let segments = output
+        .filter(|segments| !segments.is_empty())
+        .unwrap_or_else(|| raw_log_fallback_segments(stdout, stderr));
+
+    ingot_agent_protocol::AgentOutputDocument {
+        schema_version: ingot_agent_protocol::AgentOutputDocument::SCHEMA_VERSION.into(),
+        segments,
+    }
+}
+
+fn raw_log_fallback_segments(
+    stdout: Option<String>,
+    stderr: Option<String>,
+) -> Vec<ingot_agent_protocol::AgentOutputSegment> {
+    let mut segments = Vec::new();
+    let mut sequence = 1;
+
+    for (channel, artifact_name, text) in [
+        (
+            ingot_agent_protocol::AgentOutputChannel::Primary,
+            "stdout.log",
+            stdout,
+        ),
+        (
+            ingot_agent_protocol::AgentOutputChannel::Diagnostic,
+            "stderr.log",
+            stderr,
+        ),
+    ] {
+        let Some(text) = non_empty_log_artifact(text) else {
+            continue;
+        };
+
+        segments.push(ingot_agent_protocol::AgentOutputSegment {
+            sequence,
+            channel,
+            kind: ingot_agent_protocol::AgentOutputKind::RawFallback,
+            status: None,
+            title: Some(artifact_name.trim_end_matches(".log").into()),
+            text: Some(text),
+            data: Some(serde_json::json!({
+                "source_artifact": artifact_name
+            })),
+        });
+        sequence += 1;
+    }
+
+    segments
+}
+
+fn non_empty_log_artifact(text: Option<String>) -> Option<String> {
+    text.and_then(|text| {
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    })
 }
 
 pub(super) async fn get_job_logs_raw(

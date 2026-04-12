@@ -82,6 +82,17 @@ impl AgentOutputSegmentDraft {
         }
     }
 
+    pub fn stderr_text(text: impl Into<String>) -> Self {
+        Self {
+            channel: AgentOutputChannel::Diagnostic,
+            kind: AgentOutputKind::Text,
+            status: None,
+            title: Some("stderr".into()),
+            text: Some(text.into()),
+            data: None,
+        }
+    }
+
     pub fn into_segment(self, sequence: u64) -> AgentOutputSegment {
         AgentOutputSegment {
             sequence,

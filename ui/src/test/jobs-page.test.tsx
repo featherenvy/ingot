@@ -272,4 +272,71 @@ describe('JobsPage', () => {
     expect(await screen.findByText('Log stream recovered')).toBeInTheDocument()
     expect(screen.getByText(/Current output now reflects the persisted log plus new chunks/i)).toBeInTheDocument()
   })
+
+  it('labels diagnostic text output as stderr even when older segments have no title', async () => {
+    const jobs: Job[] = [
+      {
+        id: 'job_1',
+        project_id: 'prj_1',
+        item_id: 'itm_1',
+        item_revision_id: 'rev_1',
+        step_id: 'review_candidate_initial',
+        status: 'completed',
+        outcome_class: 'clean',
+        phase_kind: 'review',
+        workspace_id: 'wrk_1',
+        job_input: {
+          kind: 'candidate_subject',
+          base_commit_oid: '0123456789abcdef',
+          head_commit_oid: 'fedcba9876543210',
+        },
+        created_at: '2026-03-11T00:00:00Z',
+        started_at: '2026-03-11T00:01:00Z',
+        ended_at: '2026-03-11T00:02:00Z',
+      },
+    ]
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/agents')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/projects/prj_1/jobs')) {
+        return Promise.resolve(jsonResponse(jobs))
+      }
+      if (url.endsWith('/api/projects/prj_1/items')) {
+        return Promise.resolve(jsonResponse([]))
+      }
+      if (url.endsWith('/api/jobs/job_1/logs')) {
+        return Promise.resolve(
+          jsonResponse({
+            prompt: 'Review the candidate diff',
+            output: {
+              schema_version: 'agent_output:v1',
+              segments: [
+                {
+                  sequence: 1,
+                  channel: 'diagnostic',
+                  kind: 'text',
+                  status: null,
+                  title: null,
+                  text: 'warn',
+                  data: null,
+                },
+              ],
+            },
+            result: null,
+          }),
+        )
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: /Review Candidate Initial/i }))
+
+    expect(await screen.findByText('stderr: warn')).toBeInTheDocument()
+    expect(screen.queryByText('No output captured.')).not.toBeInTheDocument()
+  })
 })

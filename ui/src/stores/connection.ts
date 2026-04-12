@@ -1,7 +1,7 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { create } from 'zustand'
 import { queryKeys } from '../api/queries'
-import type { JobLogs, WsEvent } from '../types/domain'
+import type { AgentOutputSegment, JobLogs, WsEvent } from '../types/domain'
 import { useProjectsStore } from './projects'
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected'
@@ -67,6 +67,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 }))
 
+function mergeJobLogSegment(segments: AgentOutputSegment[], incoming: AgentOutputSegment): AgentOutputSegment[] {
+  if (segments.some((segment) => segment.sequence === incoming.sequence)) {
+    return segments
+  }
+
+  return [...segments, incoming].sort((left, right) => left.sequence - right.sequence)
+}
+
 function handleEvent(event: WsEvent, lastSeq: number, qc: QueryClient) {
   const projectId = useProjectsStore.getState().activeProjectId
 
@@ -103,12 +111,19 @@ function handleEvent(event: WsEvent, lastSeq: number, qc: QueryClient) {
           },
           result: null,
         }
+        const existingSegments = next.output?.segments ?? []
+        const nextSegment = segment as AgentOutputSegment
+        const mergedSegments = mergeJobLogSegment(existingSegments, nextSegment)
+
+        if (mergedSegments === existingSegments) {
+          return next
+        }
 
         return {
           ...next,
           output: {
             schema_version: next.output?.schema_version ?? 'agent_output:v1',
-            segments: [...(next.output?.segments ?? []), segment as JobLogs['output']['segments'][number]],
+            segments: mergedSegments,
           },
         }
       })

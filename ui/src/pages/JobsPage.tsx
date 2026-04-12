@@ -71,24 +71,29 @@ function formatTranscript(segments: AgentOutputSegment[] | undefined): string | 
   return segments.map(formatTranscriptSegment).join('\n\n')
 }
 
+function formatSegmentLabel(segment: AgentOutputSegment, fallbackToChannel = false): string {
+  if (segment.title?.trim()) return `${segment.title.trim()}: `
+  if (fallbackToChannel && segment.channel === 'diagnostic') return 'stderr: '
+  return ''
+}
+
 function formatTranscriptSegment(segment: AgentOutputSegment): string {
   const status = segment.status ? `[${segment.status}] ` : ''
-  const title = segment.title ? `${segment.title}: ` : ''
-  const text = segment.text?.trim() || ''
+  const text = segment.text?.trimEnd() || ''
 
   switch (segment.kind) {
     case 'text':
-      return `${status}${text || title || 'Message'}`
+      return `${status}${formatSegmentLabel(segment, true)}${text || 'Message'}`
     case 'progress':
-      return `${status}${title}${text || 'Progress update'}`
+      return `${status}${formatSegmentLabel(segment)}${text || 'Progress update'}`
     case 'tool_call':
-      return `${status}${title || 'Tool call: '}${text || 'started'}`
+      return `${status}${formatSegmentLabel(segment) || 'Tool call: '}${text || 'started'}`
     case 'tool_result':
-      return `${status}${title || 'Tool result: '}${text || 'completed'}`
+      return `${status}${formatSegmentLabel(segment) || 'Tool result: '}${text || 'completed'}`
     case 'lifecycle':
-      return `${status}${title}${text || 'Lifecycle update'}`
+      return `${status}${formatSegmentLabel(segment)}${text || 'Lifecycle update'}`
     case 'raw_fallback':
-      return `${status}${title}${text || 'Provider event captured as fallback'}`
+      return `${status}${formatSegmentLabel(segment)}${text || 'Provider event captured as fallback'}`
   }
 }
 

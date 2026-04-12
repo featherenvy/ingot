@@ -273,6 +273,7 @@ where
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn launch_adapter_with_schema_and_result_files<BuildArgs, Parse, ParseFuture>(
     command: &AdapterCommandConfig,
     request: &AgentRequest,
@@ -346,9 +347,7 @@ async fn collect_stream(
                     .as_mut()
                     .map(|parser| parser.parse_line(&line))
                     .unwrap_or_default(),
-                OutputStream::Stderr => {
-                    vec![AgentOutputSegmentDraft::diagnostic_text(line.clone())]
-                }
+                OutputStream::Stderr => vec![AgentOutputSegmentDraft::stderr_text(line.clone())],
             };
             if tx
                 .send(AgentOutputChunk {
@@ -390,5 +389,41 @@ pub(crate) async fn cancel_process_group(pid: u32) -> Result<(), AgentError> {
         Err(AgentError::ProcessError(
             "subprocess cancellation is only supported on unix".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn stderr_stream_emits_labeled_diagnostic_segments() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let writer_task = tokio::spawn(async move {
+            writer
+                .write_all(b"warn line\n")
+                .await
+                .expect("write stderr line");
+            writer.shutdown().await.expect("shutdown duplex writer");
+        });
+
+        let stderr = collect_stream(reader, "stderr", "test-adapter", Some(tx), None)
+            .await
+            .expect("collect stderr");
+
+        writer_task.await.expect("writer task");
+
+        assert_eq!(stderr, "warn line");
+        assert_eq!(
+            rx.recv().await,
+            Some(AgentOutputChunk {
+                stream: OutputStream::Stderr,
+                chunk: "warn line\n".into(),
+                segments: vec![AgentOutputSegmentDraft::stderr_text("warn line")],
+            })
+        );
     }
 }
