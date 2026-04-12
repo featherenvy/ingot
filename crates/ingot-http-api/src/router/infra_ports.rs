@@ -197,9 +197,15 @@ impl HttpInfraAdapter {
         target_ref: &GitRef,
         prepared_commit_oid: &CommitOid,
     ) -> Result<CheckoutFinalizationStatus, ApiError> {
-        checkout_finalization_status(&project.path, target_ref, prepared_commit_oid)
-            .await
-            .map_err(git_to_internal)
+        let paths = self.refresh_project_mirror(project).await?;
+        checkout_finalization_status(
+            &project.path,
+            paths.mirror_git_dir.as_path(),
+            target_ref,
+            prepared_commit_oid,
+        )
+        .await
+        .map_err(git_to_internal)
     }
 
     pub(super) async fn sync_checkout_to_prepared_commit(

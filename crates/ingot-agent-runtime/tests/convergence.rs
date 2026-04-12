@@ -35,6 +35,9 @@ struct BlockedAutoFinalizeFixture {
     dispatcher: JobDispatcher,
     item_id: ingot_domain::ids::ItemId,
     convergence_id: ingot_domain::ids::ConvergenceId,
+    prepared_commit: String,
+    project: ingot_domain::project::Project,
+    repo: std::path::PathBuf,
     integration_workspace_path: std::path::PathBuf,
 }
 
@@ -170,19 +173,17 @@ async fn blocked_auto_finalize_fixture() -> BlockedAutoFinalizeFixture {
         dispatcher,
         item_id,
         convergence_id: convergence.id,
+        prepared_commit,
+        project,
+        repo,
         integration_workspace_path,
     }
 }
 
 async fn assert_blocked_auto_finalize_state(fixture: &BlockedAutoFinalizeFixture) {
     let updated_item = fixture.db.get_item(fixture.item_id).await.expect("item");
-    assert!(updated_item.lifecycle.is_open());
-    assert!(matches!(
-        updated_item.escalation,
-        Escalation::OperatorRequired {
-            reason: EscalationReason::CheckoutSyncBlocked
-        }
-    ));
+    assert!(updated_item.lifecycle.is_done());
+    assert!(matches!(updated_item.escalation, Escalation::None));
     let updated_convergence = fixture
         .db
         .get_convergence(fixture.convergence_id)
@@ -190,14 +191,17 @@ async fn assert_blocked_auto_finalize_state(fixture: &BlockedAutoFinalizeFixture
         .expect("convergence");
     assert_eq!(
         updated_convergence.state.status(),
-        ConvergenceStatus::Prepared
+        ConvergenceStatus::Finalized
     );
     let queue_entries = fixture
         .db
         .list_queue_entries_by_item(fixture.item_id)
         .await
         .expect("list queue entries");
-    assert_eq!(queue_entries[0].status, ConvergenceQueueEntryStatus::Head);
+    assert_eq!(
+        queue_entries[0].status,
+        ConvergenceQueueEntryStatus::Released
+    );
     let unresolved = fixture
         .db
         .list_unresolved_git_operations()
@@ -212,7 +216,22 @@ async fn assert_blocked_auto_finalize_state(fixture: &BlockedAutoFinalizeFixture
         unresolved[0].operation_kind(),
         OperationKind::FinalizeTargetRef
     );
-    assert!(fixture.integration_workspace_path.exists());
+    assert_eq!(
+        resolve_ref_oid(
+            fixture
+                .dispatcher
+                .refresh_project_mirror(&fixture.project)
+                .await
+                .expect("refresh mirror")
+                .mirror_git_dir
+                .as_path(),
+            &GitRef::new("refs/heads/main"),
+        )
+        .await
+        .expect("mirror target ref"),
+        Some(CommitOid::new(fixture.prepared_commit.clone()))
+    );
+    assert!(!fixture.integration_workspace_path.exists());
 }
 
 #[tokio::test]
@@ -397,8 +416,49 @@ async fn tick_auto_finalizes_prepared_convergence_for_not_required_approval() {
 }
 
 #[tokio::test]
-async fn reconcile_startup_does_not_spin_when_auto_finalize_is_blocked() {
+async fn reconcile_startup_finalizes_even_when_auto_finalize_checkout_sync_is_blocked() {
     let fixture = blocked_auto_finalize_fixture().await;
+
+    assert!(
+        fixture
+            .dispatcher
+            .tick()
+            .await
+            .expect("retry tick should reconcile finalize")
+    );
+
+    assert_blocked_auto_finalize_state(&fixture).await;
+}
+
+#[tokio::test]
+async fn tick_finalizes_even_when_auto_finalize_checkout_sync_is_blocked() {
+    let fixture = blocked_auto_finalize_fixture().await;
+
+    assert!(
+        fixture
+            .dispatcher
+            .tick()
+            .await
+            .expect("blocked auto-finalize should still report progress")
+    );
+
+    assert_blocked_auto_finalize_state(&fixture).await;
+}
+
+#[tokio::test]
+async fn reconcile_startup_retries_blocked_finalize_after_checkout_becomes_safe() {
+    let fixture = blocked_auto_finalize_fixture().await;
+
+    assert!(
+        fixture
+            .dispatcher
+            .tick()
+            .await
+            .expect("initial finalize should succeed and leave sync pending")
+    );
+    assert_blocked_auto_finalize_state(&fixture).await;
+
+    git_sync(&fixture.repo, &["checkout", "main"]);
 
     timeout(
         Duration::from_secs(10),
@@ -408,22 +468,24 @@ async fn reconcile_startup_does_not_spin_when_auto_finalize_is_blocked() {
     .expect("startup should not hang")
     .expect("reconcile startup");
 
-    assert_blocked_auto_finalize_state(&fixture).await;
-}
-
-#[tokio::test]
-async fn tick_reports_no_progress_when_auto_finalize_is_blocked() {
-    let fixture = blocked_auto_finalize_fixture().await;
-
-    assert!(
-        !fixture
-            .dispatcher
-            .tick()
+    assert_eq!(
+        head_oid(&fixture.repo)
             .await
-            .expect("blocked auto-finalize should not report progress")
+            .expect("checkout head")
+            .into_inner(),
+        fixture.prepared_commit
     );
-
-    assert_blocked_auto_finalize_state(&fixture).await;
+    let unresolved = fixture
+        .db
+        .list_unresolved_git_operations()
+        .await
+        .expect("list unresolved");
+    assert!(
+        unresolved
+            .iter()
+            .all(|operation| operation.operation_kind() != OperationKind::FinalizeTargetRef),
+        "finalize op should reconcile once checkout is safe: {unresolved:?}"
+    );
 }
 
 #[tokio::test]

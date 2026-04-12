@@ -308,8 +308,17 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
         let revision = revision.clone();
         let prepared_commit_oid = prepared_commit_oid.clone();
         async move {
+            let paths = dispatcher
+                .refresh_project_mirror(&project)
+                .await
+                .map_err(usecase_from_runtime_error)?;
             match dispatcher
-                .reconcile_checkout_sync_state(&project, item.id, &revision)
+                .reconcile_checkout_sync_state(
+                    &project,
+                    item.id,
+                    &revision,
+                    Some(&prepared_commit_oid),
+                )
                 .await
                 .map_err(usecase_from_runtime_error)?
             {
@@ -318,6 +327,7 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                 }
                 CheckoutSyncStatus::Ready => match checkout_finalization_status(
                     &project.path,
+                    paths.mirror_git_dir.as_path(),
                     &revision.target_ref,
                     &prepared_commit_oid,
                 )

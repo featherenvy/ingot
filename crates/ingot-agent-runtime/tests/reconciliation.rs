@@ -8,9 +8,7 @@ use ingot_domain::convergence::ConvergenceStatus;
 use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
 use ingot_domain::git_operation::{GitOperationEntityRef, GitOperationStatus, OperationKind};
 use ingot_domain::git_ref::GitRef;
-use ingot_domain::item::{
-    ApprovalState, DoneReason, Escalation, EscalationReason, ResolutionSource,
-};
+use ingot_domain::item::{ApprovalState, DoneReason, Escalation, ResolutionSource};
 use ingot_domain::job::{
     ContextPolicy, ExecutionPermission, JobInput, JobStatus, OutcomeClass, OutputArtifactKind,
     PhaseKind,
@@ -784,7 +782,7 @@ async fn reconcile_startup_syncs_checkout_before_adopting_finalize() {
 }
 
 #[tokio::test]
-async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() {
+async fn reconcile_startup_finalizes_item_even_when_checkout_sync_is_blocked() {
     let repo = temp_git_repo("ingot-runtime-repo");
     let base_commit = head_oid(&repo).await.expect("base head").into_inner();
     std::fs::write(repo.join("tracked.txt"), "prepared").expect("write prepared");
@@ -929,26 +927,25 @@ async fn reconcile_startup_leaves_finalize_open_when_checkout_sync_is_blocked() 
         "blocked finalize should stay unresolved"
     );
     let updated_item = db.get_item(item.id).await.expect("item");
-    assert!(updated_item.lifecycle.is_open());
-    assert!(matches!(
-        updated_item.escalation,
-        Escalation::OperatorRequired {
-            reason: EscalationReason::CheckoutSyncBlocked
-        }
-    ));
+    assert!(updated_item.lifecycle.is_done());
+    assert!(matches!(updated_item.escalation, Escalation::None));
     let updated_convergence = db
         .get_convergence(convergence.id)
         .await
         .expect("convergence");
     assert_eq!(
         updated_convergence.state.status(),
-        ConvergenceStatus::Prepared
+        ConvergenceStatus::Finalized
     );
     let queue_entries = db
         .list_queue_entries_by_item(item.id)
         .await
         .expect("list queue entries");
-    assert_eq!(queue_entries[0].status, ConvergenceQueueEntryStatus::Head);
+    assert_eq!(
+        queue_entries[0].status,
+        ConvergenceQueueEntryStatus::Released
+    );
+    assert_eq!(git_output(&repo, &["branch", "--show-current"]), "feature");
 }
 
 #[tokio::test]

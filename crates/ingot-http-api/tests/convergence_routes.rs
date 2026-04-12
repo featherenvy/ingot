@@ -621,33 +621,63 @@ async fn approve_route_reuses_existing_finalize_op_when_checkout_is_blocked() {
     .expect("insert queue entry");
 
     let app = test_router(db.clone());
-    for _ in 0..2 {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "/api/projects/{project_id}/items/{item_id}/approval/approve"
-                    ))
-                    .method("POST")
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("route response");
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/projects/{project_id}/items/{item_id}/approval/approve"
+                ))
+                .method("POST")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("route response");
+    assert_eq!(response.status(), StatusCode::OK);
 
-    let item_state: (String, String, String) = sqlx::query_as(
-        "SELECT approval_state, escalation_state, escalation_reason FROM items WHERE id = ?",
+    let repeat_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/projects/{project_id}/items/{item_id}/approval/approve"
+                ))
+                .method("POST")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("repeat route response");
+    assert_eq!(repeat_response.status(), StatusCode::CONFLICT);
+
+    let item_state: (String, String, String, Option<String>) = sqlx::query_as(
+        "SELECT lifecycle_state, approval_state, escalation_state, escalation_reason FROM items WHERE id = ?",
     )
     .bind(&item_id)
     .fetch_one(db.raw_pool())
     .await
     .expect("item state");
-    assert_eq!(item_state.0, "pending");
-    assert_eq!(item_state.1, "operator_required");
-    assert_eq!(item_state.2, "checkout_sync_blocked");
+    assert_eq!(item_state.0, "done");
+    assert_eq!(item_state.1, "approved");
+    assert_eq!(item_state.2, "none");
+    assert_eq!(item_state.3, None);
+
+    let convergence_status: (String,) =
+        sqlx::query_as("SELECT status FROM convergences WHERE id = ?")
+            .bind(&convergence_id)
+            .fetch_one(db.raw_pool())
+            .await
+            .expect("convergence status");
+    assert_eq!(convergence_status.0, "finalized");
+
+    let queue_state: (String,) =
+        sqlx::query_as("SELECT status FROM convergence_queue_entries WHERE item_revision_id = ?")
+            .bind(&revision_id)
+            .fetch_one(db.raw_pool())
+            .await
+            .expect("queue state");
+    assert_eq!(queue_state.0, "released");
 
     let git_ops: Vec<(String, String)> = sqlx::query_as(
         "SELECT id, status FROM git_operations
@@ -660,6 +690,11 @@ async fn approve_route_reuses_existing_finalize_op_when_checkout_is_blocked() {
     .expect("git operations");
     assert_eq!(git_ops.len(), 1);
     assert_eq!(git_ops[0].1, "applied");
+
+    assert_eq!(
+        git_output(&repo, &["rev-parse", "refs/heads/main"]),
+        base_commit_oid
+    );
 }
 
 #[tokio::test]

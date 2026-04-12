@@ -595,9 +595,22 @@ impl JobDispatcher {
         project: &Project,
         item_id: ingot_domain::ids::ItemId,
         revision: &ItemRevision,
+        prepared_commit_oid: Option<&CommitOid>,
     ) -> Result<CheckoutSyncStatus, RuntimeError> {
         let mut item = self.db.get_item(item_id).await?;
-        let status = checkout_sync_status(&project.path, &revision.target_ref).await?;
+        let status = match prepared_commit_oid {
+            Some(prepared_commit_oid) => {
+                let paths = self.refresh_project_mirror(project).await?;
+                ingot_git::project_repo::checkout_sync_status_for_commit(
+                    &project.path,
+                    paths.mirror_git_dir.as_path(),
+                    &revision.target_ref,
+                    prepared_commit_oid,
+                )
+                .await?
+            }
+            None => checkout_sync_status(&project.path, &revision.target_ref).await?,
+        };
         let checkout_sync_blocked = matches!(
             item.escalation,
             Escalation::OperatorRequired {
@@ -627,7 +640,7 @@ impl JobDispatcher {
                 }
             }
             CheckoutSyncStatus::Blocked { message, .. } => {
-                if !checkout_sync_blocked {
+                if !checkout_sync_blocked && !item.lifecycle.is_done() {
                     item.escalation = Escalation::OperatorRequired {
                         reason: EscalationReason::CheckoutSyncBlocked,
                     };

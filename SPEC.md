@@ -1836,6 +1836,11 @@ finalize_prepared_convergence(item_id):
   compare_and_swap(target_ref, old=conv.input_target_commit_oid, new=conv.prepared_commit_oid)
   mark convergence finalized
   close item as completed with resolution_source=system_command
+  if registered checkout can be safely synchronized to conv.prepared_commit_oid:
+    synchronize checkout to conv.prepared_commit_oid
+    mark finalize_target_ref GitOperation reconciled
+  else:
+    leave finalize_target_ref GitOperation applied for later retry
 ```
 
 ### 12.6 Invalidate Prepared Convergence
@@ -1863,6 +1868,11 @@ approve(item_id):
   mark convergence finalized
   mark item approval_state approved
   close item as completed
+  if registered checkout can be safely synchronized to conv.prepared_commit_oid:
+    synchronize checkout to conv.prepared_commit_oid
+    mark finalize_target_ref GitOperation reconciled
+  else:
+    leave finalize_target_ref GitOperation applied for later retry
 ```
 
 ### 12.8 Startup Reconcile Git Operations
@@ -1876,6 +1886,12 @@ reconcile_startup_state():
     inspect Git and filesystem state appropriate to operation_kind
     if operation_kind == prepare_convergence_commit and full replay chain matching metadata is present:
       mark operation reconciled
+    if operation_kind == finalize_target_ref and target_ref already points at the finalized commit:
+      adopt finalized convergence and closed item state if it was not persisted before crash
+      if registered checkout is already synchronized, or can now be synchronized safely:
+        mark operation reconciled
+      else:
+        keep the operation applied and retry on the next maintenance pass
       adopt prepared state using rewritten tip
     else if operation_kind == prepare_convergence_commit and only a replay prefix is present:
       mark operation failed

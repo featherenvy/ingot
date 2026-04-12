@@ -38,6 +38,7 @@ pub(super) struct FakePort {
     pub(super) checkout_finalization_readiness: CheckoutFinalizationReadiness,
     pub(super) finalize_target_ref_result: FinalizeTargetRefResult,
     pub(super) apply_successful_finalization_should_fail: bool,
+    pub(super) sync_checkout_should_fail: bool,
 }
 
 impl FakePort {
@@ -96,6 +97,7 @@ impl FakePort {
             checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
             finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
             apply_successful_finalization_should_fail: false,
+            sync_checkout_should_fail: false,
         }
     }
 
@@ -109,6 +111,7 @@ impl FakePort {
             checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
             finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
             apply_successful_finalization_should_fail: false,
+            sync_checkout_should_fail: false,
         }
     }
 
@@ -122,6 +125,7 @@ impl FakePort {
             checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
             finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
             apply_successful_finalization_should_fail: false,
+            sync_checkout_should_fail: false,
         }
     }
 
@@ -363,7 +367,11 @@ impl PreparedConvergenceFinalizePort for FakePort {
             .lock()
             .expect("calls lock")
             .push(format!("sync_checkout:{}", revision.id));
-        ready(Ok(()))
+        ready(if self.sync_checkout_should_fail {
+            Err(UseCaseError::Internal("sync failed".into()))
+        } else {
+            Ok(())
+        })
     }
 
     fn update_git_operation(

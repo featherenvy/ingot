@@ -112,17 +112,33 @@ async fn reconcile_checkout_sync_state_http(
     project: &Project,
     item_id: ItemId,
     revision: &ItemRevision,
+    prepared_commit_oid: Option<&CommitOid>,
 ) -> Result<CheckoutSyncStatus, UseCaseError> {
     let mut item = state
         .db
         .get_item(item_id)
         .await
         .map_err(UseCaseError::Repository)?;
-    let status = state
-        .infra()
-        .checkout_sync_status(project, &revision.target_ref)
-        .await
-        .map_err(api_to_usecase_error)?;
+    let status = match prepared_commit_oid {
+        Some(prepared_commit_oid) => match state
+            .infra()
+            .checkout_finalization_status(project, &revision.target_ref, prepared_commit_oid)
+            .await
+            .map_err(api_to_usecase_error)?
+        {
+            CheckoutFinalizationStatus::Blocked { code, message } => {
+                CheckoutSyncStatus::Blocked { code, message }
+            }
+            CheckoutFinalizationStatus::NeedsSync | CheckoutFinalizationStatus::Synced => {
+                CheckoutSyncStatus::Ready
+            }
+        },
+        None => state
+            .infra()
+            .checkout_sync_status(project, &revision.target_ref)
+            .await
+            .map_err(api_to_usecase_error)?,
+    };
     let checkout_sync_blocked = matches!(
         item.escalation,
         Escalation::OperatorRequired {
@@ -160,7 +176,7 @@ async fn reconcile_checkout_sync_state_http(
             }
         }
         CheckoutSyncStatus::Blocked { message, .. } => {
-            if !checkout_sync_blocked {
+            if !checkout_sync_blocked && !item.lifecycle.is_done() {
                 item.escalation = Escalation::OperatorRequired {
                     reason: EscalationReason::CheckoutSyncBlocked,
                 };
@@ -553,7 +569,14 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                 CheckoutFinalizationStatus::NeedsSync => CheckoutFinalizationReadiness::NeedsSync,
                 CheckoutFinalizationStatus::Synced => CheckoutFinalizationReadiness::Synced,
             };
-            reconcile_checkout_sync_state_http(&state, &project, item.id, &revision).await?;
+            reconcile_checkout_sync_state_http(
+                &state,
+                &project,
+                item.id,
+                &revision,
+                Some(&prepared_commit_oid),
+            )
+            .await?;
             Ok(readiness)
         }
     }

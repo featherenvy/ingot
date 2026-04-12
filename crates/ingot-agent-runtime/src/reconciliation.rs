@@ -175,8 +175,11 @@ impl JobDispatcher {
             self.db.update_git_operation(operation).await?;
         }
 
+        self.adopt_finalized_target_ref(operation).await?;
+
         match checkout_finalization_status(
             Path::new(&context.project.path),
+            context.paths.mirror_git_dir.as_path(),
             &context.revision.target_ref,
             context.prepared_commit_oid,
         )
@@ -187,6 +190,7 @@ impl JobDispatcher {
                     context.project,
                     context.item_id,
                     context.revision,
+                    Some(context.prepared_commit_oid),
                 )
                 .await?;
                 Ok(FinalizeCompletionOutcome::Blocked)
@@ -196,16 +200,20 @@ impl JobDispatcher {
                     context.project,
                     context.item_id,
                     context.revision,
+                    Some(context.prepared_commit_oid),
                 )
                 .await?;
-                sync_checkout_to_commit(
+                if sync_checkout_to_commit(
                     Path::new(&context.project.path),
                     context.paths.mirror_git_dir.as_path(),
                     &context.revision.target_ref,
                     context.prepared_commit_oid,
                 )
-                .await?;
-                self.adopt_finalized_target_ref(operation).await?;
+                .await
+                .is_err()
+                {
+                    return Ok(FinalizeCompletionOutcome::Blocked);
+                }
                 self.mark_git_operation_reconciled(operation).await?;
                 Ok(FinalizeCompletionOutcome::Completed)
             }
@@ -214,9 +222,9 @@ impl JobDispatcher {
                     context.project,
                     context.item_id,
                     context.revision,
+                    Some(context.prepared_commit_oid),
                 )
                 .await?;
-                self.adopt_finalized_target_ref(operation).await?;
                 self.mark_git_operation_reconciled(operation).await?;
                 Ok(FinalizeCompletionOutcome::Completed)
             }

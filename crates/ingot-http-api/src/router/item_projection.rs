@@ -1,6 +1,7 @@
 use super::deps::*;
 use super::support::errors::{repo_to_internal, repo_to_item, repo_to_project};
 use super::types::*;
+use ingot_git::project_repo::CheckoutFinalizationStatus;
 
 pub(super) struct ItemRuntimeSnapshot {
     pub current_revision: ItemRevision,
@@ -155,7 +156,8 @@ pub(super) async fn evaluate_item_snapshot(
         convergences,
     } = snapshot;
     let evaluation = evaluator.evaluate(item, current_revision, jobs, findings, convergences);
-    let queue = load_queue_status(state, current_revision, project, &evaluation).await?;
+    let queue =
+        load_queue_status(state, current_revision, convergences, project, &evaluation).await?;
     let evaluation =
         overlay_evaluation_with_queue_state(current_revision, convergences, evaluation, &queue);
 
@@ -232,6 +234,7 @@ fn set_awaiting_convergence_lane(evaluation: &mut Evaluation) {
 pub(super) async fn load_queue_status(
     state: &AppState,
     revision: &ItemRevision,
+    convergences: &[Convergence],
     project: &Project,
     evaluation: &Evaluation,
 ) -> Result<QueueStatusResponse, ApiError> {
@@ -271,11 +274,33 @@ pub(super) async fn load_queue_status(
         && evaluation.next_recommended_action
             == RecommendedAction::named(NamedRecommendedAction::FinalizePreparedConvergence);
     if should_check_checkout {
-        if let CheckoutSyncStatus::Blocked { message, .. } = state
-            .infra()
-            .checkout_sync_status(project, &revision.target_ref)
-            .await?
-        {
+        let prepared_commit_oid = convergences.iter().find_map(|convergence| {
+            (convergence.item_revision_id == revision.id
+                && convergence.state.status()
+                    == ingot_domain::convergence::ConvergenceStatus::Prepared)
+                .then(|| convergence.state.prepared_commit_oid().cloned())
+                .flatten()
+        });
+        let blocked_message = if let Some(prepared_commit_oid) = prepared_commit_oid {
+            match state
+                .infra()
+                .checkout_finalization_status(project, &revision.target_ref, &prepared_commit_oid)
+                .await?
+            {
+                CheckoutFinalizationStatus::Blocked { message, .. } => Some(message),
+                CheckoutFinalizationStatus::NeedsSync | CheckoutFinalizationStatus::Synced => None,
+            }
+        } else {
+            match state
+                .infra()
+                .checkout_sync_status(project, &revision.target_ref)
+                .await?
+            {
+                CheckoutSyncStatus::Blocked { message, .. } => Some(message),
+                CheckoutSyncStatus::Ready => None,
+            }
+        };
+        if let Some(message) = blocked_message {
             queue.checkout_sync_blocked = true;
             queue.checkout_sync_message = Some(message);
         }

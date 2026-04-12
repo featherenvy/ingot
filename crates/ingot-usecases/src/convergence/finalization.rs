@@ -178,20 +178,6 @@ where
         port.update_git_operation(&operation).await?;
     }
 
-    match port
-        .checkout_finalization_readiness(project, item, revision, &prepared_commit_oid)
-        .await?
-    {
-        CheckoutFinalizationReadiness::Blocked { message } => {
-            return Err(UseCaseError::ProtocolViolation(message));
-        }
-        CheckoutFinalizationReadiness::NeedsSync => {
-            port.sync_checkout_to_prepared_commit(project, revision, &prepared_commit_oid)
-                .await?;
-        }
-        CheckoutFinalizationReadiness::Synced => {}
-    }
-
     port.apply_successful_finalization(
         trigger,
         project,
@@ -205,9 +191,24 @@ where
     )
     .await?;
 
-    operation.status = GitOperationStatus::Reconciled;
-    operation.completed_at = Some(Utc::now());
-    port.update_git_operation(&operation).await?;
+    let sync_completed = match port
+        .checkout_finalization_readiness(project, item, revision, &prepared_commit_oid)
+        .await
+    {
+        Ok(CheckoutFinalizationReadiness::Blocked { .. }) => false,
+        Ok(CheckoutFinalizationReadiness::NeedsSync) => port
+            .sync_checkout_to_prepared_commit(project, revision, &prepared_commit_oid)
+            .await
+            .is_ok(),
+        Ok(CheckoutFinalizationReadiness::Synced) => true,
+        Err(_) => false,
+    };
+
+    if sync_completed {
+        operation.status = GitOperationStatus::Reconciled;
+        operation.completed_at = Some(Utc::now());
+        port.update_git_operation(&operation).await?;
+    }
 
     Ok(())
 }
