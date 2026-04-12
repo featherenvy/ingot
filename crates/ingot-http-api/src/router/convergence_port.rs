@@ -517,12 +517,23 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
         mutation: FinalizationMutation,
     ) -> impl std::future::Future<Output = Result<(), UseCaseError>> + Send {
         let state = self.state.clone();
-        let cleanup = mutation.clone();
         async move {
-            if let FinalizationMutation::TargetRefAdvanced(mutation) = cleanup {
+            let cleanup = match &mutation {
+                FinalizationMutation::TargetRefAdvanced(mutation) => {
+                    Some((mutation.project_id, mutation.convergence_id))
+                }
+                FinalizationMutation::CheckoutAdoptionSucceeded(_) => None,
+            };
+            state
+                .db
+                .apply_finalization_mutation(mutation)
+                .await
+                .map_err(UseCaseError::Repository)?;
+
+            if let Some((project_id, convergence_id)) = cleanup {
                 let convergence = state
                     .db
-                    .get_convergence(mutation.convergence_id)
+                    .get_convergence(convergence_id)
                     .await
                     .map_err(UseCaseError::Repository)?;
                 if let Some(workspace_id) = convergence.state.integration_workspace_id() {
@@ -531,20 +542,22 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                         .get_workspace(workspace_id)
                         .await
                         .map_err(UseCaseError::Repository)?;
-                    if workspace.state.status() != WorkspaceStatus::Abandoned {
-                        state
+                    if workspace.state.status() == WorkspaceStatus::Abandoned
+                        && let Err(error) = state
                             .infra()
-                            .remove_workspace_path(mutation.project_id, &workspace.path)
+                            .remove_workspace_path(project_id, &workspace.path)
                             .await
-                            .map_err(api_to_usecase_error)?;
+                    {
+                        warn!(
+                            project_id = %project_id,
+                            workspace_id = %workspace_id,
+                            path = %workspace.path.display(),
+                            ?error,
+                            "failed to remove abandoned integration workspace after finalization",
+                        );
                     }
                 }
             }
-            state
-                .db
-                .apply_finalization_mutation(mutation)
-                .await
-                .map_err(UseCaseError::Repository)?;
             Ok(())
         }
     }

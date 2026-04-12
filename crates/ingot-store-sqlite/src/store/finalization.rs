@@ -40,6 +40,10 @@ impl FinalizationRepository for Database {
     }
 }
 
+fn finalization_conflict(code: &'static str) -> RepositoryError {
+    RepositoryError::Conflict(ConflictKind::Other(code.into()))
+}
+
 async fn apply_target_ref_advanced(
     tx: &mut Transaction<'_, Sqlite>,
     mutation: &FinalizationTargetRefAdvancedMutation,
@@ -72,6 +76,16 @@ async fn apply_target_ref_advanced(
         .try_get("integration_workspace_id")
         .map_err(db_err)?;
 
+    if !matches!(
+        previous_status,
+        ingot_domain::convergence::ConvergenceStatus::Prepared
+            | ingot_domain::convergence::ConvergenceStatus::Finalized
+    ) {
+        return Err(finalization_conflict(
+            "finalization_requires_prepared_or_finalized_convergence",
+        ));
+    }
+
     let item_row = sqlx::query(
         "SELECT lifecycle_state, escalation_reason
          FROM items
@@ -88,8 +102,37 @@ async fn apply_target_ref_advanced(
     let lifecycle_state: String = item_row.try_get("lifecycle_state").map_err(db_err)?;
     let escalation_reason: Option<EscalationReason> =
         item_row.try_get("escalation_reason").map_err(db_err)?;
-    let item_is_done = lifecycle_state == "done";
+    if lifecycle_state != "open" {
+        return Err(finalization_conflict("finalization_requires_open_item"));
+    }
     let checkout_sync_escalated = escalation_reason == Some(EscalationReason::CheckoutSyncBlocked);
+
+    let git_op_row = sqlx::query(
+        "SELECT status
+         FROM git_operations
+         WHERE id = ?
+           AND entity_type = 'convergence'
+           AND entity_id = ?
+           AND operation_kind = 'finalize_target_ref'",
+    )
+    .bind(mutation.git_operation_id)
+    .bind(mutation.convergence_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?
+    .ok_or(RepositoryError::NotFound)?;
+
+    let previous_git_op_status: ingot_domain::git_operation::GitOperationStatus =
+        git_op_row.try_get("status").map_err(db_err)?;
+    if !matches!(
+        previous_git_op_status,
+        ingot_domain::git_operation::GitOperationStatus::Planned
+            | ingot_domain::git_operation::GitOperationStatus::Applied
+    ) {
+        return Err(finalization_conflict(
+            "finalization_requires_unresolved_finalize_operation",
+        ));
+    }
 
     let convergence_result = sqlx::query(
         "UPDATE convergences
@@ -176,7 +219,7 @@ async fn apply_target_ref_advanced(
     }
 
     match mutation.checkout_adoption.state {
-        CheckoutAdoptionState::Blocked if !item_is_done => {
+        CheckoutAdoptionState::Blocked => {
             if !checkout_sync_escalated {
                 sqlx::query(
                     "UPDATE items
@@ -213,7 +256,7 @@ async fn apply_target_ref_advanced(
                 .await?;
             }
         }
-        _ if checkout_sync_escalated && !item_is_done => {
+        _ if checkout_sync_escalated => {
             sqlx::query(
                 "UPDATE items
                  SET escalation_state = 'none',
@@ -291,9 +334,9 @@ async fn apply_checkout_adoption_succeeded(
     let convergence_status: ingot_domain::convergence::ConvergenceStatus =
         convergence_row.try_get("status").map_err(db_err)?;
     if convergence_status != ingot_domain::convergence::ConvergenceStatus::Finalized {
-        return Err(RepositoryError::Conflict(ConflictKind::Other(
-            "finalization_requires_finalized_convergence".into(),
-        )));
+        return Err(finalization_conflict(
+            "finalization_requires_finalized_convergence",
+        ));
     }
 
     let item_row = sqlx::query(
@@ -309,7 +352,10 @@ async fn apply_checkout_adoption_succeeded(
     .map_err(db_err)?
     .ok_or(RepositoryError::NotFound)?;
 
-    let _item_was_done: String = item_row.try_get("lifecycle_state").map_err(db_err)?;
+    let lifecycle_state: String = item_row.try_get("lifecycle_state").map_err(db_err)?;
+    if lifecycle_state != "open" {
+        return Err(finalization_conflict("finalization_requires_open_item"));
+    }
     let escalation_reason: Option<EscalationReason> =
         item_row.try_get("escalation_reason").map_err(db_err)?;
     let checkout_sync_escalated = escalation_reason == Some(EscalationReason::CheckoutSyncBlocked);
@@ -331,6 +377,15 @@ async fn apply_checkout_adoption_succeeded(
 
     let previous_git_op_status: ingot_domain::git_operation::GitOperationStatus =
         git_op_row.try_get("status").map_err(db_err)?;
+    if !matches!(
+        previous_git_op_status,
+        ingot_domain::git_operation::GitOperationStatus::Planned
+            | ingot_domain::git_operation::GitOperationStatus::Applied
+    ) {
+        return Err(finalization_conflict(
+            "finalization_requires_unresolved_finalize_operation",
+        ));
+    }
 
     sqlx::query(
         "UPDATE convergences

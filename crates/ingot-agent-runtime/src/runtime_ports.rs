@@ -379,12 +379,23 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
         mutation: FinalizationMutation,
     ) -> impl Future<Output = Result<(), ingot_usecases::UseCaseError>> + Send {
         let dispatcher = self.dispatcher.clone();
-        let cleanup = mutation.clone();
         async move {
-            if let FinalizationMutation::TargetRefAdvanced(mutation) = cleanup {
+            let cleanup = match &mutation {
+                FinalizationMutation::TargetRefAdvanced(mutation) => {
+                    Some((mutation.project_id, mutation.convergence_id))
+                }
+                FinalizationMutation::CheckoutAdoptionSucceeded(_) => None,
+            };
+            dispatcher
+                .db
+                .apply_finalization_mutation(mutation)
+                .await
+                .map_err(ingot_usecases::UseCaseError::Repository)?;
+
+            if let Some((project_id, convergence_id)) = cleanup {
                 let convergence = dispatcher
                     .db
-                    .get_convergence(mutation.convergence_id)
+                    .get_convergence(convergence_id)
                     .await
                     .map_err(ingot_usecases::UseCaseError::Repository)?;
                 if let Some(workspace_id) = convergence.state.integration_workspace_id() {
@@ -394,27 +405,28 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                         .await
                         .map_err(ingot_usecases::UseCaseError::Repository)?;
                     if workspace.state.status()
-                        != ingot_domain::workspace::WorkspaceStatus::Abandoned
+                        == ingot_domain::workspace::WorkspaceStatus::Abandoned
                     {
                         let project = dispatcher
                             .db
-                            .get_project(mutation.project_id)
+                            .get_project(project_id)
                             .await
                             .map_err(ingot_usecases::UseCaseError::Repository)?;
                         let repo_path = dispatcher.project_paths(&project).mirror_git_dir;
-                        remove_workspace(repo_path.as_path(), &workspace.path)
-                            .await
-                            .map_err(|error| {
-                                ingot_usecases::UseCaseError::Internal(error.to_string())
-                            })?;
+                        if let Err(error) =
+                            remove_workspace(repo_path.as_path(), &workspace.path).await
+                        {
+                            warn!(
+                                project_id = %project_id,
+                                workspace_id = %workspace_id,
+                                path = %workspace.path.display(),
+                                ?error,
+                                "failed to remove abandoned integration workspace after finalization",
+                            );
+                        }
                     }
                 }
             }
-            dispatcher
-                .db
-                .apply_finalization_mutation(mutation)
-                .await
-                .map_err(ingot_usecases::UseCaseError::Repository)?;
             Ok(())
         }
     }
