@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { FindingsTable } from '../components/item-detail/FindingsTable'
 import { TooltipProvider } from '../components/ui/tooltip'
@@ -9,6 +9,11 @@ function renderFindingsTable(props: {
   jobs: Job[]
   linkedFindingItems?: LinkedFindingItemSummary[]
   workflowVersion: 'delivery:v1' | 'investigation:v1'
+  onTriage?: (
+    findingId: string,
+    payload: { triage_state: Finding['triage_state']; triage_note?: string; linked_item_id?: string },
+  ) => void
+  onPromote?: (findingId: string, dispatchImmediately: boolean) => void
 }) {
   return render(
     <MemoryRouter>
@@ -16,8 +21,8 @@ function renderFindingsTable(props: {
         <FindingsTable
           {...props}
           linkedFindingItems={props.linkedFindingItems ?? []}
-          onPromote={() => {}}
-          onTriage={() => {}}
+          onPromote={props.onPromote ?? (() => {})}
+          onTriage={props.onTriage ?? (() => {})}
           pendingFindingId={null}
         />
       </TooltipProvider>
@@ -53,6 +58,8 @@ function makeFinding(params: {
   sourceStepId: string
   createdAt: string
   triageState: Finding['triage_state']
+  linkedItemId?: string | null
+  triageNote?: string | null
 }): Finding {
   return {
     id: params.id,
@@ -73,8 +80,8 @@ function makeFinding(params: {
     evidence: [],
     investigation: null,
     triage_state: params.triageState,
-    linked_item_id: null,
-    triage_note: null,
+    linked_item_id: params.linkedItemId ?? null,
+    triage_note: params.triageNote ?? null,
     created_at: params.createdAt,
     triaged_at: null,
   }
@@ -247,5 +254,54 @@ describe('FindingsTable', () => {
     expect(screen.getByText('Triage all findings before the investigation can close.')).toBeInTheDocument()
     expect(screen.queryByText('Agent scope for next repair job')).not.toBeInTheDocument()
     expect(screen.queryByText('Current Review')).not.toBeInTheDocument()
+  })
+
+  it('omits a stale linked item id when changing a linked finding to a non-linking state', async () => {
+    const latestJob = makeJob({
+      id: 'job_1',
+      stepId: 'review_candidate_initial',
+      endedAt: '2026-03-12T00:02:00Z',
+    })
+    const onTriage = vi.fn()
+
+    renderFindingsTable({
+      workflowVersion: 'delivery:v1',
+      jobs: [latestJob],
+      findings: [
+        makeFinding({
+          id: 'fnd_1',
+          sourceJobId: latestJob.id,
+          sourceStepId: latestJob.step_id,
+          createdAt: '2026-03-12T00:02:00Z',
+          triageState: 'backlog',
+          linkedItemId: 'itm_2',
+        }),
+      ],
+      onTriage,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Change triage' }))
+    fireEvent.click(screen.getByRole('combobox'))
+    fireEvent.click(await screen.findByText("Won't fix"))
+    fireEvent.change(screen.getByPlaceholderText('Note (required)'), {
+      target: { value: 'accepted risk' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+
+    expect(onTriage).toHaveBeenCalledTimes(1)
+    expect(onTriage).toHaveBeenCalledWith(
+      'fnd_1',
+      expect.objectContaining({
+        triage_state: 'wont_fix',
+        triage_note: 'accepted risk',
+        linked_item_id: undefined,
+      }),
+    )
+    expect(JSON.stringify(onTriage.mock.calls[0]?.[1])).toBe(
+      JSON.stringify({
+        triage_state: 'wont_fix',
+        triage_note: 'accepted risk',
+      }),
+    )
   })
 })

@@ -406,10 +406,12 @@ function FindingCard({
       return
     }
 
+    const linkedItemIdForSubmit = NEEDS_LINK.has(triageState) ? linkedItemId || undefined : undefined
+
     onTriage(finding.id, {
       triage_state: triageState,
       triage_note: triageNote || undefined,
-      linked_item_id: linkedItemId || undefined,
+      linked_item_id: linkedItemIdForSubmit,
     })
     setEditing(false)
   }

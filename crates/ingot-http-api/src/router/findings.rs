@@ -94,6 +94,10 @@ pub(super) async fn promote_item_from_finding(
     } = maybe_request
         .map(|Json(request)| request)
         .unwrap_or_default();
+    let dispatch_immediately = dispatch_immediately.unwrap_or(false);
+
+    validate_promote_and_launch_request(&state, finding_id, dispatch_immediately).await?;
+
     let triage_request = TriageFindingRequest {
         triage_state: FindingTriageState::Backlog,
         triage_note: None,
@@ -114,13 +118,7 @@ pub(super) async fn promote_item_from_finding(
     let mut job = None;
     let mut launch_error = None;
 
-    if dispatch_immediately.unwrap_or(false) {
-        if !supports_promote_and_launch(&applied.finding) {
-            return Err(ApiError::UseCase(UseCaseError::InvalidFindingTriage(
-                "dispatch_immediately is only supported for investigation findings".into(),
-            )));
-        }
-
+    if dispatch_immediately {
         let project = state
             .db
             .get_project(item.project_id)
@@ -156,6 +154,30 @@ pub(super) async fn promote_item_from_finding(
         job,
         launch_error,
     }))
+}
+
+async fn validate_promote_and_launch_request(
+    state: &AppState,
+    finding_id: FindingId,
+    dispatch_immediately: bool,
+) -> Result<(), ApiError> {
+    if !dispatch_immediately {
+        return Ok(());
+    }
+
+    let finding = state
+        .db
+        .get_finding(finding_id)
+        .await
+        .map_err(repo_to_finding)?;
+
+    if supports_promote_and_launch(&finding) {
+        Ok(())
+    } else {
+        Err(ApiError::UseCase(UseCaseError::InvalidFindingTriage(
+            "dispatch_immediately is only supported for investigation findings".into(),
+        )))
+    }
 }
 
 fn api_error_message(error: ApiError) -> String {
