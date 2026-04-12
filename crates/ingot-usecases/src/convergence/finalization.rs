@@ -193,15 +193,14 @@ where
 
     let sync_completed = match port
         .checkout_finalization_readiness(project, item, revision, &prepared_commit_oid)
-        .await
+        .await?
     {
-        Ok(CheckoutFinalizationReadiness::Blocked { .. }) => false,
-        Ok(CheckoutFinalizationReadiness::NeedsSync) => port
+        CheckoutFinalizationReadiness::Blocked { .. } => false,
+        CheckoutFinalizationReadiness::NeedsSync => port
             .sync_checkout_to_prepared_commit(project, revision, &prepared_commit_oid)
             .await
             .is_ok(),
-        Ok(CheckoutFinalizationReadiness::Synced) => true,
-        Err(_) => false,
+        CheckoutFinalizationReadiness::Synced => true,
     };
 
     if sync_completed {

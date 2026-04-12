@@ -36,6 +36,7 @@ pub(super) struct FakePort {
     pub(super) calls: Arc<Mutex<Vec<String>>>,
     pub(super) auto_finalize_progress: bool,
     pub(super) checkout_finalization_readiness: CheckoutFinalizationReadiness,
+    pub(super) checkout_finalization_readiness_error: Option<String>,
     pub(super) finalize_target_ref_result: FinalizeTargetRefResult,
     pub(super) apply_successful_finalization_should_fail: bool,
     pub(super) sync_checkout_should_fail: bool,
@@ -95,6 +96,7 @@ impl FakePort {
             calls: Arc::new(Mutex::new(Vec::new())),
             auto_finalize_progress: true,
             checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
+            checkout_finalization_readiness_error: None,
             finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
             apply_successful_finalization_should_fail: false,
             sync_checkout_should_fail: false,
@@ -109,6 +111,7 @@ impl FakePort {
             calls: Arc::new(Mutex::new(Vec::new())),
             auto_finalize_progress: true,
             checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
+            checkout_finalization_readiness_error: None,
             finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
             apply_successful_finalization_should_fail: false,
             sync_checkout_should_fail: false,
@@ -123,6 +126,7 @@ impl FakePort {
             calls: Arc::new(Mutex::new(Vec::new())),
             auto_finalize_progress: true,
             checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
+            checkout_finalization_readiness_error: None,
             finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
             apply_successful_finalization_should_fail: false,
             sync_checkout_should_fail: false,
@@ -354,7 +358,14 @@ impl PreparedConvergenceFinalizePort for FakePort {
             .lock()
             .expect("calls lock")
             .push(format!("checkout_readiness:{}", item.id));
-        ready(Ok(self.checkout_finalization_readiness.clone()))
+        ready(
+            self.checkout_finalization_readiness_error
+                .clone()
+                .map_or_else(
+                    || Ok(self.checkout_finalization_readiness.clone()),
+                    |message| Err(UseCaseError::Internal(message)),
+                ),
+        )
     }
 
     fn sync_checkout_to_prepared_commit(

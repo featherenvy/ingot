@@ -247,6 +247,34 @@ async fn approve_item_keeps_finalize_operation_unresolved_when_sync_retry_fails_
 }
 
 #[tokio::test]
+async fn approve_item_surfaces_checkout_readiness_failures_after_finalize() {
+    let port = FakePort {
+        checkout_finalization_readiness_error: Some("git inspection failed".into()),
+        ..FakePort::with_approval_context(FakePort::default_approval_context())
+    };
+    let service = ConvergenceService::new(port.clone());
+
+    let error = service
+        .approve_item(
+            ProjectId::from_uuid(Uuid::nil()),
+            ItemId::from_uuid(Uuid::nil()),
+        )
+        .await
+        .expect_err("approval should surface checkout readiness failures");
+
+    assert!(matches!(error, UseCaseError::Internal(message) if message == "git inspection failed"));
+    let calls = port.calls();
+    assert!(calls.iter().any(|call| call == "update_op:Applied"));
+    assert!(!calls.iter().any(|call| call == "update_op:Reconciled"));
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.starts_with("apply_successful_finalization:ApprovalCommand:"))
+    );
+    assert!(!calls.iter().any(|call| call.starts_with("sync_checkout:")));
+}
+
+#[tokio::test]
 async fn approve_item_keeps_finalize_operation_unresolved_when_success_persistence_fails() {
     let port = FakePort {
         apply_successful_finalization_should_fail: true,

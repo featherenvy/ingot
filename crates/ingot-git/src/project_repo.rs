@@ -40,17 +40,28 @@ async fn tracked_working_tree_has_changes(repo_path: &Path) -> Result<bool, GitC
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
-async fn untracked_checkout_paths(repo_path: &Path) -> Result<Vec<String>, GitCommandError> {
+async fn local_checkout_artifact_paths(repo_path: &Path) -> Result<Vec<String>, GitCommandError> {
     let output = git(
         repo_path,
-        &["ls-files", "--others", "--exclude-standard", "-z"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
     )
     .await?;
     Ok(output
         .stdout
         .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| String::from_utf8_lossy(entry).into_owned())
+        .filter_map(|entry| {
+            if entry.starts_with(b"?? ") || entry.starts_with(b"!! ") {
+                Some(String::from_utf8_lossy(&entry[3..]).into_owned())
+            } else {
+                None
+            }
+        })
         .collect())
 }
 
@@ -76,14 +87,14 @@ fn path_ancestors(path: &str) -> impl Iterator<Item = &str> {
         .map(move |(index, _)| &path[..index])
 }
 
-fn collect_untracked_collision_paths(
+fn collect_local_artifact_collision_paths(
     checkout_path: &Path,
-    untracked_paths: &[String],
+    local_artifact_paths: &[String],
     tracked_paths: &[String],
 ) -> Vec<String> {
     let tracked_path_set: HashSet<&str> = tracked_paths.iter().map(String::as_str).collect();
     let mut untracked_dir_paths = BTreeSet::new();
-    for path in untracked_paths {
+    for path in local_artifact_paths {
         for ancestor in path_ancestors(path) {
             if checkout_path.join(ancestor).is_dir() {
                 untracked_dir_paths.insert(ancestor.to_string());
@@ -92,7 +103,7 @@ fn collect_untracked_collision_paths(
     }
 
     let mut conflicts = BTreeSet::new();
-    for path in untracked_paths {
+    for path in local_artifact_paths {
         if tracked_path_set.contains(path.as_str()) {
             conflicts.insert(path.clone());
         }
@@ -118,12 +129,12 @@ fn format_untracked_collision_message(conflicts: &[String]) -> String {
     let remainder = conflicts.len().saturating_sub(display_paths.len());
     if remainder == 0 {
         format!(
-            "Registered checkout has untracked paths that would be overwritten by the prepared commit: {}",
+            "Registered checkout has local untracked or ignored paths that would be overwritten by the prepared commit: {}",
             display_paths.join(", ")
         )
     } else {
         format!(
-            "Registered checkout has untracked paths that would be overwritten by the prepared commit: {} (and {remainder} more)",
+            "Registered checkout has local untracked or ignored paths that would be overwritten by the prepared commit: {} (and {remainder} more)",
             display_paths.join(", ")
         )
     }
@@ -282,14 +293,17 @@ pub async fn checkout_sync_status_for_commit(
 ) -> Result<CheckoutSyncStatus, GitCommandError> {
     match checkout_sync_status(checkout_path, target_ref).await? {
         CheckoutSyncStatus::Ready => {
-            let untracked_paths = untracked_checkout_paths(checkout_path).await?;
-            if untracked_paths.is_empty() {
+            let local_artifact_paths = local_checkout_artifact_paths(checkout_path).await?;
+            if local_artifact_paths.is_empty() {
                 return Ok(CheckoutSyncStatus::Ready);
             }
 
             let tracked_paths = tracked_paths_in_commit(commit_tree_repo_path, commit_oid).await?;
-            let conflicts =
-                collect_untracked_collision_paths(checkout_path, &untracked_paths, &tracked_paths);
+            let conflicts = collect_local_artifact_collision_paths(
+                checkout_path,
+                &local_artifact_paths,
+                &tracked_paths,
+            );
             if conflicts.is_empty() {
                 Ok(CheckoutSyncStatus::Ready)
             } else {
@@ -336,6 +350,13 @@ pub async fn sync_checkout_to_commit(
     target_ref: &GitRef,
     commit_oid: &CommitOid,
 ) -> Result<(), GitCommandError> {
+    if let CheckoutSyncStatus::Blocked { message, .. } =
+        checkout_sync_status_for_commit(checkout_path, mirror_git_dir, target_ref, commit_oid)
+            .await?
+    {
+        return Err(GitCommandError::CommandFailed(message));
+    }
+
     let sync_ref = format!(
         "refs/ingot/sync-targets/{}",
         target_ref
@@ -592,7 +613,50 @@ mod tests {
             CheckoutFinalizationStatus::Blocked { code, message }
                 if code == "checkout_untracked_conflict"
                     && message.contains("collide.txt")
-                    && message.contains("untracked")
+                    && message.contains("ignored")
+        ));
+    }
+
+    #[tokio::test]
+    async fn checkout_finalization_status_blocks_conflicting_ignored_path() {
+        let checkout_path = temp_git_repo("ingot-git-project-repo");
+        fs::write(checkout_path.join(".gitignore"), "generated.out\n").expect("write gitignore");
+        git_sync(&checkout_path, &["add", ".gitignore"]);
+        git_sync(
+            &checkout_path,
+            &["commit", "-m", "ignore generated artifact"],
+        );
+        let base_commit = git_output(&checkout_path, &["rev-parse", "HEAD"]);
+
+        let state_root = unique_temp_path("ingot-git-project-repo-state");
+        let paths = project_repo_paths(state_root.as_path(), ProjectId::new(), &checkout_path);
+        ensure_mirror(&paths).await.expect("initial ensure mirror");
+
+        fs::write(checkout_path.join("generated.out"), "prepared\n").expect("write tracked file");
+        git_sync(&checkout_path, &["add", "-f", "generated.out"]);
+        git_sync(&checkout_path, &["commit", "-m", "track generated output"]);
+        let prepared_commit = git_output(&checkout_path, &["rev-parse", "HEAD"]);
+        ensure_mirror(&paths).await.expect("refresh mirror");
+
+        git_sync(&checkout_path, &["reset", "--hard", &base_commit]);
+        fs::write(checkout_path.join("generated.out"), "scratch\n")
+            .expect("write conflicting ignored file");
+
+        let status = super::checkout_finalization_status(
+            &checkout_path,
+            &paths.mirror_git_dir,
+            &GitRef::new("refs/heads/main"),
+            &CommitOid::new(prepared_commit),
+        )
+        .await
+        .expect("checkout finalization status");
+
+        assert!(matches!(
+            status,
+            CheckoutFinalizationStatus::Blocked { code, message }
+                if code == "checkout_untracked_conflict"
+                    && message.contains("generated.out")
+                    && message.contains("ignored")
         ));
     }
 
@@ -666,6 +730,56 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(checkout_path.join("note.tmp")).expect("read untracked note"),
+            "scratch\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_checkout_to_commit_rejects_conflicting_ignored_paths() {
+        let checkout_path = temp_git_repo("ingot-git-project-repo");
+        fs::write(checkout_path.join(".gitignore"), "generated.out\n").expect("write gitignore");
+        git_sync(&checkout_path, &["add", ".gitignore"]);
+        git_sync(
+            &checkout_path,
+            &["commit", "-m", "ignore generated artifact"],
+        );
+        let base_commit = git_output(&checkout_path, &["rev-parse", "HEAD"]);
+
+        let state_root = unique_temp_path("ingot-git-project-repo-state");
+        let paths = project_repo_paths(state_root.as_path(), ProjectId::new(), &checkout_path);
+        ensure_mirror(&paths).await.expect("initial ensure mirror");
+
+        fs::write(checkout_path.join("generated.out"), "prepared\n").expect("write tracked file");
+        git_sync(&checkout_path, &["add", "-f", "generated.out"]);
+        git_sync(&checkout_path, &["commit", "-m", "track generated output"]);
+        let prepared_commit = git_output(&checkout_path, &["rev-parse", "HEAD"]);
+        ensure_mirror(&paths).await.expect("refresh mirror");
+
+        git_sync(&checkout_path, &["reset", "--hard", &base_commit]);
+        fs::write(checkout_path.join("generated.out"), "scratch\n")
+            .expect("write conflicting ignored file");
+
+        let error = sync_checkout_to_commit(
+            &checkout_path,
+            &paths.mirror_git_dir,
+            &GitRef::new("refs/heads/main"),
+            &CommitOid::new(prepared_commit),
+        )
+        .await
+        .expect_err("sync should reject conflicting ignored paths");
+
+        assert!(
+            error.to_string().contains("generated.out"),
+            "error should identify the conflicting ignored path"
+        );
+        assert_eq!(
+            git_output(&checkout_path, &["rev-parse", "HEAD"]),
+            base_commit,
+            "sync must not reset the checkout when ignored paths would be clobbered"
+        );
+        assert_eq!(
+            fs::read_to_string(checkout_path.join("generated.out"))
+                .expect("read conflicting ignored file"),
             "scratch\n"
         );
     }
