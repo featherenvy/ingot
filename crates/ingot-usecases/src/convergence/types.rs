@@ -1,13 +1,14 @@
 use std::future::Future;
 
 use ingot_domain::commit_oid::CommitOid;
-use ingot_domain::convergence::{Convergence, FinalizedCheckoutAdoption};
+use ingot_domain::convergence::Convergence;
 use ingot_domain::convergence_queue::ConvergenceQueueEntry;
 use ingot_domain::finding::Finding;
 use ingot_domain::git_operation::GitOperation;
 use ingot_domain::ids::{ItemId, ProjectId};
 use ingot_domain::item::Item;
 use ingot_domain::job::Job;
+use ingot_domain::ports::FinalizationMutation;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 
@@ -68,12 +69,6 @@ pub enum ApprovalFinalizeReadiness {
 pub enum FinalizePreparedTrigger {
     ApprovalCommand,
     SystemCommand,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct FinalizationTarget<'a> {
-    pub convergence: &'a Convergence,
-    pub queue_entry: &'a ConvergenceQueueEntry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,25 +220,8 @@ pub trait PreparedConvergenceFinalizePort: Send + Sync {
         operation: &GitOperation,
     ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
 
-    #[allow(clippy::too_many_arguments)]
-    fn persist_target_ref_advance(
+    fn apply_finalization_mutation(
         &self,
-        trigger: FinalizePreparedTrigger,
-        project: &Project,
-        item: &ingot_domain::item::Item,
-        revision: &ItemRevision,
-        target: FinalizationTarget<'_>,
-        operation: &GitOperation,
-        checkout_adoption: &FinalizedCheckoutAdoption,
-    ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
-
-    fn persist_checkout_adoption_success(
-        &self,
-        trigger: FinalizePreparedTrigger,
-        project: &Project,
-        item: &ingot_domain::item::Item,
-        revision: &ItemRevision,
-        target: FinalizationTarget<'_>,
-        operation: &GitOperation,
+        mutation: FinalizationMutation,
     ) -> impl Future<Output = Result<(), UseCaseError>> + Send;
 }

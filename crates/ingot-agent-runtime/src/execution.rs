@@ -1014,6 +1014,7 @@ impl JobDispatcher {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn finalize_integration_workspace_after_close(
         &self,
         project: &Project,

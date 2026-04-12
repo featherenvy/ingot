@@ -41,7 +41,6 @@ describe('domain contract typing', () => {
         checkout_adoption_state: null,
         checkout_adoption_message: null,
         final_target_commit_oid: null,
-        finalize_operation_unresolved: false,
       },
       queue: {
         state: null,
@@ -108,7 +107,6 @@ describe('domain contract typing', () => {
         checkout_adoption_state: null,
         checkout_adoption_message: null,
         final_target_commit_oid: 'abc123456789',
-        finalize_operation_unresolved: false,
       },
       queue: {
         state: 'head',

@@ -590,6 +590,7 @@ impl JobDispatcher {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn reconcile_checkout_sync_state(
         &self,
         project: &Project,

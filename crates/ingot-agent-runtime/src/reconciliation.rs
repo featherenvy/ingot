@@ -6,16 +6,17 @@ use chrono::Utc;
 use ingot_domain::activity::{ActivityEventType, ActivitySubject};
 use ingot_domain::commit_oid::CommitOid;
 use ingot_domain::convergence::{ConvergenceStatus, FinalizedCheckoutAdoption};
-use ingot_domain::convergence_queue::ConvergenceQueueEntryStatus;
 use ingot_domain::git_operation::{
     GitOperation, GitOperationEntityRef, GitOperationStatus, OperationKind, OperationPayload,
 };
 use ingot_domain::git_ref::GitRef;
 use ingot_domain::ids::GitOperationId;
-use ingot_domain::item::{ApprovalState, DoneReason, Escalation, Lifecycle, ResolutionSource};
+use ingot_domain::item::{ApprovalState, ResolutionSource};
 use ingot_domain::job::{Job, JobState, JobStatus, OutcomeClass};
-use ingot_domain::ports::FinishJobNonSuccessParams;
-use ingot_domain::ports::ProjectMutationLockPort;
+use ingot_domain::ports::{
+    FinalizationCheckoutAdoptionSucceededMutation, FinalizationMutation,
+    FinalizationTargetRefAdvancedMutation, FinishJobNonSuccessParams, ProjectMutationLockPort,
+};
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::workspace::{RetentionPolicy, Workspace, WorkspaceKind, WorkspaceStatus};
@@ -189,41 +190,26 @@ impl JobDispatcher {
             CheckoutFinalizationStatus::NeedsSync => FinalizedCheckoutAdoption::pending(Utc::now()),
             CheckoutFinalizationStatus::Synced => FinalizedCheckoutAdoption::synced(Utc::now()),
         };
-        if self
-            .persist_target_ref_advance(operation, checkout_adoption)
-            .await?
-        {
-            self.append_activity(
-                operation.project_id,
-                ActivityEventType::ConvergenceFinalized,
-                ActivitySubject::Convergence(*match &operation.entity {
-                    GitOperationEntityRef::Convergence(id) => id,
-                    _ => unreachable!("checked above"),
-                }),
-                serde_json::json!({ "item_id": context.item_id }),
-            )
+        self.db
+            .apply_finalization_mutation(FinalizationMutation::TargetRefAdvanced(
+                FinalizationTargetRefAdvancedMutation {
+                    project_id: operation.project_id,
+                    item_id: context.item_id,
+                    expected_item_revision_id: context.revision.id,
+                    convergence_id: *match &operation.entity {
+                        GitOperationEntityRef::Convergence(id) => id,
+                        _ => unreachable!("checked above"),
+                    },
+                    git_operation_id: operation.id,
+                    final_target_commit_oid: context.prepared_commit_oid.clone(),
+                    checkout_adoption,
+                },
+            ))
             .await?;
-        }
 
         match checkout_status {
-            CheckoutFinalizationStatus::Blocked { .. } => {
-                self.reconcile_checkout_sync_state(
-                    context.project,
-                    context.item_id,
-                    context.revision,
-                    Some(context.prepared_commit_oid),
-                )
-                .await?;
-                Ok(FinalizeCompletionOutcome::Blocked)
-            }
+            CheckoutFinalizationStatus::Blocked { .. } => Ok(FinalizeCompletionOutcome::Blocked),
             CheckoutFinalizationStatus::NeedsSync => {
-                self.reconcile_checkout_sync_state(
-                    context.project,
-                    context.item_id,
-                    context.revision,
-                    Some(context.prepared_commit_oid),
-                )
-                .await?;
                 if sync_checkout_to_commit(
                     Path::new(&context.project.path),
                     context.paths.mirror_git_dir.as_path(),
@@ -242,28 +228,93 @@ impl JobDispatcher {
                         )
                         .await?
                     {
-                        self.persist_target_ref_advance(
-                            operation,
-                            FinalizedCheckoutAdoption::blocked(message, Utc::now()),
-                        )
-                        .await?;
+                        self.db
+                            .apply_finalization_mutation(FinalizationMutation::TargetRefAdvanced(
+                                FinalizationTargetRefAdvancedMutation {
+                                    project_id: operation.project_id,
+                                    item_id: context.item_id,
+                                    expected_item_revision_id: context.revision.id,
+                                    convergence_id: *match &operation.entity {
+                                        GitOperationEntityRef::Convergence(id) => id,
+                                        _ => unreachable!("checked above"),
+                                    },
+                                    git_operation_id: operation.id,
+                                    final_target_commit_oid: context.prepared_commit_oid.clone(),
+                                    checkout_adoption: FinalizedCheckoutAdoption::blocked(
+                                        message,
+                                        Utc::now(),
+                                    ),
+                                },
+                            ))
+                            .await?;
                     }
                     return Ok(FinalizeCompletionOutcome::Blocked);
                 }
-                self.mark_git_operation_reconciled(operation).await?;
-                self.persist_checkout_adoption_success(operation).await?;
+                let resolution_source = match context.revision.approval_policy {
+                    ingot_domain::revision::ApprovalPolicy::Required => {
+                        ResolutionSource::ApprovalCommand
+                    }
+                    ingot_domain::revision::ApprovalPolicy::NotRequired => {
+                        ResolutionSource::SystemCommand
+                    }
+                };
+                let approval_state = match context.revision.approval_policy {
+                    ingot_domain::revision::ApprovalPolicy::Required => ApprovalState::Approved,
+                    ingot_domain::revision::ApprovalPolicy::NotRequired => {
+                        ApprovalState::NotRequired
+                    }
+                };
+                self.db
+                    .apply_finalization_mutation(FinalizationMutation::CheckoutAdoptionSucceeded(
+                        FinalizationCheckoutAdoptionSucceededMutation {
+                            project_id: operation.project_id,
+                            item_id: context.item_id,
+                            expected_item_revision_id: context.revision.id,
+                            convergence_id: *match &operation.entity {
+                                GitOperationEntityRef::Convergence(id) => id,
+                                _ => unreachable!("checked above"),
+                            },
+                            git_operation_id: operation.id,
+                            resolution_source,
+                            approval_state,
+                            synced_at: Utc::now(),
+                        },
+                    ))
+                    .await?;
                 Ok(FinalizeCompletionOutcome::Completed)
             }
             CheckoutFinalizationStatus::Synced => {
-                self.reconcile_checkout_sync_state(
-                    context.project,
-                    context.item_id,
-                    context.revision,
-                    Some(context.prepared_commit_oid),
-                )
-                .await?;
-                self.mark_git_operation_reconciled(operation).await?;
-                self.persist_checkout_adoption_success(operation).await?;
+                let resolution_source = match context.revision.approval_policy {
+                    ingot_domain::revision::ApprovalPolicy::Required => {
+                        ResolutionSource::ApprovalCommand
+                    }
+                    ingot_domain::revision::ApprovalPolicy::NotRequired => {
+                        ResolutionSource::SystemCommand
+                    }
+                };
+                let approval_state = match context.revision.approval_policy {
+                    ingot_domain::revision::ApprovalPolicy::Required => ApprovalState::Approved,
+                    ingot_domain::revision::ApprovalPolicy::NotRequired => {
+                        ApprovalState::NotRequired
+                    }
+                };
+                self.db
+                    .apply_finalization_mutation(FinalizationMutation::CheckoutAdoptionSucceeded(
+                        FinalizationCheckoutAdoptionSucceededMutation {
+                            project_id: operation.project_id,
+                            item_id: context.item_id,
+                            expected_item_revision_id: context.revision.id,
+                            convergence_id: *match &operation.entity {
+                                GitOperationEntityRef::Convergence(id) => id,
+                                _ => unreachable!("checked above"),
+                            },
+                            git_operation_id: operation.id,
+                            resolution_source,
+                            approval_state,
+                            synced_at: Utc::now(),
+                        },
+                    ))
+                    .await?;
                 Ok(FinalizeCompletionOutcome::Completed)
             }
         }
@@ -276,12 +327,63 @@ impl JobDispatcher {
         match operation.operation_kind() {
             OperationKind::CreateJobCommit => self.adopt_create_job_commit(operation).await,
             OperationKind::FinalizeTargetRef => {
-                self.persist_target_ref_advance(
-                    operation,
-                    FinalizedCheckoutAdoption::synced(Utc::now()),
-                )
-                .await?;
-                self.persist_checkout_adoption_success(operation).await
+                let convergence_id = match &operation.entity {
+                    GitOperationEntityRef::Convergence(id) => *id,
+                    _ => unreachable!("checked above"),
+                };
+                let convergence = self.db.get_convergence(convergence_id).await?;
+                let item = self.db.get_item(convergence.item_id).await?;
+                let revision = self.db.get_revision(convergence.item_revision_id).await?;
+                let resolution_source = match revision.approval_policy {
+                    ingot_domain::revision::ApprovalPolicy::Required => {
+                        ResolutionSource::ApprovalCommand
+                    }
+                    ingot_domain::revision::ApprovalPolicy::NotRequired => {
+                        ResolutionSource::SystemCommand
+                    }
+                };
+                let approval_state = match revision.approval_policy {
+                    ingot_domain::revision::ApprovalPolicy::Required => ApprovalState::Approved,
+                    ingot_domain::revision::ApprovalPolicy::NotRequired => {
+                        ApprovalState::NotRequired
+                    }
+                };
+                self.db
+                    .apply_finalization_mutation(FinalizationMutation::TargetRefAdvanced(
+                        FinalizationTargetRefAdvancedMutation {
+                            project_id: operation.project_id,
+                            item_id: item.id,
+                            expected_item_revision_id: revision.id,
+                            convergence_id,
+                            git_operation_id: operation.id,
+                            final_target_commit_oid: operation
+                                .new_oid()
+                                .or(operation.commit_oid())
+                                .cloned()
+                                .ok_or_else(|| {
+                                    RuntimeError::InvalidState(
+                                        "reconciled finalize_target_ref missing commit oid".into(),
+                                    )
+                                })?,
+                            checkout_adoption: FinalizedCheckoutAdoption::synced(Utc::now()),
+                        },
+                    ))
+                    .await?;
+                self.db
+                    .apply_finalization_mutation(FinalizationMutation::CheckoutAdoptionSucceeded(
+                        FinalizationCheckoutAdoptionSucceededMutation {
+                            project_id: operation.project_id,
+                            item_id: item.id,
+                            expected_item_revision_id: revision.id,
+                            convergence_id,
+                            git_operation_id: operation.id,
+                            resolution_source,
+                            approval_state,
+                            synced_at: Utc::now(),
+                        },
+                    ))
+                    .await
+                    .map_err(RuntimeError::Repository)
             }
             OperationKind::PrepareConvergenceCommit => {
                 self.adopt_prepared_convergence(operation).await
@@ -349,125 +451,6 @@ impl JobDispatcher {
         .await?;
         self.auto_dispatch_projected_review(job.project_id, job.item_id)
             .await?;
-
-        Ok(())
-    }
-
-    pub(crate) async fn persist_target_ref_advance(
-        &self,
-        operation: &GitOperation,
-        checkout_adoption: FinalizedCheckoutAdoption,
-    ) -> Result<bool, RuntimeError> {
-        let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
-            return Err(RuntimeError::InvalidState(format!(
-                "expected convergence entity, got {:?}",
-                operation.entity.entity_type()
-            )));
-        };
-        let convergence_id = *convergence_id;
-        let mut convergence = self.db.get_convergence(convergence_id).await?;
-        let mut newly_finalized = false;
-        if convergence.state.status() != ConvergenceStatus::Finalized {
-            let final_oid = operation
-                .new_oid()
-                .or(operation.commit_oid())
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| {
-                    RuntimeError::InvalidState(
-                        "reconciled finalize_target_ref missing commit oid".into(),
-                    )
-                })?;
-            convergence
-                .transition_to_finalized(final_oid, checkout_adoption, Utc::now())
-                .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
-            newly_finalized = true;
-        } else {
-            convergence
-                .transition_finalized_checkout_adoption(checkout_adoption)
-                .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
-        }
-        self.db.update_convergence(&convergence).await?;
-
-        let project = self.db.get_project(convergence.project_id).await?;
-        if let Some(workspace_id) = convergence.state.integration_workspace_id() {
-            let workspace = self.db.get_workspace(workspace_id).await?;
-            if workspace.state.status() != WorkspaceStatus::Abandoned {
-                self.finalize_integration_workspace_after_close(&project, &workspace)
-                    .await?;
-            }
-        }
-
-        if let Some(mut queue_entry) = self
-            .db
-            .find_active_queue_entry_for_revision(convergence.item_revision_id)
-            .await?
-        {
-            queue_entry.status = ConvergenceQueueEntryStatus::Released;
-            queue_entry.released_at.get_or_insert_with(Utc::now);
-            queue_entry.updated_at = Utc::now();
-            self.db.update_queue_entry(&queue_entry).await?;
-        }
-
-        Ok(newly_finalized)
-    }
-
-    pub(crate) async fn persist_checkout_adoption_success(
-        &self,
-        operation: &GitOperation,
-    ) -> Result<(), RuntimeError> {
-        let GitOperationEntityRef::Convergence(convergence_id) = &operation.entity else {
-            return Err(RuntimeError::InvalidState(format!(
-                "expected convergence entity, got {:?}",
-                operation.entity.entity_type()
-            )));
-        };
-        if operation.status != GitOperationStatus::Reconciled {
-            return Err(RuntimeError::InvalidState(
-                "cannot close finalized item before finalize operation is reconciled".into(),
-            ));
-        }
-
-        let convergence_id = *convergence_id;
-        let mut convergence = self.db.get_convergence(convergence_id).await?;
-        convergence
-            .transition_finalized_checkout_adoption(FinalizedCheckoutAdoption::synced(Utc::now()))
-            .map_err(|error| RuntimeError::InvalidState(error.to_string()))?;
-        self.db.update_convergence(&convergence).await?;
-
-        if self
-            .db
-            .find_unresolved_finalize_for_convergence(convergence.id)
-            .await?
-            .is_some()
-        {
-            return Err(RuntimeError::InvalidState(
-                "cannot close finalized item while finalize operation remains unresolved".into(),
-            ));
-        }
-
-        let mut item = self.db.get_item(convergence.item_id).await?;
-        if item.current_revision_id == convergence.item_revision_id {
-            if !item.lifecycle.is_done() {
-                let revision = self.db.get_revision(item.current_revision_id).await?;
-                let (resolution_source, approval_state) = match revision.approval_policy {
-                    ingot_domain::revision::ApprovalPolicy::Required => {
-                        (ResolutionSource::ApprovalCommand, ApprovalState::Approved)
-                    }
-                    ingot_domain::revision::ApprovalPolicy::NotRequired => {
-                        (ResolutionSource::SystemCommand, ApprovalState::NotRequired)
-                    }
-                };
-                item.lifecycle = Lifecycle::Done {
-                    reason: DoneReason::Completed,
-                    source: resolution_source,
-                    closed_at: Utc::now(),
-                };
-                item.approval_state = approval_state;
-            }
-            item.escalation = Escalation::None;
-            item.updated_at = Utc::now();
-            self.db.update_item(&item).await?;
-        }
 
         Ok(())
     }

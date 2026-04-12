@@ -1,14 +1,16 @@
 use std::future::Future;
 
+use chrono::{DateTime, Utc};
+
 use crate::activity::Activity;
 use crate::commit_oid::CommitOid;
-use crate::convergence::Convergence;
+use crate::convergence::{Convergence, FinalizedCheckoutAdoption};
 use crate::convergence_queue::ConvergenceQueueEntry;
 use crate::finding::Finding;
 use crate::git_operation::GitOperation;
 use crate::git_ref::GitRef;
 use crate::ids::*;
-use crate::item::{ApprovalState, Item};
+use crate::item::{ApprovalState, Item, ResolutionSource};
 use crate::job::Job;
 use crate::project::Project;
 use crate::revision::ItemRevision;
@@ -114,5 +116,43 @@ pub trait InvalidatePreparedConvergenceRepository: Send + Sync {
     fn apply_invalidate_prepared_convergence(
         &self,
         mutation: InvalidatePreparedConvergenceMutation,
+    ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
+}
+
+// --- Finalization transition types ---
+
+#[derive(Debug, Clone)]
+pub struct FinalizationTargetRefAdvancedMutation {
+    pub project_id: ProjectId,
+    pub item_id: ItemId,
+    pub expected_item_revision_id: ItemRevisionId,
+    pub convergence_id: ConvergenceId,
+    pub git_operation_id: GitOperationId,
+    pub final_target_commit_oid: CommitOid,
+    pub checkout_adoption: FinalizedCheckoutAdoption,
+}
+
+#[derive(Debug, Clone)]
+pub struct FinalizationCheckoutAdoptionSucceededMutation {
+    pub project_id: ProjectId,
+    pub item_id: ItemId,
+    pub expected_item_revision_id: ItemRevisionId,
+    pub convergence_id: ConvergenceId,
+    pub git_operation_id: GitOperationId,
+    pub resolution_source: ResolutionSource,
+    pub approval_state: ApprovalState,
+    pub synced_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub enum FinalizationMutation {
+    TargetRefAdvanced(FinalizationTargetRefAdvancedMutation),
+    CheckoutAdoptionSucceeded(FinalizationCheckoutAdoptionSucceededMutation),
+}
+
+pub trait FinalizationRepository: Send + Sync {
+    fn apply_finalization_mutation(
+        &self,
+        mutation: FinalizationMutation,
     ) -> impl Future<Output = Result<(), RepositoryError>> + Send;
 }

@@ -57,7 +57,6 @@ function makeItemDetail(): ItemDetail {
       checkout_adoption_state: null,
       checkout_adoption_message: null,
       final_target_commit_oid: null,
-      finalize_operation_unresolved: false,
     },
     queue: {
       state: null,
@@ -164,7 +163,6 @@ describe('ItemDetailPage', () => {
       checkout_adoption_state: 'blocked',
       checkout_adoption_message: 'Registered checkout has tracked or staged changes; clean it before finalizing',
       final_target_commit_oid: 'abcdef1234567890',
-      finalize_operation_unresolved: true,
     }
     detail.evaluation.phase_status = 'awaiting_checkout_sync'
     detail.evaluation.next_recommended_action = 'resolve_checkout_sync'

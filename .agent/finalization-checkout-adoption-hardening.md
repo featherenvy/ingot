@@ -21,6 +21,7 @@ This plan deliberately excludes migration logic, repair jobs, and backwards-comp
 - [x] (2026-04-12T15:15Z) Split usecase/runtime/HTTP finalization into target-ref advance versus checkout-adoption completion so queue release and workspace abandonment can happen before item closure without ever writing `done + unresolved finalize_target_ref`.
 - [x] (2026-04-12T15:20Z) Added `FinalizationStatusResponse`, projected blocked/pending finalized convergences independently of queue state, and taught workflow/UI to render `awaiting_checkout_sync` as a working-state blocker instead of `DONE`.
 - [x] (2026-04-12T15:25Z) Rewrote the permissive runtime/usecase/HTTP/UI tests around blocked finalization, added workflow and store coverage for the new state, and passed `make ci`.
+- [x] (2026-04-12T16:10Z) Collapsed finalization persistence behind a single transactional store mutation used by both approval-time finalization and runtime reconciliation, removed read-model dependence on unresolved finalize operations, corrected migration backfill for historical unresolved finalize rows, and re-passed `make ci`.
 
 ## Surprises & Discoveries
 
@@ -53,6 +54,12 @@ This plan deliberately excludes migration logic, repair jobs, and backwards-comp
 
 - Observation: releasing the queue at target-ref advance means the correct post-finalize queue projection is now `state = null`, not `released`, because `find_active_queue_entry_for_revision(...)` only returns active rows.
   Evidence: the updated blocked approval route test initially expected `json["queue"]["state"] == "released"` and failed; the durable blocker is now carried by `finalization.*` while queue projection correctly returns no active lane row.
+
+- Observation: the remaining “serious” bug after the first hardening pass came from marking the finalize git operation reconciled before item closure committed, which meant a partial failure could strand an open item with no unresolved finalize row left to retry.
+  Evidence: the review pass traced the sequence through `crates/ingot-usecases/src/convergence/finalization.rs`, `crates/ingot-agent-runtime/src/reconciliation.rs`, and `crates/ingot-http-api/src/router/convergence_port.rs`, then the follow-up refactor moved both reconciliation and closure into one SQLite mutation in `crates/ingot-store-sqlite/src/store/finalization.rs`.
+
+- Observation: the cleanest boundary is “transactional DB state here, filesystem cleanup in adapters,” because integration-workspace path removal cannot participate in the SQLite transaction.
+  Evidence: moving all finalize writes into `apply_finalization_mutation(...)` initially regressed the runtime convergence tests until the runtime and HTTP adapters restored `worktree remove` as a pre-mutation side effect while leaving convergence/item/git-operation state changes inside the transaction.
 
 - Observation: the live incident confirms the test expectation is not theoretical.
   Evidence: in `~/.ingot/ingot.db`, git operation `gop_019d817d39687312b102dcbf1d8101b4` is still `applied`, the item is `done/completed`, the queue entry is released, and activity at `2026-04-12T11:39:20Z` records `checkout_sync_blocked` with `Registered checkout has uncommitted changes; clean it before finalizing`.
@@ -94,6 +101,14 @@ This plan deliberately excludes migration logic, repair jobs, and backwards-comp
   Rationale: `find_active_queue_entry_for_revision(...)` only treats `queued` and `head` entries as active in `crates/ingot-store-sqlite/src/store/convergence_queue.rs`, so holding the queue entry open until checkout sync would also hold the lane. The queue should keep describing lane ownership while the new finalization state describes post-release checkout adoption.
   Date/Author: 2026-04-12 / Codex
 
+- Decision: move finalization persistence into a dedicated repository mutation rather than trying to keep the usecase port as the owner of multi-row updates.
+  Rationale: the first hardening pass still duplicated transition sequencing across usecase, runtime, and HTTP adapters. A `FinalizationMutation` owned by `crates/ingot-store-sqlite/src/store/finalization.rs` makes convergence, git-operation, queue, workspace, escalation, and item updates atomic and removes the reconciled-before-closed hole.
+  Date/Author: 2026-04-12 / Codex
+
+- Decision: stop projecting `finalize_operation_unresolved` in the API response.
+  Rationale: once finalization writes are atomic, the UI does not need git-operation rows to understand user-visible truth. The read model should project from convergence finalization state plus item state only.
+  Date/Author: 2026-04-12 / Codex
+
 ## Outcomes & Retrospective
 
 This ExecPlan records the intended hardening before implementation. The key outcome target is that the system will stop equating "the mirror moved" with "the project integrated successfully". Instead, convergence state, item lifecycle, unresolved git operations, HTTP projections, and UI labels will all agree on one rule: the item is not integrated until the registered checkout is on the final commit.
@@ -101,6 +116,8 @@ This ExecPlan records the intended hardening before implementation. The key outc
 The most important lesson from the incident is that a local fix in one layer would not be enough. The current bug is enforced by domain semantics, runtime sequencing, queue projection, and tests at the same time. The implementation therefore needs to change the model, not just one condition.
 
 Implementation completed on 2026-04-12. Finalized convergences now persist checkout-adoption truth directly, item closure only happens after the finalize git operation reconciles, and the API/UI expose an explicit `awaiting_checkout_sync` state even after the queue row is released. The focused commands in this plan plus the full `make ci` gate passed after the hardening landed.
+
+Follow-up refactor completed later the same day. Finalization now uses one transactional store mutation for target-ref advance and checkout-adoption success, git-operation reconciliation and item closure succeed or fail together, and item/detail projection no longer consults unresolved finalize operations. The main remaining complexity is unavoidable split between transactional database state and non-transactional filesystem cleanup of integration worktrees.
 
 ## Context and Orientation
 
@@ -245,7 +262,7 @@ Because backwards compatibility is explicitly out of scope, do not add fallback 
 
 ## Artifacts and Notes
 
-Plan revision note (2026-04-12): updated the plan after implementation to record the completed milestones, the reconciliation-before-closure invariant discovered during HTTP integration, the queue/read-model consequence of releasing rows at target-ref advance, and the fact that the full repository gate passed.
+Plan revision note (2026-04-12): updated the plan after the transactional refactor to record the second-pass progress, the reconciled-before-closed hole that motivated the repository mutation, the adapter/store split for workspace-path cleanup, and the fact that the full repository gate passed again.
 
 Capture these artifacts while implementing:
 

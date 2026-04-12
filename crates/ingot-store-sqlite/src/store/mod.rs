@@ -4,6 +4,7 @@ mod activity;
 mod agent;
 mod convergence;
 mod convergence_queue;
+mod finalization;
 mod finding;
 mod git_operation;
 mod invalidate_prepared_convergence;

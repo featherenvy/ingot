@@ -7,8 +7,12 @@ use ingot_domain::git_operation::{
     GitOperation, GitOperationEntityRef, GitOperationStatus, OperationPayload,
 };
 use ingot_domain::ids::ActivityId;
+use ingot_domain::item::{ApprovalState, ResolutionSource};
 use ingot_domain::job::Job;
-use ingot_domain::ports::{ActivityRepository, GitOperationRepository, RepositoryError};
+use ingot_domain::ports::{
+    ActivityRepository, FinalizationCheckoutAdoptionSucceededMutation, FinalizationMutation,
+    FinalizationTargetRefAdvancedMutation, GitOperationRepository, RepositoryError,
+};
 use ingot_domain::project::Project;
 use ingot_domain::revision::{ApprovalPolicy, ItemRevision};
 use ingot_workflow::{Evaluator, NamedRecommendedAction, RecommendedAction};
@@ -16,8 +20,8 @@ use ingot_workflow::{Evaluator, NamedRecommendedAction, RecommendedAction};
 use crate::UseCaseError;
 
 use super::types::{
-    CheckoutFinalizationReadiness, FinalizationTarget, FinalizePreparedTrigger,
-    FinalizeTargetRefResult, PreparedConvergenceFinalizePort,
+    CheckoutFinalizationReadiness, FinalizePreparedTrigger, FinalizeTargetRefResult,
+    PreparedConvergenceFinalizePort,
 };
 
 #[must_use]
@@ -130,7 +134,7 @@ pub async fn finalize_prepared_convergence<P>(
     item: &ingot_domain::item::Item,
     revision: &ItemRevision,
     convergence: &Convergence,
-    queue_entry: &ConvergenceQueueEntry,
+    _queue_entry: &ConvergenceQueueEntry,
 ) -> Result<(), UseCaseError>
 where
     P: PreparedConvergenceFinalizePort,
@@ -178,10 +182,6 @@ where
         port.update_git_operation(&operation).await?;
     }
 
-    let target = FinalizationTarget {
-        convergence,
-        queue_entry,
-    };
     let readiness = port
         .checkout_finalization_readiness(project, item, revision, &prepared_commit_oid)
         .await;
@@ -196,15 +196,17 @@ where
         Err(_) => FinalizedCheckoutAdoption::pending(Utc::now()),
     };
 
-    port.persist_target_ref_advance(
-        trigger,
-        project,
-        item,
-        revision,
-        target,
-        &operation,
-        &initial_checkout_adoption,
-    )
+    port.apply_finalization_mutation(FinalizationMutation::TargetRefAdvanced(
+        FinalizationTargetRefAdvancedMutation {
+            project_id: project.id,
+            item_id: item.id,
+            expected_item_revision_id: revision.id,
+            convergence_id: convergence.id,
+            git_operation_id: operation.id,
+            final_target_commit_oid: prepared_commit_oid.clone(),
+            checkout_adoption: initial_checkout_adoption,
+        },
+    ))
     .await?;
 
     let readiness = readiness?;
@@ -223,9 +225,17 @@ where
                     .await
                 {
                     let blocked = FinalizedCheckoutAdoption::blocked(message, Utc::now());
-                    port.persist_target_ref_advance(
-                        trigger, project, item, revision, target, &operation, &blocked,
-                    )
+                    port.apply_finalization_mutation(FinalizationMutation::TargetRefAdvanced(
+                        FinalizationTargetRefAdvancedMutation {
+                            project_id: project.id,
+                            item_id: item.id,
+                            expected_item_revision_id: revision.id,
+                            convergence_id: convergence.id,
+                            git_operation_id: operation.id,
+                            final_target_commit_oid: prepared_commit_oid.clone(),
+                            checkout_adoption: blocked,
+                        },
+                    ))
                     .await?;
                 }
                 false
@@ -235,12 +245,26 @@ where
     };
 
     if checkout_adopted {
-        operation.status = GitOperationStatus::Reconciled;
-        operation.completed_at = Some(Utc::now());
-        port.update_git_operation(&operation).await?;
-        port.persist_checkout_adoption_success(
-            trigger, project, item, revision, target, &operation,
-        )
+        let (resolution_source, approval_state) = match trigger {
+            FinalizePreparedTrigger::ApprovalCommand => {
+                (ResolutionSource::ApprovalCommand, ApprovalState::Approved)
+            }
+            FinalizePreparedTrigger::SystemCommand => {
+                (ResolutionSource::SystemCommand, ApprovalState::NotRequired)
+            }
+        };
+        port.apply_finalization_mutation(FinalizationMutation::CheckoutAdoptionSucceeded(
+            FinalizationCheckoutAdoptionSucceededMutation {
+                project_id: project.id,
+                item_id: item.id,
+                expected_item_revision_id: revision.id,
+                convergence_id: convergence.id,
+                git_operation_id: operation.id,
+                resolution_source,
+                approval_state,
+                synced_at: Utc::now(),
+            },
+        ))
         .await?;
     }
 

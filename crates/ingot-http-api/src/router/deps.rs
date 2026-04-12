@@ -16,8 +16,8 @@ pub(crate) use ingot_domain::git_operation::GitOperation;
 pub(crate) use ingot_domain::git_ref::GitRef;
 pub(crate) use ingot_domain::ids::{AgentId, FindingId, ItemId, JobId, ProjectId, WorkspaceId};
 pub(crate) use ingot_domain::item::{
-    ApprovalState, Classification, DoneReason, Escalation, EscalationReason, Item, Lifecycle,
-    Priority, ResolutionSource,
+    ApprovalState, Classification, DoneReason, Escalation, Item, Lifecycle, Priority,
+    ResolutionSource,
 };
 pub(crate) use ingot_domain::job::{Job, JobStatus, OutcomeClass};
 pub(crate) use ingot_domain::ports::{ProjectMutationLockPort, RepositoryError};

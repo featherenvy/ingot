@@ -50,7 +50,6 @@ function makeItemSummary(item: Item, evaluation: Evaluation, title = 'Test item'
       checkout_adoption_state: null,
       checkout_adoption_message: null,
       final_target_commit_oid: null,
-      finalize_operation_unresolved: false,
     },
     queue: {
       state: null,

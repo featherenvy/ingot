@@ -704,10 +704,6 @@ async fn approve_route_reuses_existing_finalize_op_when_checkout_is_blocked() {
         json["finalization"]["checkout_adoption_state"].as_str(),
         Some("blocked")
     );
-    assert_eq!(
-        json["finalization"]["finalize_operation_unresolved"].as_bool(),
-        Some(true)
-    );
     assert_eq!(json["queue"]["state"].as_str(), None);
 
     assert_eq!(

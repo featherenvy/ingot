@@ -4,12 +4,13 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 use ingot_domain::activity::Activity;
 use ingot_domain::commit_oid::CommitOid;
-use ingot_domain::convergence::{Convergence, ConvergenceStatus, FinalizedCheckoutAdoption};
+use ingot_domain::convergence::{Convergence, ConvergenceStatus};
 use ingot_domain::convergence_queue::{ConvergenceQueueEntry, ConvergenceQueueEntryStatus};
 use ingot_domain::git_operation::GitOperation;
 use ingot_domain::ids::{ConvergenceId, ItemId, ItemRevisionId, ProjectId};
 use ingot_domain::item::ApprovalState;
 use ingot_domain::job::Job;
+use ingot_domain::ports::FinalizationMutation;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
 use ingot_domain::test_support::{
@@ -23,9 +24,8 @@ use crate::UseCaseError;
 use super::types::{
     ApprovalFinalizeReadiness, CheckoutFinalizationReadiness, ConvergenceApprovalContext,
     ConvergenceCommandPort, ConvergenceQueuePrepareContext, ConvergenceSystemActionPort,
-    FinalizationTarget, FinalizePreparedTrigger, FinalizeTargetRefResult,
-    PreparedConvergenceFinalizePort, RejectApprovalContext, RejectApprovalTeardown,
-    SystemActionItemState, SystemActionProjectState,
+    FinalizeTargetRefResult, PreparedConvergenceFinalizePort, RejectApprovalContext,
+    RejectApprovalTeardown, SystemActionItemState, SystemActionProjectState,
 };
 
 #[derive(Clone)]
@@ -38,8 +38,7 @@ pub(super) struct FakePort {
     pub(super) checkout_finalization_readiness: CheckoutFinalizationReadiness,
     pub(super) checkout_finalization_readiness_error: Option<String>,
     pub(super) finalize_target_ref_result: FinalizeTargetRefResult,
-    pub(super) persist_target_ref_advance_should_fail: bool,
-    pub(super) persist_checkout_adoption_success_should_fail: bool,
+    pub(super) apply_finalization_mutation_should_fail: bool,
     pub(super) sync_checkout_should_fail: bool,
 }
 
@@ -99,8 +98,7 @@ impl FakePort {
             checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
             checkout_finalization_readiness_error: None,
             finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
-            persist_target_ref_advance_should_fail: false,
-            persist_checkout_adoption_success_should_fail: false,
+            apply_finalization_mutation_should_fail: false,
             sync_checkout_should_fail: false,
         }
     }
@@ -115,8 +113,7 @@ impl FakePort {
             checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
             checkout_finalization_readiness_error: None,
             finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
-            persist_target_ref_advance_should_fail: false,
-            persist_checkout_adoption_success_should_fail: false,
+            apply_finalization_mutation_should_fail: false,
             sync_checkout_should_fail: false,
         }
     }
@@ -131,8 +128,7 @@ impl FakePort {
             checkout_finalization_readiness: CheckoutFinalizationReadiness::Synced,
             checkout_finalization_readiness_error: None,
             finalize_target_ref_result: FinalizeTargetRefResult::UpdatedNow,
-            persist_target_ref_advance_should_fail: false,
-            persist_checkout_adoption_success_should_fail: false,
+            apply_finalization_mutation_should_fail: false,
             sync_checkout_should_fail: false,
         }
     }
@@ -400,41 +396,22 @@ impl PreparedConvergenceFinalizePort for FakePort {
         ready(Ok(()))
     }
 
-    fn persist_target_ref_advance(
+    fn apply_finalization_mutation(
         &self,
-        trigger: FinalizePreparedTrigger,
-        _project: &Project,
-        item: &ingot_domain::item::Item,
-        _revision: &ItemRevision,
-        target: FinalizationTarget<'_>,
-        _operation: &GitOperation,
-        checkout_adoption: &FinalizedCheckoutAdoption,
+        mutation: FinalizationMutation,
     ) -> impl Future<Output = Result<(), UseCaseError>> + Send {
-        self.calls.lock().expect("calls lock").push(format!(
-            "persist_target_ref_advance:{trigger:?}:{}:{}:{:?}",
-            item.id, target.convergence.id, checkout_adoption.state
-        ));
-        ready(if self.persist_target_ref_advance_should_fail {
-            Err(UseCaseError::Internal("boom".into()))
-        } else {
-            Ok(())
-        })
-    }
-
-    fn persist_checkout_adoption_success(
-        &self,
-        trigger: FinalizePreparedTrigger,
-        _project: &Project,
-        item: &ingot_domain::item::Item,
-        _revision: &ItemRevision,
-        target: FinalizationTarget<'_>,
-        _operation: &GitOperation,
-    ) -> impl Future<Output = Result<(), UseCaseError>> + Send {
-        self.calls.lock().expect("calls lock").push(format!(
-            "persist_checkout_adoption_success:{trigger:?}:{}:{}",
-            item.id, target.convergence.id
-        ));
-        ready(if self.persist_checkout_adoption_success_should_fail {
+        let label = match &mutation {
+            FinalizationMutation::TargetRefAdvanced(mutation) => format!(
+                "apply_finalization_mutation:target_ref_advanced:{}:{:?}",
+                mutation.item_id, mutation.checkout_adoption.state
+            ),
+            FinalizationMutation::CheckoutAdoptionSucceeded(mutation) => format!(
+                "apply_finalization_mutation:checkout_adoption_succeeded:{}",
+                mutation.item_id
+            ),
+        };
+        self.calls.lock().expect("calls lock").push(label);
+        ready(if self.apply_finalization_mutation_should_fail {
             Err(UseCaseError::Internal("boom".into()))
         } else {
             Ok(())

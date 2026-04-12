@@ -16,8 +16,8 @@ use ingot_git::commit::{
 use ingot_git::diff::changed_paths_between;
 use ingot_git::project_repo::ProjectRepoPaths;
 use ingot_git::project_repo::{
-    CheckoutFinalizationStatus, CheckoutSyncStatus, checkout_finalization_status,
-    checkout_sync_status, refresh_project_mirror_for_project, sync_checkout_to_commit,
+    CheckoutFinalizationStatus, checkout_finalization_status, refresh_project_mirror_for_project,
+    sync_checkout_to_commit,
 };
 use ingot_usecases::UseCaseError;
 use ingot_usecases::dispatch::DispatchInfraPort;
@@ -179,16 +179,6 @@ impl HttpInfraAdapter {
         )
         .await
         .map_err(workspace_to_api_error)
-    }
-
-    pub(super) async fn checkout_sync_status(
-        &self,
-        project: &Project,
-        target_ref: &GitRef,
-    ) -> Result<CheckoutSyncStatus, ApiError> {
-        checkout_sync_status(&project.path, target_ref)
-            .await
-            .map_err(git_to_internal)
     }
 
     pub(super) async fn checkout_finalization_status(

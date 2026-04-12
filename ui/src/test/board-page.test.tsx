@@ -153,7 +153,6 @@ describe('BoardPage', () => {
                 checkout_adoption_state: 'blocked',
                 checkout_adoption_message: 'Registered checkout is blocked',
                 final_target_commit_oid: 'abcdef1234567890',
-                finalize_operation_unresolved: true,
               },
               queue: {
                 state: 'released',

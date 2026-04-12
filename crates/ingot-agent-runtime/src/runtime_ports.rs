@@ -1,9 +1,9 @@
 use std::future::Future;
 
-use ingot_domain::activity::{ActivityEventType, ActivitySubject};
-use ingot_domain::convergence::{Convergence, FinalizedCheckoutAdoption};
+use ingot_domain::convergence::Convergence;
 use ingot_domain::convergence_queue::ConvergenceQueueEntry;
 use ingot_domain::git_operation::GitOperation;
+use ingot_domain::ports::FinalizationMutation;
 use ingot_domain::ports::ProjectMutationLockPort;
 use ingot_domain::project::Project;
 use ingot_domain::revision::ItemRevision;
@@ -11,15 +11,14 @@ use ingot_git::commands::{
     FinalizeTargetRefOutcome, finalize_target_ref as finalize_target_ref_in_repo,
 };
 use ingot_git::project_repo::{
-    CheckoutFinalizationStatus, CheckoutSyncStatus, checkout_finalization_status,
-    sync_checkout_to_commit,
+    CheckoutFinalizationStatus, checkout_finalization_status, sync_checkout_to_commit,
 };
 use ingot_usecases::convergence::{
-    CheckoutFinalizationReadiness, ConvergenceSystemActionPort, FinalizationTarget,
-    FinalizePreparedTrigger, FinalizeTargetRefResult, PreparedConvergenceFinalizePort,
-    SystemActionItemState, SystemActionProjectState,
+    CheckoutFinalizationReadiness, ConvergenceSystemActionPort, FinalizeTargetRefResult,
+    PreparedConvergenceFinalizePort, SystemActionItemState, SystemActionProjectState,
 };
 use ingot_usecases::reconciliation::ReconciliationPort;
+use ingot_workspace::remove_workspace;
 use tracing::warn;
 
 use crate::{JobDispatcher, RuntimeError};
@@ -298,7 +297,7 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
     fn checkout_finalization_readiness(
         &self,
         project: &Project,
-        item: &ingot_domain::item::Item,
+        _item: &ingot_domain::item::Item,
         revision: &ItemRevision,
         prepared_commit_oid: &ingot_domain::commit_oid::CommitOid,
     ) -> impl Future<Output = Result<CheckoutFinalizationReadiness, ingot_usecases::UseCaseError>> + Send
@@ -312,36 +311,22 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                 .refresh_project_mirror(&project)
                 .await
                 .map_err(usecase_from_runtime_error)?;
-            match dispatcher
-                .reconcile_checkout_sync_state(
-                    &project,
-                    item.id,
-                    &revision,
-                    Some(&prepared_commit_oid),
-                )
-                .await
-                .map_err(usecase_from_runtime_error)?
+            match checkout_finalization_status(
+                &project.path,
+                paths.mirror_git_dir.as_path(),
+                &revision.target_ref,
+                &prepared_commit_oid,
+            )
+            .await
+            .map_err(|error| usecase_from_runtime_error(RuntimeError::from(error)))?
             {
-                CheckoutSyncStatus::Blocked { message, .. } => {
+                CheckoutFinalizationStatus::Blocked { message, .. } => {
                     Ok(CheckoutFinalizationReadiness::Blocked { message })
                 }
-                CheckoutSyncStatus::Ready => match checkout_finalization_status(
-                    &project.path,
-                    paths.mirror_git_dir.as_path(),
-                    &revision.target_ref,
-                    &prepared_commit_oid,
-                )
-                .await
-                .map_err(|error| usecase_from_runtime_error(RuntimeError::from(error)))?
-                {
-                    CheckoutFinalizationStatus::Blocked { message, .. } => {
-                        Ok(CheckoutFinalizationReadiness::Blocked { message })
-                    }
-                    CheckoutFinalizationStatus::NeedsSync => {
-                        Ok(CheckoutFinalizationReadiness::NeedsSync)
-                    }
-                    CheckoutFinalizationStatus::Synced => Ok(CheckoutFinalizationReadiness::Synced),
-                },
+                CheckoutFinalizationStatus::NeedsSync => {
+                    Ok(CheckoutFinalizationReadiness::NeedsSync)
+                }
+                CheckoutFinalizationStatus::Synced => Ok(CheckoutFinalizationReadiness::Synced),
             }
         }
     }
@@ -389,61 +374,47 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
         }
     }
 
-    fn persist_target_ref_advance(
+    fn apply_finalization_mutation(
         &self,
-        _trigger: FinalizePreparedTrigger,
-        project: &Project,
-        item: &ingot_domain::item::Item,
-        _revision: &ItemRevision,
-        target: FinalizationTarget<'_>,
-        operation: &GitOperation,
-        checkout_adoption: &FinalizedCheckoutAdoption,
+        mutation: FinalizationMutation,
     ) -> impl Future<Output = Result<(), ingot_usecases::UseCaseError>> + Send {
         let dispatcher = self.dispatcher.clone();
-        let convergence = target.convergence.clone();
-        let operation = operation.clone();
-        let checkout_adoption = checkout_adoption.clone();
+        let cleanup = mutation.clone();
         async move {
-            if dispatcher
-                .persist_target_ref_advance(&operation, checkout_adoption)
-                .await
-                .map_err(usecase_from_runtime_error)?
-            {
-                dispatcher
-                    .append_activity(
-                        project.id,
-                        ActivityEventType::ConvergenceFinalized,
-                        ActivitySubject::Convergence(convergence.id),
-                        serde_json::json!({ "item_id": item.id }),
-                    )
+            if let FinalizationMutation::TargetRefAdvanced(mutation) = cleanup {
+                let convergence = dispatcher
+                    .db
+                    .get_convergence(mutation.convergence_id)
                     .await
-                    .map_err(usecase_from_runtime_error)?;
-            }
-            Ok(())
-        }
-    }
-
-    fn persist_checkout_adoption_success(
-        &self,
-        _trigger: FinalizePreparedTrigger,
-        _project: &Project,
-        _item: &ingot_domain::item::Item,
-        _revision: &ItemRevision,
-        _target: FinalizationTarget<'_>,
-        operation: &GitOperation,
-    ) -> impl Future<Output = Result<(), ingot_usecases::UseCaseError>> + Send {
-        let dispatcher = self.dispatcher.clone();
-        let operation = operation.clone();
-        async move {
-            if operation.status != ingot_domain::git_operation::GitOperationStatus::Reconciled {
-                return Err(ingot_usecases::UseCaseError::Internal(
-                    "cannot close finalized item before reconcile".into(),
-                ));
+                    .map_err(ingot_usecases::UseCaseError::Repository)?;
+                if let Some(workspace_id) = convergence.state.integration_workspace_id() {
+                    let workspace = dispatcher
+                        .db
+                        .get_workspace(workspace_id)
+                        .await
+                        .map_err(ingot_usecases::UseCaseError::Repository)?;
+                    if workspace.state.status()
+                        != ingot_domain::workspace::WorkspaceStatus::Abandoned
+                    {
+                        let project = dispatcher
+                            .db
+                            .get_project(mutation.project_id)
+                            .await
+                            .map_err(ingot_usecases::UseCaseError::Repository)?;
+                        let repo_path = dispatcher.project_paths(&project).mirror_git_dir;
+                        remove_workspace(repo_path.as_path(), &workspace.path)
+                            .await
+                            .map_err(|error| {
+                                ingot_usecases::UseCaseError::Internal(error.to_string())
+                            })?;
+                    }
+                }
             }
             dispatcher
-                .persist_checkout_adoption_success(&operation)
+                .db
+                .apply_finalization_mutation(mutation)
                 .await
-                .map_err(usecase_from_runtime_error)?;
+                .map_err(ingot_usecases::UseCaseError::Repository)?;
             Ok(())
         }
     }

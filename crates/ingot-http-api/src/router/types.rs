@@ -47,7 +47,6 @@ pub struct FinalizationStatusResponse {
     pub checkout_adoption_state: Option<CheckoutAdoptionState>,
     pub checkout_adoption_message: Option<String>,
     pub final_target_commit_oid: Option<CommitOid>,
-    pub finalize_operation_unresolved: bool,
 }
 
 #[derive(Debug, Serialize)]

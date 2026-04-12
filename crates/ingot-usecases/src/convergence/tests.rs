@@ -185,13 +185,11 @@ async fn approve_item_uses_shared_finalizer_for_already_finalized_target() {
     assert!(
         calls
             .iter()
-            .any(|call| call.starts_with("persist_target_ref_advance:ApprovalCommand:"))
+            .any(|call| call.starts_with("apply_finalization_mutation:target_ref_advanced:"))
     );
-    assert!(
-        calls
-            .iter()
-            .any(|call| call.starts_with("persist_checkout_adoption_success:ApprovalCommand:"))
-    );
+    assert!(calls.iter().any(|call| {
+        call.starts_with("apply_finalization_mutation:checkout_adoption_succeeded:")
+    }));
 }
 
 #[tokio::test]
@@ -218,12 +216,12 @@ async fn approve_item_leaves_finalize_unresolved_when_checkout_sync_stays_blocke
     assert!(
         calls
             .iter()
-            .any(|call| call.starts_with("persist_target_ref_advance:ApprovalCommand:"))
+            .any(|call| call.starts_with("apply_finalization_mutation:target_ref_advanced:"))
     );
     assert!(
-        !calls
-            .iter()
-            .any(|call| call.starts_with("persist_checkout_adoption_success:"))
+        !calls.iter().any(
+            |call| call.starts_with("apply_finalization_mutation:checkout_adoption_succeeded:")
+        )
     );
     assert!(!calls.iter().any(|call| call.starts_with("sync_checkout:")));
 }
@@ -251,12 +249,12 @@ async fn approve_item_keeps_finalize_operation_unresolved_when_sync_retry_fails(
     assert!(
         calls
             .iter()
-            .any(|call| call.starts_with("persist_target_ref_advance:ApprovalCommand:"))
+            .any(|call| call.starts_with("apply_finalization_mutation:target_ref_advanced:"))
     );
     assert!(
-        !calls
-            .iter()
-            .any(|call| call.starts_with("persist_checkout_adoption_success:"))
+        !calls.iter().any(
+            |call| call.starts_with("apply_finalization_mutation:checkout_adoption_succeeded:")
+        )
     );
     assert!(calls.iter().any(|call| call.starts_with("sync_checkout:")));
 }
@@ -284,12 +282,12 @@ async fn approve_item_surfaces_checkout_readiness_failures_after_finalize() {
     assert!(
         calls
             .iter()
-            .any(|call| call.starts_with("persist_target_ref_advance:ApprovalCommand:"))
+            .any(|call| call.starts_with("apply_finalization_mutation:target_ref_advanced:"))
     );
     assert!(
-        !calls
-            .iter()
-            .any(|call| call.starts_with("persist_checkout_adoption_success:"))
+        !calls.iter().any(
+            |call| call.starts_with("apply_finalization_mutation:checkout_adoption_succeeded:")
+        )
     );
     assert!(!calls.iter().any(|call| call.starts_with("sync_checkout:")));
 }
@@ -298,7 +296,7 @@ async fn approve_item_surfaces_checkout_readiness_failures_after_finalize() {
 async fn approve_item_keeps_finalize_operation_unresolved_when_target_ref_advance_persistence_fails()
  {
     let port = FakePort {
-        persist_target_ref_advance_should_fail: true,
+        apply_finalization_mutation_should_fail: true,
         ..FakePort::with_approval_context(FakePort::default_approval_context())
     };
     let service = ConvergenceService::new(port.clone());

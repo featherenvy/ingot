@@ -282,7 +282,6 @@ export interface FinalizationStatus {
   checkout_adoption_state: CheckoutAdoptionState | null
   checkout_adoption_message: string | null
   final_target_commit_oid: string | null
-  finalize_operation_unresolved: boolean
 }
 
 export interface ItemSummary {

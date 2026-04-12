@@ -17,7 +17,6 @@ pub use system_actions::{invalidate_prepared_convergence, promote_queue_heads};
 pub use types::{
     ApprovalFinalizeReadiness, CheckoutFinalizationReadiness, ConvergenceApprovalContext,
     ConvergenceCommandPort, ConvergenceQueuePrepareContext, ConvergenceSystemActionPort,
-    FinalizationTarget, FinalizePreparedTrigger, FinalizeTargetRefResult,
-    PreparedConvergenceFinalizePort, RejectApprovalContext, RejectApprovalTeardown,
-    SystemActionItemState, SystemActionProjectState,
+    FinalizePreparedTrigger, FinalizeTargetRefResult, PreparedConvergenceFinalizePort,
+    RejectApprovalContext, RejectApprovalTeardown, SystemActionItemState, SystemActionProjectState,
 };

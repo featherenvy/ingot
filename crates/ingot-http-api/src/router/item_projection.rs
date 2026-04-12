@@ -185,7 +185,7 @@ fn empty_queue_status() -> QueueStatusResponse {
 }
 
 async fn load_finalization_status(
-    state: &AppState,
+    _state: &AppState,
     revision: &ItemRevision,
     convergences: &[Convergence],
 ) -> Result<FinalizationStatusResponse, ApiError> {
@@ -196,12 +196,6 @@ async fn load_finalization_status(
     if let Some(convergence) = current_revision_convergences.clone().find(|convergence| {
         convergence.state.status() == ingot_domain::convergence::ConvergenceStatus::Finalized
     }) {
-        let unresolved = state
-            .db
-            .find_unresolved_finalize_for_convergence(convergence.id)
-            .await
-            .map_err(repo_to_internal)?
-            .is_some();
         return Ok(FinalizationStatusResponse {
             phase: FinalizationPhaseResponse::TargetRefAdvanced,
             checkout_adoption_state: convergence.state.checkout_adoption_state(),
@@ -210,7 +204,6 @@ async fn load_finalization_status(
                 .checkout_adoption_message()
                 .map(ToOwned::to_owned),
             final_target_commit_oid: convergence.state.final_target_commit_oid().cloned(),
-            finalize_operation_unresolved: unresolved,
         });
     }
 
@@ -222,7 +215,6 @@ async fn load_finalization_status(
             checkout_adoption_state: None,
             checkout_adoption_message: None,
             final_target_commit_oid: convergence.state.prepared_commit_oid().cloned(),
-            finalize_operation_unresolved: false,
         });
     }
 
@@ -231,7 +223,6 @@ async fn load_finalization_status(
         checkout_adoption_state: None,
         checkout_adoption_message: None,
         final_target_commit_oid: None,
-        finalize_operation_unresolved: false,
     })
 }
 
