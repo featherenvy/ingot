@@ -124,7 +124,7 @@ fn collect_local_artifact_collision_paths(
     conflicts.into_iter().collect()
 }
 
-fn format_untracked_collision_message(conflicts: &[String]) -> String {
+fn format_local_artifact_collision_message(conflicts: &[String]) -> String {
     let display_paths = conflicts.iter().take(3).cloned().collect::<Vec<_>>();
     let remainder = conflicts.len().saturating_sub(display_paths.len());
     if remainder == 0 {
@@ -309,7 +309,7 @@ pub async fn checkout_sync_status_for_commit(
             } else {
                 Ok(CheckoutSyncStatus::Blocked {
                     code: "checkout_untracked_conflict",
-                    message: format_untracked_collision_message(&conflicts),
+                    message: format_local_artifact_collision_message(&conflicts),
                 })
             }
         }
@@ -613,7 +613,7 @@ mod tests {
             CheckoutFinalizationStatus::Blocked { code, message }
                 if code == "checkout_untracked_conflict"
                     && message.contains("collide.txt")
-                    && message.contains("ignored")
+                    && message.contains("local untracked or ignored paths")
         ));
     }
 
