@@ -23,3 +23,21 @@ pub(crate) async fn read_optional_json(
         .map(Some)
         .map_err(|error| ApiError::from(UseCaseError::Internal(error.to_string())))
 }
+
+pub(crate) async fn read_optional_json_lines<T>(path: PathBuf) -> Result<Option<Vec<T>>, ApiError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let Some(contents) = read_optional_text(path).await? else {
+        return Ok(None);
+    };
+
+    let mut rows = Vec::new();
+    for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+        let row = serde_json::from_str::<T>(line)
+            .map_err(|error| ApiError::from(UseCaseError::Internal(error.to_string())))?;
+        rows.push(row);
+    }
+
+    Ok(Some(rows))
+}

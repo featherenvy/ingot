@@ -56,15 +56,14 @@ fn serialize_ws_event(event: &UiEventEnvelope) -> serde_json::Value {
             "entity_id": entity.subject.entity_id_string(),
             "payload": entity.payload,
         }),
-        UiEvent::JobLogChunk(chunk) => serde_json::json!({
+        UiEvent::JobOutputDelta(chunk) => serde_json::json!({
             "seq": event.seq,
-            "event": "job_log_chunk",
+            "event": "job_output_delta",
             "project_id": chunk.project_id,
             "entity_type": "job",
             "entity_id": chunk.job_id,
             "payload": {
-                "stream": chunk.stream,
-                "chunk": chunk.chunk,
+                "segment": chunk.segment,
             },
         }),
     }
@@ -72,10 +71,10 @@ fn serialize_ws_event(event: &UiEventEnvelope) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use ingot_agent_protocol::OutputStream;
+    use ingot_agent_protocol::{AgentOutputChannel, AgentOutputKind, AgentOutputSegment};
     use ingot_domain::activity::{ActivityEventType, ActivitySubject};
     use ingot_domain::ids::{ItemId, JobId, ProjectId};
-    use ingot_usecases::{EntityChangedEvent, JobLogChunkEvent, UiEvent};
+    use ingot_usecases::{EntityChangedEvent, JobOutputDeltaEvent, UiEvent};
 
     use super::*;
 
@@ -102,24 +101,32 @@ mod tests {
     }
 
     #[test]
-    fn serialize_job_log_chunk_includes_stream_and_text() {
+    fn serialize_job_output_delta_includes_segment_payload() {
         let project_id = ProjectId::new();
         let job_id = JobId::new();
         let payload = serialize_ws_event(&UiEventEnvelope {
             seq: 4,
-            event: UiEvent::JobLogChunk(JobLogChunkEvent {
+            event: UiEvent::JobOutputDelta(JobOutputDeltaEvent {
                 project_id,
                 job_id,
-                stream: OutputStream::Stderr,
-                chunk: "warn\n".into(),
+                segment: AgentOutputSegment {
+                    sequence: 2,
+                    channel: AgentOutputChannel::Diagnostic,
+                    kind: AgentOutputKind::Text,
+                    status: None,
+                    title: Some("stderr".into()),
+                    text: Some("warn".into()),
+                    data: None,
+                },
             }),
         });
 
         assert_eq!(payload["seq"], 4);
-        assert_eq!(payload["event"], "job_log_chunk");
+        assert_eq!(payload["event"], "job_output_delta");
         assert_eq!(payload["entity_type"], "job");
         assert_eq!(payload["entity_id"], job_id.to_string());
-        assert_eq!(payload["payload"]["stream"], "stderr");
-        assert_eq!(payload["payload"]["chunk"], "warn\n");
+        assert_eq!(payload["payload"]["segment"]["sequence"], 2);
+        assert_eq!(payload["payload"]["segment"]["channel"], "diagnostic");
+        assert_eq!(payload["payload"]["segment"]["text"], "warn");
     }
 }

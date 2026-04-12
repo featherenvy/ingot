@@ -24,4 +24,6 @@ pub use locking::ProjectLocks;
 pub use notify::DispatchNotify;
 pub use reconciliation::ReconciliationService;
 pub use revision_context::rebuild_revision_context;
-pub use ui_events::{EntityChangedEvent, JobLogChunkEvent, UiEvent, UiEventBus, UiEventEnvelope};
+pub use ui_events::{
+    EntityChangedEvent, JobOutputDeltaEvent, UiEvent, UiEventBus, UiEventEnvelope,
+};

@@ -108,13 +108,20 @@ describe('connection store', () => {
       new MessageEvent('message', {
         data: JSON.stringify({
           seq: 1,
-          event: 'job_log_chunk',
+          event: 'job_output_delta',
           project_id: 'prj_1',
           entity_type: 'job',
           entity_id: 'job_1',
           payload: {
-            stream: 'stdout',
-            chunk: 'hello\n',
+            segment: {
+              sequence: 1,
+              channel: 'primary',
+              kind: 'text',
+              status: null,
+              title: null,
+              text: 'hello',
+              data: null,
+            },
           },
         }),
       }),
@@ -124,13 +131,20 @@ describe('connection store', () => {
       new MessageEvent('message', {
         data: JSON.stringify({
           seq: 2,
-          event: 'job_log_chunk',
+          event: 'job_output_delta',
           project_id: 'prj_1',
           entity_type: 'job',
           entity_id: 'job_1',
           payload: {
-            stream: 'stderr',
-            chunk: 'warn\n',
+            segment: {
+              sequence: 2,
+              channel: 'diagnostic',
+              kind: 'text',
+              status: null,
+              title: 'stderr',
+              text: 'warn',
+              data: null,
+            },
           },
         }),
       }),
@@ -139,8 +153,29 @@ describe('connection store', () => {
     await waitFor(() => {
       expect(queryClient.getQueryData(queryKeys.jobLogs('job_1'))).toEqual({
         prompt: null,
-        stdout: 'hello\n',
-        stderr: 'warn\n',
+        output: {
+          schema_version: 'agent_output:v1',
+          segments: [
+            {
+              sequence: 1,
+              channel: 'primary',
+              kind: 'text',
+              status: null,
+              title: null,
+              text: 'hello',
+              data: null,
+            },
+            {
+              sequence: 2,
+              channel: 'diagnostic',
+              kind: 'text',
+              status: null,
+              title: 'stderr',
+              text: 'warn',
+              data: null,
+            },
+          ],
+        },
         result: null,
       })
     })
@@ -159,8 +194,20 @@ describe('connection store', () => {
     })
     queryClient.setQueryData(queryKeys.jobLogs('job_1'), {
       prompt: null,
-      stdout: 'before\n',
-      stderr: null,
+      output: {
+        schema_version: 'agent_output:v1',
+        segments: [
+          {
+            sequence: 1,
+            channel: 'primary',
+            kind: 'text',
+            status: null,
+            title: null,
+            text: 'before',
+            data: null,
+          },
+        ],
+      },
       result: null,
     })
 
@@ -171,13 +218,20 @@ describe('connection store', () => {
       new MessageEvent('message', {
         data: JSON.stringify({
           seq: 1,
-          event: 'job_log_chunk',
+          event: 'job_output_delta',
           project_id: 'prj_1',
           entity_type: 'job',
           entity_id: 'job_1',
           payload: {
-            stream: 'stdout',
-            chunk: 'hello\n',
+            segment: {
+              sequence: 2,
+              channel: 'primary',
+              kind: 'text',
+              status: null,
+              title: null,
+              text: 'hello',
+              data: null,
+            },
           },
         }),
       }),
@@ -205,13 +259,20 @@ describe('connection store', () => {
       new MessageEvent('message', {
         data: JSON.stringify({
           seq: 4,
-          event: 'job_log_chunk',
+          event: 'job_output_delta',
           project_id: 'prj_1',
           entity_type: 'job',
           entity_id: 'job_1',
           payload: {
-            stream: 'stderr',
-            chunk: 'warn\n',
+            segment: {
+              sequence: 3,
+              channel: 'diagnostic',
+              kind: 'text',
+              status: null,
+              title: 'stderr',
+              text: 'warn',
+              data: null,
+            },
           },
         }),
       }),

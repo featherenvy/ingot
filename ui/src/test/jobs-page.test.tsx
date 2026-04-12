@@ -163,8 +163,10 @@ describe('JobsPage', () => {
         return Promise.resolve(
           jsonResponse({
             prompt: 'Review the candidate diff',
-            stdout: null,
-            stderr: null,
+            output: {
+              schema_version: 'agent_output:v1',
+              segments: [],
+            },
             result: null,
           }),
         )
@@ -178,9 +180,8 @@ describe('JobsPage', () => {
 
     expect(await screen.findByText('Live')).toBeInTheDocument()
     expect(screen.getByText('waiting')).toBeInTheDocument()
-    expect(await screen.findByText('Waiting for agent output...')).toBeInTheDocument()
-    expect(screen.getAllByText('Stdout')).not.toHaveLength(0)
-    expect(screen.getAllByText('Stderr')).not.toHaveLength(0)
+    expect(await screen.findByText('Waiting for normalized agent output...')).toBeInTheDocument()
+    expect(screen.getAllByText('Output')).not.toHaveLength(0)
     expect(screen.getByRole('tab', { name: /Prompt/i })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: /Result/i })).toBeInTheDocument()
   })
@@ -233,8 +234,29 @@ describe('JobsPage', () => {
         return Promise.resolve(
           jsonResponse({
             prompt: 'Review the candidate diff',
-            stdout: 'streaming now\n',
-            stderr: 'warn\n',
+            output: {
+              schema_version: 'agent_output:v1',
+              segments: [
+                {
+                  sequence: 1,
+                  channel: 'primary',
+                  kind: 'text',
+                  status: null,
+                  title: null,
+                  text: 'streaming now',
+                  data: null,
+                },
+                {
+                  sequence: 2,
+                  channel: 'diagnostic',
+                  kind: 'text',
+                  status: null,
+                  title: 'stderr',
+                  text: 'warn',
+                  data: null,
+                },
+              ],
+            },
             result: null,
           }),
         )

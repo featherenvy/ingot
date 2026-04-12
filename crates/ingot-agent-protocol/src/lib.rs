@@ -4,4 +4,7 @@ pub mod request;
 pub mod response;
 
 pub use adapter::AgentAdapter;
-pub use response::{AgentOutputChunk, AgentResponse, OutputStream};
+pub use response::{
+    AgentOutputChannel, AgentOutputChunk, AgentOutputDocument, AgentOutputKind, AgentOutputSegment,
+    AgentOutputSegmentDraft, AgentOutputStatus, AgentResponse, JobStructuredResult, OutputStream,
+};

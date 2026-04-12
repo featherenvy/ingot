@@ -126,6 +126,30 @@ export interface JsonObject {
   [key: string]: JsonValue
 }
 
+export type AgentOutputChannel = 'primary' | 'diagnostic'
+export type AgentOutputKind = 'text' | 'progress' | 'tool_call' | 'tool_result' | 'lifecycle' | 'raw_fallback'
+export type AgentOutputStatus = 'in_progress' | 'completed' | 'failed' | 'unknown'
+
+export interface AgentOutputSegment {
+  sequence: number
+  channel: AgentOutputChannel
+  kind: AgentOutputKind
+  status: AgentOutputStatus | null
+  title: string | null
+  text: string | null
+  data: JsonValue | null
+}
+
+export interface AgentOutputDocument {
+  schema_version: 'agent_output:v1'
+  segments: AgentOutputSegment[]
+}
+
+export interface JobStructuredResult {
+  schema_version: string | null
+  payload: JsonValue
+}
+
 export type ExecutionMode = 'manual' | 'autopilot'
 
 export type AutoTriageDecision = 'fix_now' | 'backlog' | 'skip'
@@ -288,9 +312,8 @@ export type JobInput =
 
 export interface JobLogs {
   prompt: string | null
-  stdout: string | null
-  stderr: string | null
-  result: JsonValue | null
+  output: AgentOutputDocument
+  result: JobStructuredResult | null
 }
 
 export interface Workspace {

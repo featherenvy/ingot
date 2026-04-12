@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use ingot_agent_protocol::adapter::{AgentAdapter, AgentError};
 use ingot_agent_protocol::request::AgentRequest;
-use ingot_agent_protocol::response::{AgentOutputChunk, AgentResponse};
+use ingot_agent_protocol::response::{
+    AgentOutputChannel, AgentOutputChunk, AgentOutputKind, AgentOutputSegmentDraft,
+    AgentOutputStatus, AgentResponse,
+};
 use tokio::sync::mpsc;
 
 use crate::{result_from_text, subprocess};
@@ -60,6 +63,7 @@ impl ClaudeCodeCliAdapter {
                 args: self.build_print_args(request)?,
                 adapter_name: "claude",
                 output_tx,
+                stdout_parser: Some(Box::new(ClaudeStreamJsonParser)),
             },
             |output: &subprocess::SubprocessOutput| {
                 let stdout = output.stdout.clone();
@@ -67,6 +71,195 @@ impl ClaudeCodeCliAdapter {
             },
         )
         .await
+    }
+}
+
+struct ClaudeStreamJsonParser;
+
+impl subprocess::StdoutOutputParser for ClaudeStreamJsonParser {
+    fn parse_line(&mut self, line: &str) -> Vec<AgentOutputSegmentDraft> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+
+        let value = match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(value) => value,
+            Err(_) => {
+                return vec![AgentOutputSegmentDraft::text(
+                    AgentOutputKind::Text,
+                    trimmed,
+                )];
+            }
+        };
+
+        parse_claude_stream_event(&value)
+    }
+}
+
+fn parse_claude_stream_event(value: &serde_json::Value) -> Vec<AgentOutputSegmentDraft> {
+    let Some(event_type) = value.get("type").and_then(|value| value.as_str()) else {
+        return vec![claude_raw_fallback(
+            "unknown",
+            value.clone(),
+            Some("Unrecognized Claude JSON output".into()),
+        )];
+    };
+
+    match event_type {
+        "system" if value.get("subtype").and_then(|value| value.as_str()) == Some("init") => {
+            Vec::new()
+        }
+        "init" => Vec::new(),
+        "assistant" | "message" => {
+            let text = value
+                .get("text")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned)
+                .or_else(|| value.get("message").and_then(claude_message_text))
+                .or_else(|| value.get("content").and_then(claude_message_text));
+
+            if let Some(text) = text {
+                vec![AgentOutputSegmentDraft {
+                    channel: AgentOutputChannel::Primary,
+                    kind: AgentOutputKind::Text,
+                    status: None,
+                    title: None,
+                    text: Some(text),
+                    data: Some(serde_json::json!({
+                        "provider": "claude",
+                        "provider_event_type": event_type
+                    })),
+                }]
+            } else {
+                vec![claude_raw_fallback(
+                    event_type,
+                    value.clone(),
+                    Some("Claude message event did not include display text".into()),
+                )]
+            }
+        }
+        "tool_use" => vec![AgentOutputSegmentDraft {
+            channel: AgentOutputChannel::Primary,
+            kind: AgentOutputKind::ToolCall,
+            status: Some(AgentOutputStatus::InProgress),
+            title: Some("Tool use".into()),
+            text: value
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned),
+            data: Some(serde_json::json!({
+                "provider": "claude",
+                "provider_event_type": event_type,
+                "tool_name": value.get("name").cloned(),
+                "input": value.get("input").cloned()
+            })),
+        }],
+        "tool_result" => vec![AgentOutputSegmentDraft {
+            channel: AgentOutputChannel::Primary,
+            kind: AgentOutputKind::ToolResult,
+            status: Some(AgentOutputStatus::Completed),
+            title: Some("Tool result".into()),
+            text: value
+                .get("content")
+                .and_then(claude_message_text)
+                .or_else(|| {
+                    value
+                        .get("text")
+                        .and_then(|value| value.as_str())
+                        .map(ToOwned::to_owned)
+                }),
+            data: Some(serde_json::json!({
+                "provider": "claude",
+                "provider_event_type": event_type
+            })),
+        }],
+        "result" => {
+            let subtype = value
+                .get("subtype")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let status = match subtype {
+                "success" => AgentOutputStatus::Completed,
+                "error_max_structured_output_retries" => AgentOutputStatus::Failed,
+                _ => AgentOutputStatus::Unknown,
+            };
+            vec![AgentOutputSegmentDraft {
+                channel: AgentOutputChannel::Diagnostic,
+                kind: AgentOutputKind::Lifecycle,
+                status: Some(status),
+                title: Some("Claude result".into()),
+                text: value
+                    .get("result")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned)
+                    .or_else(|| {
+                        value
+                            .get("error")
+                            .and_then(|value| value.as_str())
+                            .map(ToOwned::to_owned)
+                    })
+                    .or_else(|| Some(subtype.replace('_', " "))),
+                data: Some(serde_json::json!({
+                    "provider": "claude",
+                    "provider_event_type": event_type,
+                    "provider_subtype": subtype,
+                    "is_error": value.get("is_error").cloned()
+                })),
+            }]
+        }
+        _ => vec![claude_raw_fallback(
+            event_type,
+            value.clone(),
+            Some(format!("Unrecognized Claude event: {event_type}")),
+        )],
+    }
+}
+
+fn claude_message_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.to_owned()),
+        serde_json::Value::Array(parts) => {
+            let joined = parts
+                .iter()
+                .filter_map(|part| {
+                    part.get("text")
+                        .and_then(|value| value.as_str())
+                        .or_else(|| part.get("content").and_then(|value| value.as_str()))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if joined.is_empty() {
+                None
+            } else {
+                Some(joined)
+            }
+        }
+        serde_json::Value::Object(_) => value
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned)
+            .or_else(|| value.get("content").and_then(claude_message_text)),
+        _ => None,
+    }
+}
+
+fn claude_raw_fallback(
+    event_type: &str,
+    raw: serde_json::Value,
+    text: Option<String>,
+) -> AgentOutputSegmentDraft {
+    AgentOutputSegmentDraft {
+        channel: AgentOutputChannel::Diagnostic,
+        kind: AgentOutputKind::RawFallback,
+        status: Some(AgentOutputStatus::Unknown),
+        title: Some("Provider event".into()),
+        text,
+        data: Some(serde_json::json!({
+            "provider": "claude",
+            "provider_event_type": event_type,
+            "raw": raw
+        })),
     }
 }
 
@@ -332,5 +525,63 @@ mod tests {
     fn parse_stream_json_output_returns_none_for_non_json_stdout() {
         let result = parse_stream_json_output("not json at all");
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn claude_parser_maps_message_events_to_text_segments() {
+        let segments = parse_claude_stream_event(&serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": "hello from claude"}]
+            }
+        }));
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].kind, AgentOutputKind::Text);
+        assert_eq!(segments[0].text.as_deref(), Some("hello from claude"));
+    }
+
+    #[test]
+    fn claude_parser_ignores_init_events() {
+        let segments = parse_claude_stream_event(&serde_json::json!({
+            "type": "system",
+            "subtype": "init"
+        }));
+
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn claude_parser_maps_success_result_events_to_lifecycle_segments() {
+        let segments = parse_claude_stream_event(&serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "done"
+        }));
+
+        assert_eq!(segments[0].kind, AgentOutputKind::Lifecycle);
+        assert_eq!(segments[0].status, Some(AgentOutputStatus::Completed));
+    }
+
+    #[test]
+    fn claude_parser_maps_structured_output_retry_failures_to_failed_lifecycle_segments() {
+        let segments = parse_claude_stream_event(&serde_json::json!({
+            "type": "result",
+            "subtype": "error_max_structured_output_retries",
+            "is_error": true
+        }));
+
+        assert_eq!(segments[0].kind, AgentOutputKind::Lifecycle);
+        assert_eq!(segments[0].status, Some(AgentOutputStatus::Failed));
+    }
+
+    #[test]
+    fn claude_parser_falls_back_for_unknown_events() {
+        let segments = parse_claude_stream_event(&serde_json::json!({
+            "type": "mystery_event"
+        }));
+
+        assert_eq!(segments[0].kind, AgentOutputKind::RawFallback);
     }
 }

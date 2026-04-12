@@ -32,12 +32,12 @@ import { getQueuedJobBlocker } from '../jobBlockers'
 import { formatDuration, formatRelativeTime, formatStepLabel } from '../lib/format'
 import { shortId } from '../lib/git'
 import { useConnectionStore } from '../stores/connection'
-import type { Job, OutcomeClass } from '../types/domain'
+import type { AgentOutputSegment, Job, OutcomeClass } from '../types/domain'
 
 // ── Constants ──────────────────────────────────────────────────
 
 type FilterTab = 'all' | 'active' | 'completed' | 'failed'
-type LogTab = 'stdout' | 'stderr' | 'prompt' | 'result'
+type LogTab = 'output' | 'prompt' | 'result'
 
 const ACTIVE_STATUSES = new Set(['queued', 'assigned', 'running'])
 const FAILED_STATUSES = new Set(['failed', 'cancelled', 'expired'])
@@ -64,6 +64,32 @@ function filterJobs(jobs: Job[], tab: FilterTab): Job[] {
 
 function isNearBottom(element: HTMLDivElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_TAIL_THRESHOLD_PX
+}
+
+function formatTranscript(segments: AgentOutputSegment[] | undefined): string | null {
+  if (!segments || segments.length === 0) return null
+  return segments.map(formatTranscriptSegment).join('\n\n')
+}
+
+function formatTranscriptSegment(segment: AgentOutputSegment): string {
+  const status = segment.status ? `[${segment.status}] ` : ''
+  const title = segment.title ? `${segment.title}: ` : ''
+  const text = segment.text?.trim() || ''
+
+  switch (segment.kind) {
+    case 'text':
+      return `${status}${text || title || 'Message'}`
+    case 'progress':
+      return `${status}${title}${text || 'Progress update'}`
+    case 'tool_call':
+      return `${status}${title || 'Tool call: '}${text || 'started'}`
+    case 'tool_result':
+      return `${status}${title || 'Tool result: '}${text || 'completed'}`
+    case 'lifecycle':
+      return `${status}${title}${text || 'Lifecycle update'}`
+    case 'raw_fallback':
+      return `${status}${title}${text || 'Provider event captured as fallback'}`
+  }
 }
 
 // ── Status Summary ─────────────────────────────────────────────
@@ -194,7 +220,7 @@ export default function JobsPage(): React.JSX.Element {
   const projectId = useRequiredProjectId()
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<FilterTab>('all')
-  const [logTab, setLogTab] = useState<LogTab>('stdout')
+  const [logTab, setLogTab] = useState<LogTab>('output')
   const [followTail, setFollowTail] = useState(true)
   const { data: jobs, error, isError, isFetching, isLoading, refetch } = useQuery(projectJobsQuery(projectId))
   const { data: itemSummaries } = useQuery(itemsQuery(projectId))
@@ -204,8 +230,7 @@ export default function JobsPage(): React.JSX.Element {
   const jobLogSyncState = useConnectionStore((state) => state.jobLogSyncState)
   const recentLogChunkAtByJobId = useConnectionStore((state) => state.recentLogChunkAtByJobId)
   const queueBlocker = getQueuedJobBlocker(jobs ?? [], agents)
-  const stdoutRef = useRef<HTMLDivElement>(null)
-  const stderrRef = useRef<HTMLDivElement>(null)
+  const outputRef = useRef<HTMLDivElement>(null)
   const [now, setNow] = useState(() => Date.now())
 
   // Build item title lookup
@@ -235,9 +260,9 @@ export default function JobsPage(): React.JSX.Element {
   // Selected job metadata
   const selectedJob = selectedJobId ? jobs?.find((j) => j.id === selectedJobId) : null
   const isSelectedJobRunning = selectedJob?.status === 'running'
-  const activeOutputRef = logTab === 'stdout' ? stdoutRef : logTab === 'stderr' ? stderrRef : null
-  const hasStdout = !!logs?.stdout?.trim()
-  const hasStderr = !!logs?.stderr?.trim()
+  const activeOutputRef = logTab === 'output' ? outputRef : null
+  const transcriptText = formatTranscript(logs?.output?.segments)
+  const hasOutput = !!transcriptText?.trim()
   const hasPrompt = !!logs?.prompt?.trim()
   const hasResult = logs?.result != null
   const showResyncingNotice = isSelectedJobRunning && jobLogSyncState === 'resyncing'
@@ -246,7 +271,7 @@ export default function JobsPage(): React.JSX.Element {
   useEffect(() => {
     setFollowTail(true)
     if (selectedJob?.status === 'running') {
-      setLogTab('stdout')
+      setLogTab('output')
     }
   }, [selectedJob?.status])
 
@@ -431,7 +456,7 @@ export default function JobsPage(): React.JSX.Element {
                           {wsStatus === 'connected' ? 'Live' : wsStatus === 'connecting' ? 'Reconnecting' : 'Offline'}
                         </Badge>
                       ) : null}
-                      {(logTab === 'stdout' || logTab === 'stderr') && !followTail ? (
+                      {logTab === 'output' && !followTail ? (
                         <Button type="button" variant="outline" size="sm" onClick={jumpToLatest}>
                           <ArrowDownIcon className="size-4" />
                           Jump to latest
@@ -478,19 +503,11 @@ export default function JobsPage(): React.JSX.Element {
 
                     <Tabs value={logTab} onValueChange={(value) => setLogTab(value as LogTab)}>
                       <TabsList variant="line" className="w-full justify-start overflow-x-auto">
-                        <TabsTrigger value="stdout">
-                          Stdout
-                          {hasStdout || isSelectedJobRunning ? (
+                        <TabsTrigger value="output">
+                          Output
+                          {hasOutput || isSelectedJobRunning ? (
                             <Badge variant="secondary" className="ml-1 h-4 rounded-full px-1.5 text-[10px]">
-                              {hasStdout ? 'Live' : '...'}
-                            </Badge>
-                          ) : null}
-                        </TabsTrigger>
-                        <TabsTrigger value="stderr">
-                          Stderr
-                          {hasStderr ? (
-                            <Badge variant="destructive" className="ml-1 h-4 rounded-full px-1.5 text-[10px]">
-                              !
+                              {hasOutput ? 'Live' : '...'}
                             </Badge>
                           ) : null}
                         </TabsTrigger>
@@ -498,30 +515,19 @@ export default function JobsPage(): React.JSX.Element {
                         <TabsTrigger value="result">Result</TabsTrigger>
                       </TabsList>
 
-                      <TabsContent value="stdout" className="mt-4">
+                      <TabsContent value="output" className="mt-4">
                         <LogBlock
-                          label="Stdout"
-                          value={logs?.stdout}
-                          emptyMessage={isSelectedJobRunning ? 'Waiting for agent output...' : 'No stdout captured.'}
+                          label="Output"
+                          value={transcriptText}
+                          emptyMessage={
+                            isSelectedJobRunning ? 'Waiting for normalized agent output...' : 'No output captured.'
+                          }
                           className={cn(
                             isSelectedJobRunning && 'border-blue-500/20 bg-blue-500/5',
-                            isSelectedJobRunning && !hasStdout && 'border-dashed',
+                            isSelectedJobRunning && !hasOutput && 'border-dashed',
                           )}
-                          autoScrollToBottom={isSelectedJobRunning && followTail && logTab === 'stdout'}
-                          scrollContainerRef={stdoutRef}
-                          onScroll={handleOutputScroll}
-                        />
-                      </TabsContent>
-
-                      <TabsContent value="stderr" className="mt-4">
-                        <LogBlock
-                          label="Stderr"
-                          value={logs?.stderr}
-                          emptyMessage={isSelectedJobRunning ? 'No stderr yet.' : 'No stderr captured.'}
-                          className={cn('border-amber-500/30 bg-amber-500/10', !hasStderr && 'border-dashed')}
-                          preClassName={cn(hasStderr && 'text-amber-950 dark:text-amber-100')}
-                          autoScrollToBottom={isSelectedJobRunning && followTail && logTab === 'stderr'}
-                          scrollContainerRef={stderrRef}
+                          autoScrollToBottom={isSelectedJobRunning && followTail && logTab === 'output'}
+                          scrollContainerRef={outputRef}
                           onScroll={handleOutputScroll}
                         />
                       </TabsContent>

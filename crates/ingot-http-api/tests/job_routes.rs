@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use axum::body::{Body, to_bytes};
@@ -20,6 +21,100 @@ use tower::ServiceExt;
 
 mod common;
 use common::*;
+
+#[tokio::test]
+async fn logs_route_returns_normalized_output_and_raw_route_returns_raw_artifacts() {
+    let (_repo, db, _project_id, _item_id, job_id) = seeded_route_test_app().await;
+    let state_root = ingot_test_support::env::temp_state_root("ingot-http-api-job-logs-state");
+    let logs_dir = PathBuf::from(&state_root).join("logs").join(&job_id);
+    tokio::fs::create_dir_all(&logs_dir)
+        .await
+        .expect("create logs dir");
+    tokio::fs::write(logs_dir.join("prompt.txt"), "review the candidate")
+        .await
+        .expect("write prompt");
+    tokio::fs::write(
+        logs_dir.join("stdout.log"),
+        "{\"type\":\"item.completed\"}\n",
+    )
+    .await
+    .expect("write stdout");
+    tokio::fs::write(logs_dir.join("stderr.log"), "warn\n")
+        .await
+        .expect("write stderr");
+    tokio::fs::write(
+        logs_dir.join("output.jsonl"),
+        concat!(
+            "{\"sequence\":1,\"channel\":\"primary\",\"kind\":\"text\",\"status\":null,",
+            "\"title\":null,\"text\":\"hello\",\"data\":null}\n"
+        ),
+    )
+    .await
+    .expect("write output jsonl");
+    tokio::fs::write(
+        logs_dir.join("result.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({"outcome":"clean","summary":"ok"}))
+            .expect("result json"),
+    )
+    .await
+    .expect("write result");
+
+    let app = ingot_http_api::build_router_with_project_locks_and_state_root(
+        db.clone(),
+        ingot_usecases::ProjectLocks::default(),
+        PathBuf::from(&state_root),
+        ingot_usecases::DispatchNotify::default(),
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/jobs/{job_id}/logs"))
+                .body(Body::empty())
+                .expect("build logs request"),
+        )
+        .await
+        .expect("logs route response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read logs body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("logs json");
+    assert_eq!(json["prompt"].as_str(), Some("review the candidate"));
+    assert_eq!(
+        json["output"]["schema_version"].as_str(),
+        Some("agent_output:v1")
+    );
+    assert_eq!(
+        json["output"]["segments"][0]["text"].as_str(),
+        Some("hello")
+    );
+    assert_eq!(json["result"]["payload"]["summary"].as_str(), Some("ok"));
+
+    let raw_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/jobs/{job_id}/logs/raw"))
+                .body(Body::empty())
+                .expect("build raw logs request"),
+        )
+        .await
+        .expect("raw logs route response");
+
+    assert_eq!(raw_response.status(), StatusCode::OK);
+    let raw_body = to_bytes(raw_response.into_body(), usize::MAX)
+        .await
+        .expect("read raw body");
+    let raw_json: serde_json::Value = serde_json::from_slice(&raw_body).expect("raw logs json");
+    assert_eq!(
+        raw_json["stdout"].as_str(),
+        Some("{\"type\":\"item.completed\"}\n")
+    );
+    assert_eq!(raw_json["stderr"].as_str(), Some("warn\n"));
+    assert_eq!(raw_json["result"]["summary"].as_str(), Some("ok"));
+}
 
 #[tokio::test]
 async fn fail_route_persists_escalation_and_item_detail_projection() {

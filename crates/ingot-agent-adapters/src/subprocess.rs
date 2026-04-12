@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use ingot_agent_protocol::adapter::AgentError;
 use ingot_agent_protocol::request::AgentRequest;
-use ingot_agent_protocol::response::{AgentOutputChunk, AgentResponse, OutputStream};
+use ingot_agent_protocol::response::{
+    AgentOutputChunk, AgentOutputSegmentDraft, AgentResponse, OutputStream,
+};
 use ingot_domain::agent_model::AgentModel;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -124,6 +126,11 @@ pub(crate) struct AdapterLaunch<'a, Model: ?Sized> {
     pub args: Vec<String>,
     pub adapter_name: &'static str,
     pub output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
+    pub stdout_parser: Option<Box<dyn StdoutOutputParser>>,
+}
+
+pub(crate) trait StdoutOutputParser: Send + 'static {
+    fn parse_line(&mut self, line: &str) -> Vec<AgentOutputSegmentDraft>;
 }
 
 /// Spawn a CLI subprocess, pipe the prompt to stdin, collect stdout/stderr,
@@ -136,6 +143,7 @@ pub(crate) async fn run_cli_subprocess(
     prompt: &str,
     adapter_name: &'static str,
     output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
+    stdout_parser: Option<Box<dyn StdoutOutputParser>>,
 ) -> Result<SubprocessOutput, AgentError> {
     let mut command = Command::new(cli_path);
     command
@@ -180,8 +188,15 @@ pub(crate) async fn run_cli_subprocess(
         "stdout",
         adapter_name,
         output_tx.clone(),
+        stdout_parser,
     ));
-    let stderr_task = tokio::spawn(collect_stream(stderr, "stderr", adapter_name, output_tx));
+    let stderr_task = tokio::spawn(collect_stream(
+        stderr,
+        "stderr",
+        adapter_name,
+        output_tx,
+        None,
+    ));
 
     let status = child
         .wait()
@@ -219,6 +234,7 @@ where
         args,
         adapter_name,
         output_tx,
+        stdout_parser,
     } = launch;
 
     info!(
@@ -238,6 +254,7 @@ where
         &request.prompt,
         adapter_name,
         output_tx,
+        stdout_parser,
     )
     .await?;
     info!(
@@ -263,6 +280,7 @@ pub(crate) async fn launch_adapter_with_schema_and_result_files<BuildArgs, Parse
     files: SchemaResultFiles<'_>,
     build_args: BuildArgs,
     output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
+    stdout_parser: Option<Box<dyn StdoutOutputParser>>,
     parse_result: Parse,
 ) -> Result<AgentResponse, AgentError>
 where
@@ -287,6 +305,7 @@ where
             args: build_args(&schema_file, &result_file)?,
             adapter_name: files.adapter_name,
             output_tx,
+            stdout_parser,
         },
         move |output| parse_result(output, parse_file),
     )
@@ -302,6 +321,7 @@ async fn collect_stream(
     stream_name: &'static str,
     adapter_name: &'static str,
     mut output_tx: Option<mpsc::Sender<AgentOutputChunk>>,
+    mut stdout_parser: Option<Box<dyn StdoutOutputParser>>,
 ) -> Result<String, AgentError> {
     let mut reader = BufReader::new(reader).lines();
     let mut lines = Vec::new();
@@ -321,7 +341,24 @@ async fn collect_stream(
                 _ => OutputStream::Stdout,
             };
             let chunk = format!("{line}\n");
-            if tx.send(AgentOutputChunk { stream, chunk }).await.is_err() {
+            let segments = match stream {
+                OutputStream::Stdout => stdout_parser
+                    .as_mut()
+                    .map(|parser| parser.parse_line(&line))
+                    .unwrap_or_default(),
+                OutputStream::Stderr => {
+                    vec![AgentOutputSegmentDraft::diagnostic_text(line.clone())]
+                }
+            };
+            if tx
+                .send(AgentOutputChunk {
+                    stream,
+                    chunk,
+                    segments,
+                })
+                .await
+                .is_err()
+            {
                 output_tx = None;
             }
         }

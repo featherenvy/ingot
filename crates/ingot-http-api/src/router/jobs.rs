@@ -6,7 +6,7 @@ use super::items::{
 use super::support::{
     activity::append_activity,
     errors::{complete_job_error_to_api_error, repo_to_internal, repo_to_item, repo_to_project},
-    io::{read_optional_json, read_optional_text},
+    io::{read_optional_json, read_optional_json_lines, read_optional_text},
     path::ApiPath,
 };
 use super::types::*;
@@ -20,6 +20,7 @@ pub(super) fn routes() -> Router<AppState> {
             post(cancel_item_job),
         )
         .route("/api/jobs/{job_id}/logs", get(get_job_logs))
+        .route("/api/jobs/{job_id}/logs/raw", get(get_job_logs_raw))
         .route("/api/jobs/{job_id}/complete", post(complete_job))
         .route("/api/jobs/{job_id}/fail", post(fail_job))
         .route("/api/jobs/{job_id}/expire", post(expire_job))
@@ -80,6 +81,30 @@ pub(super) async fn get_job_logs(
     State(state): State<AppState>,
     ApiPath(JobPathParams { job_id }): ApiPath<JobPathParams>,
 ) -> Result<Json<JobLogsResponse>, ApiError> {
+    let job = state.db.get_job(job_id).await.map_err(repo_to_internal)?;
+    let logs_dir = state.job_logs_dir(job_id);
+
+    let prompt = read_optional_text(logs_dir.join("prompt.txt")).await?;
+    let output = read_optional_json_lines(logs_dir.join("output.jsonl")).await?;
+    let result = read_optional_json(logs_dir.join("result.json")).await?;
+
+    Ok(Json(JobLogsResponse {
+        prompt,
+        output: ingot_agent_protocol::AgentOutputDocument {
+            schema_version: ingot_agent_protocol::AgentOutputDocument::SCHEMA_VERSION.into(),
+            segments: output.unwrap_or_default(),
+        },
+        result: result.map(|payload| ingot_agent_protocol::JobStructuredResult {
+            schema_version: job.state.result_schema_version().map(ToOwned::to_owned),
+            payload,
+        }),
+    }))
+}
+
+pub(super) async fn get_job_logs_raw(
+    State(state): State<AppState>,
+    ApiPath(JobPathParams { job_id }): ApiPath<JobPathParams>,
+) -> Result<Json<JobRawLogsResponse>, ApiError> {
     state.db.get_job(job_id).await.map_err(repo_to_internal)?;
     let logs_dir = state.job_logs_dir(job_id);
 
@@ -88,7 +113,7 @@ pub(super) async fn get_job_logs(
     let stderr = read_optional_text(logs_dir.join("stderr.log")).await?;
     let result = read_optional_json(logs_dir.join("result.json")).await?;
 
-    Ok(Json(JobLogsResponse {
+    Ok(Json(JobRawLogsResponse {
         prompt,
         stdout,
         stderr,

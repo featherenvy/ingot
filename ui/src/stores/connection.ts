@@ -83,10 +83,9 @@ function handleEvent(event: WsEvent, lastSeq: number, qc: QueryClient) {
     return
   }
 
-  if (event.event === 'job_log_chunk') {
-    const stream = event.payload?.stream
-    const chunk = event.payload?.chunk
-    if ((stream === 'stdout' || stream === 'stderr') && typeof chunk === 'string') {
+  if (event.event === 'job_output_delta') {
+    const segment = event.payload?.segment
+    if (segment && typeof segment === 'object') {
       const nextSyncState = useConnectionStore.getState().jobLogSyncState === 'resyncing' ? 'recovered' : 'live'
       useConnectionStore.setState((state) => ({
         jobLogSyncState: nextSyncState,
@@ -98,21 +97,19 @@ function handleEvent(event: WsEvent, lastSeq: number, qc: QueryClient) {
       qc.setQueryData<JobLogs>(queryKeys.jobLogs(event.entity_id), (current) => {
         const next: JobLogs = current ?? {
           prompt: null,
-          stdout: null,
-          stderr: null,
+          output: {
+            schema_version: 'agent_output:v1',
+            segments: [],
+          },
           result: null,
-        }
-
-        if (stream === 'stdout') {
-          return {
-            ...next,
-            stdout: `${next.stdout ?? ''}${chunk}`,
-          }
         }
 
         return {
           ...next,
-          stderr: `${next.stderr ?? ''}${chunk}`,
+          output: {
+            schema_version: next.output?.schema_version ?? 'agent_output:v1',
+            segments: [...(next.output?.segments ?? []), segment as JobLogs['output']['segments'][number]],
+          },
         }
       })
     }

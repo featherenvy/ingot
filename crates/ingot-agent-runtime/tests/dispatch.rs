@@ -4,7 +4,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ingot_agent_protocol::{AgentOutputChunk, OutputStream};
+use ingot_agent_protocol::{
+    AgentOutputChannel, AgentOutputChunk, AgentOutputKind, AgentOutputSegmentDraft, OutputStream,
+};
 use ingot_agent_runtime::{AgentRunner, DispatcherConfig, JobDispatcher};
 use ingot_domain::agent::Agent;
 use ingot_domain::job::{JobStatus, OutcomeClass};
@@ -144,6 +146,10 @@ async fn running_job_streams_stdout_to_disk_and_ui_before_completion() {
                 tx.send(AgentOutputChunk {
                     stream: OutputStream::Stdout,
                     chunk: "first line\n".into(),
+                    segments: vec![AgentOutputSegmentDraft::text(
+                        AgentOutputKind::Text,
+                        "first line",
+                    )],
                 })
                 .await
                 .expect("send first chunk");
@@ -151,6 +157,10 @@ async fn running_job_streams_stdout_to_disk_and_ui_before_completion() {
                 tx.send(AgentOutputChunk {
                     stream: OutputStream::Stdout,
                     chunk: "second line\n".into(),
+                    segments: vec![AgentOutputSegmentDraft::text(
+                        AgentOutputKind::Text,
+                        "second line",
+                    )],
                 })
                 .await
                 .expect("send second chunk");
@@ -242,10 +252,29 @@ async fn running_job_streams_stdout_to_disk_and_ui_before_completion() {
     .await
     .expect("stdout chunk persisted before completion");
 
+    let output_artifact_path = h
+        .state_root
+        .join("logs")
+        .join(job.id.to_string())
+        .join("output.jsonl");
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let contents = tokio::fs::read_to_string(&output_artifact_path)
+                .await
+                .unwrap_or_default();
+            if contents.contains("\"sequence\":1") && contents.contains("\"text\":\"first line\"") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("normalized output artifact persisted before completion");
+
     let streamed = timeout(Duration::from_secs(2), async {
         loop {
             let event = ui_rx.recv().await.expect("ui event");
-            if let UiEvent::JobLogChunk(event) = event.event {
+            if let UiEvent::JobOutputDelta(event) = event.event {
                 if event.job_id == job.id {
                     return event;
                 }
@@ -253,9 +282,10 @@ async fn running_job_streams_stdout_to_disk_and_ui_before_completion() {
         }
     })
     .await
-    .expect("job log chunk event");
-    assert_eq!(streamed.stream, OutputStream::Stdout);
-    assert_eq!(streamed.chunk, "first line\n");
+    .expect("job output delta event");
+    assert_eq!(streamed.segment.channel, AgentOutputChannel::Primary);
+    assert_eq!(streamed.segment.kind, AgentOutputKind::Text);
+    assert_eq!(streamed.segment.text.as_deref(), Some("first line"));
 
     runner.release.notify_waiters();
     assert!(tick_task.await.expect("tick join"));

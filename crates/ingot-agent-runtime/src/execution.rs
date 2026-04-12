@@ -59,6 +59,8 @@ struct JobLogPump {
     rx: mpsc::Receiver<AgentOutputChunk>,
     stdout_file: tokio::fs::File,
     stderr_file: tokio::fs::File,
+    output_file: tokio::fs::File,
+    next_segment_sequence: u64,
     ui_events: ingot_usecases::UiEventBus,
     project_id: ingot_domain::ids::ProjectId,
     job_id: JobId,
@@ -83,11 +85,18 @@ impl JobLogPump {
             .append(true)
             .open(artifact_dir.join("stderr.log"))
             .await?;
+        let output_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(artifact_dir.join("output.jsonl"))
+            .await?;
 
         Ok(Self {
             rx,
             stdout_file,
             stderr_file,
+            output_file,
+            next_segment_sequence: 1,
             ui_events,
             project_id,
             job_id,
@@ -102,12 +111,17 @@ impl JobLogPump {
             };
             file.write_all(chunk.chunk.as_bytes()).await?;
             file.flush().await?;
-            self.ui_events.publish_job_log_chunk(
-                self.project_id,
-                self.job_id,
-                chunk.stream,
-                chunk.chunk,
-            );
+            for draft in chunk.segments {
+                let segment = draft.into_segment(self.next_segment_sequence);
+                self.next_segment_sequence += 1;
+                self.output_file
+                    .write_all(serde_json::to_string(&segment)?.as_bytes())
+                    .await?;
+                self.output_file.write_all(b"\n").await?;
+                self.output_file.flush().await?;
+                self.ui_events
+                    .publish_job_output_delta(self.project_id, self.job_id, segment);
+            }
         }
 
         Ok(())

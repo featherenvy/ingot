@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 ingot-agent-adapters = { workspace = true }
+ingot-agent-protocol = { workspace = true }
 ingot-config = { workspace = true }
 ingot-domain = { workspace = true }
 ingot-git = { workspace = true }
@@ -25,7 +26,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
-ingot-agent-protocol = { workspace = true }
 ingot-agent-runtime = { workspace = true }
 ingot-domain = { workspace = true }
 ingot-git = { workspace = true }

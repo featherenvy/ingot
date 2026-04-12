@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use ingot_agent_protocol::OutputStream;
+use ingot_agent_protocol::AgentOutputSegment;
 use ingot_domain::activity::{ActivityEventType, ActivitySubject};
 use ingot_domain::ids::{JobId, ProjectId};
 use tokio::sync::broadcast;
@@ -14,18 +14,17 @@ pub struct EntityChangedEvent {
     pub payload: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JobLogChunkEvent {
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobOutputDeltaEvent {
     pub project_id: ProjectId,
     pub job_id: JobId,
-    pub stream: OutputStream,
-    pub chunk: String,
+    pub segment: AgentOutputSegment,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiEvent {
     EntityChanged(EntityChangedEvent),
-    JobLogChunk(JobLogChunkEvent),
+    JobOutputDelta(JobOutputDeltaEvent),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,18 +84,16 @@ impl UiEventBus {
         }))
     }
 
-    pub fn publish_job_log_chunk(
+    pub fn publish_job_output_delta(
         &self,
         project_id: ProjectId,
         job_id: JobId,
-        stream: OutputStream,
-        chunk: impl Into<String>,
+        segment: AgentOutputSegment,
     ) -> UiEventEnvelope {
-        self.publish(UiEvent::JobLogChunk(JobLogChunkEvent {
+        self.publish(UiEvent::JobOutputDelta(JobOutputDeltaEvent {
             project_id,
             job_id,
-            stream,
-            chunk: chunk.into(),
+            segment,
         }))
     }
 }
@@ -141,23 +138,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_job_log_chunk_broadcasts_typed_payloads() {
+    async fn publish_job_output_delta_broadcasts_typed_payloads() {
         let bus = UiEventBus::new();
         let mut rx = bus.subscribe();
         let project_id = ProjectId::new();
         let job_id = JobId::new();
+        let segment = AgentOutputSegment {
+            sequence: 1,
+            channel: ingot_agent_protocol::AgentOutputChannel::Primary,
+            kind: ingot_agent_protocol::AgentOutputKind::Text,
+            status: None,
+            title: None,
+            text: Some("hello".into()),
+            data: None,
+        };
 
-        bus.publish_job_log_chunk(project_id, job_id, OutputStream::Stdout, "hello");
+        bus.publish_job_output_delta(project_id, job_id, segment.clone());
 
-        let event = rx.recv().await.expect("job log chunk");
+        let event = rx.recv().await.expect("job output delta");
         assert_eq!(event.seq, 1);
         assert_eq!(
             event.event,
-            UiEvent::JobLogChunk(JobLogChunkEvent {
+            UiEvent::JobOutputDelta(JobOutputDeltaEvent {
                 project_id,
                 job_id,
-                stream: OutputStream::Stdout,
-                chunk: "hello".into(),
+                segment,
             })
         );
     }

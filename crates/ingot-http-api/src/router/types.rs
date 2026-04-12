@@ -1,5 +1,6 @@
 use axum::extract::{FromRequest, Json, Request};
 use axum::response::{IntoResponse, Response};
+use ingot_agent_protocol::{AgentOutputDocument, JobStructuredResult};
 use ingot_domain::agent::{AdapterKind, AgentCapability, AgentProvider};
 use ingot_domain::agent_model::AgentModel;
 use ingot_domain::commit_oid::CommitOid;
@@ -121,6 +122,13 @@ pub struct CompleteJobResponse {
 
 #[derive(Debug, Serialize)]
 pub struct JobLogsResponse {
+    pub prompt: Option<String>,
+    pub output: AgentOutputDocument,
+    pub result: Option<JobStructuredResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobRawLogsResponse {
     pub prompt: Option<String>,
     pub stdout: Option<String>,
     pub stderr: Option<String>,
