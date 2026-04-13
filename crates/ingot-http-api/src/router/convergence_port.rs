@@ -531,31 +531,38 @@ impl PreparedConvergenceFinalizePort for HttpConvergencePort {
                 .map_err(UseCaseError::Repository)?;
 
             if let Some((project_id, convergence_id)) = cleanup {
-                let convergence = state
-                    .db
-                    .get_convergence(convergence_id)
-                    .await
-                    .map_err(UseCaseError::Repository)?;
-                if let Some(workspace_id) = convergence.state.integration_workspace_id() {
+                let cleanup_result: Result<(), String> = async {
+                    let convergence = state
+                        .db
+                        .get_convergence(convergence_id)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let Some(workspace_id) = convergence.state.integration_workspace_id() else {
+                        return Ok(());
+                    };
                     let workspace = state
                         .db
                         .get_workspace(workspace_id)
                         .await
-                        .map_err(UseCaseError::Repository)?;
-                    if workspace.state.status() == WorkspaceStatus::Abandoned
-                        && let Err(error) = state
-                            .infra()
-                            .remove_workspace_path(project_id, &workspace.path)
-                            .await
-                    {
-                        warn!(
-                            project_id = %project_id,
-                            workspace_id = %workspace_id,
-                            path = %workspace.path.display(),
-                            ?error,
-                            "failed to remove abandoned integration workspace after finalization",
-                        );
+                        .map_err(|error| error.to_string())?;
+                    if workspace.state.status() != WorkspaceStatus::Abandoned {
+                        return Ok(());
                     }
+                    state
+                        .infra()
+                        .remove_workspace_path(project_id, &workspace.path)
+                        .await
+                        .map_err(|error| format!("{error:?}"))
+                }
+                .await;
+
+                if let Err(error) = cleanup_result {
+                    warn!(
+                        project_id = %project_id,
+                        convergence_id = %convergence_id,
+                        error = %error,
+                        "failed best-effort integration workspace cleanup after committed finalization",
+                    );
                 }
             }
             Ok(())

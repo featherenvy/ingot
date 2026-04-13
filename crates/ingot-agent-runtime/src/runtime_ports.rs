@@ -393,38 +393,34 @@ impl PreparedConvergenceFinalizePort for RuntimeFinalizePort {
                 .map_err(ingot_usecases::UseCaseError::Repository)?;
 
             if let Some((project_id, convergence_id)) = cleanup {
-                let convergence = dispatcher
-                    .db
-                    .get_convergence(convergence_id)
-                    .await
-                    .map_err(ingot_usecases::UseCaseError::Repository)?;
-                if let Some(workspace_id) = convergence.state.integration_workspace_id() {
-                    let workspace = dispatcher
-                        .db
-                        .get_workspace(workspace_id)
-                        .await
-                        .map_err(ingot_usecases::UseCaseError::Repository)?;
+                let cleanup_result: Result<(), RuntimeError> = async {
+                    let convergence = dispatcher.db.get_convergence(convergence_id).await?;
+                    let Some(workspace_id) = convergence.state.integration_workspace_id() else {
+                        return Ok(());
+                    };
+                    let workspace = dispatcher.db.get_workspace(workspace_id).await?;
                     if workspace.state.status()
-                        == ingot_domain::workspace::WorkspaceStatus::Abandoned
+                        != ingot_domain::workspace::WorkspaceStatus::Abandoned
                     {
-                        let project = dispatcher
-                            .db
-                            .get_project(project_id)
-                            .await
-                            .map_err(ingot_usecases::UseCaseError::Repository)?;
-                        let repo_path = dispatcher.project_paths(&project).mirror_git_dir;
-                        if let Err(error) =
-                            remove_workspace(repo_path.as_path(), &workspace.path).await
-                        {
-                            warn!(
-                                project_id = %project_id,
-                                workspace_id = %workspace_id,
-                                path = %workspace.path.display(),
-                                ?error,
-                                "failed to remove abandoned integration workspace after finalization",
-                            );
-                        }
+                        return Ok(());
                     }
+                    let repo_path = dispatcher
+                        .config
+                        .state_root
+                        .join("repos")
+                        .join(format!("{project_id}.git"));
+                    remove_workspace(repo_path.as_path(), &workspace.path).await?;
+                    Ok(())
+                }
+                .await;
+
+                if let Err(error) = cleanup_result {
+                    warn!(
+                        project_id = %project_id,
+                        convergence_id = %convergence_id,
+                        ?error,
+                        "failed best-effort integration workspace cleanup after committed finalization",
+                    );
                 }
             }
             Ok(())
