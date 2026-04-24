@@ -24,11 +24,13 @@ use super::jobs;
 use super::support::errors::{repo_to_internal, repo_to_item};
 use super::{agents, convergence, core, dispatch, findings, harness, projects, workspaces};
 
+pub(crate) type AppCompleteJobService =
+    CompleteJobService<Database, GitJobCompletionPort, ProjectLocks>;
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) db: Database,
-    pub(crate) complete_job_service:
-        CompleteJobService<Database, GitJobCompletionPort, ProjectLocks>,
+    pub(crate) complete_job_service: AppCompleteJobService,
     pub(crate) project_locks: ProjectLocks,
     pub(crate) dispatch_notify: DispatchNotify,
     pub(crate) ui_events: UiEventBus,
