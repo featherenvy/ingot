@@ -36,6 +36,32 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn new(
+        db: Database,
+        project_locks: ProjectLocks,
+        state_root: PathBuf,
+        dispatch_notify: DispatchNotify,
+        ui_events: UiEventBus,
+    ) -> Self {
+        let repo_path_resolver_root = state_root.clone();
+        Self {
+            db: db.clone(),
+            complete_job_service: CompleteJobService::with_repo_path_resolver(
+                db,
+                GitJobCompletionPort,
+                project_locks.clone(),
+                Arc::new(move |project: &Project| {
+                    project_repo_paths_for_project(repo_path_resolver_root.as_path(), project)
+                        .mirror_git_dir
+                }),
+            ),
+            project_locks,
+            dispatch_notify,
+            ui_events,
+            state_root,
+        }
+    }
+
     pub(super) fn infra(&self) -> HttpInfraAdapter {
         HttpInfraAdapter::new(self)
     }
@@ -88,23 +114,7 @@ pub fn build_router_with_project_locks_and_state_root_and_events(
     dispatch_notify: DispatchNotify,
     ui_events: UiEventBus,
 ) -> Router {
-    let repo_path_resolver_root = state_root.clone();
-    let state = AppState {
-        db: db.clone(),
-        complete_job_service: CompleteJobService::with_repo_path_resolver(
-            db,
-            GitJobCompletionPort,
-            project_locks.clone(),
-            Arc::new(move |project: &Project| {
-                project_repo_paths_for_project(repo_path_resolver_root.as_path(), project)
-                    .mirror_git_dir
-            }),
-        ),
-        project_locks,
-        dispatch_notify,
-        ui_events,
-        state_root,
-    };
+    let state = AppState::new(db, project_locks, state_root, dispatch_notify, ui_events);
 
     Router::new()
         .merge(core::routes())
