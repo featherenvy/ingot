@@ -29,6 +29,7 @@ impl CodexCliAdapter {
     fn build_exec_args(
         &self,
         request: &AgentRequest,
+        working_dir: &Path,
         schema_file: &subprocess::TempFile,
         response_file: &subprocess::TempFile,
     ) -> Result<Vec<String>, AgentError> {
@@ -43,7 +44,7 @@ impl CodexCliAdapter {
             "--sandbox".into(),
             sandbox.into(),
             "-C".into(),
-            request.working_dir.to_string_lossy().into_owned(),
+            working_dir.to_string_lossy().into_owned(),
             "-m".into(),
             self.command.model().to_string(),
             "--json".into(),
@@ -70,7 +71,9 @@ impl CodexCliAdapter {
                 result_file_stem: ".ingot-codex-last-message",
                 result_file_extension: "txt",
             },
-            |schema_file, response_file| self.build_exec_args(request, schema_file, response_file),
+            |schema_file, response_file| {
+                self.build_exec_args(request, working_dir, schema_file, response_file)
+            },
             output_tx,
             Some(Box::new(CodexJsonOutputParser)),
             |_output, response_file| async move {
@@ -385,10 +388,11 @@ mod tests {
     #[test]
     fn build_exec_args_match_current_codex_exec_flags() {
         let adapter = CodexCliAdapter::new("codex", "gpt-5");
+        let working_dir = Path::new("/tmp/repo");
         let schema_file = subprocess::TempFile::from_path("/tmp/schema.json");
         let response_file = subprocess::TempFile::from_path("/tmp/last-message.json");
         let args = adapter
-            .build_exec_args(&request(true), &schema_file, &response_file)
+            .build_exec_args(&request(true), working_dir, &schema_file, &response_file)
             .expect("build args");
 
         assert!(args.iter().all(|arg| arg != "--ask-for-approval"));
@@ -418,14 +422,33 @@ mod tests {
     #[test]
     fn build_exec_args_use_read_only_sandbox_for_non_mutating_jobs() {
         let adapter = CodexCliAdapter::new("codex", "gpt-5");
+        let working_dir = Path::new("/tmp/repo");
         let schema_file = subprocess::TempFile::from_path("/tmp/schema.json");
         let response_file = subprocess::TempFile::from_path("/tmp/last-message.json");
         let args = adapter
-            .build_exec_args(&request(false), &schema_file, &response_file)
+            .build_exec_args(&request(false), working_dir, &schema_file, &response_file)
             .expect("build args");
 
         let sandbox_idx = args.iter().position(|arg| arg == "--sandbox").unwrap();
         assert_eq!(args[sandbox_idx + 1], "read-only");
+    }
+
+    #[test]
+    fn build_exec_args_use_launch_working_dir_for_codex_c_flag() {
+        let adapter = CodexCliAdapter::new("codex", "gpt-5");
+        let launch_working_dir = Path::new("/tmp/launch-dir");
+        let schema_file = subprocess::TempFile::from_path("/tmp/schema.json");
+        let response_file = subprocess::TempFile::from_path("/tmp/last-message.json");
+        let request = AgentRequest {
+            working_dir: "/tmp/request-dir".into(),
+            ..request(true)
+        };
+        let args = adapter
+            .build_exec_args(&request, launch_working_dir, &schema_file, &response_file)
+            .expect("build args");
+
+        let working_dir_idx = args.iter().position(|arg| arg == "-C").unwrap();
+        assert_eq!(Path::new(&args[working_dir_idx + 1]), launch_working_dir);
     }
 
     #[test]

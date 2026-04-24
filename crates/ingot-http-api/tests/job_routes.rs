@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode, header};
+use axum::http::StatusCode;
 use ingot_agent_runtime::{DispatcherConfig, JobDispatcher};
 use ingot_domain::activity::ActivityEventType;
 use ingot_domain::convergence::ConvergenceStatus;
@@ -17,7 +16,6 @@ use ingot_domain::test_support::{
 };
 use ingot_domain::workspace::{RetentionPolicy, WorkspaceKind, WorkspaceStatus};
 use ingot_test_support::reports::clean_review_report;
-use tower::ServiceExt;
 
 mod common;
 use common::*;
@@ -66,22 +64,12 @@ async fn logs_route_returns_normalized_output_and_raw_route_returns_raw_artifact
         ingot_usecases::DispatchNotify::default(),
     );
 
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/jobs/{job_id}/logs"))
-                .body(Body::empty())
-                .expect("build logs request"),
-        )
-        .await
-        .expect("logs route response");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read logs body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("logs json");
+    let json: serde_json::Value = get_json(
+        app.clone(),
+        format!("/api/jobs/{job_id}/logs"),
+        StatusCode::OK,
+    )
+    .await;
     assert_eq!(json["prompt"].as_str(), Some("review the candidate"));
     assert_eq!(
         json["output"]["schema_version"].as_str(),
@@ -93,21 +81,8 @@ async fn logs_route_returns_normalized_output_and_raw_route_returns_raw_artifact
     );
     assert_eq!(json["result"]["payload"]["summary"].as_str(), Some("ok"));
 
-    let raw_response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/jobs/{job_id}/logs/raw"))
-                .body(Body::empty())
-                .expect("build raw logs request"),
-        )
-        .await
-        .expect("raw logs route response");
-
-    assert_eq!(raw_response.status(), StatusCode::OK);
-    let raw_body = to_bytes(raw_response.into_body(), usize::MAX)
-        .await
-        .expect("read raw body");
-    let raw_json: serde_json::Value = serde_json::from_slice(&raw_body).expect("raw logs json");
+    let raw_json: serde_json::Value =
+        get_json(app, format!("/api/jobs/{job_id}/logs/raw"), StatusCode::OK).await;
     assert_eq!(
         raw_json["stdout"].as_str(),
         Some("{\"type\":\"item.completed\"}\n")
@@ -139,21 +114,8 @@ async fn logs_route_falls_back_to_raw_artifacts_when_normalized_output_is_missin
         ingot_usecases::DispatchNotify::default(),
     );
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/jobs/{job_id}/logs"))
-                .body(Body::empty())
-                .expect("build logs request"),
-        )
-        .await
-        .expect("logs route response");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read logs body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("logs json");
+    let json: serde_json::Value =
+        get_json(app, format!("/api/jobs/{job_id}/logs"), StatusCode::OK).await;
 
     assert_eq!(json["output"]["segments"].as_array().map(Vec::len), Some(2));
     assert_eq!(
@@ -212,21 +174,8 @@ async fn logs_route_keeps_empty_output_artifact_for_running_jobs() {
         ingot_usecases::DispatchNotify::default(),
     );
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/jobs/{job_id}/logs"))
-                .body(Body::empty())
-                .expect("build logs request"),
-        )
-        .await
-        .expect("logs route response");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read logs body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("logs json");
+    let json: serde_json::Value =
+        get_json(app, format!("/api/jobs/{job_id}/logs"), StatusCode::OK).await;
 
     assert_eq!(json["output"]["schema_version"], "agent_output:v1");
     assert_eq!(json["output"]["segments"], serde_json::json!([]));
@@ -292,21 +241,8 @@ async fn logs_route_falls_back_to_raw_artifacts_for_terminal_jobs_when_output_ar
         ingot_usecases::DispatchNotify::default(),
     );
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/jobs/{job_id}/logs"))
-                .body(Body::empty())
-                .expect("build logs request"),
-        )
-        .await
-        .expect("logs route response");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read logs body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("logs json");
+    let json: serde_json::Value =
+        get_json(app, format!("/api/jobs/{job_id}/logs"), StatusCode::OK).await;
 
     assert_eq!(json["output"]["segments"].as_array().map(Vec::len), Some(2));
     assert_eq!(
@@ -344,43 +280,25 @@ async fn fail_route_persists_escalation_and_item_detail_projection() {
     let (_repo, db, project_id, item_id, job_id) = seeded_route_test_app().await;
     let app = test_router(db.clone());
 
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/jobs/{job_id}/fail"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "outcome_class": "terminal_failure",
-                        "error_code": "worker_failed",
-                        "error_message": "boom"
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("fail route response");
+    let response = post_json(
+        app.clone(),
+        format!("/api/jobs/{job_id}/fail"),
+        serde_json::json!({
+            "outcome_class": "terminal_failure",
+            "error_code": "worker_failed",
+            "error_message": "boom"
+        }),
+    )
+    .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    expect_status(response, StatusCode::OK);
 
-    let detail_response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/projects/{project_id}/items/{item_id}"))
-                .body(Body::empty())
-                .expect("build detail request"),
-        )
-        .await
-        .expect("detail route response");
-
-    assert_eq!(detail_response.status(), StatusCode::OK);
-    let body = to_bytes(detail_response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("detail json");
+    let json: serde_json::Value = get_json(
+        app,
+        format!("/api/projects/{project_id}/items/{item_id}"),
+        StatusCode::OK,
+    )
+    .await;
 
     assert_eq!(
         json["item"]["escalation_state"].as_str(),
@@ -406,35 +324,15 @@ async fn expire_route_persists_terminal_job_without_auto_redispatch() {
     let (_repo, db, project_id, item_id, job_id) = seeded_route_test_app().await;
     let app = test_router(db.clone());
 
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/jobs/{job_id}/expire"))
-                .body(Body::empty())
-                .expect("build expire request"),
-        )
-        .await
-        .expect("expire route response");
+    let response = post_empty(app.clone(), format!("/api/jobs/{job_id}/expire")).await;
+    expect_status(response, StatusCode::OK);
 
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let detail_response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/projects/{project_id}/items/{item_id}"))
-                .body(Body::empty())
-                .expect("build detail request"),
-        )
-        .await
-        .expect("detail route response");
-
-    assert_eq!(detail_response.status(), StatusCode::OK);
-    let body = to_bytes(detail_response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("detail json");
+    let json: serde_json::Value = get_json(
+        app,
+        format!("/api/projects/{project_id}/items/{item_id}"),
+        StatusCode::OK,
+    )
+    .await;
 
     assert_eq!(json["item"]["escalation_state"].as_str(), Some("none"));
     assert!(json["evaluation"]["dispatchable_step_id"].is_null());
@@ -507,24 +405,13 @@ async fn retry_route_requeues_terminal_non_success_job_on_current_revision() {
     .await;
 
     let app = test_router(db.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/retry"
-                ))
-                .method("POST")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("route response");
+    let response = post_empty(
+        app,
+        format!("/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/retry"),
+    )
+    .await;
 
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let json: serde_json::Value = read_json(expect_status(response, StatusCode::CREATED)).await;
     assert_eq!(json["step_id"].as_str(), Some("review_candidate_initial"));
     assert_eq!(json["semantic_attempt_no"].as_u64(), Some(1));
     assert_eq!(json["retry_no"].as_u64(), Some(1));
@@ -587,25 +474,13 @@ async fn retry_route_requeues_authoring_job_without_persisting_assigned_state() 
     .await;
 
     let app = test_router(db.clone());
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/api/projects/{project_id}/items/{item_id}/jobs/{failed_job_id}/retry"
-                ))
-                .method("POST")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("route response");
+    let response = post_empty(
+        app.clone(),
+        format!("/api/projects/{project_id}/items/{item_id}/jobs/{failed_job_id}/retry"),
+    )
+    .await;
 
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let json: serde_json::Value = read_json(expect_status(response, StatusCode::CREATED)).await;
     let retried_job_id = json["id"].as_str().expect("retried job id");
 
     assert_eq!(json["step_id"].as_str(), Some("author_initial"));
@@ -625,20 +500,12 @@ async fn retry_route_requeues_authoring_job_without_persisting_assigned_state() 
     assert_eq!(retried_job.0, "queued");
     assert_eq!(retried_job.1, None);
 
-    let detail_response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/projects/{project_id}/items/{item_id}"))
-                .body(Body::empty())
-                .expect("build detail request"),
-        )
-        .await
-        .expect("detail route response");
-    assert_eq!(detail_response.status(), StatusCode::OK);
-    let detail_body = to_bytes(detail_response.into_body(), usize::MAX)
-        .await
-        .expect("read detail body");
-    let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).expect("detail json");
+    let detail_json: serde_json::Value = get_json(
+        app,
+        format!("/api/projects/{project_id}/items/{item_id}"),
+        StatusCode::OK,
+    )
+    .await;
     assert_eq!(detail_json["workspaces"].as_array().map(Vec::len), Some(1));
     assert_eq!(
         detail_json["workspaces"][0]["kind"].as_str(),
@@ -708,21 +575,14 @@ async fn retry_route_rejects_daemon_only_validation_job() {
     .await;
 
     let app = test_router(db.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/api/projects/{project_id}/items/{item_id}/jobs/{failed_job_id}/retry"
-                ))
-                .method("POST")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("route response");
+    let response = post_empty(
+        app,
+        format!("/api/projects/{project_id}/items/{item_id}/jobs/{failed_job_id}/retry"),
+    )
+    .await;
 
     // Daemon-only validation jobs cannot be retried manually
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    expect_status(response, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]
@@ -797,20 +657,13 @@ async fn cancel_route_marks_active_job_cancelled_and_clears_workspace_attachment
     .await;
 
     let app = test_router(db.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/cancel"
-                ))
-                .method("POST")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("route response");
+    let response = post_empty(
+        app,
+        format!("/api/projects/{project_id}/items/{item_id}/jobs/{job_id}/cancel"),
+    )
+    .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    expect_status(response, StatusCode::OK);
     let job_state: (String, String) =
         sqlx::query_as("SELECT status, outcome_class FROM jobs WHERE id = ?")
             .bind(&job_id)
@@ -919,30 +772,18 @@ async fn complete_route_rejects_stale_prepared_convergence_after_target_moves() 
     git(&repo, &["commit", "-m", "next"]);
 
     let app = test_router(db.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/jobs/{job_id}/complete"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "outcome_class": "clean",
-                        "result_schema_version": "validation_report:v1",
-                        "result_payload": clean_validation_report("ok")
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("complete route response");
+    let response = post_json(
+        app,
+        format!("/api/jobs/{job_id}/complete"),
+        serde_json::json!({
+            "outcome_class": "clean",
+            "result_schema_version": "validation_report:v1",
+            "result_payload": clean_validation_report("ok")
+        }),
+    )
+    .await;
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+    let json: serde_json::Value = read_json(expect_status(response, StatusCode::CONFLICT)).await;
 
     assert_eq!(
         json["error"]["code"].as_str(),
@@ -1052,36 +893,28 @@ async fn complete_route_clears_item_escalation_after_successful_retry() {
     .await;
 
     let app = test_router(db.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/jobs/{retry_job_id}/complete"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "outcome_class": "clean",
-                        "result_schema_version": "validation_report:v1",
-                        "result_payload": {
-                            "outcome": "clean",
-                            "summary": "ok",
-                            "checks": [{
-                                "name": "lint",
-                                "status": "pass",
-                                "summary": "ok"
-                            }],
-                            "findings": [],
-                            "extensions": null
-                        }
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("complete route response");
+    let response = post_json(
+        app,
+        format!("/api/jobs/{retry_job_id}/complete"),
+        serde_json::json!({
+            "outcome_class": "clean",
+            "result_schema_version": "validation_report:v1",
+            "result_payload": {
+                "outcome": "clean",
+                "summary": "ok",
+                "checks": [{
+                    "name": "lint",
+                    "status": "pass",
+                    "summary": "ok"
+                }],
+                "findings": [],
+                "extensions": null
+            }
+        }),
+    )
+    .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    expect_status(response, StatusCode::OK);
 
     let item_row: (String, Option<String>) =
         sqlx::query_as("SELECT escalation_state, escalation_reason FROM items WHERE id = ?")
@@ -1192,26 +1025,18 @@ async fn complete_route_auto_dispatches_candidate_review_after_clean_incremental
     )
     .await;
 
-    let response = test_router(db.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/jobs/{review_job_id}/complete"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "outcome_class": "clean",
-                        "result_schema_version": "review_report:v1",
-                        "result_payload": clean_review_report(&seed_head, &candidate_head)
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("complete route response");
+    let response = post_json(
+        test_router(db.clone()),
+        format!("/api/jobs/{review_job_id}/complete"),
+        serde_json::json!({
+            "outcome_class": "clean",
+            "result_schema_version": "review_report:v1",
+            "result_payload": clean_review_report(&seed_head, &candidate_head)
+        }),
+    )
+    .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    expect_status(response, StatusCode::OK);
 
     let review_job_status: (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
         .bind(&review_job_id)
@@ -1324,25 +1149,17 @@ async fn complete_route_recovers_projected_review_after_warning_only_dispatch_fa
     )
     .await;
 
-    let response = test_router(db.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/jobs/{review_job_id}/complete"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "outcome_class": "clean",
-                        "result_schema_version": "review_report:v1",
-                        "result_payload": clean_review_report(&seed_head, &candidate_head)
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("complete route response");
-    assert_eq!(response.status(), StatusCode::OK);
+    let response = post_json(
+        test_router(db.clone()),
+        format!("/api/jobs/{review_job_id}/complete"),
+        serde_json::json!({
+            "outcome_class": "clean",
+            "result_schema_version": "review_report:v1",
+            "result_payload": clean_review_report(&seed_head, &candidate_head)
+        }),
+    )
+    .await;
+    expect_status(response, StatusCode::OK);
 
     let review_job_status: (String,) = sqlx::query_as("SELECT status FROM jobs WHERE id = ?")
         .bind(&review_job_id)
